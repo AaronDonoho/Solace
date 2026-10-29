@@ -4,19 +4,14 @@
 use crate::{
     REASON, SHOWN, agent_reference,        
 };
-use crate::cli::run_options;
-use crate::cli::reset_after_panic;
-use crate::cli::read_hint;
-use crate::cli::panic_reply;
-use crate::cli::looks_like_code;
-use crate::cli::is_question;
-use crate::cli::batch;
+use crate::cli::{batch, is_question, looks_like_code, panic_reply, read_hint, reset_after_panic, run_options};
 use crate::failure::usage;
 use crate::{board, reads};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::Write;
 
+#[cfg(test)] use crate::cli::with_root;
 /// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
 /// and plans (D-93), so it is told only those commands.
 pub(crate) fn tool_schema() -> Value {
@@ -209,37 +204,22 @@ fn guarded(call: impl FnOnce() -> Value) -> Value {
 /// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
 /// can pass code without shell quoting and needs no shell at all.
 pub(crate) fn mcp(budget: usize) {
-    let tool = tool_schema();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut single_reads = 0;
-    let mut run_reads = reads::Run::load();
+    // A harness takes its tool list once at startup. Answer the handshake
+    // before touching the store: `tools/call` is the first thing that needs
+    // the run's reads.
+    let mut run_reads: Option<Option<reads::Run>> = None;
     for line in stdin.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let Some(id) = msg.get("id").cloned() else {
-            continue;
-        }; // notifications need no reply
-        let result = match msg["method"].as_str().unwrap_or("") {
-            "initialize" => json!({
-                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "solace", "version": env!("CARGO_PKG_VERSION")}
-            }),
-            "tools/list" => json!({"tools": [tool]}),
-            "tools/call" => guarded(|| tool_call(&msg, budget, &mut single_reads, &mut run_reads)),
-            "ping" => json!({}),
-            _ => {
-                let reply = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}});
-                let _ = writeln!(stdout, "{reply}");
-                let _ = stdout.flush();
-                continue;
-            }
-        };
-        let _ = writeln!(stdout, "{}", json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        let _ = stdout.flush();
+        if let Some(reply) = dispatch(&msg, budget, &mut single_reads, &mut run_reads) {
+            let _ = writeln!(stdout, "{reply}");
+            let _ = stdout.flush();
+        }
     }
 }
 
@@ -295,7 +275,7 @@ mod tests {
         let root = crate::testing::Scratch::new().with(&[("notes.md", "a|b\n")]);
         let msg = json!({"params": {"arguments": {"command": "grep \"a|b\" --in notes.md"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
     }
 
@@ -334,7 +314,7 @@ mod tests {
         let root = crate::testing::Scratch::new();
         let msg = json!({"params": {"arguments": {"command": "inspect language::rust_refs.Refs<'a>::resolve"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
     }
 
@@ -387,10 +367,28 @@ mod tests {
         let root = crate::testing::Scratch::new();
         let msg = json!({"params": {"arguments": {"command": "view crate.<Failure as From<std::io::Error>>::from"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         let text = out["content"][0]["text"].as_str().unwrap();
         assert!(!text.contains("commands are not shell"), "{out}");
         assert!(!text.contains("Not a command"), "{out}");
+    }
+
+    /// The handshake answers without loading the run's reads.
+    #[test]
+    fn the_handshake_answers_without_loading_the_reads() {
+        let (mut single_reads, mut run_reads) = (0, None);
+        let init = dispatch(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+            10_000,
+            &mut single_reads,
+            &mut run_reads,
+        )
+        .unwrap();
+        assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(init["result"]["serverInfo"]["name"], "solace");
+        let list = dispatch(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), 10_000, &mut single_reads, &mut run_reads).unwrap();
+        assert_eq!(list["result"]["tools"][0]["name"], "solace");
+        assert!(run_reads.is_none());
     }
 }
 
@@ -435,4 +433,32 @@ fn shell_suffix_pass(line: &str, track_angles: bool) -> (Option<&str>, usize) {
         i += 1;
     }
     (None, depth)
+}
+
+/// One MCP message's reply; `None` when no reply is due. The handshake answers
+/// before the run's reads are loaded: only `tools/call` needs them.
+fn dispatch(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &mut Option<Option<reads::Run>>) -> Option<Value> {
+    let id = msg.get("id")?.clone();
+    let reply = match msg["method"].as_str().unwrap_or("") {
+        "initialize" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "solace", "version": env!("CARGO_PKG_VERSION")}
+            }
+        }),
+        "tools/list" => json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [tool_schema()]}}),
+        "tools/call" => {
+            let result = guarded(|| {
+                let run_reads = run_reads.get_or_insert_with(reads::Run::load);
+                tool_call(msg, budget, single_reads, run_reads)
+            });
+            json!({"jsonrpc": "2.0", "id": id, "result": result})
+        }
+        "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+        _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}),
+    };
+    Some(reply)
 }

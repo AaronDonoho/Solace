@@ -9,6 +9,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use serde_json::Value;
 use serde_json::json;
 use std::io::Read;
+use std::env;
+#[cfg(test)] use crate::store_core::SCHEMA;
 pub const COPY: &str = "solace-migration";
 const STATE: &str = ".solace/migration.json";
 const INVENTORY: &str = ".solace/migration-inventory.json";

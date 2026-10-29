@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use serde_json::json;
 use std::io::Read;
+use crate::cli::module_elsewhere;
+#[cfg(test)] use crate::cli::with_root;
+use std::env;
+use std::collections::HashMap;
 pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     fail(format!("{code} command refused\n  at {at}\n  {message}\n"))
 }
@@ -39,7 +43,7 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
         && matches!(command, "view" | "inspect" | "refs")
     {
         let module = name.split_once('.').map_or(name, |(module, _)| module);
-        if let Some(project) = crate::cli::module_elsewhere(&store.root, module) {
+        if let Some(project) = module_elsewhere(&store.root, module) {
             out += &format!(" Module `{module}` is in project `{project}`; add `--project {project}`.");
         }
     }
@@ -2092,7 +2096,8 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
         "codex" => {
             // Codex runs some models with `exec` and others with the MCP tool directly.
             // An `exec` script can batch several solace replies, so its output limit is
-            // raised past Codex's default 10k tokens.
+            // raised past Codex's default 10k tokens. Codex takes its tool list once at
+            // startup, so it must wait for the server instead of dropping a slow one.
             let hint = "The tool is the MCP tool `solace`. If you have `exec`, call it from there as \
                 `await tools.mcp__solace__solace({command: \"inspect app.main --context\"})`; one `exec` \
                 script can make several solace calls, so read everything you need in one step. Otherwise \
@@ -2101,6 +2106,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 concat!(
                     "sandbox_mode = \"read-only\"\napproval_policy = \"never\"\n",
                     "web_search = \"live\"\ntool_output_token_limit = 30000\n",
+                    "mcp_optional_startup_grace_ms = 0\n",
                     "developer_instructions = {}\n[features]\n"
                 ),
                 json!(hint)
@@ -2154,6 +2160,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 })
                 .to_string(),
             )?;
+            // Claude Code takes its MCP tool list once at startup too.
             json!({
                 "args": [
                     "--strict-mcp-config",
@@ -2171,7 +2178,10 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                     "WebFetch",
                     "WebSearch"
                 ],
-                "env": {"MCP_TOOL_TIMEOUT": (timeout.max(3600) * 1000).to_string()},
+                "env": {
+                    "MCP_TIMEOUT": "60000",
+                    "MCP_TOOL_TIMEOUT": (timeout.max(3600) * 1000).to_string()
+                },
                 "config": "settings.json"
             })
         }
@@ -4245,7 +4255,7 @@ running your program.
         }
         let s = Store::at(&root.join("a")).unwrap();
         let v = settings(&s.root).unwrap();
-        let e = crate::cli::with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
+        let e = with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
         assert!(e.contains("view plan --header --project b") && e.contains("view plan --bodies --project b"), "{e}");
     }
 

@@ -37,7 +37,14 @@ pub(crate) fn merge(s: &Store, survivor: &str, retired: &str, budget: usize) -> 
     same_signature(&keep, &gone)?;
 
     let MergeTests { moving, moved_ids, helper_ids } = select_merge_tests(&ix, gone_i, &keep.module)?;
-    let rewrite = redirect_merge(&ix, keep_i, gone_i, &moving)?;
+    let references = language::rust_refs::references(&ix.syms, &ix.modules);
+    let mut rewrite = redirect_merge(&ix, &references, keep_i, gone_i, &moving)?;
+    if gone.module == "crate" && super::visibility::is_plain_public(&gone.text) {
+        let mut public_moved = moving.clone();
+        public_moved[gone_i] = true;
+        rewrite.raised =
+            super::raise_target_modules(&ix, &references, &keep.module, None, &public_moved, &mut rewrite.text, &mut rewrite.headers)?;
+    }
     let unused = unused_in_merge(&ix, gone_i, &moving);
     let before = s.broken()?;
     let mut created = vec![];
@@ -137,11 +144,17 @@ struct MergeRewrite {
     headers: HashMap<String, String>,
     hits: usize,
     modules: BTreeSet<String>,
+    raised: Vec<(String, &'static str)>,
 }
 
-fn redirect_merge(ix: &Index, keep_i: usize, gone_i: usize, moving: &[bool]) -> Result<MergeRewrite, Failure> {
+fn redirect_merge(
+    ix: &Index,
+    references: &language::rust_refs::References<'_>,
+    keep_i: usize,
+    gone_i: usize,
+    moving: &[bool],
+) -> Result<MergeRewrite, Failure> {
     let keep = &ix.syms[keep_i];
-    let references = language::rust_refs::references(&ix.syms, &ix.modules);
     let mentions = language::rust_refs::rewrite_sites_refs(&references, gone_i);
     let use_gone: Vec<(String, Site)> = all_use_sites(ix)?.into_iter().filter(|(_, s)| s.target == gone_i).collect();
     let mut text: Vec<String> = ix.syms.iter().map(|s| s.text.clone()).collect();
@@ -152,7 +165,7 @@ fn redirect_merge(ix: &Index, keep_i: usize, gone_i: usize, moving: &[bool]) -> 
     let (mention_hits, mention_modules) = rewrite_merge_mentions(ix, keep, gone_i, moving, &alias_kept, &path_only, mentions, &mut text);
     modules.extend(mention_modules);
     drop_merge_imports(ix, gone_i, &rewritten, &mut text, &mut headers)?;
-    Ok(MergeRewrite { text, headers, hits: import_hits + mention_hits, modules })
+    Ok(MergeRewrite { text, headers, hits: import_hits + mention_hits, modules, raised: vec![] })
 }
 
 fn drop_merge_imports(
@@ -628,6 +641,7 @@ fn merge_reply(ix: &Index, plan: &MergePlan<'_>, rewrite: &MergeRewrite, tests: 
     if !plan.unused.is_empty() {
         out += &format!("Now unused: {}\n", plan.unused.join(", "));
     }
+    out += &super::raised_modules_reply(&rewrite.raised);
     if !retired.is_empty() {
         out += &format!("Retired module {}\n", retired.join(", "));
     }

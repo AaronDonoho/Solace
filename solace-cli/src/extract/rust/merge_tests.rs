@@ -443,3 +443,26 @@ fn a_merge_puts_a_redirected_use_where_its_item_was() {
     let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+/// A merge of a plain `pub` crate-root item into a private module keeps the
+/// survivor reachable by making every module on the way public.
+#[test]
+fn a_merge_of_a_plain_pub_root_item_makes_the_target_public() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod util;\n\npub fn lonely() -> i32 {\n    1\n}\n"),
+        ("src/util.rs", "pub fn lonely() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let out = fold(&s, &["util.lonely", "crate.lonely"]).unwrap();
+    assert!(out.contains("Now pub: mod util"), "{out}");
+    let ix = s.index().unwrap();
+    let header = &ix.modules.iter().find(|m| m.path == "crate").unwrap().header;
+    assert!(header.contains("pub mod util;"), "{header}");
+    let warnings: Vec<String> = s.check_all(&ix).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}

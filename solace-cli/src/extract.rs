@@ -14,6 +14,9 @@ mod merge;
 mod rust;
 
 use std::collections::HashMap;
+use crate::store_write::import_statements;
+use crate::store_write::merge_import;
+use crate::store_write::add_import;
 const MODULE_HINT: &str = "to move a whole module, use move src/x.gleam src/y.gleam";
 
 /// An import a module needs after the move: `import <module> [as <alias>]`,

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 type Job = Box<dyn FnOnce() + Send>;
 
 struct Server {

@@ -2,6 +2,9 @@
 use super::*;
 
 use serde_json::json;
+#[cfg(test)] use crate::cli::routing::run_options;
+#[cfg(test)] use crate::cli::routing::with_root;
+use std::env;
 fn owner() -> String {
     crate::board::context().map(|(task, _)| task).unwrap_or_else(|| env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into()))
 }
@@ -1145,27 +1148,6 @@ mod tests {
         );
     }
 
-    /// A dead-code warning the submit leaves on another symbol is named under
-    /// its own heading.
-    #[test]
-    fn a_submit_names_a_warning_it_leaves_elsewhere() {
-        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
-        s.check_report(false).unwrap();
-        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  1\n}\n").unwrap();
-        assert!(out.contains("New warnings elsewhere:"), "{out}");
-        assert!(out.contains("app.tools: warning:"), "{out}");
-    }
-
-    /// A warning that was there before the submit stays quiet.
-    #[test]
-    fn a_submit_does_not_repeat_a_warning_from_before() {
-        let s = project(&[("src/app.gleam", "fn unused() {\n  1\n}\n\npub fn main() {\n  1\n}\n")]);
-        s.check_report(false).unwrap();
-        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  2\n}\n").unwrap();
-        assert!(!out.contains("New warnings elsewhere"), "{out}");
-        assert!(!out.contains("app.unused"), "{out}");
-    }
-
     /// A whole-module submit names a warning the compiler newly reports elsewhere.
     #[test]
     fn a_whole_module_submit_names_a_warning_it_leaves_elsewhere() {
@@ -1177,25 +1159,6 @@ mod tests {
         let out = s.submit(crate::store::Target::Module("app"), "@deprecated(\"old\")\npub fn value() {\n  1\n}\n").unwrap();
         assert!(out.contains("New warnings elsewhere:"), "{out}");
         assert!(out.contains("other.use_value: warning:"), "{out}");
-    }
-
-    /// Before any check has run there is no baseline, so no warning is new.
-    #[test]
-    fn a_submit_before_a_check_does_not_name_a_warning_elsewhere() {
-        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
-        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  1\n}\n").unwrap();
-        assert!(!out.contains("New warnings elsewhere"), "{out}");
-    }
-
-    /// Both warning sections share one footer.
-    #[test]
-    fn a_submit_prints_the_diagnostics_footer_once() {
-        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
-        s.check_report(false).unwrap();
-        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  todo\n}\n").unwrap();
-        assert!(out.contains("\nWarnings:"), "{out}");
-        assert!(out.contains("\nNew warnings elsewhere:"), "{out}");
-        assert_eq!(out.matches("Use `check --warnings` for full diagnostics.").count(), 1, "{out}");
     }
 
     /// A module's warning stays in the baseline when a later check omits it.
@@ -1434,7 +1397,7 @@ mod tests {
         }
         let run = |id: &str| {
             let args: Vec<String> = ["drafts", "drop", id].iter().map(|x| x.to_string()).collect();
-            crate::cli::with_root(&p.root, || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+            with_root(&p.root, || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         };
         let out = run("mine").unwrap();
         assert!(out.contains("Dropped draft mine"), "{out}");
@@ -1520,7 +1483,7 @@ mod tests {
         });
         let run = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
-            crate::cli::with_root(&p.root, || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+            with_root(&p.root, || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         };
         let viewed = crate::board::with_context(&tid, "run-1", || run(&["view", "--draft", id.as_str()])).unwrap();
         assert_eq!(viewed, "pub fn main(");

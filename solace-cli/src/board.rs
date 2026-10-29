@@ -6,6 +6,8 @@ mod prerequisites;
 use serde_json::Value;
 use serde_json::json;
 use std::io::Read;
+use std::env;
+use std::collections::HashMap;
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
     // one project lock; use per-change store isolation if parallel work is introduced.
@@ -1644,11 +1646,12 @@ fn last_review(t: &Value) -> Option<(String, String)> {
 /// open Tech Debt task (`techDebt: true`, not in a final column) with one
 /// `solace` note per finding of the last work run's summary and the last
 /// review's `### Tech debt`, naming the task and run they came from. With no
-/// open one, a new one is made in Planning of `t`'s home (its first column if it
-/// has none, D-132), with its scope, titled `<feature title>: Tech Debt`. A task
-/// with no feature always gets a new one titled `<task title>: Tech Debt`, with
-/// no feature or milestone. Returns the task with the counts of work-run and
-/// review items; None when neither lists tech debt. Nothing is written here.
+/// open one, a new one is made in Planning of `t`'s home (its first column if
+/// it has none, D-132), with its scope, titled with just the feature's title.
+/// A task with no feature always gets a new one titled with just the completed
+/// task's title, with no feature or milestone. Returns the task with the
+/// counts of work-run and review items; None when neither lists tech debt.
+/// Nothing is written here.
 pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize, usize)>, Failure> {
     let tid = t["id"].as_str().unwrap_or("");
     let mut items: Vec<String> = Vec::new();
@@ -2491,17 +2494,27 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
             if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && r["kind"] == "review") {
                 write_review_checkpoint(&root, &t, &rid)?;
             }
-            let result = agent_process(&root, &t, &rid, &m, true);
-            let mut result = match result {
-                Err(Failure(_, SESSION_GONE)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
-                other => other,
+            let mut result = agent_process(&root, &t, &rid, &m, true, false);
+            let mut retried = false;
+            let result = loop {
+                match result {
+                    Err(Failure(_, SESSION_GONE)) => {
+                        result = agent_process(&root, &task(&root, tid)?, &rid, &m, false, false);
+                    }
+                    // A clean run that never called Solace gets one fresh agent, never a resume.
+                    Err(Failure(_, NO_TOOL)) if !retried => {
+                        retried = true;
+                        result = agent_process(&root, &task(&root, tid)?, &rid, &m, false, true);
+                    }
+                    // A discussion agent that exited after replying gets a fresh agent,
+                    // briefed with every note, at the human's next note.
+                    Err(Failure(_, REPLIED)) => {
+                        wait_discussion(&open(&root)?, tid, &rid)?;
+                        result = agent_process(&root, &task(&root, tid)?, &rid, &m, false, false);
+                    }
+                    other => break other,
+                }
             };
-            // A discussion agent that exited after replying gets a fresh agent,
-            // briefed with every note, at the human's next note.
-            while let Err(Failure(_, REPLIED)) = result {
-                wait_discussion(&open(&root)?, tid, &rid)?;
-                result = agent_process(&root, &task(&root, tid)?, &rid, &m, false);
-            }
             let current = task(&root, tid)?;
             if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && matches!(r["kind"].as_str(), Some("review" | "discuss")))
                 || m["run"].is_array()
@@ -2570,7 +2583,7 @@ const SESSION_GONE: i32 = 3;
 /// `agent_process`'s result when a discussion agent replied in plain text and
 /// exited: the reply is recorded and the run waits for the human.
 const REPLIED: i32 = 4;
-fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: bool) -> Result<(), Failure> {
+fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: bool, retried: bool) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
     let run = &t["runs"][run_at(t, rid)?];
     let log = PathBuf::from(run["log"].as_str().unwrap());
@@ -2628,7 +2641,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
     let supervised =
-        supervise(Watch::Task(root, tid), rid, &mut child, &log, m, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+        supervise(Watch::Task(root, tid), rid, &mut child, &log, m, resume.is_some(), retried, Duration::from_secs(timeout), GRACEFUL_EXIT);
     let (started, outcome) = run_state(root, tid, rid);
     // A discussion agent that replied in plain text took its turn: its reply
     // answers like a finished run, so it clears a mark the same way.
@@ -2885,6 +2898,7 @@ fn supervise(
     log: &Path,
     m: &Value,
     resumed: bool,
+    retried: bool,
     timeout: Duration,
     grace: Duration,
 ) -> Result<bool, Failure> {
@@ -2906,7 +2920,7 @@ fn supervise(
         }
         if let Some(status) = child.try_wait()? {
             if !ended {
-                handle_exit(&watch, rid, RunContext { run: r, log, model: m, resumed }, status)?;
+                handle_exit(&watch, rid, RunContext { run: r, log, model: m, resumed, retried }, status)?;
             }
             return Ok(false);
         }
@@ -5367,7 +5381,7 @@ fn note_recorded(output: &str) -> bool {
 
 /// Handles an agent that exited before its run ended.
 fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::process::ExitStatus) -> Result<(), Failure> {
-    let RunContext { run: r, log, model: m, resumed } = context;
+    let RunContext { run: r, log, model: m, resumed, retried } = context;
     let entries = transcript(log);
     let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
     let raw = fs::read_to_string(log).unwrap_or_default().to_lowercase();
@@ -5393,10 +5407,19 @@ fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::p
     {
         return Ok(());
     }
-    let message = agents::stopped(m, &entries).unwrap_or_else(|| {
-        let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
-        format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default())
-    });
+    if let Some(message) = agents::stopped(m, &entries) {
+        return watch.fail(rid, &message);
+    }
+    // A custom `run` command writes a log in its own format, so its tool
+    // entries can't say whether the Solace tool was offered.
+    if m["run"].is_null() && status.success() && error.is_empty() && !called_solace(&entries) {
+        if retried || matches!(watch, Watch::Strategy(..)) {
+            return watch.fail(rid, NO_TOOL_MESSAGE);
+        }
+        return Err(Failure("no Solace call; trying a fresh agent".into(), NO_TOOL));
+    }
+    let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
+    let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
     watch.fail(rid, &message)
 }
 
@@ -5440,6 +5463,7 @@ struct RunContext<'a> {
     log: &'a Path,
     model: &'a Value,
     resumed: bool,
+    retried: bool,
 }
 
 /// `event` with its task's board visibility worked out, where the stream's
@@ -5458,12 +5482,12 @@ pub(super) fn stream_task_event(top: &Path, mut event: Value, has_project: bool)
 /// titled after `t` and belongs to no feature or milestone.
 fn new_debt(top: &Path, t: &Value, feature: Option<&Value>) -> Result<Value, Failure> {
     let named = feature.unwrap_or(t);
-    let title = format!("{}: Tech Debt", named["title"].as_str().unwrap_or("").trim());
+    let title = named["title"].as_str().unwrap_or("").trim();
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
     let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
     let w = flow(&home)?;
     let first = planning_column(&w);
-    let mut d = new_task(&title, TECH_DEBT_BODY, &first, rank);
+    let mut d = new_task(title, TECH_DEBT_BODY, &first, rank);
     d["techDebt"] = json!(true);
     d["feature"] = t["feature"].clone();
     d["milestone"] = feature.map(|f| f["milestone"].clone()).unwrap_or(Value::Null);
@@ -5888,4 +5912,29 @@ fn last_run_note(t: &Value, kind: &str, outcome: &str) -> Option<(String, String
 /// note of it.
 fn last_work(t: &Value) -> Option<(String, String)> {
     last_run_note(t, "work", "finished")
+}
+
+/// `agent_process`'s failure when a clean run made no Solace call: the run
+/// starts once more with a fresh agent.
+const NO_TOOL: i32 = 5;
+
+/// What a run that never called Solace says, after its one fresh try.
+const NO_TOOL_MESSAGE: &str = concat!(
+    "The agent made no Solace call: it didn't get the Solace tool, or never used it, so it couldn't work. ",
+    "Solace tried again once. Start the run again; if it keeps happening, try another model."
+);
+
+/// Whether a transcript entry calls the `solace` MCP tool, not one of the
+/// harness's resource tools.
+fn called_solace(entries: &[Value]) -> bool {
+    entries.iter().any(|e| e["kind"] == "tool" && e["title"].as_str().is_some_and(solace_title))
+}
+
+/// The tool is `solace` in a Codex log and `mcp__solace__solace` in a Claude
+/// log; resource tools such as `list_mcp_resources` share the server but are
+/// not the tool.
+fn solace_title(title: &str) -> bool {
+    ["solace", "mcp__solace", "mcp__solace__solace"]
+        .iter()
+        .any(|name| title == *name || title.strip_prefix(name).is_some_and(|rest| rest.starts_with(' ')))
 }

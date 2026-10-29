@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use serde_json::json;
+use std::env;
+use std::collections::HashMap;
 // effects inside dependencies are seen only through this table; extend by settings later.
 const EFFECTS: &[(&str, &str, &str)] = &[
     ("gleam/io", "*", "prints"),

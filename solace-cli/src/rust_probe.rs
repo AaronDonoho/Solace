@@ -5,6 +5,9 @@
 use super::*;
 
 use crate::cli::PROBE;
+use crate::diagnostics::FileMap;
+use crate::diagnostics::Diag;
+use std::collections::HashMap;
 /// Runs a Rust probe in the crate's reusable scratch copy. A lock serializes
 /// runs on it; each run refreshes it and restores only the probe text.
 pub(crate) fn run(s: &Store, text: &str, module: Option<&str>, from: Option<&str>) -> Out {

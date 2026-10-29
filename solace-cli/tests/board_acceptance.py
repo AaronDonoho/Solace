@@ -304,7 +304,7 @@ class Board(unittest.TestCase):
         # A review's tech debt waits for completion, then makes the feature's Tech Debt task once.
         a = reviewed(True, 'first finding')
         [debt] = debts()
-        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search: Tech Debt', 'planning', f['id']))
+        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search', 'planning', f['id']))
         notes = self.get(debt)['notes']
         self.assertEqual(len(notes), 1)
         self.assertIn('task:'+a['id'], notes[0]['text']); self.assertIn('first finding', notes[0]['text'])
@@ -316,7 +316,7 @@ class Board(unittest.TestCase):
         self.assertEqual([('task:'+x) in n['text'] for n, x in zip(self.get(debt)['notes'], [a['id'], b['id']])], [True, True])
         # A review of a task with no feature makes a Tech Debt task of its own.
         c = reviewed(False, 'own finding')
-        own = next(d for d in debts() if d['title'] == c['title']+': Tech Debt')
+        own = next(d for d in debts() if d['title'] == c['title'])
         self.assertEqual((own['column'], own.get('feature'), own.get('milestone')), ('planning', None, None))
         self.assertEqual((own['scope'], own['home']), (c['scope'], c['home']))
         own_notes = self.get(own)['notes']

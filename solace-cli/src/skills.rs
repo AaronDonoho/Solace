@@ -5,6 +5,7 @@
 
 use super::*;
 
+use std::collections::HashMap;
 /// One skill the brief lists: its name, its one-line description, and the
 /// path to `read`.
 pub struct Skill {

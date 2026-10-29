@@ -1315,3 +1315,9 @@ Amends D-112 points 2 and 4 and D-199 point 2, and Spec 15 §1, §6 and A20 (Aar
 2. When a task is completed, Solace also reads its last work run that ended `finished`: the agent's note of that run, as it reads its last review. Each top-level bullet of the note's `### Tech debt` section is one finding and is filed on the same Tech Debt task as the review's findings, one `solace` note each: `Tech debt from the work on task:<id> (work run <rid>):` followed by the finding. A work summary with no section files nothing.
 3. The completed task's note names the sources that had items: `from the last review`, `from the last work run`, or `from the last work run and review`, with the total count. A review is told not to repeat items in the work summary's `### Tech debt` section, so they are filed once.
 Why: a reviewer never sees a work run's steps, so waste such as a command printing a large diff of files the task didn't touch went unreported and the run was compacted. The work agent sees that waste and can name it while it is still fresh.
+
+## D-213 A new Tech Debt task has no title suffix
+Amends D-112 point 3 and D-198 point 2, and Spec 15 §6 and A20 (Aaron, board task "tech debt: drop the Tech Debt title suffix", 2026-10-29).
+1. A new Tech Debt task is titled with just the feature's title, or the completed task's title when it has no feature, with nothing added. The board's "Tech debt" label marks it.
+2. Existing Tech Debt tasks keep their titles; nothing is renamed.
+Why: the board's label already marked these tasks, so the suffix repeated the label and made their titles longer.

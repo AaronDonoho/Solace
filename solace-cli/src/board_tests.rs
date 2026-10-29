@@ -3,6 +3,7 @@ use super::*;
 use serde_json::Value;
 use serde_json::json;
 use std::io::Read;
+use crate::cli::{batch, next_step, run_options, with_root};
 /// A task with one run `r1` in `run`'s state, and a hung agent in its own process group.
 fn supervised(run: Value) -> (testing::Project, String, std::process::Child) {
     launched(run, Command::new("sleep").arg("45").process_group(0).spawn().unwrap())
@@ -241,7 +242,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let did = debt["id"].as_str().unwrap().to_string();
     assert_eq!(
         (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()),
-        (Some("Search: Tech Debt"), Some("planning"), Some(fid.as_str()))
+        (Some("Search"), Some("planning"), Some(fid.as_str()))
     );
     assert_eq!(debt["scope"], done["scope"]);
     let notes = texts(&debt);
@@ -285,6 +286,7 @@ fn hung_shutdown_is_killed_after_the_grace_period() {
         &log,
         &json!({}),
         false,
+        false,
         Duration::from_secs(3600),
         Duration::from_millis(300),
     )
@@ -304,7 +306,7 @@ fn graceful_exit_is_not_forced() {
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
     assert!(
-        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
             .unwrap()
     );
     assert!(start.elapsed() < Duration::from_secs(10));
@@ -317,13 +319,14 @@ fn interrupted_and_timed_out_agents_are_killed() {
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
     assert!(
-        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap()
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
     );
     assert!(start.elapsed() < Duration::from_secs(10));
     let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"running"}));
     let log = p.root.join(".solace/r1.log");
     assert!(
-        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_millis(200), GRACEFUL_EXIT)
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_millis(200), GRACEFUL_EXIT,)
             .unwrap()
     );
     assert!(child.try_wait().unwrap().is_some());
@@ -3057,9 +3060,9 @@ fn a_whole_module_format_is_recorded_on_the_task() {
     let tid = t["id"].as_str().unwrap().to_string();
     t["runs"] = json!([{"id":"format","kind":"work","state":"running"}]);
     tasks::put(&s, &t).unwrap();
-    let out = crate::cli::with_root(&root, || {
+    let out = with_root(&root, || {
         with_context(&tid, "format", || {
-            crate::cli::run_options(&["format".to_string(), "crate".to_string()], &mut || Ok(String::new()), None, 1000, &[])
+            run_options(&["format".to_string(), "crate".to_string()], &mut || Ok(String::new()), None, 1000, &[])
         })
     })
     .unwrap();
@@ -3456,7 +3459,7 @@ fn a_review_that_exits_with_its_assessment_is_reviewed() {
     let assessment = "**Assessment: Looks good**\n\n### Findings\n\nFine.";
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says(assessment)]);
     assert!(
-        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
             .unwrap()
     );
     let t = task(&p.root, &tid).unwrap();
@@ -3482,7 +3485,7 @@ fn a_refused_review_note_still_recovers() {
     });
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[refused, agent_says(assessment)]);
     assert!(
-        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
             .unwrap()
     );
     let t = task(&p.root, &tid).unwrap();
@@ -3501,7 +3504,7 @@ fn a_review_fallback_keeps_existing_attention() {
     .unwrap();
     let before = task(&p.root, &tid).unwrap()["attention"].clone();
     assert!(
-        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
             .unwrap()
     );
     assert_eq!(task(&p.root, &tid).unwrap()["attention"], before);
@@ -3530,9 +3533,10 @@ fn a_review_with_recorded_feedback_is_not_noted_twice() {
 
 #[test]
 fn a_review_without_an_assessment_still_fails() {
-    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says("Done.")]);
+    let (p, tid, mut child, log) =
+        exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_tool("i1", "solace", "task diff"), agent_says("Done.")]);
     assert!(
-        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
             .unwrap()
     );
     let t = task(&p.root, &tid).unwrap();
@@ -3625,9 +3629,9 @@ fn a_review_run_gets_no_next_step() {
         {"id":"r2","kind":"work","state":"running"}
     ]);
     tasks::put(&s, &t).unwrap();
-    assert_eq!(with_context(&tid, "r1", || crate::cli::next_step(Some("app.one"), work_run(&root))), "");
+    assert_eq!(with_context(&tid, "r1", || next_step(Some("app.one"), work_run(&root))), "");
     assert_eq!(
-        with_context(&tid, "r2", || crate::cli::next_step(None, work_run(&root))),
+        with_context(&tid, "r2", || next_step(None, work_run(&root))),
         "Next: if every part of the task is changed, finish with task done.\n"
     );
 }
@@ -3861,7 +3865,9 @@ fn a_sign_in_failure_is_a_plain_message() {
     let said = "Failed to authenticate: OAuth session expired and could not be refreshed";
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 1, &[json!({"type":"error","message":said})]);
     let m = json!({"agent":"claude","model":"m"});
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap()
+    );
     let t = task(&p.root, &tid).unwrap();
     let plain = "Claude Code's sign-in has expired. Open Claude Code once and sign in, then press Try again.";
     assert_eq!(t["attention"]["reason"], plain);
@@ -3877,7 +3883,9 @@ fn an_update_needed_is_a_plain_message() {
     let said = "Claude Code needs an update. A newer version (2.0.0 or higher) is required to continue.";
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 1, &[json!({"type":"error","message":said})]);
     let m = json!({"agent":"claude","model":"m"});
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap()
+    );
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["attention"]["reason"], "Claude Code needs an update. Update Claude Code, then start the task again.");
     assert_eq!(t["runs"][0]["outcome"], "Claude Code needs an update. Update Claude Code, then start the task again.");
@@ -4365,7 +4373,7 @@ fn a_work_run_is_found_from_a_secondary_project() {
     let sub = root.join("sub");
     assert!(!with_context(&tid, "r1", || work_run(&sub)));
     assert_eq!(
-        with_context(&tid, "r2", || crate::cli::next_step(None, work_run(&sub))),
+        with_context(&tid, "r2", || next_step(None, work_run(&sub))),
         "Next: if every part of the task is changed, finish with task done.\n"
     );
 }
@@ -4435,7 +4443,7 @@ fn a_task_with_no_feature_files_its_own_tech_debt() {
     assert_eq!((work, review), (0, 2));
     assert_eq!(
         (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str(), debt["milestone"].as_str(), debt["techDebt"].as_bool()),
-        (Some("Loose: Tech Debt"), Some("planning"), None, None, Some(true))
+        (Some("Loose"), Some("planning"), None, None, Some(true))
     );
     assert_eq!((&debt["scope"], &debt["home"]), (&t["scope"], &t["home"]));
     let notes: Vec<&str> = debt["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap()).collect();
@@ -4497,7 +4505,7 @@ fn failed_tool_lines_name_the_code_and_failed_command() {
 #[test]
 fn a_repeated_command_reports_the_copy_that_failed() {
     let mut seen = 0;
-    let (output, failed) = crate::cli::batch(&["check", "check"], 10_000, &mut |_, _| {
+    let (output, failed) = batch(&["check", "check"], 10_000, &mut |_, _| {
         seen += 1;
         if seen == 2 { Err(Failure("E0308 mismatched types".into(), 1)) } else { Ok("no problems\n".into()) }
     });
@@ -4635,7 +4643,7 @@ fn task_peek_reads_the_tasks_a_run_may_read() {
     let peek = |target: &str, extra: &[&str], budget: usize| {
         let mut args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
         args.extend(extra.iter().map(|x| x.to_string()));
-        crate::cli::with_root(&p.root, || with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
+        with_root(&p.root, || with_context(tid, "r1", || run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
     };
     let allowed = [
         (dep["id"].as_str().unwrap(), "Dependency"),
@@ -4688,8 +4696,8 @@ fn task_peek_notes_page() {
     let peek = |extra: &[&str], budget: usize| {
         let mut args = vec!["task".to_string(), "peek".to_string(), did.to_string()];
         args.extend(extra.iter().map(|x| x.to_string()));
-        crate::cli::with_root(&p.root, || {
-            with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, budget, &[]))
+        with_root(&p.root, || {
+            with_context(tid, "r1", || run_options(&args, &mut || Ok(String::new()), None, budget, &[]))
         })
     };
     let first = peek(&["--notes"], 650).unwrap();
@@ -4735,7 +4743,7 @@ fn task_peek_feature_lists_its_tasks() {
     let tid = t["id"].as_str().unwrap();
     let peek = |tid: &str, target: &str| {
         let args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
-        crate::cli::with_root(&p.root, || with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+        with_root(&p.root, || with_context(tid, "r1", || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
     };
     let out = peek(tid, "feature").unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
@@ -4868,9 +4876,9 @@ fn a_resumed_brief_names_drafts_in_every_project() {
 fn a_refused_submit_in_another_project_names_the_project_of_its_draft() {
     let (_root, web, components, tid) = draft_board();
     let run = |args: &[&str], text: &str| {
-        crate::cli::with_root(&web.root, || {
+        with_root(&web.root, || {
             with_context(&tid, "r1", || {
-                crate::cli::run_options(
+                run_options(
                     &args.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
                     &mut || Ok(text.to_string()),
                     None,
@@ -4905,9 +4913,9 @@ fn a_refused_submit_in_another_project_names_the_project_of_its_draft() {
 }
 
 fn run_draft_command(web: &Store, tid: &str, args: &[&str], text: &str) -> Out {
-    crate::cli::with_root(&web.root, || {
+    with_root(&web.root, || {
         with_context(tid, "r1", || {
-            crate::cli::run_options(
+            run_options(
                 &args.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
                 &mut || Ok(text.to_string()),
                 None,
@@ -5123,4 +5131,116 @@ fn ending_a_run_stores_its_model_label() {
     with_config(&config, || end_run(&mut run, "finished"));
     let saved: Value = jsonx::read(&dir.join("agent-models.json")).unwrap();
     assert_eq!(saved["used"]["claude-haiku"], json!({"model":"claude-haiku-9-9","label":"Haiku 9.9"}));
+}
+
+/// A Codex log entry for a call to `tool` with `command`.
+fn agent_tool(id: &str, tool: &str, command: &str) -> Value {
+    json!({
+        "type":"item.completed",
+        "item":{
+            "id":id,
+            "type":"mcp_tool_call",
+            "tool":tool,
+            "arguments":{"command":command},
+            "result":{"content":[{"type":"text","text":"ok"}]},
+            "status":"completed"
+        }
+    })
+}
+
+/// The failed run's log: resource tools reached the server, but `solace` did not.
+fn resource_calls() -> Vec<Value> {
+    vec![agent_tool("i1", "list_mcp_resources", ""), agent_tool("i2", "read_mcp_resource", ""), agent_says("Done.")]
+}
+
+#[test]
+fn a_run_without_a_solace_call_gets_one_fresh_try() {
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 0, &resource_calls());
+    let e =
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap_err();
+    assert_eq!(e.1, NO_TOOL);
+    assert_eq!(task(&p.root, &tid).unwrap()["runs"][0]["state"], "running");
+}
+
+#[test]
+fn a_second_run_without_a_solace_call_says_the_tool_was_missing() {
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 0, &resource_calls());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, true, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["state"], "ended");
+    assert_eq!(t["runs"][0]["outcome"], NO_TOOL_MESSAGE);
+    assert_eq!(t["attention"]["reason"], NO_TOOL_MESSAGE);
+    assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "solace" && n["text"] == NO_TOOL_MESSAGE));
+    assert!(!t["runs"][0]["outcome"].as_str().unwrap().contains("without finishing"));
+}
+
+#[test]
+fn a_run_that_called_solace_keeps_the_generic_exit() {
+    let lines = [agent_tool("i1", "solace", "task diff"), agent_says("Done.")];
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 0, &lines);
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let t = task(&p.root, &tid).unwrap();
+    assert!(t["runs"][0]["outcome"].as_str().unwrap().contains("without finishing"));
+}
+
+#[test]
+fn a_crash_without_a_solace_call_keeps_the_generic_exit() {
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 7, &resource_calls());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let t = task(&p.root, &tid).unwrap();
+    assert!(t["runs"][0]["outcome"].as_str().unwrap().contains("without finishing"));
+}
+
+#[test]
+fn a_custom_run_without_a_solace_call_keeps_the_generic_exit() {
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 0, &resource_calls());
+    let m = json!({"agent": "codex", "run": ["sh"]});
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let t = task(&p.root, &tid).unwrap();
+    assert!(t["runs"][0]["outcome"].as_str().unwrap().contains("without finishing"));
+}
+
+#[test]
+fn only_the_solace_tool_counts_as_a_solace_call() {
+    for title in ["solace", "solace view a", "mcp__solace__solace test", "mcp__solace inspect a"] {
+        assert!(solace_title(title), "{title}");
+    }
+    for title in ["list_mcp_resources ", "read_mcp_resource ", "web search rg", "mcp__solace__list_mcp_resources"] {
+        assert!(!solace_title(title), "{title}");
+    }
+}
+
+/// A strategy agent that exits cleanly after only resource calls is told the tool was missing.
+#[test]
+fn a_strategy_run_without_a_solace_call_says_the_tool_was_missing() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let runs = top.join(".solace/strategy/runs");
+    fs::create_dir_all(&runs).unwrap();
+    fs::write(runs.join("r1.json"), json!({"id":"r1","kind":"strategy","state":"running","notes":[]}).to_string()).unwrap();
+    let mut child = Command::new("sh").arg("-c").arg("exit 0").process_group(0).spawn().unwrap();
+    let log = top.join(".solace/r1.log");
+    let lines = &resource_calls()[..2];
+    fs::write(&log, lines.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    assert!(
+        !supervise(Watch::Strategy(&top), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let run = tasks::strategy_run(&top, "r1").unwrap();
+    assert_eq!(run["state"], "ended");
+    let notes = run["notes"].as_array().unwrap();
+    assert!(notes.iter().any(|n| n["text"].as_str().unwrap_or("").contains(NO_TOOL_MESSAGE)), "{run}");
 }

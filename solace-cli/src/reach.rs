@@ -4,6 +4,7 @@
 use super::*;
 use std::collections::VecDeque;
 
+use std::collections::HashMap;
 /// Test functions: public `_test` functions in test modules (Gleam), or
 /// `#[test]` functions (Rust, D-170).
 pub fn test_symbols(ix: &Index) -> Vec<usize> {

@@ -7,6 +7,7 @@ use crate::cli::verb_words;
 
 use serde_json::Value;
 use serde_json::json;
+use std::env;
 thread_local! {
     /// The symbols this MCP call printed in full, in a task run; `None`
     /// elsewhere, so other runs keep no reads.
@@ -26,7 +27,7 @@ pub(super) fn window_reads() -> Option<Value> {
 }
 
 /// Records symbol `s` of the project at `root` as served in full.
-pub(super) fn mark_served(root: &Path, s: &Sym) {
+pub(crate) fn mark_served(root: &Path, s: &Sym) {
     SERVED.with(|v| {
         if let Some(v) = v.borrow_mut().as_mut() {
             let project = scope::dir(&scope::top(root), root);

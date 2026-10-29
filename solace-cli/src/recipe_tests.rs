@@ -3,6 +3,7 @@ use crate::testing::Scratch;
 
 use serde_json::Value;
 use serde_json::json;
+use std::env;
 fn invalid(text: &str) -> String {
     lockdown::parse_settings(text).unwrap_err().0
 }

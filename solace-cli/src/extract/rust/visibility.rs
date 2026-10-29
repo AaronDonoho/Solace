@@ -53,6 +53,28 @@ pub(super) fn promote_access(
         let used: HashSet<String> = methods.iter().flat_map(|&m| method_fields(&newtext[m], owner_name)).collect();
         newtext[owner] = promote_fields(&newtext[owner], &used);
     }
+    let mut used_fields: std::collections::BTreeMap<usize, HashSet<String>> = std::collections::BTreeMap::new();
+    for moved_fn in 0..ix.syms.len() {
+        if !moved[moved_fn] || ix.syms[moved_fn].kind_text != "fn" {
+            continue;
+        }
+        for &used in &ix.uses[moved_fn] {
+            if moved[used] || ix.syms[used].kind_text != "struct" {
+                continue;
+            }
+            let fields = method_fields(&newtext[moved_fn], &ix.syms[used].name);
+            if fields.is_empty() || visible_from(&ix.syms[used].module, target) {
+                continue;
+            }
+            if !is_public(&newtext[used]) {
+                promote.insert(used);
+            }
+            used_fields.entry(used).or_default().extend(fields);
+        }
+    }
+    for (owner, fields) in used_fields {
+        newtext[owner] = promote_fields(&newtext[owner], &fields);
+    }
     for owner in 0..ix.syms.len() {
         if !moved[owner] || ix.syms[owner].kind_text != "struct" {
             continue;
@@ -657,4 +679,19 @@ pub(super) fn make_public(text: &str) -> String {
         return format!("{}pub{}", &text[..at], &text[at + end + 1..]);
     }
     format!("{}pub {}", &text[..at], &text[at..])
+}
+
+/// The declaration with plain `pub` visibility, so an item that reached
+/// outside the crate before the move still does.
+pub(super) fn make_module_public(text: &str, name: &str) -> Option<String> {
+    let (start, mod_at, current) = module_declaration(text, name)?;
+    if current == "pub" {
+        return None;
+    }
+    Some(format!("{}pub {}", &text[..start], &text[mod_at..]))
+}
+
+pub(super) fn is_plain_public(text: &str) -> bool {
+    let Some((_, code)) = super::declaration(text) else { return false };
+    code.starts_with("pub ") || code.starts_with("pub\n")
 }

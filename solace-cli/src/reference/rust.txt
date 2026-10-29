@@ -41,6 +41,86 @@ Adding
                                 name is refused: use the dotted form, e.g.
                                 `*** Add: m.f` instead of `*** Add: m::f`.
 
+Moving
+  extract <name>... --to <module>
+                                moves items with their ids, then checks with
+                                cargo or changes nothing. A method is
+                                `Type::method` (`Store::find` works when one
+                                impl matches); a short name two symbols share
+                                is refused and listed (E1002): write the
+                                module, `store_core.has_column`, or
+                                `crate.has_column` for the crate root's. Moved
+                                methods join an `impl` of their type in the
+                                target; methods of one impl per call, and a
+                                trait impl only whole (E6013). A whole
+                                inherent impl is named `<Type>`. Imports the
+                                moved code used come with it; one a staying
+                                module reaches through a glob stays in place.
+  --to <new module>             a module the store lacks is created: `helpers`
+                                beside the crate root (`src/helpers.rs`),
+                                `store::read` in `src/store/read.rs`. Its
+                                parent gets `mod <name>;` after its last `mod`
+                                line (`pub mod` when a plain `pub` crate-root
+                                item moves in). The file starts with the moved
+                                code and its imports: add a module comment with
+                                `submit --imports <module>`.
+  helpers                       a private free function, const or static that
+                                only moved code uses comes along
+                                (`+1 helper:`). One that staying code or a
+                                staying test also uses stays; the moved call
+                                is rewritten, by a path such as
+                                `crate::matches(…)` or by an import. A private
+                                method never comes along: it stays in its
+                                impl and is raised to `pub(crate)` when the
+                                target can't see it.
+  tests                         a test moves only when everything it calls,
+                                directly or through a fixture in its test
+                                module, moves too. A test whose `sample()`
+                                fixture calls staying `Store::new` stays.
+                                The reply is `Tests staying: N`, plus
+                                `(rewritten: …)` for tests whose text or
+                                imports changed. A moved test goes to the
+                                target's `tests` file module when its header
+                                declares one, else to a new `<target>::tests`
+                                beside the target's file (`src/helpers_tests.rs`,
+                                `src/board/reviews_tests.rs`). An inline test
+                                module whose tests all move moves inline,
+                                keeping its name; a file test module that
+                                empties is retired, and its tests join
+                                `<target>::tests`.
+  visibility                    named in the reply. A moved item that
+                                staying code outside the target calls becomes
+                                `pub(crate)` (`Now pub(crate): search.Store::count`);
+                                a staying private item, or the fields of a
+                                staying type, the moved code uses become
+                                `pub(crate)` unless the target is inside their
+                                module. A `mod` line on the way to the target
+                                is raised only as far as callers need: to
+                                `pub(super)` or `pub(crate)`, or `pub` when a
+                                plain `pub` crate-root item moved
+                                (`Now pub(crate): mod x`; D-211).
+  refusals                      E1001 `<file> already exists`: the target's
+                                test file name is taken, even by another
+                                module's tests (`store_read_tests.rs` holds
+                                `store::read_tests`); choose another target,
+                                such as `store::read` (`src/store/read_tests.rs`).
+                                E1004 `<target>.tests already exists`: the
+                                target already has a `tests` module it can't
+                                take. E1004 `<target>.<name> already exists`:
+                                a name clash.
+Example: `Store` has private `find` and `count`, a private free `matches`,
+`report` calls `count`, and `count_counts` calls `sample()`, whose fixture
+calls the staying `Store::new`. Moving `find` and `count` to a new `search`:
+  extract crate.Store::find crate.Store::count --to search
+  Moved crate.Store::find, crate.Store::count (+1 helper: matches) to search
+  Tests staying: 1
+  Created module search (src/search.rs)
+  Now pub(crate): search.Store::count
+  Rewrote references in 1 symbol
+`find` stays private because only moved `count` calls it; `count` becomes
+`pub(crate)` because `report` stays; `matches` moves; `count_counts` stays
+because its fixture reaches the staying `Store::new`.
+
 Formatting
   format <module>               rustfmt the whole module, with the project's
                                 rustfmt.toml and edition; its ids stay by name.

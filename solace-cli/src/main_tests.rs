@@ -2,6 +2,8 @@ use super::testing::*;
 use super::*;
 
 use serde_json::json;
+use crate::cli::{hinted, is_process, reset_after_panic, run_inner, run_options, with_root};
+use std::env;
 /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
 fn reference_layout(text: &str) -> (bool, String) {
     let dir = Scratch::new().with(&[("reference.txt", text)]);
@@ -179,7 +181,7 @@ fn a_panic_resets_the_calls_state() {
     store.db.execute_batch("BEGIN IMMEDIATE").unwrap();
     COMMAND_DB.set(vec![(store.root.clone(), store.db.clone())]);
     UNTESTED.with(|u| *u.borrow_mut() = Some("app.main".into()));
-    crate::cli::reset_after_panic();
+    reset_after_panic();
     assert!(store.db.is_autocommit(), "the open transaction is rolled back");
     assert!(COMMAND_DB.with(|c| c.borrow().is_empty()));
     assert!(UNTESTED.with(|u| u.borrow().is_none()));
@@ -263,6 +265,10 @@ fn help_answers_one_command_its_own_section() {
     assert!(r.contains("run <name>") && !r.contains("work add"), "{r}");
     let f = agent_help(Some("format"));
     assert!(f.contains("format") && f.contains("Rust") && f.contains("module"), "{f}");
+    let e = agent_help(Some("extract"));
+    assert!(e.contains("Moving\n") && e.contains("Moved crate.Store::find"), "{e}");
+    let s = agent_help(Some("submit"));
+    assert!(!s.contains("Moving\n"), "{s}");
     let n = agent_help(Some("nosuch"));
     assert!(
         n.starts_with("No command `nosuch`")
@@ -290,9 +296,9 @@ fn a_name_in_another_project_says_where_it_is() {
         import(&root.join(d)).unwrap();
     }
     let a = Store::at(&root.join("a")).unwrap();
-    let e = crate::cli::hinted(a.view(&["plan.answer"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
+    let e = hinted(a.view(&["plan.answer"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
     assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
-    let e = crate::cli::hinted(a.view(&["plan.nope"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
+    let e = hinted(a.view(&["plan.nope"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
     assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
     let s = a.other_projects(None);
     for part in [
@@ -1150,11 +1156,11 @@ fn a_rust_format_takes_one_module_the_store_holds() {
 #[test]
 fn a_rust_format_is_not_a_process() {
     let (root, _) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
-    assert!(!crate::cli::is_process(&["format", "crate"], &root));
-    assert!(!crate::cli::is_process(&["format"], &root));
-    assert!(crate::cli::is_process(&["build"], &root));
+    assert!(!is_process(&["format", "crate"], &root));
+    assert!(!is_process(&["format"], &root));
+    assert!(is_process(&["build"], &root));
     let plain = testing::Scratch::new();
-    assert!(crate::cli::is_process(&["format", "crate"], &plain));
+    assert!(is_process(&["format", "crate"], &plain));
 }
 
 /// D-180: `format` names the tool a machine lacks and saves nothing.
@@ -1228,21 +1234,6 @@ fn the_reference_and_worker_schema_show_the_submit_call_fields() {
     }
     let text = mcp::tool_schema()["inputSchema"]["properties"]["text"]["description"].as_str().unwrap().to_string();
     assert!(text.contains("`submit --project <folder>` then `test --project <folder>`"), "{text}");
-}
-
-#[test]
-fn dependency_modules_come_from_direct_manifest_entries_only() {
-    let root = Scratch::new().with(&[
-        (
-            "gleam.toml",
-            "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\ngleam_json = \"1.0\"\n\n[dev-dependencies]\ngleeunit = \"1.0\"\n",
-        ),
-        ("build/packages/gleam_json/src/gleam/json.gleam", ""),
-        ("build/packages/gleam_stdlib/src/gleam/list.gleam", ""),
-        ("build/packages/gleeunit/src/gleeunit.gleam", ""),
-    ]);
-    let modules = dependency_modules(&root);
-    assert_eq!(modules.iter().map(|m| (m.path.as_str(), m.test)).collect::<Vec<_>>(), vec![("gleam/json", false), ("gleeunit", true)]);
 }
 
 #[test]
@@ -1403,18 +1394,6 @@ fn an_unknown_type_in_an_imported_module_gets_no_import_hint() {
 }
 
 #[test]
-fn an_alias_to_an_unlisted_dependency_is_not_reused() {
-    let store = project(&[
-        ("build/packages/indirect/src/indirect.gleam", "pub fn value() -> Int {\n  1\n}\n"),
-        ("src/caller.gleam", "import indirect as x\n\npub fn call() -> Int {\n  x.value()\n}\n"),
-        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
-    ]);
-    let ix = store.index().unwrap();
-    let deps = store.dependency_modules();
-    assert!(matches!(import_match(&ix, &deps, "x", false), ImportMatch::None));
-}
-
-#[test]
 fn dependency_modules_are_read_once_until_the_manifest_changes() {
     let store = project(&[
         ("gleam.toml", concat!("name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n", "first = { path = \"deps/first\" }\n",)),
@@ -1456,14 +1435,6 @@ fn dependency_modules_are_read_once_until_the_manifest_changes() {
 }
 
 #[test]
-fn only_gleams_unknown_module_error_names_a_qualifier() {
-    assert_eq!(unknown_module("Unknown module type\n\nThe module `helper` does not have a `Foo` type."), None);
-    assert_eq!(unknown_module("Unknown module value\n\nThe module `helper` does not have a `x` value."), None);
-    assert_eq!(unknown_module("Unknown module\n\nThe module `helper` does not exist."), Some("helper"));
-    assert_eq!(unknown_module("No module has been found with the name `sqlight`."), Some("sqlight"));
-}
-
-#[test]
 fn a_rust_project_can_drop_a_draft() {
     let (root, s) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
     s.db.execute(
@@ -1471,8 +1442,8 @@ fn a_rust_project_can_drop_a_draft() {
         params!["cli", json!(["submit"]).to_string(), "text", ""],
     )
     .unwrap();
-    let out = crate::cli::with_root(&root, || {
-        crate::cli::run_options(&["drafts".to_string(), "drop".to_string(), "d1".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
+    let out = with_root(&root, || {
+        run_options(&["drafts".to_string(), "drop".to_string(), "d1".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
     })
     .unwrap();
     assert!(out.contains("Dropped draft d1"), "{out}");
@@ -1566,8 +1537,8 @@ fn a_rust_project_runs_a_probe_without_saving_it() {
         return;
     }
     let (root, _store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
-    let out = crate::cli::with_root(&root, || {
-        crate::cli::run_inner(&root, &root, &["probe".to_string()], &mut || Ok("println!(\"{}\", crate::one());".to_string()), None, 10_000)
+    let out = with_root(&root, || {
+        run_inner(&root, &root, &["probe".to_string()], &mut || Ok("println!(\"{}\", crate::one());".to_string()), None, 10_000)
     })
     .unwrap();
     assert!(out.contains("exit code: 0") && out.contains('1'), "{out}");
@@ -1862,13 +1833,13 @@ fn a_rust_project_extracts_and_merges_through_the_cli() {
     }
     let (extract_root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
     let extract = ["extract", "crate.one", "--to", "helpers"].map(String::from);
-    let out = crate::cli::with_root(&extract_root, || crate::cli::run_options(&extract, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    let out = with_root(&extract_root, || run_options(&extract, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
     assert!(out.contains("Created module helpers (src/helpers.rs)"), "{out}");
 
     let (merge_root, _) =
         testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn go() -> i32 {\n    two()\n}\n");
     let merge = ["merge", "crate.one", "crate.two"].map(String::from);
-    let out = crate::cli::with_root(&merge_root, || crate::cli::run_options(&merge, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    let out = with_root(&merge_root, || run_options(&merge, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
     assert!(out.contains("Merged crate.two into crate.one"), "{out}");
     assert!(out.contains("Redirected 1 reference in 1 module"), "{out}");
 }
@@ -1879,7 +1850,7 @@ fn a_rust_project_needs_cargo_to_extract_and_merge() {
     let (root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
     let run = |args: &[&str]| {
         let args: Vec<String> = args.iter().copied().map(String::from).collect();
-        crate::cli::with_root(&root, || crate::language::cargo::with_path(&[], || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+        with_root(&root, || crate::language::cargo::with_path(&[], || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
     };
     for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
         let err = run(args).unwrap_err().0;
@@ -1894,8 +1865,8 @@ fn a_language_reason_refusal_covers_extract_and_merge() {
     let reason = crate::language::off(crate::language::RUST);
     for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let err = crate::cli::with_root(&root, || {
-            crate::board::with_config(&off.join("system.toml"), || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        let err = with_root(&root, || {
+            crate::board::with_config(&off.join("system.toml"), || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         })
         .unwrap_err();
         assert!(err.0.contains("E6013") && err.0.contains(reason), "{args:?}: {}", err.0);
@@ -1926,8 +1897,8 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
     t["runs"] = json!([{"id": "run", "kind": "work", "state": "running"}]);
     crate::tasks::put(&s, &t).unwrap();
     let args = ["extract", "crate.helper", "--to", "helpers", "--to-project", "web"].map(String::from);
-    let e = crate::cli::with_root(&rust, || {
-        crate::board::with_context(&tid, "run", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+    let e = with_root(&rust, || {
+        crate::board::with_context(&tid, "run", || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
     })
     .unwrap_err();
     assert!(e.0.contains("E6013") && e.0.contains("not available for Rust") && e.0.contains("D-185"), "{}", e.0);
@@ -1946,7 +1917,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "bbc2998ed52bd6052f2afb112feded68a3f61dc0e599de98f9ca612d40fb3bea");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "95079c226e7f3cedc7c2de051472b8aa3ad4549d523c9a9f8d49a72ce1d93999");
 }
 
 #[test]

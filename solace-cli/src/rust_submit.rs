@@ -6,6 +6,7 @@
 //! it is saved. `delete` (D-173) retires named items and the module they left
 //! empty.
 use crate::*;
+use crate::diagnostics::Diag;
 
 /// Where a Rust `submit` block lands (D-168): the module, the symbol the text
 /// replaces, the container an added item sits in, and the module it creates

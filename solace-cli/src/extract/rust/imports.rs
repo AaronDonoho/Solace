@@ -439,13 +439,8 @@ pub(super) fn module_imports(ix: &Index, ids: &HashMap<&str, usize>, module: &st
 }
 
 pub(super) fn add_import_line(header: &str, line: &str) -> String {
-    let mut out = header.to_string();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(line);
-    out.push('\n');
-    out
+    let body = header.trim_end();
+    if body.is_empty() { format!("{line}\n\n") } else { format!("{body}\n{line}\n\n") }
 }
 
 /// The target's imports, from its header and its top-level `use` symbols.

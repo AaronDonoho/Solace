@@ -39,7 +39,7 @@ pub(super) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let prompt = strategy_brief(top, &run);
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
     let supervised = launched.and_then(|mut child| {
-        supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
+        supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
     });
     let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
     // A strategy agent that replied in plain text took its turn: its reply

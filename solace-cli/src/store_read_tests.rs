@@ -3,6 +3,7 @@
 use super::*;
 use crate::testing::*;
 
+#[cfg(test)] use crate::cli::{run_inner, with_root};
 /// A crate whose `src/a/agents.rs` makes module `a::agents`, so a suffix name
 /// (`agents::deep`) has to resolve.
 const LIB: &str = r#"//! A sample crate.
@@ -581,18 +582,18 @@ fn view_shows_module_header() {
 
     let args = ["view", "crate", "--header"].map(str::to_string);
     let header =
-        crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &args, &mut || Ok(String::new()), None, usize::MAX)).unwrap();
+        with_root(&root, || run_inner(&root, &root, &args, &mut || Ok(String::new()), None, usize::MAX)).unwrap();
     assert!(header.contains("//! A sample crate.") && header.contains("use std::fmt;"), "{header}");
     assert!(header.contains("pub fn answer() -> i32") && !header.contains("42"), "{header}");
 
     let body_args = ["view", "crate", "--bodies", "--header"].map(str::to_string);
     let body =
-        crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &body_args, &mut || Ok(String::new()), None, usize::MAX))
+        with_root(&root, || run_inner(&root, &root, &body_args, &mut || Ok(String::new()), None, usize::MAX))
             .unwrap();
     assert_eq!(body, source);
 
     let missing = ["view", "missing", "--header"].map(str::to_string);
-    let error = crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &missing, &mut || Ok(String::new()), None, usize::MAX))
+    let error = with_root(&root, || run_inner(&root, &root, &missing, &mut || Ok(String::new()), None, usize::MAX))
         .unwrap_err();
     assert!(error.0.contains("unknown name"), "{}", error.0);
 }

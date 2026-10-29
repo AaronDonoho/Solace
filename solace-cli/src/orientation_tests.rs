@@ -1,6 +1,7 @@
 use super::*;
 use testing::*;
 
+use std::env;
 const SAMPLE: &str = r####"//! A module.
 use std::fs;
 

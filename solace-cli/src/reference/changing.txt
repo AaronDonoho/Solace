@@ -76,12 +76,10 @@ Changing (the new code is in `text`)
                                 public symbols are rewritten with --to-project
                                 when the task covers them; others are refused
                                 (E5003).
-                                Same-project Rust (D-185, D-205): moves named
-                                items with their identity. An inherent impl
-                                is `<Type>`; its methods are `Type::method`.
-                                Methods move into the type's impl in the
-                                target, and a trait impl moves only whole.
-                                --to-project is refused.
+                                Same-project Rust (D-185, D-205): --to-project
+                                is refused; a private method doesn't come
+                                along. Helpers, tests, visibility and new
+                                modules: see Rust projects, Moving.
   merge <keep> <drop> [--to-project <folder>]
                                 fold a duplicate into its copy: <keep> keeps its
                                 identity, <drop> is retired (history:

@@ -3,6 +3,7 @@
 
 use super::*;
 
+use std::collections::HashMap;
 /// Stores a Rust file split by `syn` as module `module` of `file`, its items
 /// nested in their containers, to be written back exactly (D-158 point 5).
 pub fn store_rust_file(db: &Connection, module: &str, dir: &str, file: &str, split: &language::rust::File) -> Result<(), Failure> {

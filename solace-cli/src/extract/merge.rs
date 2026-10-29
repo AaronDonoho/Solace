@@ -7,6 +7,8 @@ use super::*;
 
 #[cfg(test)]
 use serde_json::Value;
+use crate::diagnostics::Diag;
+use std::collections::HashMap;
 const FORM: &str = "merge <survivor> <retired> [--to-project <folder>]";
 
 struct Args {

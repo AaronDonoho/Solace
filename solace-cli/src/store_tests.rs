@@ -1,6 +1,9 @@
 use super::*;
 use crate::testing::*;
 
+use std::env;
+#[cfg(test)] use crate::store_core::SCHEMA;
+use crate::diagnostics::Diag;
 #[test]
 fn a_split_rust_file_is_stored_nested_and_written_back_exactly() {
     let board = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board.rs")).unwrap();

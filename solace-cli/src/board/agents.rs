@@ -9,6 +9,8 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::Value;
 use serde_json::json;
+use std::env;
+use std::collections::HashMap;
 /// One agent kind.
 pub(super) struct Kind {
     /// The `agent` a model names, which is also its program.

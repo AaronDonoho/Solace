@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use serde_json::json;
+use crate::store::projection;
+use std::collections::HashMap;
 pub const TITLE: &str = "Unexpected Changes";
 
 fn digest(bytes: &[u8]) -> String {

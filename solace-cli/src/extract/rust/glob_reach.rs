@@ -20,18 +20,14 @@ pub(crate) fn descendants_need_glob(cx: &Rewrite, source: &str) -> Result<bool, 
     Ok(false)
 }
 
-fn descendant_mentions(cx: &Rewrite, source: &str, name: &str) -> Vec<String> {
+fn descendant_mentions(cx: &Rewrite, source: &str, name: &str) -> Result<Vec<String>, Failure> {
     let mut out = vec![];
     for module in reaching_modules(cx.reaching, source) {
-        if module == source || module_has_name(cx.ix, source, module, name) {
-            continue;
-        }
-        let mentioned = staying_in(cx.ix, cx.moved, cx.newmod, module).any(|i| cx.mentioned[i].contains(name));
-        if mentioned {
+        if module_mentions(cx, source, module, name)? {
             out.push(module.to_string());
         }
     }
-    out
+    Ok(out)
 }
 
 fn module_has_name(ix: &Index, source: &str, module: &str, name: &str) -> bool {
@@ -49,7 +45,13 @@ fn module_has_name(ix: &Index, source: &str, module: &str, name: &str) -> bool {
 
 fn import_line(path: &[String], local: &str) -> String {
     let path = path.join("::");
-    if leaf(&path) == local { format!("use {path};") } else { format!("use {path} as {local};") }
+    if local == "*" {
+        format!("use {path}::*;")
+    } else if leaf(&path) == local {
+        format!("use {path};")
+    } else {
+        format!("use {path} as {local};")
+    }
 }
 
 pub(crate) fn add_module_import(
@@ -74,7 +76,7 @@ pub(crate) fn add_descendant_import(
     local: &str,
     newheaders: &mut HashMap<String, String>,
 ) -> Result<(), Failure> {
-    for module in descendant_mentions(cx, source, name) {
+    for module in descendant_mentions(cx, source, name)? {
         add_module_import(&module, path, local, newheaders)?;
     }
     Ok(())
@@ -130,30 +132,7 @@ fn module_paths(ix: &Index) -> BTreeSet<String> {
 }
 
 fn super_glob_modules(ix: &Index, modules: &BTreeSet<String>) -> Result<HashSet<String>, Failure> {
-    let headers: HashMap<&str, &str> = ix.modules.iter().map(|m| (m.path.as_str(), m.header.as_str())).collect();
-    let mut uses: HashMap<&str, Vec<&str>> = HashMap::new();
-    for symbol in ix.syms.iter().filter(|s| s.kind_text == "use" && s.parent.is_none()) {
-        uses.entry(symbol.module.as_str()).or_default().push(&symbol.text);
-    }
-    let mut out = HashSet::new();
-    for module in modules {
-        let mut texts = vec![];
-        if let Some(header) = headers.get(module.as_str()) {
-            texts.push(*header);
-        }
-        if let Some(lines) = uses.get(module.as_str()) {
-            texts.extend(lines.iter().copied());
-        }
-        for text in texts {
-            let sites = crate::language::rust_refs::import_sites_in(text)
-                .map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
-            if sites.iter().any(|site| site.glob && site.path.len() == 1 && site.path[0] == "super") {
-                out.insert(module.clone());
-                break;
-            }
-        }
-    }
-    Ok(out)
+    glob_modules(ix, modules, is_super_glob)
 }
 
 pub(crate) fn reach_map(ix: &Index, sources: &BTreeSet<String>) -> Result<HashMap<String, HashSet<String>>, Failure> {
@@ -272,8 +251,84 @@ fn header_imports(module: &str, header: &str, path: &[String], local: &str) -> R
     let sites =
         crate::language::rust_refs::import_sites_in(header).map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
     Ok(sites.iter().any(|site| {
-        site.local.as_str() == local
-            || (!site.glob && site.path.as_slice() == path)
-            || (site.glob && path.len() == site.path.len() + 1 && path.starts_with(&site.path))
+        if local == "*" {
+            site.glob && site.path.as_slice() == path
+        } else {
+            site.local.as_str() == local
+                || (!site.glob && site.path.as_slice() == path)
+                || (site.glob && path.len() == site.path.len() + 1 && path.starts_with(&site.path))
+        }
     }))
+}
+
+/// Whether staying code in `module` mentions `name`, which `source` has and
+/// `module` neither declares nor imports itself.
+pub(crate) fn module_mentions(cx: &Rewrite, source: &str, module: &str, name: &str) -> Result<bool, Failure> {
+    if module == source || module_has_name(cx.ix, source, module, name) || named_imports(cx, module)?.contains(name) {
+        return Ok(false);
+    }
+    Ok(staying_in(cx.ix, cx.moved, cx.newmod, module).any(|i| cx.mentioned[i].contains(name)))
+}
+
+fn crate_glob_modules(ix: &Index, modules: &BTreeSet<String>) -> Result<HashSet<String>, Failure> {
+    glob_modules(ix, modules, is_crate_glob)
+}
+
+fn glob_modules(
+    ix: &Index,
+    modules: &BTreeSet<String>,
+    is_glob: impl Fn(&crate::language::rust_refs::ImportSite) -> bool,
+) -> Result<HashSet<String>, Failure> {
+    let headers: HashMap<&str, &str> = ix.modules.iter().map(|m| (m.path.as_str(), m.header.as_str())).collect();
+    let mut uses: HashMap<&str, Vec<&str>> = HashMap::new();
+    for symbol in ix.syms.iter().filter(|s| s.kind_text == "use" && s.parent.is_none()) {
+        uses.entry(symbol.module.as_str()).or_default().push(&symbol.text);
+    }
+    let mut out = HashSet::new();
+    for module in modules {
+        let mut texts = vec![];
+        if let Some(header) = headers.get(module.as_str()) {
+            texts.push(*header);
+        }
+        if let Some(lines) = uses.get(module.as_str()) {
+            texts.extend(lines.iter().copied());
+        }
+        for text in texts {
+            let sites = crate::language::rust_refs::import_sites_in(text)
+                .map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
+            if sites.iter().any(|site| is_glob(site)) {
+                out.insert(module.clone());
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The modules that see crate-root names through `use crate::*`, and the
+/// `use super::*` descendants of those modules.
+pub(crate) fn crate_glob_reach(ix: &Index) -> Result<HashSet<String>, Failure> {
+    let modules = module_paths(ix);
+    let super_glob = super_glob_modules(ix, &modules)?;
+    let crate_glob = crate_glob_modules(ix, &modules)?;
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for module in &super_glob {
+        children.entry(super::visibility::parent_module(module).to_string()).or_default().push(module.clone());
+    }
+    let mut out: HashSet<String> = crate_glob.into_iter().filter(|module| module.as_str() != "crate").collect();
+    let mut at: Vec<String> = out.iter().cloned().collect();
+    while let Some(module) = at.pop() {
+        if let Some(kids) = children.get(&module) {
+            for kid in kids {
+                if out.insert(kid.clone()) {
+                    at.push(kid.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn is_crate_glob(site: &crate::language::rust_refs::ImportSite) -> bool {
+    site.glob && site.path.len() == 1 && site.path[0] == "crate"
 }

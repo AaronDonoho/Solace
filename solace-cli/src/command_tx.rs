@@ -10,6 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::store_core::OuterTransaction;
 /// May change the project: recorded on the task in a board run, and refused in
 /// read-only runs, except `build`, which reviews run to verify.
 pub(crate) const CHANGES: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move", "run", "format", "build"];
@@ -66,9 +67,9 @@ impl Changes<'_> {
 /// record ahead of its commits (D-77 point 7, D-103).
 pub(crate) struct Transactions {
     pub(crate) ahead: Option<Value>,
-    _deps: Vec<crate::OuterTransaction>,
-    _dest: Option<crate::OuterTransaction>,
-    _source: crate::OuterTransaction,
+    _deps: Vec<OuterTransaction>,
+    _dest: Option<OuterTransaction>,
+    _source: OuterTransaction,
 }
 
 /// An extract into another project may add a dependency to gleam.toml, which
@@ -223,15 +224,15 @@ pub(crate) fn begin_transactions(session: &Session, changes: &Changes<'_>, a: &[
     let dest_tx = changes.extract_dest();
     let mark_dest = changes.dest();
     crate::COMMAND_DB.set(vec![(store.root.clone(), store.db.clone())]);
-    let source = crate::OuterTransaction(store.db.clone());
+    let source = OuterTransaction(store.db.clone());
     if let Some(d) = dest_tx {
         crate::COMMAND_DB.with_borrow_mut(|c| c.push((d.root.clone(), d.db.clone())));
     }
-    let dest = dest_tx.map(|d| crate::OuterTransaction(d.db.clone()));
+    let dest = dest_tx.map(|d| OuterTransaction(d.db.clone()));
     for (d, _) in deps_before {
         crate::COMMAND_DB.with_borrow_mut(|c| c.push((d.root.clone(), d.db.clone())));
     }
-    let deps: Vec<crate::OuterTransaction> = deps_before.iter().map(|(d, _)| crate::OuterTransaction(d.db.clone())).collect();
+    let deps: Vec<OuterTransaction> = deps_before.iter().map(|(d, _)| OuterTransaction(d.db.clone())).collect();
     if let (Some(_), Some((tid, rid))) = (before, context) {
         crate::lockdown::mark(&store.root, tid, rid)?;
         if let Some(d) = mark_dest {

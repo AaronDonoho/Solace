@@ -136,12 +136,13 @@ fn rewrite(
     for (i, x) in ix.syms.iter().enumerate().filter(|(_, x)| sources.contains(&x.module) && x.kind_text != "use") {
         in_sources.entry(x.module.clone()).or_default().push(i);
     }
-    let cx = Rewrite { ix, moved, newmod, targets, sites, use_keys, sources, mentioned, in_sources, external, reaching };
+    let crate_glob = if sources.contains("crate") { glob_reach::crate_glob_reach(ix)? } else { HashSet::new() };
+    let cx = Rewrite { ix, moved, newmod, targets, sites, use_keys, sources, mentioned, in_sources, external, reaching, crate_glob };
     let (mut promote, public, import_ok) = rewrite_imports(&cx, groups, &mut newtext, &mut newheaders)?;
     restore_moved_use_imports(&cx, &mut newheaders)?;
     for module in &cx.sources {
         drop_unused_external_imports(&cx, module, &mut newtext, &mut newheaders)?;
-        drop_unused_local_imports(&cx, module, local_sites, &mut newtext, &mut newheaders)?;
+        drop_unused_local_imports(ix, module, local_sites, &mut newtext, &mut newheaders)?;
     }
     imports::carry_imports(ix, moved, newmod, target, carried, references, &mut newtext, &mut newheaders)?;
     check_format_capture_clashes(&cx, &newheaders)?;
@@ -495,7 +496,10 @@ fn rewrite_imports(
                     Some(i) => &ix.syms[i].module,
                     None => &key.1,
                 };
-                let unused = alias.as_ref().is_some_and(|a| unused_after_move(cx, module, a));
+                let unused = match alias.as_ref() {
+                    Some(alias) => unused_after_move(cx, module, alias)?,
+                    None => false,
+                };
                 if unused && !allows_unused(&original, &site.range) {
                     if let Some(local) = &alias {
                         let target = &ix.syms[site.target];
@@ -657,7 +661,7 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
                 )?;
             }
         }
-        drop_super_globs(s, ix, &ids, &moved, &m.target, &whole, &m.newtext)?;
+        drop_super_globs(s, ix, &ids, &moved, &m.target, &whole, &mut m.newtext)?;
 
         let existing_target =
             ix.syms.iter().enumerate().filter(|(j, x)| x.module == m.target && x.parent.is_none() && !moved[*j]).map(|(j, _)| j).last();
@@ -669,7 +673,7 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
         let parents = impls::place_target_impls(s, ix, &m.target, &m.placements, &mut ord)?;
         move_roots(s, ix, &moving_roots, &m.target, target_end.as_deref(), &parents, &mut ord)?;
         if let Some(t) = &test {
-            move_test_groups(s, ix, &groups, &t.module)?;
+            move_test_groups(s, ix, &groups, &t.module, &mut m.newtext)?;
         }
         if file_tests {
             retire_test_containers(s, ix, &whole)?;
@@ -713,11 +717,27 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
     Ok(out)
 }
 
-/// Whether code moving out of `module` mentioned `name` and nothing staying there does.
-fn unused_after_move(cx: &Rewrite, module: &str, name: &str) -> bool {
+/// Whether code moving out of `module` mentioned `name` and nothing staying
+/// there, or seeing it through a glob, does.
+fn unused_after_move(cx: &Rewrite, module: &str, name: &str) -> Result<bool, Failure> {
     let mentions = |i: usize| cx.mentioned[i].contains(name);
     let in_module = cx.in_sources.get(module).map(Vec::as_slice).unwrap_or_default();
-    in_module.iter().any(|&i| cx.moved[i] && mentions(i)) && !staying_mentions(cx, module, name)
+    if !in_module.iter().any(|&i| cx.moved[i] && mentions(i)) || staying_mentions(cx, module, name) {
+        return Ok(false);
+    }
+    for at in reaching_modules(cx.reaching, module) {
+        if glob_reach::module_mentions(cx, module, at, name)? {
+            return Ok(false);
+        }
+    }
+    if module == "crate" {
+        for at in &cx.crate_glob {
+            if glob_reach::module_mentions(cx, module, at, name)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Whether the `use` whose tree holds `range` carries an `unused_imports` allowance.
@@ -744,6 +764,7 @@ pub(crate) struct Rewrite<'a> {
     in_sources: HashMap<String, Vec<usize>>,
     external: &'a HashMap<String, Vec<language::rust_refs::ImportSite>>,
     reaching: &'a HashMap<String, HashSet<String>>,
+    crate_glob: HashSet<String>,
 }
 
 /// The source module without the imports from another crate that only the code
@@ -795,7 +816,7 @@ fn drop_unused_imports(
                 }
                 keys.insert(key);
             }
-        } else if unused_after_move(cx, module, &site.local) {
+        } else if unused_after_move(cx, module, &site.local)? {
             add_descendant_import(cx, module, &site.local, &site.path, &site.local, newheaders)?;
             keys.insert(key);
         }
@@ -1178,13 +1199,24 @@ fn move_roots(
     Ok(())
 }
 
-fn move_test_groups(s: &Store, ix: &Index, groups: &[TestGroup], module: &str) -> Result<(), Failure> {
+fn move_test_groups(s: &Store, ix: &Index, groups: &[TestGroup], module: &str, newtext: &mut [String]) -> Result<(), Failure> {
     let mut ord: i64 =
         s.db.query_row("SELECT COALESCE(MAX(ord), 0) FROM symbols WHERE live = 1 AND module = ?1", [module], |r| r.get(0))?;
+    let moving: HashSet<usize> = groups.iter().flat_map(|g| g.children.iter().copied()).collect();
+    let mut inline_parents: HashSet<usize> = HashSet::new();
     for g in groups {
         for &i in &g.children {
             ord += 1;
             let old = ix.syms[i].module.clone();
+            if let Some(parent) = ix.syms[i].parent.as_deref()
+                && let Some(p) = ix.syms.iter().position(|sym| sym.id == parent && sym.kind_text == "mod")
+            {
+                inline_parents.insert(p);
+                if old != module {
+                    let dedented = dedent(&newtext[i]);
+                    newtext[i] = dedented;
+                }
+            }
             let prefix = format!("{}::", ix.syms[i].name);
             let name = leaf(&ix.syms[i].name).to_string();
             s.db.execute(
@@ -1197,6 +1229,9 @@ fn move_test_groups(s: &Store, ix: &Index, groups: &[TestGroup], module: &str) -
             }
             s.history(&ix.syms[i].id, "move", &old)?;
         }
+    }
+    for parent in inline_parents {
+        restore_inline_tail(s, ix, parent, &moving)?;
     }
     Ok(())
 }
@@ -1233,36 +1268,28 @@ fn drop_import_keys(text: &str, module: &str, keys: &HashSet<(String, Vec<String
 
 /// `text` without the local imports that only the moved code uses.
 fn drop_unused_local_imports(
-    cx: &Rewrite,
+    ix: &Index,
     module: &str,
     local: &[LocalImport],
     newtext: &mut [String],
     newheaders: &mut HashMap<String, String>,
 ) -> Result<(), Failure> {
     let mut keys = HashSet::new();
-    let mut allowed = HashSet::new();
     for import in local.iter().filter(|import| import.module == module && !import.used_by_staying) {
         let key = (import.site.local.clone(), import.site.path.clone(), import.site.glob);
-        if import.site.glob && !import.needed_by.is_empty() {
-            allowed.insert(key);
-        } else {
-            if !import.site.glob {
-                for child in &import.needed_by {
-                    add_module_import(child, &import.site.path, &import.site.local, newheaders)?;
-                }
-            }
-            keys.insert(key);
+        for child in &import.needed_by {
+            add_module_import(child, &import.site.path, &import.site.local, newheaders)?;
         }
+        keys.insert(key);
     }
-    if keys.is_empty() && allowed.is_empty() {
+    if keys.is_empty() {
         return Ok(());
     }
     if let Some(header) = newheaders.get(module).cloned() {
         let kept = drop_import_keys(&header, module, &keys)?;
-        newheaders.insert(module.to_string(), allow_import_keys(&kept, module, &allowed)?);
+        newheaders.insert(module.to_string(), kept);
     }
-    let symbols: Vec<usize> = cx
-        .ix
+    let symbols: Vec<usize> = ix
         .syms
         .iter()
         .enumerate()
@@ -1271,7 +1298,7 @@ fn drop_unused_local_imports(
         .collect();
     for i in symbols {
         let kept = drop_import_keys(&newtext[i], module, &keys)?;
-        newtext[i] = allow_import_keys(&kept, module, &allowed)?;
+        newtext[i] = kept;
     }
     Ok(())
 }
@@ -1427,21 +1454,23 @@ fn move_reply(m: &RustMove<'_>, ids: &HashMap<&str, usize>, moved: &[bool], reti
         out += &format!("Impls moved: {}\n", impls.iter().map(|&i| ix.syms[i].qname()).collect::<Vec<_>>().join(", "));
     }
     out += &moved_tests_reply(ix, moved, &m.target);
-    out += &staying_tests_reply(ix, ids, moved, &m.target);
+    out += &staying_tests_reply(m, ids, moved);
     if let Some(c) = &m.create {
         out += &format!("Created module {} ({})\n", c.module, c.file);
     }
     if !m.already.is_empty() {
         out += &format!("Already in {}: {}\n", m.target, m.already.join(", "));
     }
-    if !m.promote.is_empty() {
-        let names: Vec<String> =
-            m.promote.iter().map(|&i| format!("{}.{}", new_module(ix, ids, moved, &m.target, i), ix.syms[i].name)).collect();
-        out += &format!("Now pub(crate): {}\n", names.join(", "));
+    let promoted: Vec<String> = m
+        .promote
+        .iter()
+        .filter(|&&i| !is_public(&ix.syms[i].text) && is_public(&m.newtext[i]))
+        .map(|&i| format!("{}.{}", new_module(ix, ids, moved, &m.target, i), ix.syms[i].name))
+        .collect();
+    if !promoted.is_empty() {
+        out += &format!("Now pub(crate): {}\n", promoted.join(", "));
     }
-    for (module, visibility) in &m.raised {
-        out += &format!("Now {visibility}: mod {module}\n");
-    }
+    out += &raised_modules_reply(&m.raised);
     let edited = (0..ix.syms.len()).filter(|&i| m.newtext[i] != ix.syms[i].text).count();
     if edited > 0 {
         out += &format!("Rewrote references in {edited} symbol{}\n", if edited == 1 { "" } else { "s" });
@@ -1850,20 +1879,14 @@ fn drop_super_globs(
     moved: &[bool],
     target: &str,
     whole: &HashSet<usize>,
-    newtext: &[String],
+    newtext: &mut [String],
 ) -> Result<(), Failure> {
     for &container in whole {
         if ix.syms[container].module == target || needs_super(ix, ids, moved, &[container], target) {
             continue;
         }
         let text = without_super_glob(&newtext[container]);
-        if text != ix.syms[container].text {
-            s.db.execute(
-                "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                params![ix.syms[container].id, text, revision(&text)],
-            )?;
-            s.history(&ix.syms[container].id, "edit", &ix.syms[container].name)?;
-        }
+        newtext[container] = text;
         let drops: Vec<String> = ix
             .syms
             .iter()
@@ -1902,10 +1925,11 @@ fn test_file_header(existing: &str, needs_super: bool) -> String {
 }
 
 fn with_super(header: &str) -> String {
+    let body = header.trim_end();
     if header.lines().any(|line| line.trim() == "use super::*;") {
-        return header.to_string();
+        return format!("{body}\n\n");
     }
-    if header.trim().is_empty() { "use super::*;\n".to_string() } else { format!("{}\nuse super::*;\n", header.trim_end()) }
+    if body.is_empty() { "use super::*;\n\n".to_string() } else { format!("{body}\nuse super::*;\n\n") }
 }
 
 fn retire_test_containers(s: &Store, ix: &Index, whole: &HashSet<usize>) -> Result<(), Failure> {
@@ -1980,37 +2004,6 @@ fn staying_mentions(cx: &Rewrite, source: &str, name: &str) -> bool {
 fn module_needs_glob(cx: &Rewrite, module: &str) -> Result<bool, Failure> {
     let named = named_imports(cx, module)?;
     Ok(staying_in(cx.ix, cx.moved, cx.newmod, module).any(|i| names_need_glob(cx.ix, module, &cx.mentioned[i], &named)))
-}
-
-fn allow_import_keys(text: &str, module: &str, keys: &HashSet<(String, Vec<String>, bool)>) -> Result<String, Failure> {
-    if keys.is_empty() {
-        return Ok(text.to_string());
-    }
-    let sites: Vec<language::rust_refs::ImportSite> = language::rust_refs::import_sites_in(text)
-        .map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?
-        .into_iter()
-        .filter(|site| keys.contains(&(site.local.clone(), site.path.clone(), site.glob)))
-        .collect();
-    let ranges = language::rust::import_ranges(text).map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
-    let mut starts: Vec<usize> = sites
-        .iter()
-        .filter(|site| !allows_unused(text, &site.range))
-        .filter_map(|site| {
-            ranges
-                .iter()
-                .find(|(item, _)| item.start <= site.range.start && site.range.end <= item.end)
-                .map(|(item, _)| text[..item.start].rfind('\n').map_or(0, |i| i + 1))
-        })
-        .collect();
-    starts.sort_unstable();
-    starts.dedup();
-    let mut out = text.to_string();
-    for start in starts.into_iter().rev() {
-        let indent_end = out[start..].find(|c: char| !c.is_whitespace()).map_or(start, |n| start + n);
-        let indent = out[start..indent_end].to_string();
-        out.insert_str(start, &format!("{indent}#[allow(unused_imports)]\n"));
-    }
-    Ok(out)
 }
 
 fn moved_sources(ix: &Index, moved: &[bool]) -> BTreeSet<String> {
@@ -2173,6 +2166,9 @@ fn apply_import_edits(
     let mut text = original.to_string();
     for (range, with) in edits {
         text = replace_range(&text, range, &with);
+    }
+    if !original.starts_with('\n') {
+        text = text.trim_start_matches('\n').to_string();
     }
     Ok(text)
 }
@@ -2439,25 +2435,38 @@ fn target_names_after_move(ix: &Index, moved: &[bool], newmod: &[String], header
     target_names(ix, header, module, |i, _| in_module_after_move(ix, moved, newmod, i, module))
 }
 
-/// The tests that reach moved code but stay, with one staying symbol each.
-fn staying_tests_reply(ix: &Index, ids: &HashMap<&str, usize>, moved: &[bool], target: &str) -> String {
-    let test_file = format!("{target}::tests");
-    let mut out = String::new();
+/// The staying tests that reach moved code: a count, and the ones the move rewrote.
+fn staying_tests_reply(m: &RustMove<'_>, ids: &HashMap<&str, usize>, moved: &[bool]) -> String {
+    let ix = m.ix;
+    let test_file = format!("{}::tests", m.target);
+    let (mut staying, mut rewritten) = (0, Vec::new());
+    let mut rewritten_modules: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut container_imports: HashMap<usize, BTreeSet<String>> = HashMap::new();
     for t in (0..ix.syms.len()).filter(|&t| !moved[t] && reach::is_test_fn(ix, t)) {
         let module = &ix.syms[t].module;
-        if module == target || module == &test_file {
+        if module == &m.target || module == &test_file {
             continue;
         }
         let (outside, locals) = test_covered(ix, ids, t);
         if !outside.iter().any(|&u| moved[u]) {
             continue;
         }
-        let stay = outside.iter().chain(locals.iter()).copied().filter(|&u| !moved[u] && !reach::is_test_fn(ix, u)).min();
-        if let Some(stay) = stay {
-            out += &format!("stays: {} (reaches {}, which stays)\n", ix.syms[t].qname(), ix.syms[stay].qname());
+        staying += 1;
+        let changed = rewritten_modules.entry(module.clone()).or_insert_with_key(|module| module_imports_rewritten(m, module));
+        let module_changed = test_uses_changed_import(m, t, &locals, changed);
+        let container_changed = test_container(ix, ids, t).is_some_and(|c| {
+            let changed = container_imports.entry(c).or_insert_with(|| changed_imports(&ix.syms[c].text, &m.newtext[c]));
+            test_uses_changed_import(m, t, &locals, changed)
+        });
+        if m.newtext[t] != ix.syms[t].text || module_changed || container_changed {
+            rewritten.push(ix.syms[t].qname());
         }
     }
-    out
+    if staying == 0 {
+        return String::new();
+    }
+    let names = if rewritten.is_empty() { String::new() } else { format!(" (rewritten: {})", rewritten_names(&rewritten)) };
+    format!("Tests staying: {staying}{names}\n")
 }
 
 /// One moved item's mentions in one module, which share a spelling.
@@ -2549,7 +2558,8 @@ fn resolve_moved_mentions(
             edits.entry(i).or_default().push((range, text.clone()));
         }
         if !taken && !imported {
-            let line = if group.test_only { format!("#[cfg(test)] use {path};") } else { format!("use {path};") };
+            let gated = group.test_only && !ix.test_modules.contains(&module);
+            let line = if gated { format!("#[cfg(test)] use {path};") } else { format!("use {path};") };
             newheaders.insert(module, add_import_line(&base, &line));
         }
     }
@@ -2660,7 +2670,8 @@ fn target_prefixes(target: &str) -> Vec<String> {
 }
 
 /// Raises each `mod` declaration on the way to `target` so callers reach the
-/// moved items, and returns each raised module with its new visibility.
+/// moved items, or makes every one plain `pub` when a crate-root `pub` item
+/// moved, and returns each raised module with its new visibility.
 fn raise_target_modules(
     ix: &Index,
     refs: &language::rust_refs::References<'_>,
@@ -2671,7 +2682,8 @@ fn raise_target_modules(
     newheaders: &mut HashMap<String, String>,
 ) -> Result<Vec<(String, &'static str)>, Failure> {
     let callers = caller_modules(ix, refs, moved)?;
-    if target == "crate" || callers.is_empty() {
+    let public_root = moves_public_root_item(ix, moved);
+    if target == "crate" || (!public_root && callers.is_empty()) {
         return Ok(vec![]);
     }
     let prefixes = target_prefixes(target);
@@ -2683,14 +2695,14 @@ fn raise_target_modules(
         let file_module = ix.modules.iter().any(|m| m.path == *module && m.file.is_some());
         if created || file_module {
             let Some(header) = newheaders.get(&parent).cloned() else { continue };
-            if let Some((header, visibility)) = visibility::raise_module(&header, name, &parent, &callers) {
+            if let Some((header, visibility)) = raise_module_declaration(&header, name, &parent, &callers, public_root) {
                 newheaders.insert(parent, header);
                 raised.push((module.clone(), visibility));
             }
             continue;
         }
         if let Some(symbol) = ix.syms.iter().position(|s| s.kind_text == "mod" && s.module == parent && s.name == name)
-            && let Some((text, visibility)) = visibility::raise_module(&newtext[symbol], name, &parent, &callers)
+            && let Some((text, visibility)) = raise_module_declaration(&newtext[symbol], name, &parent, &callers, public_root)
         {
             newtext[symbol] = text;
             raised.push((module.clone(), visibility));
@@ -2897,87 +2909,26 @@ fn rewrite_mention(
     mention_new: &str,
     out: &mut MentionEdits,
 ) {
-    let (ix, moved, newmod) = (cx.ix, cx.moved, cx.newmod);
-    let parent_impl = ix.syms[t].parent.as_deref().and_then(|p| ix.syms.iter().position(|s| s.id == p && s.kind_text == "impl"));
-    if let Some(at) = parent_impl {
-        if matches!(&site.via, Via::Path) && site.segs.len() > 1 {
-            if let Ok(owner) = impl_owner_symbol(ix, at) {
-                let owner_new = newmod[owner].clone();
-                if mention_new != owner_new.as_str() {
-                    if !visibility::visible_from(&owner_new, mention_new) {
-                        out.promote.insert(owner);
-                    }
-                    if let Some(sep) = ix.syms[i].text[site.range.clone()].rfind("::") {
-                        out.edits.entry(i).or_default().push((
-                            site.range.start..site.range.start + sep,
-                            reference_path(ix, moved, owner, &owner_new, i, &site.segs[..site.segs.len() - 1]),
-                        ));
-                    }
-                }
-            }
-        }
+    if rewrite_impl_mention(cx, t, i, site, mention_new, out) {
         return;
     }
-    let target_new = newmod[t].clone();
+    let target_new = cx.newmod[t].clone();
     let stays_in_parent = test_module_path(&target_new).as_str() == mention_new;
-    let written = &ix.syms[i].text[site.range.clone()];
-    let mut replacement: Option<String> = None;
-    let mut needs_visibility = false;
-    let mut importable = false;
-    match &site.via {
-        Via::Import(alias) => {
-            if written.contains("::") {
-                if moved[t] {
-                    let (path, promote) = moved_reference(&target_new, &ix.syms[t].name, mention_new);
-                    replacement = Some(path);
-                    needs_visibility = promote;
-                    importable = !in_moved_inline_module(cx, i);
-                }
-            } else if import_ok.contains(&(t, alias.clone(), mention_new.to_string()))
-                || target_new.as_str() == mention_new
-                || cx.sites[&t].iter().any(|m| {
-                    m.symbol == site.symbol && is_import_path(m, &ix.syms[i].text) && matches!(&m.via, Via::Import(a) if a == alias)
-                })
-            {
-            } else {
-                let (path, promote) = moved_reference(&target_new, &ix.syms[t].name, mention_new);
-                replacement = Some(path);
-                needs_visibility = promote;
-                importable = moved[t] && !in_moved_inline_module(cx, i);
-            }
-        }
-        Via::Path => {
-            if target_new.as_str() == mention_new {
-                replacement = Some(leaf(&ix.syms[t].name).to_string());
-            } else if !moved[t] {
-                replacement = Some(reference_path(ix, moved, t, &target_new, i, &site.segs));
-                needs_visibility = !visibility::visible_from(&target_new, mention_new);
-            } else {
-                let (path, promote) = moved_reference(&target_new, &ix.syms[t].name, mention_new);
-                replacement = Some(path);
-                needs_visibility = promote;
-                importable = !in_moved_inline_module(cx, i);
-            }
-        }
-        Via::Own | Via::Glob => {
-            if target_new.as_str() != mention_new && !stays_in_parent {
-                let (path, promote) = moved_reference(&target_new, &ix.syms[t].name, mention_new);
-                replacement = Some(path);
-                needs_visibility = promote;
-                importable = moved[t] && !in_moved_inline_module(cx, i);
-            }
-        }
-    }
-    if let Some(text) = replacement {
-        if importable {
+    let plan = match &site.via {
+        Via::Import(alias) => import_mention(cx, import_ok, t, i, site, mention_new, &target_new, alias),
+        Via::Path => path_mention(cx, t, i, site, mention_new, &target_new),
+        Via::Own | Via::Glob => own_mention(cx, t, i, mention_new, &target_new, stays_in_parent),
+    };
+    if let Some(text) = plan.replacement {
+        if plan.importable {
             let group = out.groups.entry((mention_new.to_string(), t)).or_insert_with(|| MovedMentions { test_only: true, sites: vec![] });
-            group.test_only &= ix.test[i];
+            group.test_only &= cx.ix.test[i];
             group.sites.push((i, site.range.clone()));
         } else {
             out.edits.entry(i).or_default().push((site.range.clone(), text));
         }
     }
-    if needs_visibility {
+    if plan.needs_visibility {
         out.promote.insert(t);
     }
 }
@@ -2998,4 +2949,201 @@ fn all_bindings_removed(text: &str, item: &Range<usize>, removals: &[Range<usize
             let range = (item.start + binding.range.start)..(item.start + binding.range.end);
             removals.iter().any(|removal| removal.start <= range.start && range.end <= removal.end)
         }))
+}
+
+#[derive(Default)]
+struct MentionPlan {
+    replacement: Option<String>,
+    needs_visibility: bool,
+    importable: bool,
+}
+
+fn rewrite_impl_mention(cx: &Rewrite, t: usize, i: usize, site: &Site, mention_new: &str, out: &mut MentionEdits) -> bool {
+    let (ix, moved, newmod) = (cx.ix, cx.moved, cx.newmod);
+    let parent_impl = ix.syms[t].parent.as_deref().and_then(|p| ix.syms.iter().position(|s| s.id == p && s.kind_text == "impl"));
+    let Some(at) = parent_impl else { return false };
+    if matches!(&site.via, Via::Path) && site.segs.len() > 1 {
+        if let Ok(owner) = impl_owner_symbol(ix, at) {
+            let owner_new = newmod[owner].clone();
+            if mention_new != owner_new.as_str() {
+                if !visibility::visible_from(&owner_new, mention_new) {
+                    out.promote.insert(owner);
+                }
+                if let Some(sep) = ix.syms[i].text[site.range.clone()].rfind("::") {
+                    out.edits.entry(i).or_default().push((
+                        site.range.start..site.range.start + sep,
+                        reference_path(ix, moved, owner, &owner_new, i, &site.segs[..site.segs.len() - 1]),
+                    ));
+                }
+            }
+        }
+    }
+    true
+}
+
+fn import_mention(
+    cx: &Rewrite,
+    import_ok: &HashSet<(usize, String, String)>,
+    t: usize,
+    i: usize,
+    site: &Site,
+    mention_new: &str,
+    target_new: &str,
+    alias: &str,
+) -> MentionPlan {
+    let ix = cx.ix;
+    let written = &ix.syms[i].text[site.range.clone()];
+    let mut plan = MentionPlan::default();
+    if written.contains("::") {
+        if cx.moved[t] {
+            let (path, promote) = moved_reference(target_new, &ix.syms[t].name, mention_new);
+            plan.replacement = Some(path);
+            plan.needs_visibility = promote;
+            plan.importable = !in_moved_inline_module(cx, i);
+        }
+    } else if import_ok.contains(&(t, alias.to_string(), mention_new.to_string()))
+        || target_new == mention_new
+        || cx.sites[&t]
+            .iter()
+            .any(|m| m.symbol == site.symbol && is_import_path(m, &ix.syms[i].text) && matches!(&m.via, Via::Import(a) if a == alias))
+    {
+    } else {
+        let (path, promote) = moved_reference(target_new, &ix.syms[t].name, mention_new);
+        plan.replacement = Some(path);
+        plan.needs_visibility = promote;
+        plan.importable = !path_only(cx, t, i);
+    }
+    plan
+}
+
+fn path_mention(cx: &Rewrite, t: usize, i: usize, site: &Site, mention_new: &str, target_new: &str) -> MentionPlan {
+    let ix = cx.ix;
+    let mut plan = MentionPlan::default();
+    if target_new == mention_new {
+        plan.replacement = Some(leaf(&ix.syms[t].name).to_string());
+    } else if !cx.moved[t] {
+        plan.replacement = Some(reference_path(ix, cx.moved, t, target_new, i, &site.segs));
+        plan.needs_visibility = !visibility::visible_from(target_new, mention_new);
+    } else {
+        let (path, promote) = moved_reference(target_new, &ix.syms[t].name, mention_new);
+        plan.replacement = Some(path);
+        plan.needs_visibility = promote;
+        plan.importable = !path_only(cx, t, i);
+    }
+    plan
+}
+
+fn own_mention(cx: &Rewrite, t: usize, i: usize, mention_new: &str, target_new: &str, stays_in_parent: bool) -> MentionPlan {
+    let ix = cx.ix;
+    let mut plan = MentionPlan::default();
+    if target_new != mention_new && !stays_in_parent {
+        let (path, promote) = moved_reference(target_new, &ix.syms[t].name, mention_new);
+        plan.replacement = Some(path);
+        plan.needs_visibility = promote;
+        plan.importable = !path_only(cx, t, i);
+    }
+    plan
+}
+
+fn path_only(cx: &Rewrite, t: usize, i: usize) -> bool {
+    in_moved_inline_module(cx, i) || (!cx.moved[t] && cx.ix.syms[t].kind_text == "thread_local!")
+}
+
+fn dedent(text: &str) -> String {
+    let Some(first) = text.lines().find(|line| !line.trim().is_empty()) else { return text.to_string() };
+    let base = &first[..first.len() - first.trim_start().len()];
+    if base.is_empty() {
+        return text.to_string();
+    }
+    let literals = language::rust::string_literals(text);
+    let mut out = String::new();
+    let mut at = 0;
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+            at += 1;
+        }
+        if literals.iter().any(|literal| literal.start < at && at < literal.end) {
+            out.push_str(line);
+        } else {
+            out.push_str(line.strip_prefix(base).unwrap_or(line));
+        }
+        at += line.len();
+    }
+    out
+}
+
+fn restore_inline_tail(s: &Store, ix: &Index, parent: usize, moving: &HashSet<usize>) -> Result<(), Failure> {
+    let siblings: Vec<usize> = (0..ix.syms.len()).filter(|&i| ix.syms[i].parent.as_deref() == Some(ix.syms[parent].id.as_str())).collect();
+    let Some(&last) = siblings.last() else { return Ok(()) };
+    if !moving.contains(&last) {
+        return Ok(());
+    }
+    let Some(&survivor) = siblings.iter().rev().find(|&&i| !moving.contains(&i)) else { return Ok(()) };
+    s.db.execute("UPDATE symbols SET sep = ?2 WHERE id = ?1", params![ix.syms[survivor].id, ix.syms[last].sep.clone()])?;
+    Ok(())
+}
+
+/// A plain `pub` item at the crate root reached outside the crate. Every
+/// module on the way to its new home must be public to keep that reach.
+fn moves_public_root_item(ix: &Index, moved: &[bool]) -> bool {
+    (0..ix.syms.len()).any(|i| moved[i] && ix.syms[i].module == "crate" && visibility::is_plain_public(&ix.syms[i].text))
+}
+
+fn raise_module_declaration(
+    text: &str,
+    name: &str,
+    parent: &str,
+    callers: &BTreeSet<String>,
+    public_root: bool,
+) -> Option<(String, &'static str)> {
+    if public_root {
+        visibility::make_module_public(text, name).map(|text| (text, "pub"))
+    } else {
+        visibility::raise_module(text, name, parent, callers)
+    }
+}
+
+fn raised_modules_reply(raised: &[(String, &'static str)]) -> String {
+    raised.iter().map(|(module, visibility)| format!("Now {visibility}: mod {module}\n")).collect()
+}
+
+/// The imports whose binding the move changed in the module's header.
+fn module_imports_rewritten(m: &RustMove<'_>, module: &str) -> BTreeSet<String> {
+    let before = m.ix.modules.iter().find(|row| row.path.as_str() == module).map(|row| row.header.as_str()).unwrap_or("");
+    let after = m.newheaders.get(module).map(String::as_str).unwrap_or("");
+    changed_imports(before, after)
+}
+
+/// The import bindings a header or module body holds.
+fn import_keys(text: &str) -> BTreeSet<(String, Vec<String>, bool, String)> {
+    language::rust_refs::import_sites_in(text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|site| (site.local, site.path, site.glob, site.attributes))
+        .collect()
+}
+
+/// Whether a test or a helper it reaches names a binding whose import changed.
+fn test_uses_changed_import(m: &RustMove<'_>, t: usize, locals: &HashSet<usize>, changed: &BTreeSet<String>) -> bool {
+    if changed.contains("*") {
+        return true;
+    }
+    std::iter::once(t).chain(locals.iter().copied()).any(|i| m.refs.mentioned[i].iter().any(|name| changed.contains(name)))
+}
+
+/// The reply names at most ten rewritten tests, then counts the rest.
+fn rewritten_names(names: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let mut shown: Vec<String> = names.iter().take(SHOWN).cloned().collect();
+    let more = names.len().saturating_sub(SHOWN);
+    if more > 0 {
+        shown.push(format!("+{more} more"));
+    }
+    shown.join(", ")
+}
+
+/// The import bindings that differ between two texts.
+fn changed_imports(before: &str, after: &str) -> BTreeSet<String> {
+    import_keys(before).symmetric_difference(&import_keys(after)).map(|key| key.0.clone()).collect()
 }

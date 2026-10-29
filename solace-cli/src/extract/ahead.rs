@@ -378,7 +378,7 @@ mod tests {
     }
 
     fn tempfile_dir() -> PathBuf {
-        let dir = env::temp_dir().join(format!("solace-ahead-{}", unique_id()));
+        let dir = std::env::temp_dir().join(format!("solace-ahead-{}", unique_id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
