@@ -27,7 +27,9 @@ Adding
                                 with `#[cfg(test)]` and `#[path]`; also
                                 `<module>::tests`; its items come from the
                                 submitted text
-  submit --imports <module>     a module's header: imports and module comment
+  submit --imports <module>     a module's header: module comment and imports;
+                                its `mod` lines are kept
+                                (`view <module> --header` shows it)
   submit <module>               a whole module: keep every stored item; ids
                                 stay by name, and only changed items are reformatted
   submit <container>            an existing block changes item by item; submit

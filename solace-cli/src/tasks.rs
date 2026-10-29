@@ -3210,7 +3210,14 @@ mod tests {
         assert!(dir.join("t2.json").exists());
         assert!(pending.join("tasks-live.json").exists());
         drop(owner);
-        recover(&root).unwrap();
+        // A process spawned by a parallel test may hold the lock until it execs.
+        for _ in 0..100 {
+            recover(&root).unwrap();
+            if !dir.join("t2.json").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(!dir.join("t2.json").exists());
         assert!(!pending.join("tasks-live.json").exists());
     }

@@ -97,7 +97,7 @@ fn outer_attrs(text: &str) -> Vec<String> {
 
 /// `text`'s leading `#[…]` groups and the text after them: the same scan as
 /// `outer_attrs`, for a reader that needs what follows the attributes (D-170).
-fn attrs_and_rest(text: &str) -> (Vec<&str>, &str) {
+pub(crate) fn attrs_and_rest(text: &str) -> (Vec<&str>, &str) {
     let mut out = vec![];
     let mut rest = text;
     loop {
@@ -117,20 +117,7 @@ fn skip_trivia(mut s: &str) -> &str {
             continue;
         }
         if let Some(r) = s.strip_prefix("/*") {
-            let b = r.as_bytes();
-            let (mut depth, mut i) = (1i32, 0);
-            while i < b.len() && depth > 0 {
-                if b[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if b[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            s = &r[i..];
+            s = &r[block_comment_len(r)..];
             continue;
         }
         return s;
@@ -1973,6 +1960,8 @@ pub(crate) struct ImportSite {
     pub outside: usize,
     /// Whether this imports every name of `path` (`use path::*`).
     pub glob: bool,
+    /// The outer attributes written before the `use`, such as `#[cfg(test)]`.
+    pub attributes: String,
 }
 
 /// Every import binding of `module`: its header's lines, its `use` symbols and
@@ -1995,10 +1984,10 @@ pub(crate) fn import_sites(syms: &[Sym], modules: &[ModuleRow], module: &str, ro
 /// The import bindings `text` holds.
 pub(crate) fn import_sites_in(text: &str) -> Result<Vec<ImportSite>, syn::Error> {
     let mut out = vec![];
-    for (base, tree) in container_use_trees(text)? {
+    for (base, tree, attributes) in container_use_trees_with_attributes(text)? {
         let Ok(parsed) = syn::parse_str::<syn::UseTree>(&tree) else { continue };
         let starts = line_starts(&tree);
-        collect_import_sites(&parsed, &mut vec![], None, base, &tree, &starts, &mut out);
+        collect_import_sites(&parsed, &mut vec![], None, base, &tree, &starts, &attributes, &mut out);
     }
     Ok(out)
 }
@@ -2006,13 +1995,7 @@ pub(crate) fn import_sites_in(text: &str) -> Result<Vec<ImportSite>, syn::Error>
 /// Each `use` tree in `text`, with where it starts. A container's stored text
 /// can stop before its closing brace, so a failed parse is retried closed.
 fn container_use_trees(text: &str) -> Result<Vec<(usize, String)>, syn::Error> {
-    match use_trees(text) {
-        Ok(trees) => Ok(trees.into_iter().map(|(base, tree)| (base, tree.to_string())).collect()),
-        Err(_) => {
-            let closed = format!("{text}\n}}");
-            Ok(use_trees(&closed)?.into_iter().map(|(base, tree)| (base, tree.to_string())).collect())
-        }
-    }
+    Ok(container_trees(text)?.1)
 }
 
 fn collect_import_sites(
@@ -2022,6 +2005,7 @@ fn collect_import_sites(
     base: usize,
     text: &str,
     starts: &[usize],
+    attributes: &str,
     out: &mut Vec<ImportSite>,
 ) {
     match tree {
@@ -2029,7 +2013,7 @@ fn collect_import_sites(
             let at = base + use_span(text, starts, path.ident.span()).start;
             let root = Some(root.unwrap_or((at, prefix.len())));
             prefix.push(path.ident.to_string());
-            collect_import_sites(&path.tree, prefix, root, base, text, starts, out);
+            collect_import_sites(&path.tree, prefix, root, base, text, starts, attributes, out);
             prefix.pop();
         }
         syn::UseTree::Name(name) => {
@@ -2038,13 +2022,29 @@ fn collect_import_sites(
             if leaf == "self" {
                 let Some(local) = prefix.last().cloned() else { return };
                 let (start, outside) = root.unwrap_or((base + span.start, 1));
-                out.push(ImportSite { local, path: prefix.clone(), range: start..base + span.end, alias: None, outside, glob: false });
+                out.push(ImportSite {
+                    local,
+                    path: prefix.clone(),
+                    range: start..base + span.end,
+                    alias: None,
+                    outside,
+                    glob: false,
+                    attributes: attributes.to_string(),
+                });
                 return;
             }
             let mut path = prefix.clone();
             path.push(leaf.clone());
             let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
-            out.push(ImportSite { local: leaf, path, range: start..base + span.end, alias: None, outside, glob: false });
+            out.push(ImportSite {
+                local: leaf,
+                path,
+                range: start..base + span.end,
+                alias: None,
+                outside,
+                glob: false,
+                attributes: attributes.to_string(),
+            });
         }
         syn::UseTree::Rename(rename) => {
             let leaf = rename.ident.to_string();
@@ -2064,11 +2064,12 @@ fn collect_import_sites(
                 alias: Some(alias_start..alias_end),
                 outside,
                 glob: false,
+                attributes: attributes.to_string(),
             });
         }
         syn::UseTree::Group(group) => {
             for item in &group.items {
-                collect_import_sites(item, prefix, None, base, text, starts, out);
+                collect_import_sites(item, prefix, None, base, text, starts, attributes, out);
             }
         }
         syn::UseTree::Glob(glob) => {
@@ -2081,6 +2082,7 @@ fn collect_import_sites(
                 alias: None,
                 outside,
                 glob: true,
+                attributes: attributes.to_string(),
             });
         }
     }
@@ -2321,7 +2323,7 @@ pub(crate) fn references<'a>(syms: &'a [Sym], modules: &'a [ModuleRow]) -> Refer
 pub(crate) fn references_external_imports(refs: &References, module: &str) -> Result<Vec<ImportSite>, Failure> {
     Ok(import_sites(refs.refs.syms, refs.modules, module, true)?
         .into_iter()
-        .filter(|site| block_use_targets(&refs.refs, module, None, &site.path).is_none())
+        .filter(|site| !local_path(refs.modules, &site.path) && block_use_targets(&refs.refs, module, None, &site.path).is_none())
         .collect())
 }
 
@@ -2717,4 +2719,78 @@ fn test_modules(syms: &[Sym], modules: &[ModuleRow]) -> HashSet<String> {
         }
     }
     test_mods
+}
+
+/// Whether an import path starts at the crate root, a parent module, or a
+/// module this project holds, so it names no other crate.
+fn local_path(modules: &[ModuleRow], path: &[String]) -> bool {
+    path.first()
+        .is_some_and(|first| matches!(first.as_str(), "crate" | "self" | "super") || modules.iter().any(|module| module.path == *first))
+}
+
+/// The bytes of a block comment's body, `after_open` being the text past its
+/// `/*`: through the matching `*/`, nested comments included.
+pub(crate) fn block_comment_len(after_open: &str) -> usize {
+    let b = after_open.as_bytes();
+    let (mut depth, mut i) = (1i32, 0);
+    while i < b.len() && depth > 0 {
+        if b[i..].starts_with(b"/*") {
+            depth += 1;
+            i += 2;
+        } else if b[i..].starts_with(b"*/") {
+            depth -= 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+impl ImportSite {
+    /// An import the extract writes rather than one read from a source place.
+    pub(crate) fn named(path: Vec<String>) -> ImportSite {
+        let local = path.last().cloned().unwrap_or_default();
+        ImportSite { local, path, range: 0..0, alias: None, outside: 0, glob: false, attributes: String::new() }
+    }
+}
+
+/// Each `use` tree with its start and the outer attributes written before it.
+fn with_attributes(source: &str, trees: Vec<(usize, String)>) -> Vec<(usize, String, String)> {
+    let ranges = crate::language::rust::import_ranges(source).unwrap_or_default();
+    trees
+        .into_iter()
+        .map(|(base, tree)| {
+            let range = base..base + tree.len();
+            let attributes = ranges
+                .iter()
+                .find(|(_, tree_range)| tree_range.start <= range.start && range.end <= tree_range.end)
+                .map_or_else(String::new, |(item, tree_range)| attrs_and_rest(&source[item.start..tree_range.start]).0.join("\n"));
+            (base, tree, attributes)
+        })
+        .collect()
+}
+
+/// Each `use` tree in `text`, with where it starts and the outer attributes
+/// written before it.
+fn container_use_trees_with_attributes(text: &str) -> Result<Vec<(usize, String, String)>, syn::Error> {
+    let (closed, trees) = container_trees(text)?;
+    Ok(with_attributes(closed.as_deref().unwrap_or(text), trees))
+}
+
+/// The `use` trees of `text` with where they start, and the closed text when
+/// a parse needed its missing brace added.
+fn container_trees(text: &str) -> Result<(Option<String>, Vec<(usize, String)>), syn::Error> {
+    match use_trees(text) {
+        Ok(trees) => Ok((None, use_tree_texts(trees))),
+        Err(_) => {
+            let closed = format!("{text}\n}}");
+            let trees = use_tree_texts(use_trees(&closed)?);
+            Ok((Some(closed), trees))
+        }
+    }
+}
+
+fn use_tree_texts(trees: Vec<(usize, &str)>) -> Vec<(usize, String)> {
+    trees.into_iter().map(|(base, tree)| (base, tree.to_string())).collect()
 }

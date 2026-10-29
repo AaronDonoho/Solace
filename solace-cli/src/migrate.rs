@@ -76,21 +76,7 @@ fn exclusive(parent: &Path) -> Result<fs::File, Failure> {
 }
 /// Every current project's lock in `top`, refused while an agent works in one.
 fn hold(top: &Path) -> Result<Vec<fs::File>, Failure> {
-    let mut held = vec![];
-    for d in workspace::members(top)? {
-        let root = scope::path(top, &d);
-        if !root.join(".solace/store.db").exists() {
-            continue;
-        }
-        if root.join(".solace/board").exists() && board::tasks(&root)?.iter().any(board::active) {
-            return refuse("E7003", format!("an agent is working in {d}; let it finish or stop it first"));
-        }
-        let Some(f) = fsx::try_lock_file(&root.join(".solace/lock"))? else {
-            return refuse("E7003", format!("{d} is busy with another command; try again when it finishes"));
-        };
-        held.push(f);
-    }
-    Ok(held)
+    hold_within(top, BUSY_WAIT)
 }
 /// Refuses a shell command while a board serves `dir` or one of its projects,
 /// since the board would be left serving a folder that moved (fix 10).
@@ -1727,6 +1713,30 @@ mod tests {
         assert_eq!(relative(Path::new("/a/b"), Path::new("/a/c/d")), PathBuf::from("../c/d"));
         assert_eq!(relative(Path::new("/a"), Path::new("/a/x")), PathBuf::from("x"));
     }
+
+    fn project_with_lock() -> (crate::testing::Project, fs::File) {
+        let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let held = crate::board::lock(&p.root).unwrap();
+        (p, held)
+    }
+
+    #[test]
+    fn hold_refuses_a_lock_held_for_the_whole_wait() {
+        let (p, _held) = project_with_lock();
+        let e = hold(&p.root).unwrap_err();
+        assert!(e.0.starts_with("E7003"), "{}", e.0);
+        assert!(e.0.contains("is busy with another command"), "{}", e.0);
+    }
+
+    #[test]
+    fn hold_takes_a_lock_released_during_the_wait() {
+        let (p, held) = project_with_lock();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        assert!(hold_within(&p.root, Duration::from_secs(10)).is_ok());
+    }
 }
 
 /// A test run from a task must not see the agent's task context (D-71): the
@@ -1832,4 +1842,26 @@ pub(crate) fn sandbox_works() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+const BUSY_WAIT: Duration = Duration::from_millis(500);
+
+/// Every current project's lock in `top`, waiting up to `deadline` for one held by another command.
+fn hold_within(top: &Path, deadline: Duration) -> Result<Vec<fs::File>, Failure> {
+    let mut held = vec![];
+    for d in workspace::members(top)? {
+        let root = scope::path(top, &d);
+        if !root.join(".solace/store.db").exists() {
+            continue;
+        }
+        if root.join(".solace/board").exists() && board::tasks(&root)?.iter().any(board::active) {
+            return refuse("E7003", format!("an agent is working in {d}; let it finish or stop it first"));
+        }
+        let lock_path = root.join(".solace/lock");
+        let Some(f) = fsx::try_lock_file_within(&lock_path, deadline)? else {
+            return refuse("E7003", format!("{d} is busy with another command; try again when it finishes"));
+        };
+        held.push(f);
+    }
+    Ok(held)
 }

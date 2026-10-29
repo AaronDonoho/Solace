@@ -410,7 +410,7 @@ fn a_merge_places_a_redirected_use_after_its_group() {
     assert!(out.contains("Merged b.two into a.one"), "{out}");
     let ix = s.index().unwrap();
     let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
-    assert!(callers.header.contains("use crate::b::{other};\nuse crate::a::one;"), "{}", callers.header);
+    assert!(callers.header.contains("use crate::b::other;\nuse crate::a::one;"), "{}", callers.header);
     let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
     assert!(warnings.is_empty(), "{warnings:?}");
 }

@@ -1038,8 +1038,13 @@ class Board(unittest.TestCase):
         # the family's live preset, and an alias only for a family with no preset.
         self.assertIn('claude-opus-5-5',models)
         self.assertNotIn('claude-opus',models,"the alias stands behind the family's live model")
-        self.assertIn('claude-fable',models)
-        self.assertEqual(models['claude-fable']['label'],'Fable (latest)')
+        self.assertIn('claude-fable-5-1',models)
+        self.assertEqual(models['claude-fable-5-1']['label'],'Fable 5.1')
+        self.assertNotIn('claude-fable',models,"the alias stands behind the family's live model")
+        self.assertIn('claude-haiku-5-5',models)
+        self.assertEqual(models['claude-haiku-5-5']['label'],'Haiku 5.5')
+        self.assertNotIn('claude-haiku',models,"the alias stands behind the family's live model")
+        self.assertNotIn('claude-haiku-4-5',models,"the stale exact preset is gone")
 
     def test_a_run_shows_the_model_it_used(self):
         t=self.create([{'command':'task done done'}])

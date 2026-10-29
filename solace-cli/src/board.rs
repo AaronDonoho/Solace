@@ -485,7 +485,11 @@ pub(super) fn end_run(r: &mut Value, outcome: &str) {
     let log = PathBuf::from(r["log"].as_str().unwrap_or(""));
     if let Some(used) = used_model(&log) {
         r["used"] = json!(used);
-        agents::record_used(r["model"].as_str().unwrap_or(""), &used);
+        let label = system()
+            .ok()
+            .and_then(|s| s["models"].as_array().map(|models| agents::used_label(models, &used)))
+            .unwrap_or_else(|| used.clone());
+        agents::record_used(r["model"].as_str().unwrap_or(""), &used, &label);
     }
 }
 
@@ -1634,26 +1638,34 @@ pub(super) fn tech_debt_items(text: &str) -> Vec<String> {
 /// The task's last review: the run id and the agent's note of its last review
 /// run that ended `reviewed`.
 fn last_review(t: &Value) -> Option<(String, String)> {
-    let r = t["runs"].as_array()?.iter().rev().find(|r| r["kind"] == "review" && r["outcome"] == "reviewed")?;
-    let rid = r["id"].as_str()?;
-    let n = t["notes"].as_array()?.iter().rev().find(|n| n["run"] == rid && n["author"] == "agent")?;
-    Some((rid.to_string(), n["text"].as_str()?.to_string()))
+    last_run_note(t, "review", "reviewed")
 }
-/// What completing task `t` files as tech debt (D-112): its feature's open Tech
-/// Debt task (`techDebt: true`, not in a final column) with one `solace` note per
-/// finding of the last review's `### Tech debt`, naming the task they came from.
-/// With no open one, a new one is made in Planning of `t`'s home (its first
-/// column if it has none, D-132), with its scope, titled `<feature title>: Tech
-/// Debt`. A task with no feature always gets a new one titled `<task title>:
-/// Tech Debt`, with no feature or milestone. None when the review lists no tech
-/// debt. Nothing is written here.
-pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>, Failure> {
-    let Some((rid, text)) = last_review(t) else { return Ok(None) };
-    let items = tech_debt_items(&text);
+/// What completing task `t` files as tech debt (D-112, D-199): its feature's
+/// open Tech Debt task (`techDebt: true`, not in a final column) with one
+/// `solace` note per finding of the last work run's summary and the last
+/// review's `### Tech debt`, naming the task and run they came from. With no
+/// open one, a new one is made in Planning of `t`'s home (its first column if it
+/// has none, D-132), with its scope, titled `<feature title>: Tech Debt`. A task
+/// with no feature always gets a new one titled `<task title>: Tech Debt`, with
+/// no feature or milestone. Returns the task with the counts of work-run and
+/// review items; None when neither lists tech debt. Nothing is written here.
+pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize, usize)>, Failure> {
+    let tid = t["id"].as_str().unwrap_or("");
+    let mut items: Vec<String> = Vec::new();
+    let (mut work, mut review) = (0, 0);
+    if let Some((rid, text)) = last_review(t) {
+        let found = tech_debt_items(&text);
+        review = found.len();
+        items.extend(found.into_iter().map(|item| format!("Tech debt from the review of task:{tid} (review run {rid}):\n\n{item}")));
+    }
+    if let Some((rid, text)) = last_work(t) {
+        let found = tech_debt_items(&text);
+        work = found.len();
+        items.extend(found.into_iter().map(|item| format!("Tech debt from the work on task:{tid} (work run {rid}):\n\n{item}")));
+    }
     if items.is_empty() {
         return Ok(None);
     }
-    let tid = t["id"].as_str().unwrap_or("");
     let fid = t["feature"].as_str();
     let feature = fid.and_then(|f| tasks::record(top, "features", f));
     let mut debt = match (fid, feature) {
@@ -1669,9 +1681,9 @@ pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>,
         (None, _) => new_debt(top, t, None)?,
     };
     for item in &items {
-        note(&mut debt, "solace", None, &format!("Tech debt from the review of task:{tid} (review run {rid}):\n\n{item}"));
+        note(&mut debt, "solace", None, item);
     }
-    Ok(Some((debt, items.len())))
+    Ok(Some((debt, work, review)))
 }
 /// Settles task `tid` once the task server has moved it into a final column
 /// (D-77 point 5, Option B): a step of its own, after the reply, that takes the
@@ -3440,7 +3452,7 @@ const START: &str = "Start with `session start --task`, with the task's title an
 /// A fresh run's first step when its brief holds the session start reply (D-151).
 const HELD_START: &str = "The reply to `session start --task`, with the task's title and description, is at the end of this brief: start with the call its `Next:` line names. Send `session start --task` again only to see that reply again, for example after the conversation is compacted.";
 /// What every review is asked to add (D-112, D-198, D-199).
-const TECH_DEBT_ASK: &str = "Put minor, non-blocking findings that should be fixed later in a Tech debt section at the end of the feedback, each written like a finding. Findings that block this task belong in the findings, not there. When the task is completed, Solace files each item on a Tech Debt task, and a section in any other shape is dropped: the heading is exactly `### Tech debt`; each item is one `- ` bullet at the start of a line; its details are lines indented under it; no line after the heading starts with `#`; no other heading is inside the section, and nothing follows it except a new heading. For example:\n\n### Tech debt\n\n- `board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>.";
+const TECH_DEBT_ASK: &str = "Put minor, non-blocking findings that should be fixed later in a Tech debt section at the end of the feedback, each written like a finding. Findings that block this task belong in the findings, not there. Leave out items already in the work summary's `### Tech debt` section: they are filed already. When the task is completed, Solace files each item on a Tech Debt task, and a section in any other shape is dropped: the heading is exactly `### Tech debt`; each item is one `- ` bullet at the start of a line; its details are lines indented under it; no line after the heading starts with `#`; no other heading is inside the section, and nothing follows it except a new heading. For example:\n\n### Tech debt\n\n- `board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>.";
 /// The task's context as a brief gives it: title, body, links, notes and
 /// questions. Its feature and dependencies are added where a brief adds them.
 fn task_sections(t: &Value) -> String {
@@ -4206,6 +4218,8 @@ struct Board {
     held: std::sync::Mutex<HashMap<PathBuf, fs::File>>,
     /// Serializes changes to the root's project list.
     editing: std::sync::Mutex<()>,
+    /// Serializes the watcher's outside-change scan with a migration step (D-58, D-59).
+    watching: std::sync::Mutex<()>,
     port: u16,
     /// The migration step running now, and the last one's failure (D-59).
     step: std::sync::Mutex<Option<String>>,
@@ -4332,6 +4346,8 @@ impl Board {
         let me = self.clone();
         std::thread::spawn(move || {
             let report = |s: &str| *me.step.lock().unwrap() = Some(s.to_string());
+            // A scan already running must finish before a step moves a project's files.
+            let _watching = me.watching_guard();
             let copy = migrate::locate(&me.top);
             let moved = match action.as_str() {
                 // A migration that stops partway keeps its copy: serve it, to show why.
@@ -4446,7 +4462,21 @@ impl Board {
     }
 
     fn new(top: PathBuf, port: u16) -> Self {
-        Board { top, held: Default::default(), editing: Default::default(), port, step: Default::default(), failed: Default::default() }
+        Board {
+            top,
+            held: Default::default(),
+            editing: Default::default(),
+            watching: Default::default(),
+            port,
+            step: Default::default(),
+            failed: Default::default(),
+        }
+    }
+
+    /// The watcher's scan guard. The lock guards no data, so a panic during a
+    /// scan must not keep a migration step from taking it.
+    fn watching_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.watching.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -4545,13 +4575,16 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             }
             for (_, root) in watcher.projects().unwrap_or_default() {
                 // About once a second, read in code changed outside Solace (D-58).
-                if tick % 10 == 1
-                    && let Some(_guard) = try_lock(&root)
-                    // an extract's half-written files are not outside changes
-                    && !extract::ahead::waiting(&root)
-                    && let Ok(s) = open(&root)
-                {
-                    let _ = outside::absorb(&s, outside::Mode::Notice);
+                if tick % 10 == 1 {
+                    let _watching = watcher.watching_guard();
+                    if let Some(_guard) = try_lock(&root)
+                        && watcher.step.lock().unwrap().is_none()
+                        // an extract's half-written files are not outside changes
+                        && !extract::ahead::waiting(&root)
+                        && let Ok(s) = open(&root)
+                    {
+                        let _ = outside::absorb(&s, outside::Mode::Notice);
+                    }
                 }
                 let current = fs::read(root.join("solace.toml")).ok();
                 let changed = match previous.insert(root.clone(), current.clone()) {
@@ -5286,11 +5319,11 @@ fn act(root: &Path, s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result
     }
 }
 
-/// A completed task's last review files its tech debt (D-112); its conversation
-/// goes.
+/// A completed task's last work summary and review file their tech debt (D-112);
+/// its conversation goes.
 fn completed(root: &Path, tid: &str, t: &mut Value, was_final: bool, a: &Value) -> After {
-    // Completed with its changes kept, not canceled: the last review's tech
-    // debt is filed.
+    // Completed with its changes kept, not canceled: the last work summary's
+    // and review's tech debt is filed.
     let debt = if !was_final && a["revert"] != true {
         tech_debt(&scope::top(root), t).unwrap_or_else(|e| {
             eprintln!("filing tech debt of task {tid}: {}", e.0);
@@ -5299,11 +5332,17 @@ fn completed(root: &Path, tid: &str, t: &mut Value, was_final: bool, a: &Value) 
     } else {
         None
     };
-    if let Some((d, n)) = &debt {
-        let items = if *n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
-        note(t, "solace", None, &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")));
+    if let Some((d, work, review)) = &debt {
+        let n = work + review;
+        let items = if n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
+        let source = match (*work > 0, *review > 0) {
+            (true, true) => "the last work run and review",
+            (true, false) => "the last work run",
+            _ => "the last review",
+        };
+        note(t, "solace", None, &format!("Filed {items} from {source} on task:{}.", d["id"].as_str().unwrap_or("")));
     }
-    After::Clean(debt.map(|(d, _)| d))
+    After::Clean(debt.map(|(d, _, _)| d))
 }
 
 /// Whether a tool reply says the task note was recorded, including in a batch.
@@ -5378,7 +5417,7 @@ fn discussion_role(read_only: &str, verify: &str) -> String {
 /// The work role's direction in a task brief.
 fn work_role(start: &str, ask: &str, settings: &str, tests: &str) -> String {
     format!(
-        "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+        "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know. {WORK_TECH_DEBT_ASK}"
     )
 }
 
@@ -5832,4 +5871,21 @@ fn task_drafts(s: &Store, t: &Value) -> Result<Vec<(String, String, Vec<String>,
         }
     }
     Ok(out)
+}
+
+const WORK_TECH_DEBT_ASK: &str = "End the `task done` summary with a `### Tech debt` section only for a bug in a step or tool, or a step that cost far more than it gave: a reply that was oversized or mostly about code the task didn't touch, a reply too unclear to act on so the step was repeated, or a check that can't pass for reasons outside the task. Name the command or step, what was wasted, and what would fix it. Leave the section out when there is none; ordinary friction, code-quality notes and restating risks are not tech debt. Its shape is exact: the heading is exactly `### Tech debt`; each item is one `- ` bullet at the start of a line; its details are lines indented under it; no line after the heading starts with `#`; no other heading is inside the section, and nothing follows it except a new heading. For example:\n\n### Tech debt\n\n- `<command or step>`: <what was wasted>. <what would fix it>.";
+
+/// The task's last `kind` run that ended `outcome`: the run id and the agent's
+/// note of it.
+fn last_run_note(t: &Value, kind: &str, outcome: &str) -> Option<(String, String)> {
+    let r = t["runs"].as_array()?.iter().rev().find(|r| r["kind"] == kind && r["outcome"] == outcome)?;
+    let rid = r["id"].as_str()?;
+    let n = t["notes"].as_array()?.iter().rev().find(|n| n["run"] == rid && n["author"] == "agent")?;
+    Some((rid.to_string(), n["text"].as_str()?.to_string()))
+}
+
+/// The task's last work run that ended `finished`: the run id and the agent's
+/// note of it.
+fn last_work(t: &Value) -> Option<(String, String)> {
+    last_run_note(t, "work", "finished")
 }

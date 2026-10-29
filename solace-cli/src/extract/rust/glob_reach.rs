@@ -1,14 +1,9 @@
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{Rewrite, add_import_line, is_known_name, leaf, names_need_glob, staying_in};
-use crate::{ Index};
+use super::imports::{add_import_line, module_imports};
+use super::{Rewrite, is_known_name, leaf, names_need_glob, staying_in};
+use crate::Index;
 use crate::failure::Failure;
-fn parent_module(module: &str) -> &str {
-    module.rsplit_once("::").map_or("crate", |(parent, _)| parent)
-}
-
 pub(crate) fn reaching_modules<'a>(reaching: &'a HashMap<String, HashSet<String>>, module: &'a str) -> impl Iterator<Item = &'a str> + 'a {
     let known = reaching.get(module);
     let fallback = (!reaching.contains_key(module)).then_some(module);
@@ -48,7 +43,7 @@ fn module_has_name(ix: &Index, source: &str, module: &str, name: &str) -> bool {
         if at == source || at == "crate" {
             return false;
         }
-        at = parent_module(at);
+        at = super::visibility::parent_module(at);
     }
 }
 
@@ -65,8 +60,7 @@ pub(crate) fn add_module_import(
 ) -> Result<(), Failure> {
     let header = newheaders.get(module).cloned().unwrap_or_default();
     let line = import_line(path, local);
-    let exists = header.lines().any(|existing| existing.trim() == line);
-    if !exists {
+    if !header_imports(module, &header, path, local)? {
         newheaders.insert(module.to_string(), add_import_line(&header, &line));
     }
     Ok(())
@@ -168,7 +162,7 @@ pub(crate) fn reach_map(ix: &Index, sources: &BTreeSet<String>) -> Result<HashMa
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for module in &modules {
         if super_glob.contains(module) {
-            children.entry(parent_module(module).to_string()).or_default().push(module.clone());
+            children.entry(super::visibility::parent_module(module).to_string()).or_default().push(module.clone());
         }
     }
     let mut out = HashMap::new();
@@ -206,7 +200,7 @@ fn chain<'a>(from: &'a str, has_glob: impl Fn(&str) -> bool + 'a) -> impl Iterat
             next = None;
             return None;
         }
-        let parent = parent_module(module);
+        let parent = super::visibility::parent_module(module);
         next = (parent != module).then_some(parent);
         child = Some(module);
         Some(module)
@@ -221,7 +215,7 @@ fn has_super_glob(ix: &Index, ids: &HashMap<&str, usize>, newheaders: &HashMap<S
     {
         return true;
     }
-    super::module_imports(ix, ids, module).iter().any(is_super_glob)
+    module_imports(ix, ids, module).iter().any(is_super_glob)
 }
 
 pub(crate) fn is_super_glob(site: &crate::language::rust_refs::ImportSite) -> bool {
@@ -263,6 +257,23 @@ pub(crate) fn super_glob_imports(
 ) -> Vec<(String, crate::language::rust_refs::ImportSite)> {
     chain(from, |module| has_super_glob(ix, ids, newheaders, module))
         .skip(1)
-        .flat_map(|module| super::module_imports(ix, ids, module).into_iter().map(move |site| (module.to_string(), site)))
+        .flat_map(|module| module_imports(ix, ids, module).into_iter().map(move |site| (module.to_string(), site)))
         .collect()
+}
+
+/// Whether `from` can see the crate root through its `use super::*` chain.
+pub(crate) fn reaches_crate_root(ix: &Index, ids: &HashMap<&str, usize>, newheaders: &HashMap<String, String>, from: &str) -> bool {
+    chain(from, |module| has_super_glob(ix, ids, newheaders, module)).any(|module| module == "crate")
+}
+
+/// Whether `header` already binds `local`, or brings in `path` under another
+/// name, so adding this import would repeat or alias it.
+fn header_imports(module: &str, header: &str, path: &[String], local: &str) -> Result<bool, Failure> {
+    let sites =
+        crate::language::rust_refs::import_sites_in(header).map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
+    Ok(sites.iter().any(|site| {
+        site.local.as_str() == local
+            || (!site.glob && site.path.as_slice() == path)
+            || (site.glob && path.len() == site.path.len() + 1 && path.starts_with(&site.path))
+    }))
 }

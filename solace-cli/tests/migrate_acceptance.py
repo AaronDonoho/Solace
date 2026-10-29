@@ -175,11 +175,7 @@ class Migrate(unittest.TestCase):
         self.assertIn('already exists', self.cli('create', 'web', cwd=empty, input='y\n', ok=False))
 
     def test_board_migrates_and_restarts_where_the_project_is(self):
-        server = subprocess.Popen([BIN, 'serve', '--port', '0'], cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.servers.append(server)
-        line = server.stdout.readline()
-        self.assertIn('listening', line, line or server.stderr.read())
-        self.port = int(line.strip().rsplit(':', 1)[1])
+        self.serve(self.repo)
         v = self.get()
         self.assertEqual(v['state'], 'available')
         self.assertEqual(sorted(c['dir'] for c in v['candidates']), ['app', 'lib'])
@@ -199,6 +195,22 @@ class Migrate(unittest.TestCase):
         self.assertEqual(v['top'], str(self.repo))
         self.assertTrue(v['undo'])
         self.assertTrue((self.parent/'repo.pre-solace').exists())
+
+    def test_a_served_copy_reads_in_an_edit_made_outside_solace(self):
+        self.serve(self.repo)
+        self.post('/migration/start', {'projects': ['app'], 'smoke': ['true']})
+        self.until(lambda v: v['state'] == 'confirm_paths')
+        self.post('/migration/confirm', {})
+        self.until(lambda v: v['state'] == 'in_progress')
+        source = self.copy/'app/src/app.gleam'
+        source.write_text(source.read_text() + '\npub fn added_outside() { 5 }\n')
+        self.poll(
+            lambda: self.call('GET', '/p/app/tasks'),
+            lambda result: result[0] == 200 and any(t['title'] == 'Unexpected Changes' for t in result[1]),
+            timeout=15,
+        )
+        self.post('/migration/abandon', {})
+        self.until(lambda v: v['state'] == 'available')
 
     # Fixes from Astra's review (handoff.md).
 
@@ -377,6 +389,13 @@ class Migrate(unittest.TestCase):
         self.cli('migrate', '--abandon', '--yes')
         self.assertFalse(self.copy.exists())
 
+    def serve(self, cwd):
+        server = subprocess.Popen([BIN, 'serve', '--port', '0'], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.servers.append(server)
+        line = server.stdout.readline()
+        self.assertIn('listening', line, line or server.stderr.read())
+        self.port = int(line.strip().rsplit(':', 1)[1])
+
     def call(self, method, url, body=None):
         c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=30)
         c.request(method, url, None if body is None else json.dumps(body), {'Content-Type': 'application/json'})
@@ -390,25 +409,26 @@ class Migrate(unittest.TestCase):
         status, v = self.call('POST', url, body)
         self.assertEqual(status, 200, v)
         return v
-    def until(self, predicate, timeout=120):
+
+    def poll(self, fetch, predicate, timeout=120):
+        last = None
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             try:
-                v = self.get()
-                error = v.get('error')
-                if error and 'E7003' in str(error) and 'app is busy' in str(error):
-                    pass
-                else:
-                    self.assertIsNone(error, error)
-                    if predicate(v): return v
+                last = fetch()
+                if predicate(last): return last
             except (ConnectionError, http.client.HTTPException):
                 pass  # the server is restarting
             time.sleep(.2)
-        self.fail(f'timed out; last {v}')
-    def test_until_retries_when_the_app_is_busy(self):
-        replies = [{'error': 'E7003 app is busy'}, {'state': 'ready'}]
-        self.get = lambda: replies.pop(0)
-        self.assertEqual(self.until(lambda v: v['state'] == 'ready', timeout=1), {'state': 'ready'})
+        self.fail(f'timed out; last {last}')
+
+    def until(self, predicate, timeout=120):
+        def check():
+            v = self.get()
+            error = v.get('error')
+            self.assertIsNone(error, error)
+            return v
+        return self.poll(check, predicate, timeout)
 
 if __name__ == '__main__':
     unittest.main()

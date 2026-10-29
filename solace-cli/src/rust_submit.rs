@@ -854,7 +854,14 @@ impl Store {
             return Ok(RustTarget { module: create.module.clone(), existing: None, parent: None, create: Some(create) });
         }
         let m = n.rsplit_once('.').map_or(n, |(m, _)| m);
-        fail(format!("E1003 unknown module: {m}"))
+        match type_without_impl(ix, n) {
+            Some(ty) => fail(format!(
+                "E1003 {ty} has no `impl`: add one with `*** Add: {module}` and a whole `impl {name} {{ … }}` block",
+                module = ty.rsplit_once('.').map_or("", |(m, _)| m),
+                name = ty.rsplit_once('.').map_or(ty.as_str(), |(_, t)| t),
+            )),
+            None => fail(format!("E1003 unknown module: {m}")),
+        }
     }
 
     /// Where `submit --new <m>` adds items (D-168): a module the store has, an
@@ -975,8 +982,8 @@ impl Store {
 
     /// `submit --imports <module>` in a Rust store (D-168): the header changes
     /// only when the text is imports and the module comment alone — no refusals,
-    /// no items — and keeps the same `mod x;` list, since changing it adds or
-    /// removes a module.
+    /// no items — and keeps the module's `mod x;` list, taking the stored lines
+    /// when the text leaves them out, since changing it adds or removes a module.
     /// Then cargo checks the module.
     fn submit_imports_rust(&self, m: &str, raw: &str) -> Out {
         let ix = self.index()?;
@@ -985,23 +992,34 @@ impl Store {
             return fail(format!("E1003 unknown module: {m}"));
         };
         let old = self.header(&module)?;
+        let old_file = language::rust::split(&old, &module)?;
         let new = language::rust::split(raw, &module)?;
         if !new.refusals.is_empty() {
             let lines: Vec<String> = new.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
             return fail(lines.join("\n"));
         }
-        if language::rust::split(&old, &module)?.mods != new.mods {
-            return fail(format!("Not saved: `--imports` can't add or remove a module; {}.", store::MODULE_NOTE));
+        if !new.mods.is_empty() && old_file.mods != new.mods {
+            return fail(format!(
+                concat!(
+                    "Not saved: `--imports` replaces the module's whole header, so it must ",
+                    "leave out the module's `mod` lines or keep them as they are; `view {module} --header` shows them; {note}.",
+                ),
+                module = module,
+                note = store::MODULE_NOTE,
+            ));
         }
         if !new.items.is_empty() {
             return fail("E0101 --imports text may only contain imports and the module comment.");
         }
         let end = &old[old.trim_end().len()..];
-        let header = if new.header.trim().is_empty() {
-            String::new()
+        let header_text = new.header.trim_end();
+        let header_text = if new.mods.is_empty() && !old_file.mods.is_empty() {
+            with_stored_mods(header_text, &old, &old_file.mods)
         } else {
-            format!("{}{}", new.header.trim_end(), if end.is_empty() { "\n\n" } else { end })
+            header_text.to_string()
         };
+        let header =
+            if header_text.is_empty() { String::new() } else { format!("{header_text}{}", if end.is_empty() { "\n\n" } else { end }) };
         let saved = format!("{module} imports");
         let out = self.transaction(&[], || {
             self.set_header(&module, &header)?;
@@ -1530,4 +1548,94 @@ pub(crate) fn string_end(text: &str, start: usize) -> Option<usize> {
     i += 1;
     let close = format!("\"{}", "#".repeat(hashes));
     Some(i + text[i..].find(&close)? + close.len())
+}
+
+/// The type a method name `<module>.<Type>::<fn>` is added to when the store
+/// has that type (struct, enum, union, or type alias) but no `impl` for it.
+fn type_without_impl(ix: &Index, method: &str) -> Option<String> {
+    let (ty, _) = method.rsplit_once("::")?;
+    let i = rust_symbol(ix, ty).ok().flatten()?;
+    match ix.syms[i].kind_text.as_str() {
+        "struct" | "enum" | "union" | "type" => Some(ix.syms[i].qname()),
+        _ => None,
+    }
+}
+
+/// Puts the stored `mod` lines back among a `use`-only header at the places
+/// they held in the stored one (D-168): a line before the imports stays before
+/// them, and one after them stays after, with the stored gap.
+fn with_stored_mods(header: &str, old: &str, mods: &[language::rust::FileMod]) -> String {
+    let lines: Vec<&str> = header.split('\n').collect();
+    let uses = use_blocks(header);
+    let old_uses = language::rust::import_ranges(old).unwrap_or_default();
+    if old_uses.is_empty() || uses.is_empty() {
+        let mods: Vec<&str> = mods.iter().map(|decl| decl.text.as_str()).collect();
+        let mods = mods.join("\n");
+        return if header.is_empty() { mods } else { format!("{header}\n\n{mods}") };
+    }
+    let mut at: Vec<Vec<&str>> = vec![vec![]; lines.len() + 1];
+    let mut from = 0;
+    for decl in mods {
+        let found = old[from..].find(&decl.text).map(|offset| from + offset);
+        let before = found.map_or(old_uses.len(), |offset| old_uses.iter().filter(|(item, _)| item.end <= offset).count());
+        let (blank_before, blank_after) = found.map_or((false, false), |offset| {
+            let end = offset + decl.text.len();
+            (
+                before > 0 && old[..offset].trim_end_matches(|c| c == ' ' || c == '\t').ends_with("\n\n"),
+                before < old_uses.len() && old[end..].trim_start_matches(|c| c == ' ' || c == '\t').starts_with("\n\n"),
+            )
+        });
+        if let Some(offset) = found {
+            from = offset + decl.text.len();
+        }
+        let index = if before == 0 {
+            uses[0].0
+        } else if before >= old_uses.len() {
+            uses[uses.len() - 1].1 + 1
+        } else {
+            uses.get(before).map_or(uses[uses.len() - 1].1 + 1, |block| block.0)
+        };
+        if blank_before {
+            at[index].push("");
+        }
+        at[index].push(decl.text.as_str());
+        if blank_after && index <= uses[uses.len() - 1].0 {
+            at[index].push("");
+        }
+    }
+    let mut out: Vec<&str> = vec![];
+    for (index, line) in lines.iter().enumerate() {
+        out.extend(at[index].iter().copied());
+        out.push(line);
+    }
+    out.extend(at[lines.len()].iter().copied());
+    out.join("\n")
+}
+
+/// The line ranges of the header's `use` blocks, attributes and comments
+/// included, so a `mod` before a block stays above all of it.
+fn use_blocks(source: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let Ok(imports) = language::rust::import_ranges(source) else {
+        return vec![];
+    };
+    imports
+        .iter()
+        .map(|(item, _)| {
+            let mut start = line_of(source, item.start);
+            while start > 0 {
+                let line = lines[start - 1].trim_start();
+                if line.starts_with("#[") || line.starts_with("///") || (line.starts_with("//") && !line.starts_with("//!")) {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            (start, line_of(source, item.end))
+        })
+        .collect()
+}
+
+fn line_of(source: &str, at: usize) -> usize {
+    source[..at].bytes().filter(|b| *b == b'\n').count()
 }

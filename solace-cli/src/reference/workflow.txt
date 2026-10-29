@@ -26,35 +26,56 @@ call is a turn that re-reads the conversation, so work in few calls:
    other files go in one `write` patch (no path), then `run <name>`;
    a change to both is two calls. A `submit` patch has one header per
    symbol or module (`*** Update: <module.name>`, `*** Add: <name>`),
-   an `@@` hunk per edit; send only what changes:
+   an `@@` hunk per edit, always followed by its lines; send only what
+   changes:
     *** Begin Patch
     *** Update: pilot/checkout.pay
     @@
     -  let total = sum(lines)
     +  let total = sum(lines) + fee
+    *** Update: pilot/checkout.tax
+    @@
+    -  rate(order)
+    +  rate(order) + 1
     *** Add: pilot/checkout_test.fee_test
     +pub fn fee_test() { ... }
     *** End Patch
-   A `submit` call has the commands in `command` and the patch in `text`:
-    command: submit --project <folder>
-             test --project <folder>
-    text:    *** Begin Patch
-             *** Update: checkout.pay
-             @@
-             ...
-             *** End Patch
+   In Rust, a new function is `*** Add: m.f`; a method of a type with an
+   `impl` is `*** Add: m.Type::f` (`+pub fn f() {}`); a type with no `impl`
+   gets `*** Add: m` with a whole `+impl Type { ... }` block.
+   A `submit` call has two arguments, `command` and `text`. These are the
+   values, not text to type; `text` starts at `*** Begin Patch`:
+    argument command:
+     submit --project <folder>
+     test --project <folder>
+    argument text:
+     *** Begin Patch
+     ...
+     *** End Patch
+   A rejected patch is fixed with `--replace`; `old` and `text` are separate
+   arguments holding patch lines, prefixes included, never lines of `command`:
+    argument command:
+     submit --draft <id> --replace
+     test
+    argument old:
+     -  rate(order)
+    argument text:
+     -  rate(order, region)
+   `read` does not open symbol-held source: use `view` or `inspect`.
    A `submit` patch for symbols in another project needs `--project <folder>`
    on both `submit` and `test`.
    A patch or code always goes in `text`; `command` names the command that
    takes it (`write`, `submit` or `probe`), never the patch or the code.
    A new module is `*** Add: <module>`: its module comment, imports and code.
-   Every line of an Add, empty ones too, starts with `+`. A needed import is
+   Every line of an Add, empty ones too, starts with `+`. In Gleam, a needed import is
    added when exactly one project or dependency module matches the qualifier's
    last path segment (`sqlight`, `gleam/json`), when the standard library does,
    or when another module already imports that name as the qualifier; several
    matches are refused and listed. `submit --imports <module>` replaces a
-   header. Work out expected values from the task's numbers and the code's own
-   rules, never from running the code.
+   module's whole header: module comment and imports; its `mod` lines are kept
+   (`view <module> --header`). Rust adds no import automatically. Work out
+   expected values from the task's numbers and the code's own rules, never
+   from running the code.
    Write code the way the code around it is written: reuse the helpers, types
    and patterns `inspect --context` shows. A comment says why code exists, only
    where the code can't say it; never restate what the code does or address the

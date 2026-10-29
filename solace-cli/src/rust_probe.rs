@@ -24,6 +24,7 @@ struct Prepared {
     file: PathBuf,
     before: String,
     test: String,
+    deps: Vec<String>,
 }
 
 /// A Rust probe: copy the store's crate to `dir`, add a test module holding
@@ -57,6 +58,7 @@ fn prepare(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir:
     }
     let root =
         ix.modules.iter().find(|m| m.path == "crate").ok_or_else(|| Failure("E0101 this Rust store has no crate root.".into(), 1))?;
+    let deps = cargo::manifest_dependency_names(&manifest);
     let (target, source) = probe_target(s, &ix, root, module, from)?;
     let container = source
         .and_then(|sym| sym.parent.as_deref())
@@ -95,13 +97,13 @@ fn prepare(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir:
     }
     let test = probe_test(target, container);
     let argv = probe_argv(dir, &s.root.join("target/solace-probe/target"), &manifest, root, &test);
-    Ok(Prepared { ix, text: text.to_string(), argv, files, file: path, before, test })
+    Ok(Prepared { ix, text: text.to_string(), argv, files, file: path, before, test, deps })
 }
 
 fn report(p: &Prepared, private: bool, output: &str) -> Out {
     let ok = lockdown::passed(output);
     let raw = output.split_once('\n').map_or("", |(_, rest)| rest);
-    let diags = cargo::diagnostics(raw, &p.files);
+    let diags = cargo::diagnostics_with_dependencies(raw, &p.files, &p.deps);
     let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
     let mut out = if errors.is_empty() { clean(raw, &p.files, &p.test) } else { format!("Compile error:\n\n{}", errors.join("\n\n")) };
     if !ok {
@@ -152,7 +154,7 @@ fn copy_crate(s: &Store, dir: &Path, manifest: &toml::Value) -> Result<Vec<Strin
 /// A probe's own output: cargo's progress and libtest's status lines are noise.
 fn clean(output: &str, files: &[FileMap], test: &str) -> String {
     let mut out = String::new();
-    for line in diagnostics::strip_ansi(output).lines() {
+    for line in output.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('{')
             || test_runner_noise(trimmed, test)
@@ -627,6 +629,7 @@ mod tests {
             file: PathBuf::new(),
             before: String::new(),
             test: "solace_probe::probe".into(),
+            deps: vec![],
         };
         assert_eq!(report(&p, true, "exit code: 0 (1.2s)\n1 + 1 = 2\n").unwrap(), "1 + 1 = 2\n\n(1.2s)");
         assert_eq!(report(&p, true, "exit code: 0 (0.4s)\n").unwrap(), "The probe produced no output.\n\n(0.4s)");
@@ -637,6 +640,77 @@ mod tests {
         assert!(compile.0.ends_with("\n\n(3.0s)"), "{}", compile.0);
         let untimed = report(&p, true, "exit code: 0\n1\n").unwrap_err().0;
         assert!(!untimed.ends_with("()"), "{untimed}");
+    }
+
+    /// A probe runs with a crate the project depends on, at the version its lock
+    /// pins (D-210).
+    #[test]
+    fn a_probe_uses_the_projects_own_dependency() {
+        if !language::cargo::installed() {
+            return;
+        }
+        let Some(home) = cargo_home() else {
+            return;
+        };
+        let Some(version) = locked_sha2() else {
+            return;
+        };
+        if !crate_is_cached(&home, "sha2", &version) {
+            return;
+        }
+        let root = crate::testing::Scratch::new().with(&[
+            (
+                "Cargo.toml",
+                concat!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n", "[dependencies]\nsha2 = \"0.11.0\"\n",),
+            ),
+            ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+        ]);
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+        crate::import_with(&root, false).unwrap();
+        let store = Store::at(&root).unwrap();
+        let out = store.probe("use sha2::{Digest, Sha256};\nprintln!(\"{}\", Sha256::digest(b\"x\").len());", None, &[], None).unwrap();
+        assert!(out.contains("32"), "{out}");
+    }
+
+    /// A probe naming a crate the project doesn't depend on says where a dependency
+    /// is added, and leaves Cargo.toml as it was (D-210).
+    #[test]
+    fn an_unknown_crate_in_a_probe_names_cargo_toml() {
+        if !language::cargo::installed() {
+            return;
+        }
+        let (root, store) = crate::testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let err = store.probe("use foo_not_a_dep::Bar;", None, &[], None).unwrap_err().0;
+        assert!(err.contains("`foo_not_a_dep` isn't a dependency of this project; add it to `Cargo.toml` first."), "{err}");
+        assert!(!err.contains("cargo add"), "{err}");
+        assert_eq!(fs::read_to_string(root.join("Cargo.toml")).unwrap(), manifest);
+    }
+
+    fn cargo_home() -> Option<std::path::PathBuf> {
+        std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cargo")))
+            .or_else(|| std::env::var_os("USERPROFILE").map(|home| std::path::PathBuf::from(home).join(".cargo")))
+    }
+
+    fn locked_sha2() -> Option<String> {
+        let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock")).ok()?;
+        let lock: toml::Value = text.parse().ok()?;
+        lock.get("package")?.as_array()?.iter().find_map(|package| {
+            if package.get("name").and_then(toml::Value::as_str) != Some("sha2") {
+                return None;
+            }
+            let version = package.get("version")?.as_str()?;
+            version.starts_with("0.11.").then(|| version.to_string())
+        })
+    }
+
+    fn crate_is_cached(home: &Path, name: &str, version: &str) -> bool {
+        [("cache", format!("{name}-{version}.crate")), ("src", format!("{name}-{version}"))].iter().any(|(kind, file)| {
+            fs::read_dir(home.join("registry").join(kind))
+                .is_ok_and(|indexes| indexes.flatten().any(|index| index.path().join(file).exists()))
+        })
     }
 }
 

@@ -83,3 +83,48 @@ fn formatting_reports_invalid_settings() {
     let e = crate::board::with_config(&bad.join("system.toml"), || store.format_module_rust("crate")).unwrap_err();
     assert!(e.0.contains("E6020"), "{}", e.0);
 }
+
+/// A stored `mod` between two imports keeps that place when the uses change.
+#[test]
+fn stored_mods_keep_their_place_between_imports() {
+    let old = "use a::a;\nmod between;\nuse b::b;\n";
+    let new = "use a::a;\nuse c::c;\nuse b::b;";
+    let mods = [language::rust::FileMod { name: "between".into(), file: None, text: "mod between;".into() }];
+    assert_eq!(with_stored_mods(new, old, &mods), "use a::a;\nmod between;\nuse c::c;\nuse b::b;");
+}
+
+/// A stored `mod` before the imports goes above the first `use`'s attributes.
+#[test]
+fn stored_mods_stay_before_a_uses_attributes() {
+    let old = "mod a;\n#[cfg(unix)]\nuse b::c;\n";
+    let new = "#[cfg(unix)]\nuse b::c;";
+    let mods = [language::rust::FileMod { name: "a".into(), file: None, text: "mod a;".into() }];
+    assert_eq!(with_stored_mods(new, old, &mods), "mod a;\n#[cfg(unix)]\nuse b::c;");
+}
+
+/// A stored `mod` between imports keeps its place when a `use` spans lines.
+#[test]
+fn stored_mods_keep_their_place_between_multiline_uses() {
+    let old = "use a::{\n    x,\n};\nmod between;\nuse b::b;\n";
+    let new = "use a::{\n    x,\n};\nuse c::c;\nuse b::b;";
+    let mods = [language::rust::FileMod { name: "between".into(), file: None, text: "mod between;".into() }];
+    assert_eq!(with_stored_mods(new, old, &mods), "use a::{\n    x,\n};\nmod between;\nuse c::c;\nuse b::b;");
+}
+
+/// A stored `mod` after the submitted imports goes there when uses are dropped.
+#[test]
+fn stored_mods_after_the_last_import_when_uses_are_dropped() {
+    let old = "use a::a;\nuse b::b;\nmod m;\nuse c::c;\n";
+    let new = "use a::a;";
+    let mods = [language::rust::FileMod { name: "m".into(), file: None, text: "mod m;".into() }];
+    assert_eq!(with_stored_mods(new, old, &mods), "use a::a;\nmod m;");
+}
+
+/// A stored `mod` pushed past dropped uses does not leave a trailing blank line.
+#[test]
+fn stored_mods_after_the_last_import_drop_their_blank_after() {
+    let old = "use a::a;\nuse b::b;\nmod m;\n\nuse c::c;\n";
+    let new = "use a::a;";
+    let mods = [language::rust::FileMod { name: "m".into(), file: None, text: "mod m;".into() }];
+    assert_eq!(with_stored_mods(new, old, &mods), "use a::a;\nmod m;");
+}

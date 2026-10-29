@@ -627,3 +627,82 @@ fn without_probe_indent(text: &str) -> Option<String> {
     let at = text[..prefix].find(crate::PROBE_INDENT).or_else(|| text[..prefix].find(&underscores))?;
     Some(format!("{}{}", &text[..at], &text[at + indent..]))
 }
+
+/// The crate names a project's manifest lets its code use: its own package and
+/// every dependency, dev-dependency and build-dependency, those a target names
+/// included. A dash in a dependency's name is an underscore in code (D-210).
+pub fn dependency_names(root: &Path) -> Option<Vec<String>> {
+    let text = fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest: toml::Value = text.parse().ok()?;
+    Some(manifest_dependency_names(&manifest))
+}
+
+pub(crate) fn manifest_dependency_names(manifest: &toml::Value) -> Vec<String> {
+    let mut names = vec![];
+    for table in ["package", "lib"] {
+        if let Some(name) = manifest.get(table).and_then(|t| t.get("name")).and_then(toml::Value::as_str) {
+            names.push(name.replace('-', "_"));
+        }
+    }
+    for kind in DEPENDENCY_TABLES {
+        collect_dependency_names(manifest.get(kind), &mut names);
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for spec in targets.values() {
+            for kind in DEPENDENCY_TABLES {
+                collect_dependency_names(spec.get(kind), &mut names);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+fn collect_dependency_names(table: Option<&toml::Value>, names: &mut Vec<String>) {
+    for name in table.and_then(toml::Value::as_table).into_iter().flatten().map(|(name, _)| name) {
+        names.push(name.replace('-', "_"));
+    }
+}
+
+/// `diagnostics`, with the crates this project's manifest declares.
+pub fn diagnostics_for(root: &Path, output: &str, files: &[FileMap]) -> Vec<Diag> {
+    match dependency_names(root) {
+        Some(deps) => diagnostics_with_dependencies(output, files, &deps),
+        None => diagnostics(output, files),
+    }
+}
+
+/// `diagnostics`, with the crate names the project may use: rustc's
+/// "use `cargo add`" hint for another crate becomes the rule that a dependency
+/// is a Cargo.toml change the human approves (D-158 point 4, D-210).
+pub(crate) fn diagnostics_with_dependencies(output: &str, files: &[FileMap], deps: &[String]) -> Vec<Diag> {
+    let mut diags = diagnostics(output, files);
+    for diag in &mut diags {
+        diag.text = without_cargo_add_hint(&diag.text, deps);
+    }
+    diags
+}
+
+fn without_cargo_add_hint(text: &str, deps: &[String]) -> String {
+    text.lines()
+        .map(|line| match cargo_add_crate(line) {
+            Some((indent, name)) if !deps.iter().any(|dep| dep == &name.replace('-', "_")) => {
+                format!("{indent}= help: `{name}` isn't a dependency of this project; add it to `Cargo.toml` first.")
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The leading indent and crate name of rustc's "use `cargo add`" help, if the
+/// line is that help.
+fn cargo_add_crate(line: &str) -> Option<(&str, &str)> {
+    let indent = &line[..line.len() - line.trim_start().len()];
+    let help = line.trim_start().strip_prefix("= help:")?;
+    let name = help.split_once("use `cargo add ")?.1.split('`').next()?;
+    (!name.is_empty()).then_some((indent, name))
+}

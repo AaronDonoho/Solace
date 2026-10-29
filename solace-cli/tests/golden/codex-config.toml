@@ -2,7 +2,7 @@ sandbox_mode = "read-only"
 approval_policy = "never"
 web_search = "live"
 tool_output_token_limit = 30000
-developer_instructions = "The tool is the MCP tool `solace`; from `exec`, call it as `await tools.mcp__solace__solace({command: \"inspect app.main --context\"})`, with the new code in `text` for submit commands. One `exec` script can make several solace calls, so read everything you need in one step."
+developer_instructions = "The tool is the MCP tool `solace`. If you have `exec`, call it from there as `await tools.mcp__solace__solace({command: \"inspect app.main --context\"})`; one `exec` script can make several solace calls, so read everything you need in one step. Otherwise call `mcp__solace__solace` directly, putting new code in `text` for submit commands."
 [features]
 shell_tool = false
 unified_exec = false
@@ -25,3 +25,5 @@ args = ["mcp", "--budget", "32000"]
 env_vars = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG"]
 default_tools_approval_mode = "approve"
 tool_timeout_sec = 3600
+required = true
+startup_timeout_sec = 60

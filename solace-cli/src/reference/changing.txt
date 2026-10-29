@@ -10,8 +10,9 @@ Changing (the new code is in `text`)
                                 <module>.<name>` adds a symbol, an item with
                                 its `impl` block, or a new `impl`/`trait`
                                 block; `*** Add:
-                                <module>.<Type>::<fn>` adds a method to the
-                                type added earlier in the patch; `*** Add:
+                                <module>.<Type>::<fn>` adds a method to a
+                                type that has an `impl`, or whose `impl` is
+                                added earlier in the patch; `*** Add:
                                 <module>` a new module (module comment,
                                 imports, code); every line of an Add, empty
                                 ones too, starts with `+`.
@@ -43,7 +44,9 @@ Changing (the new code is in `text`)
                                 comment, imports, symbols; under test/ if the
                                 name ends in `_test`)
   submit <module>               replace a whole module; it must keep every symbol
-  submit --imports <module>     replace a module's imports and module comment
+  submit --imports <module>     replace a module's whole header: module comment
+                                and imports; its `mod` lines are kept
+                                (`view <module> --header` shows it)
   delete <name>...              removes each named symbol, in the order named; a
                                 symbol used outside the list stops the whole
                                 list, so nothing is deleted
@@ -106,14 +109,16 @@ Changing (the new code is in `text`)
                                 each with its id; fix and retry with `--draft`;
                                 `drafts drop <id>` discards one this task owns,
                                 in this project or the one `--project` names
-Every submit is type-checked. Missing imports are added: a qualifier takes the
-one project module, dependency module (`sqlight`, `gleam/json`) or standard
-library module whose last path segment it is, or the module another module
-already imports as that qualifier. Several matches add nothing and are listed;
-an unknown module names `submit --imports <module>` with the header to use.
-Imports in `text` are merged. If the submitted code has errors, nothing is
-saved. If it breaks other symbols (e.g. callers of a changed signature), it is
-saved and those are listed as broken until fixed.
+Every submit is type-checked. In Gleam, missing imports are added: a qualifier
+takes the one project module, dependency module (`sqlight`, `gleam/json`) or
+standard library module whose last path segment it is, or the module another
+module already imports as that qualifier. Several matches add nothing and are
+listed; an unknown module names `submit --imports <module>` with the header to
+use. Rust adds no import automatically: `submit --imports <module>` replaces the
+module comment and imports, keeping the module's `mod` lines and their attributes.
+In Gleam, imports in `text` are merged. If the submitted code has errors,
+nothing is saved. If it breaks other symbols (e.g. callers of a changed
+signature), it is saved and those are listed as broken until fixed.
 Rejected text is kept as a draft; the error gives its id. Fix it rather than
 resending it: `submit --draft <id> --replace` (`old` and `text`; in a patch,
 both are lines of the patch, prefixes included) patches and

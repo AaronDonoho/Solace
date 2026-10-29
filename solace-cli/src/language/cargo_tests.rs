@@ -594,3 +594,45 @@ fn a_probe_line_without_indent_keeps_quoted_spaces() {
     assert_eq!(diags.len(), 1);
     assert!(diags[0].text.contains("\n 1 | let s = \"        x\";"), "{}", diags[0].text);
 }
+
+/// Every dependency table counts, and a dash in a crate's name is an underscore
+/// in code (D-210).
+#[test]
+fn dependency_names_cover_every_table_and_use_underscores() {
+    let manifest: toml::Value = concat!(
+        "[package]\nname = \"my-app\"\n\n",
+        "[lib]\nname = \"core\"\n\n",
+        "[dependencies]\nserde-json = \"1\"\n\n",
+        "[dev-dependencies]\nsha2 = \"0.11\"\n\n",
+        "[target.'cfg(unix)'.build-dependencies]\ncc = \"1\"\n",
+    )
+    .parse()
+    .unwrap();
+    assert_eq!(manifest_dependency_names(&manifest), ["cc", "core", "my_app", "serde_json", "sha2"]);
+}
+
+/// A crate the manifest doesn't declare gets the rule, not rustc's `cargo add`
+/// hint; one it declares keeps rustc's text (D-210).
+#[test]
+fn an_undeclared_crate_hint_names_cargo_toml() {
+    let rendered = concat!(
+        "error[E0432]: unresolved import `foo`\n",
+        " --> src/lib.rs:2:5\n",
+        "  |\n",
+        "2 | use foo::Bar;\n",
+        "  |     ^^^ use of unresolved module or unlinked crate `foo`\n",
+        "  |\n",
+        "  = help: if you wanted to use a crate named `foo`, use `cargo add foo` to add it to your `Cargo.toml`\n",
+    );
+    let output = message("error", rendered, &span("src/lib.rs", 2, true));
+    let files = files("crate", "/x/src/lib.rs", vec![(1, 3, "crate::one")]);
+    let undeclared = diagnostics_with_dependencies(&output, &files, &["sha2".to_string()]);
+    assert!(
+        undeclared[0].text.contains("= help: `foo` isn't a dependency of this project; add it to `Cargo.toml` first."),
+        "{}",
+        undeclared[0].text
+    );
+    assert!(!undeclared[0].text.contains("cargo add"), "{}", undeclared[0].text);
+    let declared = diagnostics_with_dependencies(&output, &files, &["foo".to_string()]);
+    assert!(declared[0].text.contains("use `cargo add foo`"), "{}", declared[0].text);
+}

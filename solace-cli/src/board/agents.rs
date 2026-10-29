@@ -123,8 +123,7 @@ fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
 /// same id, and a configured model keeps its entry — the human's config wins.
 /// Models a discovery dropped stay, marked `gone`, so tasks already using them
 /// keep working; they are not offered for a new run. Once a run has named the
-/// model it used, an alias's label is that model's: the label of the entry
-/// running it, else its id.
+/// model it used, an alias's label is that run's stored label.
 pub(super) fn merge(configured: &Value) -> Vec<Value> {
     merge_from(configured, &saved_models(&models_path()))
 }
@@ -148,18 +147,12 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
             out.push(m);
         }
     }
-    // A current entry names a shared model before a gone entry does.
-    let labels: Vec<(Value, Value)> = out
-        .iter()
-        .filter(|m| m["gone"].as_bool() == Some(true))
-        .chain(out.iter().filter(|m| m["gone"].as_bool() != Some(true)))
-        .map(|m| (m["model"].clone(), m["label"].clone()))
-        .collect();
     for m in &mut out {
         m["effort"] = json!(default_effort(m));
-        if let Some(used) = all["used"][m["id"].as_str().unwrap_or("")].as_str() {
-            if names_family(m) {
-                m["label"] = labels.iter().rev().find(|(model, _)| model == used).map_or(json!(used), |(_, l)| l.clone());
+        if names_family(m) {
+            let used = &all["used"][m["id"].as_str().unwrap_or("")];
+            if let Some(label) = used["label"].as_str().or(used.as_str()).or(used["model"].as_str()) {
+                m["label"] = json!(label);
             }
         }
     }
@@ -262,14 +255,15 @@ fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), F
     save_models(path, &all)
 }
 
-/// Says model `model` resolved to `used`: an alias's label names the model a run used, and a
-/// model with its own `model` keeps showing it.
-pub(super) fn record_used(model: &str, used: &str) {
+/// Records that model `model` resolved to `used`, with `label` as the plain
+/// text the run showed.
+pub(super) fn record_used(model: &str, used: &str, label: &str) {
     let _writer = MODELS.lock().unwrap();
     let path = models_path();
     let mut all = saved_models(&path);
-    if all["used"][model].as_str() != Some(used) {
-        all["used"][model] = json!(used);
+    let record = json!({"model": used, "label": label});
+    if all["used"][model] != record {
+        all["used"][model] = record;
         if let Err(e) = save_models(&path, &all) {
             eprintln!("solace: could not record the model a run used: {}", e.0);
         }
@@ -1296,4 +1290,18 @@ pub(super) fn clear_retryable(path: &Path) -> Result<(), Failure> {
         .unwrap()
         .retain(|_, m| !matches!(m["kind"].as_str(), Some("sign_in" | "refusal")) && m["until"].as_u64().is_some_and(|until| now < until));
     save_marks(path, &all)
+}
+
+/// The label a run's `used` model had when the run ended: a current entry
+/// before a gone one, the later entry among equals, else the model id.
+pub(super) fn used_label(models: &[Value], used: &str) -> String {
+    models
+        .iter()
+        .filter(|m| m["gone"] == true)
+        .chain(models.iter().filter(|m| m["gone"] != true))
+        .filter(|m| m["model"] == used)
+        .filter_map(|m| m["label"].as_str())
+        .last()
+        .unwrap_or(used)
+        .to_string()
 }

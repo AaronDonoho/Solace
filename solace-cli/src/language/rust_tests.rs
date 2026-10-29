@@ -259,7 +259,18 @@ fn leading_file_modules_stay_in_the_header_and_every_one_is_listed() {
     let f = split(source, "crate").unwrap();
     assert_eq!(f.join(), source);
     assert_eq!(f.header, "//! Doc.\n#![allow(dead_code)]\nmod a;\nuse b::c;\npub mod d;\n\n");
-    assert_eq!(f.mods, [("a".to_string(), None), ("d".to_string(), None), ("tests".to_string(), Some("x_tests.rs".to_string()))]);
+    assert_eq!(
+        f.mods,
+        [
+            FileMod { name: "a".to_string(), file: None, text: "mod a;".to_string() },
+            FileMod { name: "d".to_string(), file: None, text: "pub mod d;".to_string() },
+            FileMod {
+                name: "tests".to_string(),
+                file: Some("x_tests.rs".to_string()),
+                text: "#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod tests;".to_string(),
+            },
+        ]
+    );
     assert_eq!(f.items.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["f", "tests", "inline"]);
     assert_eq!(f.items[2].children[0].name, "inline::e");
 }

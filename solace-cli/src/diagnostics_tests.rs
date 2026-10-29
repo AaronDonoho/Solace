@@ -83,3 +83,27 @@ fn grouped_site(module: Option<&str>, symbol: Option<String>) -> Diag {
         text: format!("error[E0616]: field `0` of struct `Failure` is private\n  at {at}, line 1"),
     }
 }
+
+#[test]
+fn an_osc_hyperlink_keeps_only_its_text() {
+    let link = "\u{1b}]8;;https://example.com\u{1b}\\text\u{1b}]8;;\u{1b}\\";
+    assert_eq!(strip_ansi(link), "text");
+    assert_eq!(strip_ansi("\u{1b}]0;title\u{7}done"), "done");
+    assert_eq!(strip_ansi("a\u{1b}]8;;unterminated"), "a");
+}
+
+#[test]
+fn a_stray_escape_keeps_the_text_after_it() {
+    assert_eq!(strip_ansi("a\u{1b} 123 lost text"), "a 123 lost text");
+}
+
+#[test]
+fn color_and_charset_escapes_are_dropped() {
+    assert_eq!(strip_ansi("\u{1b}[31mred\u{1b}(B\u{1b}[m"), "red");
+    assert_eq!(strip_ansi("\u{1b}[31"), "");
+}
+
+#[test]
+fn two_byte_escapes_are_dropped() {
+    assert_eq!(strip_ansi("\u{1b}7saved\u{1b}8"), "saved");
+}

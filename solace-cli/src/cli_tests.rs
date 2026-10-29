@@ -41,12 +41,13 @@ fn a_second_single_read_in_a_row_gets_the_hint() {
 #[test]
 fn an_option_a_command_doesnt_take_is_refused_by_name() {
     let e = crate::cli::unknown_option(&["view", "strategy.update", "--lines", "50..80"]).unwrap().unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies"), "{e}");
+    assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies, --header"), "{e}");
     let e = crate::cli::unknown_option(&["view", "strategy.update", "--context"]).unwrap().unwrap_err().0;
     assert!(e.contains("`--context` belongs to `inspect`: `inspect <name> --context`"), "{e}");
     assert!(crate::cli::unknown_option(&["read", "a.md", "--lines", "1..2"]).is_none());
     assert!(crate::cli::unknown_option(&["inspect", "a.b", "--context"]).is_none());
     assert!(crate::cli::unknown_option(&["view", "a", "--bodies"]).is_none());
+    assert!(crate::cli::unknown_option(&["view", "a", "--header"]).is_none());
     assert!(crate::cli::unknown_option(&["view", "--draft", "x"]).is_none(), "view --draft is in the reference");
     assert!(crate::cli::unknown_option(&["grep", "--x"]).is_none());
 }

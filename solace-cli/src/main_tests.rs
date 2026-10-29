@@ -213,7 +213,7 @@ fn agent_reference_leaves_out_host_and_task_commands() {
             && r.contains("`help <command>`")
     );
     assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
-    assert!(r.contains("A needed import is") && r.contains("submit --imports <module>") && !r.contains("task ask"));
+    assert!(r.contains("In Gleam, a needed import is") && r.contains("submit --imports <module>") && !r.contains("task ask"));
     // Scope, the code's own conventions, comments that say why, and no secrets.
     assert!(r.contains("stop exploring") && r.contains("Write code the way the code around it is written"));
     assert!(r.contains("A comment says why code exists") && r.contains("Never put secrets or keys"));
@@ -1222,7 +1222,8 @@ fn the_reference_and_worker_schema_show_the_submit_call_fields() {
         .and_then(|(_, rest)| rest.split_once("\n3. Fix only what the reply reports"))
         .map(|(step, _)| step)
         .expect("workflow step 2");
-    for part in ["command: submit --project <folder>", "test --project <folder>", "text:    *** Begin Patch"] {
+    for part in ["submit --project <folder>", "test --project <folder>", "argument text:", "argument old:", "submit --draft <id> --replace"]
+    {
         assert!(step.contains(part), "workflow step 2: missing {part}");
     }
     let text = mcp::tool_schema()["inputSchema"]["properties"]["text"]["description"].as_str().unwrap().to_string();
@@ -1945,7 +1946,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "0f76622c25dde0ab3b6ad518adffa89c8a6696044e5b178e0ce6a1ec1d34fa34");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "bbc2998ed52bd6052f2afb112feded68a3f61dc0e599de98f9ca612d40fb3bea");
 }
 
 #[test]

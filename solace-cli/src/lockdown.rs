@@ -842,7 +842,8 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
 }
 
 /// Runs `argv` in `root`: the exit code and elapsed time, then the output
-/// within `budget`, `condense`d for a `run` or `build` reply (D-111).
+/// with terminal color codes removed, within `budget`, `condense`d for a
+/// `run` or `build` reply (D-111).
 pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool, sandbox: bool) -> Out {
     use std::os::unix::process::CommandExt;
     let mut cmd = prepared(root, argv, sandbox)?;
@@ -854,7 +855,7 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, conden
         Some(status) => Ok(format!("exit code: {} ({:.1}s)\n", status.code().unwrap_or(-1), start.elapsed().as_secs_f64())),
         None => error("E6012", &argv[0], format!("timed out after {timeout}s")),
     };
-    let output = fs::read_to_string(&log)?;
+    let output = diagnostics::strip_ansi(&fs::read_to_string(&log)?);
     fs::remove_file(log)?;
     let output = if condensed { condense(&output) } else { output };
     match result {
@@ -2089,12 +2090,13 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
     let binary = binary.to_string_lossy();
     let launch = match agent {
         "codex" => {
-            // Codex calls tools from JavaScript (`exec`); one script can batch several
-            // solace replies, so its output limit is raised past Codex's default 10k tokens.
-            let hint = "The tool is the MCP tool `solace`; from `exec`, call it as \
-                `await tools.mcp__solace__solace({command: \"inspect app.main --context\"})`, \
-                with the new code in `text` for submit commands. One `exec` script can make several \
-                solace calls, so read everything you need in one step.";
+            // Codex runs some models with `exec` and others with the MCP tool directly.
+            // An `exec` script can batch several solace replies, so its output limit is
+            // raised past Codex's default 10k tokens.
+            let hint = "The tool is the MCP tool `solace`. If you have `exec`, call it from there as \
+                `await tools.mcp__solace__solace({command: \"inspect app.main --context\"})`; one `exec` \
+                script can make several solace calls, so read everything you need in one step. Otherwise \
+                call `mcp__solace__solace` directly, putting new code in `text` for submit commands.";
             let mut config = format!(
                 concat!(
                     "sandbox_mode = \"read-only\"\napproval_policy = \"never\"\n",
@@ -2126,7 +2128,8 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 concat!(
                     "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\n",
                     "env_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\"]\n",
-                    "default_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n"
+                    "default_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n",
+                    "required = true\nstartup_timeout_sec = 60\n"
                 ),
                 json!(binary),
                 timeout.max(3600)
@@ -4035,7 +4038,13 @@ running your program.
         let viewed = call(&s, &v, &["view", "src/main.gleam"], "", None).unwrap_err().0;
         let read = call(&s, &v, &["read", "src/main.gleam"], "", None).unwrap_err().0;
         assert_eq!(viewed, read);
-        assert!(viewed.contains("E6001") && viewed.contains("view main --bodies") && viewed.contains("inspect main."), "{viewed}");
+        assert!(
+            viewed.contains("E6001")
+                && viewed.contains("view main --header")
+                && viewed.contains("view main --bodies")
+                && viewed.contains("inspect main."),
+            "{viewed}"
+        );
         for cmd in ["view", "read"] {
             let e = call(&s, &v, &[cmd, "src/new.gleam"], "", None).unwrap_err().0;
             assert!(e.contains("E6001") && e.contains("submit --new new"), "{cmd}: {e}");
@@ -4206,7 +4215,7 @@ running your program.
         let s = Store::at(&root.join("a")).unwrap();
         let v = settings(&s.root).unwrap();
         let e = call(&s, &v, &["read", "a/src/app.gleam"], "", None).unwrap_err().0;
-        assert!(e.contains("view app --bodies"), "{e}");
+        assert!(e.contains("view app --header") && e.contains("view app --bodies"), "{e}");
         assert!(!e.contains("did you mean"), "{e}");
         fs::write(s.root.join("notes"), "notes\n").unwrap();
         let e = call(&s, &v, &["read", "a/notes"], "", None).unwrap_err().0;
@@ -4237,7 +4246,7 @@ running your program.
         let s = Store::at(&root.join("a")).unwrap();
         let v = settings(&s.root).unwrap();
         let e = crate::cli::with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
-        assert!(e.contains("view plan --bodies --project b"), "{e}");
+        assert!(e.contains("view plan --header --project b") && e.contains("view plan --bodies --project b"), "{e}");
     }
 
     #[test]
@@ -4320,6 +4329,21 @@ running your program.
         let e = validate(&dir, &v, "src/reference/reading.txt", &reading, &bad).unwrap_err().0;
         assert!(e.contains("E6003") && e.contains("no entry in \"Commands in full\" for `impact`"), "{e}");
     }
+
+    /// A declared command's color codes never reach the reply.
+    #[test]
+    fn run_reply_strips_color() {
+        let (s, _) = fixture();
+        let v: toml::Value =
+            concat!("[commands]\nsuite = { run = [\"sh\", \"-c\", ", "\"printf '\\\\033[31mred\\\\033(B\\\\033[m\\\\n'\"] }\n")
+                .parse()
+                .unwrap();
+        let out = call(&s, &v, &["run", "suite"], "", None).unwrap();
+        let (prefix, rest) = out.split_once('\n').unwrap();
+        assert!(prefix.starts_with("exit code: 0 ("), "{prefix}");
+        assert_eq!(rest, "red\n");
+        assert!(!out.contains('\u{1b}'));
+    }
 }
 
 /// `[sandbox] read` is a list of non-empty paths, and no other sandbox key is
@@ -4379,8 +4403,12 @@ pub(crate) fn graph_hint(s: &Store, name: &str) -> String {
     match module_of_file(s, name) {
         Some(module) if module_held(s, &module) => {
             format!(
-                "source is held as symbols; view {module} --bodies{} shows the file, or inspect {module}.<symbol> for one item",
-                project_suffix(s)
+                concat!(
+                    "source is held as symbols; view {module} --header{sfx} shows its imports and mod lines, ",
+                    "view {module} --bodies{sfx} the whole file, or inspect {module}.<symbol> for one item",
+                ),
+                module = module,
+                sfx = project_suffix(s)
             )
         }
         Some(module) => format!("this source file isn't in the store yet: {}", new_module_hint(&module)),

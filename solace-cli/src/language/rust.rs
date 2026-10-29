@@ -17,8 +17,9 @@ use syn::{Attribute, ForeignItem, ImplItem, Item, TraitItem};
 /// before the first item), its items, and what Solace refuses in it.
 pub struct File {
     pub header: String,
-    /// Every top-level `mod x;`, in the header or an item, with its `#[path]` file.
-    pub mods: Vec<(String, Option<String>)>,
+    /// Every top-level `mod x;`, in the header or an item, with its `#[path]` file
+    /// and its text with attributes.
+    pub mods: Vec<FileMod>,
     pub items: Vec<Piece>,
     pub refusals: Vec<Refusal>,
     /// Whether this file's `mod x;` children sit beside it rather than in a
@@ -108,7 +109,11 @@ fn split_parsed(source: &str, module: &str) -> Result<File, Failure> {
     let mut cx = Cx { source: body, refusals: vec![] };
     let nodes: Vec<Node> = ast.items.iter().map(|i| cx.node(i, "", module)).collect();
     cx.duplicates(&nodes, module, "");
-    let mods = nodes.iter().filter(|n| n.kind == "mod" && n.children.is_none()).map(|n| (n.name.clone(), n.file.clone())).collect();
+    let mods = nodes
+        .iter()
+        .filter(|n| n.kind == "mod" && n.children.is_none())
+        .map(|n| FileMod { name: n.name.clone(), file: n.file.clone(), text: body[n.item.start..n.item.end].to_string() })
+        .collect();
     let (first, mut items) = cut(body, &nodes, 0, body.len(), true);
     shift(&mut items, prefix);
     Ok(File { header: source[..prefix + first].to_string(), mods, items, refusals: cx.refusals, owns_dir: false })
@@ -648,7 +653,10 @@ fn walk(
     let ok = file.refusals.is_empty();
     if ok {
         if let Some(name) = inline_file_mod(&text, &file.items) {
-            return Err(Failure(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."), 1));
+            return Err(Failure(
+                format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."),
+                1,
+            ));
         }
     } else {
         refused.extend(file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)));
@@ -664,7 +672,8 @@ fn walk(
     // A test crate's own `mod x;` is `integration::x` (D-169), so every test crate that names
     // `tests/common/mod.rs` holds the same module name, and it never clashes with the
     // library module `common`. A library crate's own `mod x;` takes the bare name `x`.
-    for (name, named) in mods {
+    for m in mods {
+        let (name, named) = (m.name, m.file);
         let child = child_module(&module, &rel, owns_dir, &name);
         if let Some(p) = named {
             walk(root, format!("{dir}/{p}"), child, true, seen, out, refused)?;
@@ -940,5 +949,40 @@ pub fn test_file(target: &str, target_file: &str) -> String {
     let (dir, name) = target_file.rsplit_once('/').map_or(("", target_file), |(dir, name)| (dir, name));
     let stem = if target == "crate" { name.strip_suffix(".rs").unwrap_or(name) } else { target.rsplit("::").next().unwrap_or(target) };
     if dir.is_empty() { format!("{stem}_tests.rs") } else { format!("{dir}/{stem}_tests.rs") }
+}
+
+/// A file-level `mod x;`: its name, the `#[path]` file it names, and its text
+/// with attributes, so a header edit keeps the declaration as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMod {
+    pub name: String,
+    pub file: Option<String>,
+    pub text: String,
+}
+
+/// The item and tree byte ranges of every `use` in `source`, including ones
+/// inside a fn or method body.
+pub(crate) fn body_import_ranges(source: &str) -> Result<Vec<(Range<usize>, Range<usize>)>, syn::Error> {
+    struct Uses(Vec<(Range<usize>, Range<usize>)>);
+
+    impl<'ast> syn::visit::Visit<'ast> for Uses {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.0.push((item.span().byte_range(), item.tree.span().byte_range()));
+            syn::visit::visit_item_use(self, item);
+        }
+    }
+
+    let mut uses = Uses(vec![]);
+    if let Ok(file) = syn::parse_file(source) {
+        syn::visit::Visit::visit_file(&mut uses, &file);
+    } else if let Ok(func) = syn::parse_str::<syn::ItemFn>(source) {
+        syn::visit::Visit::visit_item_fn(&mut uses, &func);
+    } else if let Ok(func) = syn::parse_str::<syn::ImplItemFn>(source) {
+        syn::visit::Visit::visit_impl_item_fn(&mut uses, &func);
+    } else {
+        let func = syn::parse_str::<syn::TraitItemFn>(source)?;
+        syn::visit::Visit::visit_trait_item_fn(&mut uses, &func);
+    }
+    Ok(uses.0)
 }
 

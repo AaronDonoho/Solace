@@ -462,3 +462,199 @@ fn all_fields(text: &str) -> HashSet<String> {
         .map(|(index, field)| field.ident.as_ref().map_or_else(|| index.to_string(), |name| name.to_string()))
         .collect()
 }
+
+/// The narrowest visibility a `mod <name>` declaration needs so every caller
+/// can reach it, with the declaration rewritten to have it. `None` when the
+/// declaration already allows every caller, or when no such declaration is
+/// found.
+pub(super) fn raise_module(text: &str, name: &str, parent: &str, callers: &BTreeSet<String>) -> Option<(String, &'static str)> {
+    let (start, mod_at, current) = module_declaration(text, name)?;
+    if callers.is_empty() || callers.iter().all(|caller| reaches(&current, parent, caller)) {
+        return None;
+    }
+    let needed = callers.iter().map(|caller| needed_from(caller, parent)).max()?;
+    let visibility = match needed {
+        Needed::Private => return None,
+        Needed::Super => "pub(super)",
+        Needed::Crate => "pub(crate)",
+    };
+    Some((format!("{}{visibility} {}", &text[..start], &text[mod_at..]), visibility))
+}
+
+/// A `mod <name>;` or `mod <name> {` declaration's visibility start, its
+/// `mod` start and the visibility it has now.
+fn module_declaration(text: &str, name: &str) -> Option<(usize, usize, String)> {
+    let mut offset = 0;
+    while offset < text.len() {
+        let rest = crate::language::rust_refs::attrs_and_rest(&text[offset..]).1;
+        let at = text.len() - rest.len();
+        let (visibility, used) = visibility_at(rest);
+        let after = &rest[used..];
+        let mod_at = at + used + after.len() - after.trim_start().len();
+        let rest = after.trim_start();
+        if let Some(after_mod) = rest.strip_prefix("mod")
+            && (after_mod.starts_with(' ') || after_mod.starts_with('\t') || after_mod.starts_with('\n'))
+            && let Some(after_name) = after_mod.trim_start().strip_prefix(name)
+            && (after_name.is_empty()
+                || after_name.starts_with(';')
+                || after_name.starts_with('{')
+                || after_name.starts_with(' ')
+                || after_name.starts_with('\t'))
+        {
+            return Some((at, mod_at, visibility.to_string()));
+        }
+        offset = next_line_start(text, at);
+    }
+    None
+}
+
+fn visibility_at(rest: &str) -> (&str, usize) {
+    if rest.starts_with("pub(")
+        && let Some(end) = rest.find(')')
+    {
+        return (&rest[..=end], end + 1);
+    }
+    if rest.starts_with("pub") {
+        let next = rest[3..].chars().next();
+        if next.is_none() || next.is_some_and(char::is_whitespace) {
+            return (&rest[..3], 3);
+        }
+    }
+    ("", 0)
+}
+
+fn reaches(visibility: &str, parent: &str, caller: &str) -> bool {
+    match visibility {
+        "" => visible_from(parent, caller),
+        "pub" | "pub(crate)" => true,
+        "pub(super)" => visible_from(parent_module(parent), caller),
+        other => restricted_ancestor(other, parent).is_some_and(|ancestor| visible_from(&ancestor, caller)),
+    }
+}
+
+fn restricted_ancestor(visibility: &str, parent: &str) -> Option<String> {
+    let path = visibility.strip_prefix("pub(in ")?.strip_suffix(')')?;
+    Some(ancestor(path, parent))
+}
+
+fn ancestor(path: &str, parent: &str) -> String {
+    match path {
+        "crate" => "crate".to_string(),
+        "self" => parent.to_string(),
+        "super" => parent_module(parent).to_string(),
+        _ => {
+            if let Some(rest) = path.strip_prefix("crate::") {
+                rest.to_string()
+            } else if let Some(rest) = path.strip_prefix("self::") {
+                child(parent, rest)
+            } else if let Some(rest) = path.strip_prefix("super::") {
+                child(parent_module(parent), rest)
+            } else {
+                path.to_string()
+            }
+        }
+    }
+}
+
+fn child(parent: &str, name: &str) -> String {
+    if parent == "crate" { name.to_string() } else { format!("{parent}::{name}") }
+}
+
+fn needed_from(caller: &str, parent: &str) -> Needed {
+    if visible_from(parent, caller) {
+        Needed::Private
+    } else if visible_from(parent_module(parent), caller) {
+        Needed::Super
+    } else {
+        Needed::Crate
+    }
+}
+
+pub(super) fn parent_module(module: &str) -> &str {
+    module.rsplit_once("::").map_or("crate", |(parent, _)| parent)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Needed {
+    Private,
+    Super,
+    Crate,
+}
+
+/// Where the line holding `from` ends, reading past a block comment that
+/// opens on it and past string and char literals, so comment state carries
+/// across lines.
+fn next_line_start(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") || bytes[i] == b'\n' {
+            return text[i..].find('\n').map_or(text.len(), |newline| i + newline + 1);
+        }
+        i = if bytes[i..].starts_with(b"/*") {
+            i + 2 + crate::language::rust_refs::block_comment_len(&text[i + 2..])
+        } else {
+            literal_end(text, i).unwrap_or(i + 1)
+        };
+    }
+    text.len()
+}
+
+/// Where the string, raw string or char literal starting at `at` ends, or
+/// `None` when none starts there (a lifetime's `'` is not one).
+fn literal_end(text: &str, at: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    match bytes[at] {
+        b'"' => Some(string_end(bytes, at + 1)),
+        b'\'' => char_end(bytes, at),
+        b'r' if at == 0 || bytes[at - 1] == b'b' || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') => {
+            raw_string_end(text, at)
+        }
+        _ => None,
+    }
+}
+
+/// Past the closing `"` of a string whose body starts at `body`; backslash escapes.
+fn string_end(bytes: &[u8], mut body: usize) -> usize {
+    while body < bytes.len() && bytes[body] != b'"' {
+        body += if bytes[body] == b'\\' { 2 } else { 1 };
+    }
+    (body + 1).min(bytes.len())
+}
+
+/// Past the closing `'` of the char literal starting at `at`, or `None` for a lifetime.
+fn char_end(bytes: &[u8], at: usize) -> Option<usize> {
+    match (bytes.get(at + 1).copied(), bytes.get(at + 2).copied()) {
+        (Some(b'\\'), _) => bytes.get(at + 3..)?.iter().position(|&b| b == b'\'').map(|close| at + 3 + close + 1),
+        (Some(_), Some(b'\'')) => Some(at + 3),
+        _ => None,
+    }
+}
+
+/// Past the end of the raw string `r"…"` or `r#"…"#` starting at `at`, or
+/// `None` when the `r` does not open one. A raw string has no escapes: it ends
+/// at a `"` followed by as many `#` as it opened with.
+fn raw_string_end(text: &str, at: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let hashes = bytes[at + 1..].iter().take_while(|&&b| b == b'#').count();
+    if bytes.get(at + 1 + hashes) != Some(&b'"') {
+        return None;
+    }
+    let body = at + 2 + hashes;
+    let close = format!("\"{}", "#".repeat(hashes));
+    Some(text[body..].find(&close).map_or(text.len(), |found| body + found + close.len()))
+}
+
+/// The declaration with plain `pub` visibility, so a dropped re-export keeps
+/// the reach it had.
+pub(super) fn make_public(text: &str) -> String {
+    let Some((at, code)) = super::declaration(text) else { return text.to_string() };
+    if code.starts_with("pub ") || code.starts_with("pub\n") {
+        return text.to_string();
+    }
+    if code.starts_with("pub(") {
+        let Some(end) = code.find(')') else { return text.to_string() };
+        return format!("{}pub{}", &text[..at], &text[at + end + 1..]);
+    }
+    format!("{}pub {}", &text[..at], &text[at..])
+}

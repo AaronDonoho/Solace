@@ -29,3 +29,28 @@ fn a_try_lock_is_none_while_another_holds_it() {
     drop(held);
     assert!(try_lock_file(&path).unwrap().is_some());
 }
+
+#[test]
+fn try_lock_file_within_succeeds_when_lock_is_released_during_wait() {
+    let root = crate::testing::Scratch::new();
+    let path = root.join("lock");
+    let held = lock_file(&path).unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+    });
+    let result = try_lock_file_within(&path, Duration::from_millis(500)).unwrap();
+    assert!(result.is_some());
+}
+
+#[test]
+fn try_lock_file_within_fails_if_lock_is_never_released() {
+    let root = crate::testing::Scratch::new();
+    let path = root.join("lock");
+    let _held = lock_file(&path).unwrap();
+    let started = Instant::now();
+    let result = try_lock_file_within(&path, Duration::from_millis(60)).unwrap();
+    let waited = started.elapsed();
+    assert!(result.is_none());
+    assert!(waited < Duration::from_millis(90), "the wait honors its deadline: {waited:?}");
+}

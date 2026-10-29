@@ -85,7 +85,7 @@ pub fn submit_module(root: &Path, module: &str, text: &str, formatted: bool) -> 
     // A `mod x;` names a module this submit doesn't create; it is looked for in
     // the text as written, since rustfmt resolves the file it formats (D-168).
     if let Ok(split) = language::rust::split(text, module)
-        && let Some(name) = split.mods.first().map(|(n, _)| n.clone()).or_else(|| file_mod(&split.items).map(|p| p.name.clone()))
+        && let Some(name) = split.mods.first().map(|m| m.name.clone()).or_else(|| file_mod(&split.items).map(|p| p.name.clone()))
     {
         return fail(format!("Not saved: `mod {name};` names another module; {MODULE_NOTE}."));
     }
@@ -123,7 +123,7 @@ pub fn submit_items(
     // nested item's text doesn't parse on its own, so a refusal to parse is not
     // one of these.
     if let Ok(file) = language::rust::split(text, module) {
-        let named = file.mods.first().map(|(n, _)| n.clone()).or_else(|| file_mod(&file.items).map(|p| p.name.clone()));
+        let named = file.mods.first().map(|m| m.name.clone()).or_else(|| file_mod(&file.items).map(|p| p.name.clone()));
         if let Some(name) = named {
             return fail(format!("Not saved: `mod {name};` names another module; {MODULE_NOTE}."));
         }
@@ -466,27 +466,37 @@ pub(crate) fn module_text(ix: &Index, m: &ModuleRow) -> String {
 
 /// A module's outline: its heading and items, a Rust module's nested under its
 /// parents with each item's signature and its `// BROKEN` mark (D-158).
-pub(crate) fn module_outline(ix: &Index, m: &ModuleRow, broken: &HashMap<String, String>, bodies: bool) -> String {
+pub(crate) fn module_outline(ix: &Index, m: &ModuleRow, broken: &HashMap<String, String>, bodies: bool, header: bool) -> String {
     let mut text = format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
     if bodies {
         text += &format!("// bodies left out to fit the size limit; `view {} --bodies` alone shows them\n", m.path);
     }
-    if m.file.is_some() {
-        let doc: Vec<&str> = m.header.lines().filter(|l| l.trim_start().starts_with("//!")).collect();
-        if !doc.is_empty() {
-            text += &doc.join("\n");
-            text.push('\n');
-            text.push('\n');
+    let rust = m.file.is_some();
+    if header {
+        if !m.header.trim().is_empty() {
+            text += m.header.trim_end();
+            text += "\n\n";
         }
+    } else {
+        let prefix = if rust { "//!" } else { "////" };
+        let doc: Vec<&str> = m
+            .header
+            .lines()
+            .filter(|l| {
+                let line = if rust { l.trim_start() } else { *l };
+                line.starts_with(prefix)
+            })
+            .collect();
+        if !doc.is_empty() {
+            text += &format!("{}\n\n", doc.join("\n"));
+        }
+    }
+    if rust {
         walk_by_parent(ix, &by_parent(ix, &m.path), None, 0, broken, &mut text);
-        return text;
-    }
-    let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).collect();
-    if !doc.is_empty() {
-        text += &format!("{}\n\n", doc.join("\n"));
-    }
-    for s in ix.syms.iter().filter(|s| s.module == m.path) {
-        text += &format!("{}{}\n\n", crate::index::signature(ix, s), if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" });
+    } else {
+        for s in ix.syms.iter().filter(|s| s.module == m.path) {
+            text += &format!("{}{}\n\n", crate::index::signature(ix, s), if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" });
+        }
     }
     text
 }

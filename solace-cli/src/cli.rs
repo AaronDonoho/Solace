@@ -572,7 +572,9 @@ pub(crate) fn run_inner(
         ["drafts"] => crate::drafts::list(&store),
         ["view", "--draft", id] => crate::drafts::view(&store, id),
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
+        ["view", rest @ ..] if !operands(rest).is_empty() => {
+            store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
+        }
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["impact", names @ ..] => store.impact(names, budget),
@@ -729,7 +731,9 @@ pub(crate) fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: 
         return crate::lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
     }
     let out = match a {
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
+        ["view", rest @ ..] if !operands(rest).is_empty() => {
+            store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
+        }
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),

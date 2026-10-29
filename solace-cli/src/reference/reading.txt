@@ -7,6 +7,9 @@ Reading
   view <name>...                symbols' source
   view <module>...              outlines: signatures and doc lines
   view <module> --bodies        whole module; only for one you will rewrite
+  view <module> --header        the outline, with the module's whole header
+                                (comment and imports) in place of its doc lines;
+                                a module only, not an item or dependency
   view <file>                   a .py or plain-file .rs file's outline: each
                                 item (fn, struct, `Type::method`, test) with
                                 its line range, signature and first doc line;

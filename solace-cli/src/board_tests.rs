@@ -197,6 +197,7 @@ fn tech_debt_items_are_the_sections_bullets() {
         tech_debt_items(TECH_DEBT_ASK),
         vec!["`board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>."]
     );
+    assert_eq!(tech_debt_items(WORK_TECH_DEBT_ASK), vec!["`<command or step>`: <what was wasted>. <what would fix it>."]);
 }
 
 /// D-112: completing a task in a feature files its last review's tech debt
@@ -934,13 +935,13 @@ fn tech_debt_goes_to_the_first_column_without_planning() {
     t["feature"] = f["id"].clone();
     t["runs"].as_array_mut().unwrap().push(json!({"id":"rv","kind":"review","state":"ended","outcome":"reviewed"}));
     note(&mut t, "agent", Some("rv"), "### Tech debt\n- `app.main`: name the constant\n");
-    let (debt, n) = tech_debt(&top, &t).unwrap().unwrap();
-    assert_eq!((debt["column"].as_str(), n), (Some("todo"), 1));
+    let (debt, work, review) = tech_debt(&top, &t).unwrap().unwrap();
+    assert_eq!((debt["column"].as_str(), work, review), (Some("todo"), 0, 1));
     let mut loose = api(&s.root, "POST", "/tasks", json!({"title":"Loose"})).unwrap();
     loose["runs"].as_array_mut().unwrap().push(json!({"id":"rv2","kind":"review","state":"ended","outcome":"reviewed"}));
     note(&mut loose, "agent", Some("rv2"), "### Tech debt\n- `app.other`: split it\n");
-    let (own, n) = tech_debt(&top, &loose).unwrap().unwrap();
-    assert_eq!((own["column"].as_str(), n), (Some("todo"), 1));
+    let (own, work, review) = tech_debt(&top, &loose).unwrap().unwrap();
+    assert_eq!((own["column"].as_str(), work, review), (Some("todo"), 0, 1));
 }
 
 /// A `done` from a live run, applied by the server, settles: the move and the settle both happen.
@@ -1645,7 +1646,7 @@ fn a_model_error_names_the_offer_as_out_of_date() {
 }
 
 /// The model a run used comes from its log's start event, and an alias's
-/// label becomes that model's once known: its entry's label, else its id.
+/// label is the plain text stored with that run.
 #[test]
 fn a_run_shows_the_model_it_used() {
     let dir = testing::Scratch::new();
@@ -1660,14 +1661,14 @@ fn a_run_shows_the_model_it_used() {
     assert_eq!(used_model(&log), None, "a start event naming no model names none");
     let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
     let m = agents::merge_from(&configured, &json!({"used":{"claude-opus":"claude-opus-5-5"}}));
-    assert_eq!(m[0]["label"], "claude-opus-5-5", "no entry runs it: its id");
+    assert_eq!(m[0]["label"], "claude-opus-5-5", "a record from before labels shows its model id");
     assert_eq!(m[0]["model"], "opus", "the alias is what runs");
     let listed = json!([configured[0], {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"}]);
-    let m = agents::merge_from(&listed, &json!({"used":{"claude-opus":"claude-opus-5-5"}}));
-    assert_eq!(m[0]["label"], "Opus 5.5", "the entry running it names it");
+    let m = agents::merge_from(&listed, &json!({"used":{"claude-opus":{"model":"claude-opus-5-5","label":"Opus 5.5"}}}));
+    assert_eq!(m[0]["label"], "Opus 5.5", "the stored label names it");
     let own = agents::merge_from(
         &json!([{"id":"local","label":"Local: Strata Swift","agent":"claude","model":"swift-iq3_xxs","configured":true}]),
-        &json!({"used":{"local":"swift-iq2_xs"}}),
+        &json!({"used":{"local":{"model":"swift-iq2_xs","label":"Swift IQ2"}}}),
     );
     assert_eq!(own[0]["label"], "Local: Strata Swift", "a model with its own name shows it, not what an older run used");
 }
@@ -2220,6 +2221,15 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         assert!(review.contains(rule), "review: missing {rule}");
     }
     assert!(review.contains(TECH_DEBT_ASK), "a review is asked for tech debt");
+    assert!(
+        review.contains("Leave out items already in the work summary's `### Tech debt` section: they are filed already."),
+        "a review is told not to repeat work tech debt"
+    );
+    assert!(work.contains(WORK_TECH_DEBT_ASK), "a work run is asked for its summary's tech debt");
+    assert!(
+        work.contains("ordinary friction, code-quality notes and restating risks are not tech debt"),
+        "a work run is told what is not tech debt"
+    );
     for kind in ["work", "investigate", "discuss"] {
         let prompt = brief(&t, kind);
         assert!(!prompt.contains(FINDINGS_ASK), "{kind}: unexpected findings detail");
@@ -3256,20 +3266,15 @@ fn malformed_language_settings_are_an_error_not_off() {
 }
 
 /// When entries share the model string a run used, the later current entry
-/// names the alias; the alias still runs its own model.
+/// supplies the label stored with the run.
 #[test]
 fn a_later_entry_names_the_shared_model() {
-    let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
-    let all = json!({
-        "codex":{"models":[
-            {"id":"first","label":"First","agent":"codex","model":"claude-opus-5-5"},
-            {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
-        ]},
-        "used":{"claude-opus":"claude-opus-5-5"}
-    });
-    let m = agents::merge_from(&configured, &all);
-    assert_eq!(m[0]["label"], "Second");
-    assert_eq!(m[0]["model"], "opus");
+    let models = json!([
+        {"id":"first","label":"First","agent":"codex","model":"claude-opus-5-5"},
+        {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
+    ]);
+    assert_eq!(agents::used_label(models.as_array().unwrap(), "claude-opus-5-5"), "Second");
+    assert_eq!(agents::used_label(models.as_array().unwrap(), "not-listed"), "not-listed", "no entry leaves the model id");
 }
 
 /// Maintainability direction is in the shared reference, not only the briefs.
@@ -3630,25 +3635,18 @@ fn a_review_run_gets_no_next_step() {
 /// A current entry names a shared model before a gone entry does.
 #[test]
 fn a_current_model_names_the_shared_model_before_a_gone_one() {
-    let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
-    let all = json!({
-        "codex":{"models":[
-            {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
-        ]},
-        "gone":{
-            "old":{"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5"}
-        },
-        "used":{"claude-opus":"claude-opus-5-5"}
-    });
-    let m = agents::merge_from(&configured, &all);
-    assert_eq!(m[0]["label"], "Second", "a current entry names the shared model");
+    let models = json!([
+        {"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5","gone":true},
+        {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
+    ]);
+    assert_eq!(agents::used_label(models.as_array().unwrap(), "claude-opus-5-5"), "Second", "a current entry names the shared model");
 
-    let gone_only = json!({
-        "gone":{"old":{"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5"}},
-        "used":{"claude-opus":"claude-opus-5-5"}
-    });
-    let m = agents::merge_from(&configured, &gone_only);
-    assert_eq!(m[0]["label"], "Gone", "a gone entry still names it when no current one does");
+    let gone_only = json!([{"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5","gone":true}]);
+    assert_eq!(
+        agents::used_label(gone_only.as_array().unwrap(), "claude-opus-5-5"),
+        "Gone",
+        "a gone entry still names it when no current one does"
+    );
 }
 
 /// D-186: an investigation states outcomes and constraints, not a plan that
@@ -4433,8 +4431,8 @@ fn a_task_with_no_feature_files_its_own_tech_debt() {
     let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Loose"})).unwrap();
     t["runs"].as_array_mut().unwrap().push(json!({"id":"rv1","kind":"review","state":"ended","outcome":"reviewed"}));
     note(&mut t, "agent", Some("rv1"), "### Tech debt\n- `app.main`: name the constant\n- `app.other`: split it\n");
-    let (debt, n) = tech_debt(&top, &t).unwrap().unwrap();
-    assert_eq!(n, 2);
+    let (debt, work, review) = tech_debt(&top, &t).unwrap().unwrap();
+    assert_eq!((work, review), (0, 2));
     assert_eq!(
         (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str(), debt["milestone"].as_str(), debt["techDebt"].as_bool()),
         (Some("Loose: Tech Debt"), Some("planning"), None, None, Some(true))
@@ -4996,7 +4994,7 @@ fn assert_draft_in_components_only(components: &Store, web: &Store, tid: &str, i
 fn a_cross_project_graph_hint_names_the_project() {
     let (_root, web, _components, tid) = draft_board();
     let e = run_draft_command(&web, &tid, &["read", "src/lib.gleam", "--project", "components"], "").unwrap_err().0;
-    assert!(e.contains("view lib --bodies --project components"), "{e}");
+    assert!(e.contains("view lib --header --project components") && e.contains("view lib --bodies --project components"), "{e}");
 }
 
 /// A move into another project marks its destination before changing it, so a
@@ -5014,4 +5012,115 @@ fn a_move_into_another_project_marks_its_destination() {
     assert!(panicked, "the move did not reach its crash point");
     let mark = components.root.join(".solace/pending/command-r1.json");
     assert!(mark.exists(), "no destination marker at {}", mark.display());
+}
+
+/// A scan that panics leaves the lock poisoned; a migration still takes it.
+#[test]
+fn a_poisoned_watching_lock_is_still_taken() {
+    let board = event_board(std::env::temp_dir());
+    let scan = board.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = scan.watching_guard();
+        panic!("a scan failed");
+    })
+    .join();
+    let _guard = board.watching_guard();
+}
+
+/// D-112: a completed task files the tech debt in its last work summary and its
+/// last review, with a note naming each source.
+#[test]
+fn completing_a_task_files_its_work_and_review_tech_debt() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Waste"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"wk","kind":"work","state":"ended","outcome":"finished"}));
+    note(
+        &mut t,
+        "agent",
+        Some("wk"),
+        "### Tech debt\n- `run cargo-fmt-check`: printed files the task never touched. Check only its files.\n",
+    );
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"rv","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some("rv"), "### Tech debt\n- `app.main`: name the constant\n");
+    tasks::put(&s, &t).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"plan"})).unwrap();
+    let done = api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+    let debts: Vec<Value> = all_tasks(&top).unwrap().into_iter().filter(|t| t["techDebt"] == true).collect();
+    let [debt] = debts.as_slice() else { panic!("{debts:?}") };
+    let notes: Vec<&str> = debt["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap()).collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].contains(&format!("Tech debt from the review of task:{tid} (review run rv):")), "{}", notes[0]);
+    assert!(notes[0].ends_with("`app.main`: name the constant"));
+    assert!(notes[1].contains(&format!("Tech debt from the work on task:{tid} (work run wk):")), "{}", notes[1]);
+    assert!(notes[1].ends_with("`run cargo-fmt-check`: printed files the task never touched. Check only its files."));
+    let last = done["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
+    assert!(
+        last.contains(&format!("Filed 2 tech-debt items from the last work run and review on task:{}", debt["id"].as_str().unwrap())),
+        "{last}"
+    );
+    // A work summary alone files too.
+    let mut only = api(&s.root, "POST", "/tasks", json!({"title":"Work only"})).unwrap();
+    let only_id = only["id"].as_str().unwrap().to_string();
+    only["runs"].as_array_mut().unwrap().push(json!({"id":"wk2","kind":"work","state":"ended","outcome":"finished"}));
+    note(&mut only, "agent", Some("wk2"), "### Tech debt\n- `run tests`: the reply named only untouched files.\n");
+    tasks::put(&s, &only).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{only_id}/actions"), json!({"action":"plan"})).unwrap();
+    let work_done = api(&s.root, "POST", &format!("/tasks/{only_id}/actions"), json!({"action":"complete"})).unwrap();
+    let fresh: Vec<Value> = all_tasks(&top).unwrap().into_iter().filter(|d| d["techDebt"] == true && d["id"] != debt["id"]).collect();
+    let [work_debt] = fresh.as_slice() else { panic!("{fresh:?}") };
+    let work_notes: Vec<&str> = work_debt["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap()).collect();
+    assert_eq!(work_notes.len(), 1, "{work_notes:?}");
+    assert!(work_notes[0].contains(&format!("Tech debt from the work on task:{only_id} (work run wk2):")), "{}", work_notes[0]);
+    let work_last = work_done["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
+    assert!(
+        work_last.contains(&format!("Filed 1 tech-debt item from the last work run on task:{}", work_debt["id"].as_str().unwrap())),
+        "{work_last}"
+    );
+}
+
+/// The shipped presets and Claude's aliases show one entry per family, and the
+/// Haiku entry is the latest model rather than the exact one a preset once named.
+#[test]
+fn the_shipped_presets_show_the_latest_claude_models() {
+    let mut models = parse_system("").unwrap()["models"].as_array().unwrap().clone();
+    models.extend(agents::claude_aliases());
+    let picked = served(&models);
+    let haiku: Vec<&Value> = picked.iter().filter(|m| agents::family(m) == Some("haiku")).collect();
+    assert_eq!(haiku.len(), 1, "one Haiku entry");
+    assert_eq!(haiku[0]["id"], "claude-haiku-5-5");
+    assert_eq!(haiku[0]["label"], "Haiku 5.5");
+    assert_eq!(haiku[0]["model"], "claude-haiku-5-5");
+    for family in ["opus", "sonnet", "haiku", "fable"] {
+        assert_eq!(picked.iter().filter(|m| agents::family(m) == Some(family)).count(), 1, "one {family} entry");
+    }
+}
+
+/// A run's stored label names its model after every entry that ran it is gone.
+#[test]
+fn a_used_model_keeps_the_label_a_run_stored() {
+    let configured = json!([{"id":"claude-haiku","label":"Haiku (latest)","agent":"claude","model":"haiku"}]);
+    let all = json!({
+        "used":{"claude-haiku":{"model":"claude-haiku-4-5-20251001","label":"Haiku 4.5"}}
+    });
+    let m = agents::merge_from(&configured, &all);
+    assert_eq!(m[0]["label"], "Haiku 4.5", "the label stored with the run is shown");
+    assert_eq!(m[0]["model"], "haiku", "the alias is still what runs");
+}
+
+/// Ending a run stores the label the model list gave its used model.
+#[test]
+fn ending_a_run_stores_its_model_label() {
+    let dir = testing::Scratch::new();
+    let config = dir.join("config.toml");
+    fs::write(&config, "[[models]]\nid = \"claude-haiku-9-9\"\nlabel = \"Haiku 9.9\"\nagent = \"claude\"\nmodel = \"claude-haiku-9-9\"\n")
+        .unwrap();
+    let log = dir.join("log.jsonl");
+    fs::write(&log, "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-haiku-9-9\"}\n").unwrap();
+    let mut run = json!({"model":"claude-haiku","log":log});
+    with_config(&config, || end_run(&mut run, "finished"));
+    let saved: Value = jsonx::read(&dir.join("agent-models.json")).unwrap();
+    assert_eq!(saved["used"]["claude-haiku"], json!({"model":"claude-haiku-9-9","label":"Haiku 9.9"}));
 }

@@ -23,16 +23,46 @@ pub(crate) struct Diag {
 
 pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
                 }
             }
-        } else {
-            out.push(c);
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(c) if ('!'..='/').contains(&c) => {
+                chars.next();
+                while chars.peek().is_some_and(|c| ('!'..='/').contains(c)) {
+                    chars.next();
+                }
+                if chars.peek().is_some_and(|c| ('0'..='~').contains(c)) {
+                    chars.next();
+                }
+            }
+            Some(c) if ('0'..='~').contains(&c) => {
+                chars.next();
+            }
+            _ => {}
         }
     }
     out

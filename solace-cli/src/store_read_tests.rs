@@ -570,3 +570,82 @@ fn a_module_and_a_function_of_one_name_are_named_by_kind() {
     let err = store.view(&["crate.g"], false, usize::MAX).unwrap_err().0;
     assert!(err.starts_with("E1002") && err.contains("(mod)") && err.contains("(fn)"), "{err}");
 }
+
+#[test]
+fn view_shows_module_header() {
+    let source = "//! A sample crate.\nuse std::fmt;\n\npub fn answer() -> i32 {\n    42\n}\n";
+    let (root, store) = testing::rust_project(source);
+    let outline = store.view(&["crate"], false, usize::MAX).unwrap();
+    assert!(outline.contains("//! A sample crate."), "{outline}");
+    assert!(!outline.contains("use std::fmt;") && !outline.contains("42"), "{outline}");
+
+    let args = ["view", "crate", "--header"].map(str::to_string);
+    let header =
+        crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &args, &mut || Ok(String::new()), None, usize::MAX)).unwrap();
+    assert!(header.contains("//! A sample crate.") && header.contains("use std::fmt;"), "{header}");
+    assert!(header.contains("pub fn answer() -> i32") && !header.contains("42"), "{header}");
+
+    let body_args = ["view", "crate", "--bodies", "--header"].map(str::to_string);
+    let body =
+        crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &body_args, &mut || Ok(String::new()), None, usize::MAX))
+            .unwrap();
+    assert_eq!(body, source);
+
+    let missing = ["view", "missing", "--header"].map(str::to_string);
+    let error = crate::cli::with_root(&root, || crate::cli::run_inner(&root, &root, &missing, &mut || Ok(String::new()), None, usize::MAX))
+        .unwrap_err();
+    assert!(error.0.contains("unknown name"), "{}", error.0);
+}
+
+/// `--header` keeps a Rust module's items nested under their `impl`, as the
+/// ordinary outline does.
+#[test]
+fn view_header_keeps_a_rust_module_outline_nested() {
+    let source = concat!(
+        "//! A sample crate.\n",
+        "use std::fmt;\n\n",
+        "pub struct Store;\n\n",
+        "impl Store {\n",
+        "    /// Opens it.\n",
+        "    pub fn open() -> Self {\n",
+        "        Store\n",
+        "    }\n",
+        "}\n"
+    );
+    let (_root, store) = testing::rust_project(source);
+    let outline = store.view(&["crate"], false, usize::MAX).unwrap();
+    let header = store.view_with_header(&["crate"], false, true, usize::MAX).unwrap();
+    assert!(header.contains("//! A sample crate.") && header.contains("use std::fmt;"), "{header}");
+    assert!(header.contains("\n  pub fn open() -> Self"), "{header}");
+    assert!(!header.contains("        Store"), "{header}");
+    let header_items = header.split_once("pub struct Store").map(|(_, rest)| rest).unwrap();
+    let outline_items = outline.split_once("pub struct Store").map(|(_, rest)| rest).unwrap();
+    assert_eq!(header_items, outline_items, "{header}\n---\n{outline}");
+}
+
+/// A Gleam module shows its `////` comment and imports once, with no bodies.
+#[test]
+fn view_header_shows_a_gleam_comment_and_import_once() {
+    let source = "//// A sample module.\n\nimport gleam/io\n\npub fn main() -> Int {\n  io.debug(1)\n  42\n}\n";
+    let project = project(&[("src/app.gleam", source)]);
+    let header = project.view_with_header(&["app"], false, true, usize::MAX).unwrap();
+    assert_eq!(header.matches("//// A sample module.").count(), 1, "{header}");
+    assert_eq!(header.matches("import gleam/io").count(), 1, "{header}");
+    assert!(header.contains("pub fn main() -> Int"), "{header}");
+    assert!(!header.contains("42"), "{header}");
+}
+
+/// A test run that uses a crate the manifest doesn't declare names the
+/// Cargo.toml change, not rustc's `cargo add` hint (D-210).
+#[test]
+fn an_undeclared_crate_in_a_test_names_cargo_toml() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = crate::testing::rust_project(
+        "use foo_not_a_dep::Bar;\n\npub fn one() -> i32 {\n    1\n}\n\n#[test]\nfn it_works() {\n    assert_eq!(one(), 1);\n}\n",
+    );
+    let err = store.test(&["--all"]).unwrap_err().0;
+    assert!(err.contains("`foo_not_a_dep` isn't a dependency of this project; add it to `Cargo.toml` first."), "{err}");
+    assert!(!err.contains("cargo add"), "{err}");
+}

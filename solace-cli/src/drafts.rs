@@ -1796,10 +1796,10 @@ fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: V
     if file.header.trim_end() != c.s.header(&module)?.trim_end() {
         return Err((c.bad)(format!(
             concat!(
-                "the patch changes {}'s imports (section at line {}); ",
-                "imports are added automatically (`submit --imports {}` replaces them).",
+                "the patch changes {}'s header (section at line {}); a patch can't change it: ",
+                "view {} --header, then submit --imports {} with the whole header, mod lines included.",
             ),
-            module, c.at_line, module
+            module, c.at_line, module, module
         )));
     }
     let mut items = crate::rust_submit::rust_module_items(c.ix, &module, &file.items)?;

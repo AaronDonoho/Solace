@@ -4,6 +4,8 @@ use crate::failure::Failure;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 #[path = "fsx_tests.rs"]
@@ -51,4 +53,18 @@ pub(crate) fn replace_bytes(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), 
     fs::rename(&part, &to)?;
     fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+pub(crate) fn try_lock_file_within(path: &Path, deadline: Duration) -> Result<Option<fs::File>, Failure> {
+    let started = Instant::now();
+    loop {
+        if let Some(f) = try_lock_file(path)? {
+            return Ok(Some(f));
+        }
+        let left = deadline.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(left.min(Duration::from_millis(50)));
+    }
 }

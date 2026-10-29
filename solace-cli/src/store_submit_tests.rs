@@ -139,7 +139,10 @@ fn imports_replace_the_header_only() {
     let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\n\npub fn extra() -> i32 {\n    1\n}\n").unwrap_err().0;
     assert!(err.contains("--imports text may only contain imports"), "{err}");
     let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\nmod extra;\n").unwrap_err().0;
-    assert!(err.contains("`--imports` can't add or remove a module") && err.contains("submit --new <module>"), "{err}");
+    assert!(
+        err.contains("must leave out the module's `mod` lines or keep them as they are") && err.contains("view crate --header"),
+        "{err}"
+    );
     assert_eq!(text_of(&root, "src/lib.rs"), header);
 }
 
@@ -975,7 +978,13 @@ fn a_patch_changing_a_modules_imports_is_refused() {
     let (root, store) = rust_project(lib);
     let patch = "*** Begin Patch\n*** Update: crate\n@@\n-use std::fmt;\n+use std::io;\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
-    assert!(err.contains("changes crate's imports") && err.contains("submit --imports"), "{err}");
+    assert!(
+        err.contains("changes crate's header")
+            && err.contains("view crate --header")
+            && err.contains("submit --imports crate")
+            && !err.contains("added automatically"),
+        "{err}"
+    );
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
@@ -1907,4 +1916,167 @@ fn a_patch_add_refuses_an_item_wrapped_in_its_own_module() {
     assert!(out.contains("Saved m.tests::t"), "{out}");
     let ix = store.index().unwrap();
     assert!(store.resolve(&ix, "m.tests::t").is_ok());
+}
+
+/// Every `*** Begin Patch … *** End Patch` block in the reference, with the
+/// indentation it has there removed.
+fn reference_patches() -> Vec<String> {
+    let mut blocks = vec![];
+    let mut open: Option<(usize, Vec<&str>)> = None;
+    for line in crate::reference::REFERENCE.lines() {
+        let text = line.trim_start();
+        if text.starts_with("*** Begin Patch") {
+            open = Some((line.len() - text.len(), vec![]));
+        }
+        if let Some((indent, lines)) = open.as_mut() {
+            lines.push(line.get(*indent..).unwrap_or(""));
+            if text.starts_with("*** End Patch") {
+                blocks.push(lines.join("\n") + "\n");
+                open = None;
+            }
+        }
+    }
+    blocks
+}
+
+/// The patches the reference shows agents must be ones `submit` and `write`
+/// accept; a block that is only a placeholder (`...`) is skipped.
+#[test]
+fn the_reference_patches_parse_and_break_with_a_bad_header() {
+    let blocks: Vec<String> = reference_patches().into_iter().filter(|b| !b.lines().any(|l| l.trim() == "...")).collect();
+    assert!(blocks.len() >= 2, "{blocks:?}");
+    for block in blocks {
+        let files = block.contains("File:");
+        let parsed = crate::drafts::sections(&block, files);
+        assert!(parsed.is_ok_and(|s| !s.is_empty()), "{block}");
+        let broken = block.replacen("\n*** ", "\n*** Bad", 1);
+        assert!(crate::drafts::sections(&broken, files).is_err(), "{broken}");
+    }
+}
+
+#[test]
+fn a_method_for_a_type_without_an_impl_says_to_add_one() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub struct Y;\npub enum E { A }\npub type T = Y;\npub fn f() {}\n");
+    let add = |name: &str| {
+        let patch = format!("*** Begin Patch\n*** Add: {name}\n+pub fn c() -> i32 {{\n+    1\n+}}\n*** End Patch\n");
+        drafts::submit(&store, &["submit"], &mut || Ok(patch.clone()), None).unwrap_err().0
+    };
+    let err = add("crate.Y::c");
+    assert!(err.starts_with("E1003 crate.Y has no `impl`: add one with `*** Add: crate` and a whole `impl Y { … }` block"), "{err}");
+    let err = add("crate.E::c");
+    assert!(err.starts_with("E1003 crate.E has no"), "{err}");
+    let err = add("crate.T::c");
+    assert!(err.starts_with("E1003 crate.T has no"), "{err}");
+    assert!(add("crate.Z::c").starts_with("E1003 unknown module: crate.Z::c"));
+    assert!(add("crate.f::c").starts_with("E1003 unknown module: crate.f::c"));
+}
+
+/// `--imports` keeps a module's `mod` lines and their attributes, whether the
+/// text repeats them or leaves them out (D-168).
+#[test]
+fn adding_a_use_to_a_fsx_shaped_module_keeps_its_mods() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod fsx;\n"),
+        (
+            "src/fsx.rs",
+            concat!(
+                "//! File primitives.\n\n",
+                "use std::fs;\n\n",
+                "#[cfg(test)]\n",
+                "#[path = \"fsx_tests.rs\"]\n",
+                "mod tests;\n\n",
+                "pub fn size(path: &str) -> u64 {\n",
+                "    fs::metadata(path).map(|m| m.len()).unwrap_or(0)\n",
+                "}\n",
+            ),
+        ),
+        ("src/fsx_tests.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let header = concat!(
+        "//! File primitives.\n\n",
+        "use std::fs;\n",
+        "use std::time::{Duration, Instant};\n\n",
+        "#[cfg(test)]\n",
+        "#[path = \"fsx_tests.rs\"]\n",
+        "mod tests;\n",
+    );
+    let out = store.submit(crate::store::Target::Imports("fsx"), header).unwrap();
+    assert!(out.contains("Saved fsx imports"), "{out}");
+    let saved = text_of(&root, "src/fsx.rs");
+    assert!(saved.contains("use std::time::{Duration, Instant};"), "{saved}");
+    assert!(saved.contains("#[cfg(test)]\n#[path = \"fsx_tests.rs\"]\nmod tests;\n"), "{saved}");
+    assert!(saved.contains("pub fn size"), "{saved}");
+    let uses_only = "use std::fs;\nuse std::time::{Duration, Instant};\nuse std::thread;\n";
+    let out = store.submit(crate::store::Target::Imports("fsx"), uses_only).unwrap();
+    assert!(out.contains("Saved fsx imports"), "{out}");
+    let saved = text_of(&root, "src/fsx.rs");
+    assert!(saved.contains("use std::thread;\n\n#[cfg(test)]\n#[path = \"fsx_tests.rs\"]\nmod tests;\n"), "{saved}");
+    let no_cfg =
+        concat!("//! File primitives.\n\n", "use std::fs;\n", "use std::thread;\n\n", "#[path = \"fsx_tests.rs\"]\n", "mod tests;\n",);
+    let err = store.submit(crate::store::Target::Imports("fsx"), no_cfg).unwrap_err().0;
+    assert!(err.contains("must leave out the module's `mod` lines or keep them as they are") && err.contains("view fsx --header"), "{err}");
+    assert!(!err.contains(". a new module"), "{err}");
+    assert_eq!(text_of(&root, "src/fsx.rs"), saved);
+}
+
+/// A `use`-only header puts the stored `mod` lines back before or after the
+/// imports as they were, not all after the submitted text (D-168).
+#[test]
+fn a_use_only_submit_keeps_the_stored_mods_around_its_uses() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "mod a;\nuse b::c;\npub mod d;\n\n",
+                "pub fn one() -> i32 {\n    c()\n}\n\n",
+                "pub mod b {\n    pub fn c() -> i32 {\n        1\n    }\n}\n",
+            ),
+        ),
+        ("src/a.rs", ""),
+        ("src/b.rs", "pub fn c() -> i32 {\n    1\n}\n"),
+        ("src/d.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit(crate::store::Target::Imports("crate"), "use b::c;\nuse std::time::Duration;\n").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        concat!(
+            "mod a;\nuse b::c;\nuse std::time::Duration;\npub mod d;\n\n",
+            "pub fn one() -> i32 {\n    c()\n}\n\n",
+            "pub mod b {\n    pub fn c() -> i32 {\n        1\n    }\n}\n",
+        )
+    );
+}
+
+/// A use-only submit may remove imports on either side of a stored `mod` (D-168).
+#[test]
+fn a_use_only_submit_can_drop_imports_around_a_stored_mod() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", concat!("use std::fmt;\nuse std::io;\nmod a;\nuse std::cmp;\n\n", "pub fn one() -> i32 {\n    1\n}\n",)),
+        ("src/a.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\n").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), concat!("use std::fmt;\nmod a;\n\n", "pub fn one() -> i32 {\n    1\n}\n",));
 }

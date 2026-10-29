@@ -518,7 +518,7 @@ impl Store {
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
         let text = lockdown::command(&self.root, &argv, 120, usize::MAX, false, false)?;
-        Ok((lockdown::passed(&text), diagnostics::strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+        Ok((lockdown::passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
     }
 
     /// Runs `cargo` in the project (D-158): the exit code and its output.
@@ -529,7 +529,7 @@ impl Store {
         let mut argv = vec!["cargo".to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         let text = lockdown::command(&self.root, &argv, timeout, usize::MAX, false, true)?;
-        Ok((lockdown::passed(&text), diagnostics::strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+        Ok((lockdown::passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
     }
 
     /// Type-checks the project and records which symbols are broken, with
@@ -546,7 +546,7 @@ impl Store {
             let args = cargo::check_args(&self.root);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let (passed, output) = self.cargo(&argv, 120)?;
-            let mut diags = cargo::diagnostics(&output, &files);
+            let mut diags = cargo::diagnostics_for(&self.root, &output, &files);
             // A build script that fails this way (no network, a refused
             // write) is cargo's exit with no located diagnostic, so the
             // check must add it or it would report a pass (D-158 point 4).
@@ -1094,42 +1094,7 @@ impl Store {
     /// module bodies fall back to outlines, and what still doesn't fit is
     /// listed to view separately (D-14).
     fn view(&self, names: &[&str], bodies: bool, budget: usize) -> Out {
-        let ix = self.index()?;
-        let (mut out, mut left) = (String::new(), vec![]);
-        let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
-        for &name in names {
-            let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
-                let body = store::module_text(&ix, m);
-                if bodies && fits(&out, &body) {
-                    (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
-                } else {
-                    (store::module_outline(&ix, m, &self.broken()?, bodies), vec![])
-                }
-            } else {
-                match self.resolve(&ix, name) {
-                    Ok(i) => {
-                        (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]])
-                    }
-                    Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
-                }
-            };
-            if left.is_empty() && fits(&out, &text) {
-                out += &text;
-                let printed: Vec<String> = match self.resolve_module(&ix, name) {
-                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect(),
-                    None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
-                };
-                printed.into_iter().for_each(mark_shown);
-                served.into_iter().for_each(|s| reads::mark_served(&self.root, s));
-            } else {
-                left.push(name);
-            }
-        }
-        if !left.is_empty() {
-            out +=
-                &format!("Not shown, to fit the size limit: `solace view {}{}`\n", left.join(" "), if bodies { " --bodies" } else { "" });
-        }
-        Ok(out)
+        self.view_with_header(names, bodies, false, budget)
     }
 
     /// Several names give one document: each signature is printed once, and
@@ -2080,7 +2045,7 @@ impl Store {
             result
         };
         let (ok, output) = result?;
-        let diags = if rust { cargo::diagnostics(&output, &files) } else { self.lang().diagnostics(&output, &files) };
+        let diags = if rust { cargo::diagnostics_for(&self.root, &output, &files) } else { self.lang().diagnostics(&output, &files) };
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         if !errors.is_empty() {
             return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
@@ -2456,6 +2421,52 @@ impl Store {
             )?;
         }
         Ok(())
+    }
+
+    fn view_with_header(&self, names: &[&str], bodies: bool, header: bool, budget: usize) -> Out {
+        let ix = self.index()?;
+        let (mut out, mut left) = (String::new(), vec![]);
+        let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
+        for &name in names {
+            let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
+                let body = store::module_text(&ix, m);
+                if bodies && fits(&out, &body) {
+                    (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
+                } else {
+                    (store::module_outline(&ix, m, &self.broken()?, bodies, header && !bodies), vec![])
+                }
+            } else {
+                match self.resolve(&ix, name) {
+                    Ok(i) => {
+                        (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]])
+                    }
+                    Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
+                }
+            };
+            if left.is_empty() && fits(&out, &text) {
+                out += &text;
+                let printed: Vec<String> = match self.resolve_module(&ix, name) {
+                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect(),
+                    None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
+                };
+                printed.into_iter().for_each(mark_shown);
+                served.into_iter().for_each(|s| reads::mark_served(&self.root, s));
+            } else {
+                left.push(name);
+            }
+        }
+        if !left.is_empty() {
+            out += &format!(
+                "Not shown, to fit the size limit: `solace view {}{}`\n",
+                left.join(" "),
+                match (bodies, header) {
+                    (true, _) => " --bodies",
+                    (false, true) => " --header",
+                    (false, false) => "",
+                }
+            );
+        }
+        Ok(out)
     }
 }
 

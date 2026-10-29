@@ -42,7 +42,13 @@ agent = "claude"
 model = "claude-sonnet-5-5"
 
 [[models]]
-id = "claude-haiku-4-5"
-label = "Haiku 4.5"
+id = "claude-haiku-5-5"
+label = "Haiku 5.5"
 agent = "claude"
-model = "claude-haiku-4-5-20251001"
+model = "claude-haiku-5-5"
+
+[[models]]
+id = "claude-fable-5-1"
+label = "Fable 5.1"
+agent = "claude"
+model = "claude-fable-5-1"
