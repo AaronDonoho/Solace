@@ -2,6 +2,7 @@
 //! its path is written.
 
 use super::*;
+use crate::board::setup::with_config;
 
 /// A path resolves `.` and `..` parts lexically, as the file system would; a
 /// path above the project keeps the `..` that leaves it.
@@ -80,7 +81,7 @@ fn a_format_refuses_a_changed_mod_list() {
 fn formatting_reports_invalid_settings() {
     let (_root, store) = crate::testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
     let bad = crate::testing::Scratch::new().with(&[("system.toml", "[languages]\nrust = 1\n")]);
-    let e = crate::board::with_config(&bad.join("system.toml"), || store.format_module_rust("crate")).unwrap_err();
+    let e = with_config(&bad.join("system.toml"), || store.format_module_rust("crate")).unwrap_err();
     assert!(e.0.contains("E6020"), "{}", e.0);
 }
 

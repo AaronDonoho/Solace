@@ -4,64 +4,22 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::glob_reach;
-use super::{
-    Carry, HiddenThreadLocal, TestGroup, TestModule, enclosing_module, leaf, module_names, names_need_glob, rewrite_targets, splice,
-    target_names, test_container, thread_local_paths,
-};
+use super::{Carry, enclosing_module, leaf, names_need_glob};
+use crate::extract::rust::test_files::TestModule;
+use crate::extract::rust::test_files::test_container;
+use crate::extract::rust::test_files::TestGroup;
 use crate::Index;
 use crate::failure::Failure;
 use crate::language;
-
-/// The parent and crate-root imports a newly created module needs for names
-/// the moved code mentions only in a pattern, which the reference graph leaves
-/// out of its uses.
-pub(super) fn parent_imports(
-    ix: &Index,
-    ids: &HashMap<&str, usize>,
-    moved: &[bool],
-    newmod: &[String],
-    target: &str,
-    references: &language::rust_refs::References<'_>,
-    newheaders: &HashMap<String, String>,
-) -> Result<Vec<Carry>, Failure> {
-    let targets = rewrite_targets(ix, moved);
-    let hidden = thread_local_paths(ix, ids, &module_names(ix, ids));
-    let mut carried = vec![];
-    let mut seen = HashSet::new();
-    for i in (0..ix.syms.len()).filter(|&i| moved[i] && newmod[i] == target) {
-        let from = ix.syms[i].module.clone();
-        let mut sites: Vec<(String, language::rust_refs::ImportSite)> =
-            language::rust_refs::import_sites(&ix.syms, &ix.modules, &from, true)?.into_iter().map(|site| (from.clone(), site)).collect();
-        sites.extend(glob_reach::super_glob_imports(ix, ids, newheaders, &from));
-        let crate_root = glob_reach::reaches_crate_root(ix, ids, newheaders, &from);
-        for name in &references.mentioned[i] {
-            if !parent_name_needed(ix, &targets, name) {
-                continue;
-            }
-            let found = sites.iter().find(|(_, site)| !site.glob && &site.local == name);
-            let (owner, mut site) = match found {
-                Some((owner, site)) => (owner.clone(), site.clone()),
-                None if crate_root && crate_root_item(ix, name) => {
-                    ("crate".to_string(), language::rust_refs::ImportSite::named(vec![name.clone()]))
-                }
-                None => continue,
-            };
-            site.path = absolute_import_path(ix, &owner, &site.path);
-            if hidden_thread_local(&hidden, &site.path) {
-                continue;
-            }
-            if seen.insert((owner.clone(), site.local.clone(), site.path.clone(), site.glob)) {
-                carried.push(Carry { from: owner, site, rename: true });
-            }
-        }
-    }
-    Ok(carried)
-}
-
+use crate::extract::rust::rewrite::use_visibility;
+use crate::extract::rust::rewrite::use_line_removal;
+use crate::extract::rust::rewrite::apply_import_edits;
+use crate::extract::rust::rewrite::attributed_import_line;
 /// Adds the carried imports to `target`, aliasing one whose local name the
 /// target already uses, and renames its mentions in the moved code.
-pub(super) fn carry_imports(
+pub(crate) fn carry_imports(
     ix: &Index,
+    ids: &HashMap<&str, usize>,
     moved: &[bool],
     newmod: &[String],
     target: &str,
@@ -69,24 +27,45 @@ pub(super) fn carry_imports(
     refs: &language::rust_refs::References<'_>,
     newtext: &mut [String],
     newheaders: &mut HashMap<String, String>,
+    inline: Option<usize>,
 ) -> Result<Vec<Vec<String>>, Failure> {
-    let mut header = newheaders.get(target).cloned().unwrap_or_default();
-    let mut names = super::target_names_after_move(ix, moved, newmod, &header, target)?;
-    let mut existing = target_import_sites(ix, &header, target)?;
+    let mut header = match inline {
+        Some(container) => newtext[container].clone(),
+        None => newheaders.get(target).cloned().unwrap_or_default(),
+    };
+    let mut names = match inline {
+        Some(container) => inline_names(ix, moved, newmod, target, container, &header, newtext)?,
+        None => super::target_names_after_move(ix, moved, newmod, &header, target)?,
+    };
+    let mut existing = match inline {
+        Some(container) => test_container_imports(ix, container, &header, newtext)?,
+        None => target_import_sites(ix, &header, target)?,
+    };
     let mut aliases: HashMap<(String, Vec<String>, bool), String> = HashMap::new();
     let mut added_globs = vec![];
     for carry in carried {
         let key = import_key(&carry.site);
-        let covered = existing.iter().any(|site| import_key(site) == key && covers(site, &carry.site));
+        let glob_ok = carry.site.alias.is_none() && !names.contains(&carry.site.local);
+        let covered = existing.iter().any(|site| covers(site, &carry.site))
+            || (glob_ok
+                && (existing.iter().any(|site| glob_covers(site, &carry.site))
+                    || (!carry.site.glob && glob_reach::sees_through_super_glob(ix, ids, newheaders, target, &carry.from))));
         if !covered {
             let ungated = gates(&carry.site.attributes).is_empty();
-            let changed = if ungated { drop_gated_imports(ix, target, &key, &mut header, newtext)? } else { false };
+            let changed = if ungated {
+                match inline {
+                    Some(container) => drop_gated_imports_in(ix, target, &key, &mut header, newtext, Some(ix.syms[container].id.as_str()))?,
+                    None => drop_gated_imports(ix, target, &key, &mut header, newtext)?,
+                }
+            } else {
+                false
+            };
             if !changed {
                 let (line, alias) = carried_import_line(ix, target, carry, &mut names, &mut added_globs);
                 if let Some(alias) = alias {
                     aliases.insert(key.clone(), alias);
                 }
-                header = add_import_line(&header, &line);
+                header = if inline.is_some() { add_inline_import_line(&header, &line) } else { add_import_line(&header, &line) };
             }
             if changed {
                 existing.retain(|site| import_key(site) != key || gates(&site.attributes).is_empty());
@@ -101,7 +80,11 @@ pub(super) fn carry_imports(
             }
         }
     }
-    newheaders.insert(target.to_string(), header);
+    if let Some(container) = inline {
+        newtext[container] = header;
+    } else {
+        newheaders.insert(target.to_string(), header);
+    }
     Ok(added_globs)
 }
 
@@ -127,7 +110,7 @@ pub(super) fn carry_test_imports(
             container.map_or_else(|| from.clone(), |container| format!("{}::{}", ix.syms[container].module, ix.syms[container].name));
         let mut sites = vec![];
         if let Some(container) = container {
-            sites.extend(test_container_imports(ix, container)?);
+            sites.extend(test_container_imports(ix, container, &newtext[container], newtext)?);
         } else if let Some(row) = ix.modules.iter().find(|row| row.path == from) {
             sites.extend(
                 language::rust_refs::import_sites_in(&row.header).map_err(|e| Failure(format!("imports in {from} don't parse: {e}"), 1))?,
@@ -177,37 +160,11 @@ pub(super) fn carry_test_imports(
     if carried.is_empty() {
         return Ok(vec![]);
     }
-    carry_imports(ix, moved, newmod, &test.module, &carried, refs, newtext, newheaders)
+    let inline = test.inline.as_deref().and_then(|id| ix.syms.iter().position(|sym| sym.id == id));
+    carry_imports(ix, ids, moved, newmod, &test.module, &carried, refs, newtext, newheaders, inline)
 }
 
-/// Roots the crate-root paths in moved `use` items, so a test container keeps
-/// resolving the modules it saw beside its old parent.
-pub(super) fn root_moved_use_imports(ix: &Index, moved: &[bool], newmod: &[String], newtext: &mut [String]) {
-    for i in
-        (0..ix.syms.len()).filter(|&i| moved[i] && matches!(ix.syms[i].kind_text.as_str(), "use" | "mod") && newmod[i] != ix.syms[i].module)
-    {
-        newtext[i] = root_import_text(ix, &newtext[i]);
-    }
-}
-
-/// `text`, an import item, with `crate::` in front of each path that names a
-/// crate-root module or item.
-fn root_import_text(ix: &Index, text: &str) -> String {
-    let Ok(sites) = language::rust_refs::import_sites_in(text) else { return text.to_string() };
-    let starts: BTreeSet<usize> = sites
-        .into_iter()
-        .filter_map(|site| {
-            let first = site.path.first()?;
-            (!matches!(first.as_str(), "crate" | "self" | "super") && crate_root_name(ix, first)).then_some(site.range.start)
-        })
-        .collect();
-    if starts.is_empty() {
-        return text.to_string();
-    }
-    splice(text, starts.into_iter().map(|at| (at..at, "crate::".to_string())).collect())
-}
-
-pub(super) fn rooted_path(ix: &Index, from: &str, target: &str, path: &[String]) -> Vec<String> {
+pub(crate) fn rooted_path(ix: &Index, from: &str, target: &str, path: &[String]) -> Vec<String> {
     if from != "crate" || target == "crate" {
         return path.to_vec();
     }
@@ -216,7 +173,7 @@ pub(super) fn rooted_path(ix: &Index, from: &str, target: &str, path: &[String])
 
 /// The absolute crate path `path` names when read from `from`, or `path`
 /// unchanged when it names another crate or is already absolute.
-pub(super) fn absolute_import_path(ix: &Index, from: &str, path: &[String]) -> Vec<String> {
+pub(crate) fn absolute_import_path(ix: &Index, from: &str, path: &[String]) -> Vec<String> {
     let Some(first) = path.first() else { return path.to_vec() };
     if first == "crate" {
         return path.to_vec();
@@ -268,41 +225,27 @@ pub(super) fn module_item(ix: &Index, module: &str, name: &str) -> bool {
 }
 
 /// Whether `name` is an item the crate root declares, not one it imports.
-fn crate_root_item(ix: &Index, name: &str) -> bool {
+pub(crate) fn crate_root_item(ix: &Index, name: &str) -> bool {
     module_item(ix, "crate", name)
 }
 
-fn crate_root_name(ix: &Index, name: &str) -> bool {
+pub(crate) fn crate_root_name(ix: &Index, name: &str) -> bool {
     ix.modules.iter().any(|module| module.path == name) || crate_root_item(ix, name)
 }
 
-/// Whether a moved mention still needs an import: it is no module qualifier,
-/// and no rewritten target already gives it a name.
-fn parent_name_needed(ix: &Index, targets: &BTreeSet<usize>, name: &str) -> bool {
-    if ix.modules.iter().any(|module| module.path == name) {
-        return false;
-    }
-    !targets.iter().any(|&t| ix.syms[t].name == name || leaf(&ix.syms[t].name) == name)
-}
-
-/// Whether an import path names a static declared inside a `thread_local!`
-/// block, which `qualify_thread_locals` names directly instead.
-fn hidden_thread_local(hidden: &[HiddenThreadLocal], path: &[String]) -> bool {
-    let rooted = path.join("::");
-    hidden.iter().any(|tl| {
-        let full = if tl.module == "crate" { tl.name.clone() } else { format!("{}::{}", tl.module, tl.name) };
-        rooted == full || rooted == format!("crate::{full}") || rooted.ends_with(&format!("::{full}"))
-    })
-}
-
-fn test_container_imports(ix: &Index, container: usize) -> Result<Vec<language::rust_refs::ImportSite>, Failure> {
-    let mut sites = language::rust_refs::import_sites_in(&ix.syms[container].text)
+fn test_container_imports(
+    ix: &Index,
+    container: usize,
+    text: &str,
+    newtext: &[String],
+) -> Result<Vec<language::rust_refs::ImportSite>, Failure> {
+    let mut sites = language::rust_refs::import_sites_in(text)
         .map_err(|e| Failure(format!("imports in {} don't parse: {e}", ix.syms[container].qname()), 1))?;
     let id = ix.syms[container].id.as_str();
-    for symbol in ix.syms.iter().filter(|s| s.parent.as_deref() == Some(id) && s.kind_text == "use") {
+    for (i, symbol) in ix.syms.iter().enumerate().filter(|(_, s)| s.parent.as_deref() == Some(id) && s.kind_text == "use") {
         sites.extend(
-            language::rust_refs::import_sites_in(&symbol.text)
-                .map_err(|e| Failure(format!("imports in {} don't parse: {e}", ix.syms[container].name), 1))?,
+            language::rust_refs::import_sites_in(&newtext[i])
+                .map_err(|e| Failure(format!("imports in {} don't parse: {e}", symbol.name), 1))?,
         );
     }
     Ok(sites)
@@ -367,7 +310,7 @@ fn carry_super_glob(
     }
 }
 
-fn import_keys(ix: &Index, header: &str, target: &str) -> Result<HashSet<(String, Vec<String>, bool)>, Failure> {
+pub(super) fn import_keys(ix: &Index, header: &str, target: &str) -> Result<HashSet<(String, Vec<String>, bool)>, Failure> {
     Ok(target_import_sites(ix, header, target)?.into_iter().map(|site| import_key(&site)).collect())
 }
 
@@ -382,50 +325,8 @@ fn fresh_name(local: &str, taken: &HashSet<String>) -> String {
     }
 }
 
-/// Adds the import rustc names for a trait a moved item uses through a type
-/// path, which name matching cannot see. Returns whether a header changed.
-pub(super) fn add_missing_trait_imports(
-    s: &crate::Store,
-    ix: &Index,
-    before: &HashMap<String, String>,
-    diags: &[crate::diagnostics::Diag],
-) -> Result<bool, Failure> {
-    let mut added = false;
-    let mut seen = HashSet::new();
-    for diag in crate::rust_check::new_errors(before, diags) {
-        let Some(module) = diag.module.as_deref() else { continue };
-        for path in suggested_trait_imports(&diag.text) {
-            if !seen.insert((module.to_string(), path.clone())) {
-                continue;
-            }
-            let header = s.header(module)?;
-            if import_keys(ix, &header, module)?.iter().any(|(_, imported, glob)| !*glob && imported == &path) {
-                continue;
-            }
-            let taken = target_names(ix, &header, module, |_, symbol| symbol.module == module)?;
-            let local = path.last().map(String::as_str).unwrap_or("");
-            let line = if taken.contains(local) { format!("use {} as _;", path.join("::")) } else { format!("use {};", path.join("::")) };
-            s.set_header(module, &add_import_line(&header, &line))?;
-            added = true;
-        }
-    }
-    Ok(added)
-}
-
-/// The imports rustc offers for a trait missing from scope.
-pub(super) fn suggested_trait_imports(text: &str) -> Vec<Vec<String>> {
-    if !(text.contains("trait") && text.contains("not in scope")) {
-        return vec![];
-    }
-    let lines: Vec<&str> = text.lines().filter_map(|line| line.find("+ use ").map(|at| &line[at + "+ ".len()..])).collect();
-    let [line] = lines.as_slice() else { return vec![] };
-    let Some(end) = line.find(';') else { return vec![] };
-    let Ok(sites) = language::rust_refs::import_sites_in(&line[..=end]) else { return vec![] };
-    sites.into_iter().find(|site| !site.glob).map(|site| vec![site.path]).unwrap_or_default()
-}
-
 /// The imports written in `module`, including an inline module's own `use`s.
-pub(super) fn module_imports(ix: &Index, ids: &HashMap<&str, usize>, module: &str) -> Vec<language::rust_refs::ImportSite> {
+pub(crate) fn module_imports(ix: &Index, ids: &HashMap<&str, usize>, module: &str) -> Vec<language::rust_refs::ImportSite> {
     if ix.modules.iter().any(|m| m.path == module) {
         return language::rust_refs::import_sites(&ix.syms, &ix.modules, module, true).unwrap_or_default();
     }
@@ -438,7 +339,7 @@ pub(super) fn module_imports(ix: &Index, ids: &HashMap<&str, usize>, module: &st
         .collect()
 }
 
-pub(super) fn add_import_line(header: &str, line: &str) -> String {
+pub(crate) fn add_import_line(header: &str, line: &str) -> String {
     let body = header.trim_end();
     if body.is_empty() { format!("{line}\n\n") } else { format!("{body}\n{line}\n\n") }
 }
@@ -467,8 +368,7 @@ fn gates(attributes: &str) -> Vec<String> {
 /// Whether `existing` provides the binding `carry` needs in every
 /// configuration where `carry` is needed.
 pub(super) fn covers(existing: &language::rust_refs::ImportSite, carry: &language::rust_refs::ImportSite) -> bool {
-    let existing_gates = gates(&existing.attributes);
-    existing_gates.is_empty() || existing_gates == gates(&carry.attributes)
+    import_key(existing) == import_key(carry) && gates_cover(existing, carry)
 }
 
 /// Drops the target's `cfg` gates on `key`: the first copy becomes ungated and
@@ -480,15 +380,7 @@ fn drop_gated_imports(
     header: &mut String,
     newtext: &mut [String],
 ) -> Result<bool, Failure> {
-    let (kept, mut changed, mut ungated) = ungate_import(header, target, key, true)?;
-    *header = kept;
-    for (i, _) in ix.syms.iter().enumerate().filter(|(_, s)| s.module == target && s.parent.is_none() && s.kind_text == "use") {
-        let (kept, did, did_ungate) = ungate_import(&newtext[i], target, key, !ungated)?;
-        newtext[i] = kept;
-        changed |= did;
-        ungated |= did_ungate;
-    }
-    Ok(changed)
+    drop_gated_imports_in(ix, target, key, header, newtext, None)
 }
 
 fn is_config_gate(attr: &str) -> bool {
@@ -568,7 +460,7 @@ fn carried_import_line(
         let line = if local == leaf(&path) { format!("use {path};") } else { format!("use {path} as {local};") };
         (line, alias)
     };
-    (super::attributed_import_line(&carry.site.attributes, line), alias)
+    (attributed_import_line(&carry.site.attributes, line), alias)
 }
 
 /// `text` without the gated copies of `key`, adding `line` for the copy at
@@ -584,14 +476,14 @@ fn remove_gated_copies(
     let mut members = vec![];
     for site in sites.into_iter().filter(|site| import_key(site) == *key && !gates(&site.attributes).is_empty()) {
         if site.outside == 0 && sole_tree_item(text, &site.range).is_some() {
-            if let Some(range) = super::use_line_removal(text, &site.range) {
+            if let Some(range) = use_line_removal(text, &site.range) {
                 line_removals.push(range);
             }
         } else {
             members.push((site.range, site.alias));
         }
     }
-    super::apply_import_edits(text, vec![], line_removals, members, add.into_iter().collect(), module)
+    apply_import_edits(text, vec![], line_removals, members, add.into_iter().collect(), module)
 }
 
 /// The ungated `use` line for one grouped import `site`.
@@ -604,8 +496,8 @@ fn ungated_import_line(text: &str, site: &language::rust_refs::ImportSite) -> St
     } else {
         format!("use {path} as {};", site.local)
     };
-    let line = format!("{}{line}", super::use_visibility(text, &site.range));
-    super::attributed_import_line(&without_cfg_attributes(&site.attributes), line)
+    let line = format!("{}{line}", use_visibility(text, &site.range));
+    attributed_import_line(&without_cfg_attributes(&site.attributes), line)
 }
 
 /// `attributes` without its `cfg` gates.
@@ -619,4 +511,80 @@ fn sole_tree_item(text: &str, range: &std::ops::Range<usize>) -> Option<(std::op
     let (item, tree) = items.into_iter().find(|(_, tree)| tree.start <= range.start && range.end <= tree.end)?;
     let bindings = language::rust_refs::import_sites_in(&text[item.clone()]).ok()?;
     (bindings.len() == 1).then_some((item, tree))
+}
+
+/// Whether a glob import of `existing`'s path names `carry`'s leaf.
+pub(super) fn glob_covers(existing: &language::rust_refs::ImportSite, carry: &language::rust_refs::ImportSite) -> bool {
+    existing.glob && carry.path.len() == existing.path.len() + 1 && carry.path.starts_with(&existing.path) && gates_cover(existing, carry)
+}
+
+fn gates_cover(existing: &language::rust_refs::ImportSite, carry: &language::rust_refs::ImportSite) -> bool {
+    let existing_gates = gates(&existing.attributes);
+    existing_gates.is_empty() || existing_gates == gates(&carry.attributes)
+}
+
+/// The names an inline test module already binds: its parent's items and
+/// imports, which its `use super::*` reaches, then its own children and uses.
+fn inline_names(
+    ix: &Index,
+    moved: &[bool],
+    newmod: &[String],
+    target: &str,
+    container: usize,
+    text: &str,
+    newtext: &[String],
+) -> Result<HashSet<String>, Failure> {
+    let mut names = super::target_names(ix, "", target, |i, _| super::in_module_after_move(ix, moved, newmod, i, target))?;
+    let id = ix.syms[container].id.as_str();
+    for child in ix.syms.iter().filter(|s| s.parent.as_deref() == Some(id)) {
+        names.insert(leaf(&child.name).to_string());
+    }
+    for site in test_container_imports(ix, container, text, newtext)? {
+        names.insert(site.local);
+    }
+    Ok(names)
+}
+
+fn add_inline_import_line(text: &str, line: &str) -> String {
+    let body = text.trim_end();
+    let line = crate::store::reindent(line, "    ");
+    if body.ends_with('{') { format!("{body}\n{line}\n") } else { format!("{body}\n{line}\n\n") }
+}
+
+/// Drops the `key` gates in `header` and the `use` symbols whose parent is
+/// `parent`: the first copy becomes ungated and the rest go.
+pub(super) fn drop_gated_imports_in(
+    ix: &Index,
+    target: &str,
+    key: &(String, Vec<String>, bool),
+    header: &mut String,
+    newtext: &mut [String],
+    parent: Option<&str>,
+) -> Result<bool, Failure> {
+    let (closed, added) = closed_fragment(header);
+    let (kept, mut changed, mut ungated) = ungate_import(&closed, target, key, true)?;
+    if added {
+        *header = match kept.strip_suffix("\n}").or_else(|| kept.strip_suffix('}')) {
+            Some(text) => text.to_string(),
+            None => return Err(Failure(format!("import edits in {target} removed the closing brace of an open header"), 1)),
+        };
+    } else {
+        *header = kept;
+    }
+    for i in 0..ix.syms.len() {
+        let symbol = &ix.syms[i];
+        if symbol.module != target || symbol.kind_text != "use" || symbol.parent.as_deref() != parent {
+            continue;
+        }
+        let (kept, did, did_ungate) = ungate_import(&newtext[i], target, key, !ungated)?;
+        newtext[i] = kept;
+        changed |= did;
+        ungated |= did_ungate;
+    }
+    Ok(changed)
+}
+
+/// `text` and whether a missing closing brace had to be added to parse it.
+fn closed_fragment(text: &str) -> (String, bool) {
+    if text.parse::<proc_macro2::TokenStream>().is_ok() { (text.to_string(), false) } else { (format!("{text}\n}}"), true) }
 }

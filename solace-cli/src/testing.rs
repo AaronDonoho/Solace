@@ -103,3 +103,10 @@ pub(crate) fn kept_copy(root: &std::path::Path, reply: &str) -> std::path::PathB
         .unwrap_or_else(|| panic!("no kept copy in reply: {reply}"));
     root.join(kept.trim_end_matches(|c: char| c == '.' || c == ','))
 }
+
+/// The span the next Rust parse gets. On a thread whose span table is clear,
+/// proc-macro2 starts at byte 1, so `x` spans `bytes(1..2)`.
+pub(crate) fn rust_span_start() -> String {
+    let ident: syn::Ident = syn::parse_str("x").expect("x is an identifier");
+    format!("{:?}", ident.span())
+}

@@ -1321,3 +1321,9 @@ Amends D-112 point 3 and D-198 point 2, and Spec 15 §6 and A20 (Aaron, board ta
 1. A new Tech Debt task is titled with just the feature's title, or the completed task's title when it has no feature, with nothing added. The board's "Tech debt" label marks it.
 2. Existing Tech Debt tasks keep their titles; nothing is renamed.
 Why: the board's label already marked these tasks, so the suffix repeated the label and made their titles longer.
+
+## D-214 Tests run only when their reach changed
+Amends D-44 point 1 and Spec 3 §2 (Aaron, board task "test: stop running tests a change can't affect", 2026-10-30). Part of the Improved Agent Integration feature.
+1. `test` without `--all` runs a test when it has no passing result, or the hash of its reach changed since that pass. A test that reaches another process, the network or foreign code is not run for that reason alone.
+2. A test's reach hash covers the revision and module of every symbol it can run, and the project and dependency manifests; a module header alone is not part of it.
+Why: moving `lockdown.limit` ran 1,338 of 1,407 tests because every test reaching `lockdown.command` was treated as a process test and every test touching `lockdown` saw its header change. A move does not change behavior. A header change that leaves the reach graph the same is not a test change; reach stays a derived fact, not a guarantee.

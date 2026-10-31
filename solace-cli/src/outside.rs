@@ -11,6 +11,9 @@ use serde_json::Value;
 use serde_json::json;
 use crate::store::projection;
 use std::collections::HashMap;
+#[cfg(test)] use crate::lockdown::settings::settings;
+#[cfg(test)] use crate::board::task_model::open;
+
 pub const TITLE: &str = "Unexpected Changes";
 
 fn digest(bytes: &[u8]) -> String {
@@ -752,9 +755,9 @@ mod tests {
         let lost = "pub fn lost() -> Int {\n  9\n}\n";
         let kept = keep(&p.root, "src/app.gleam", lost.as_bytes()).unwrap();
         assert_eq!(kept, ".solace/outside/src/app.gleam");
-        let mut ignores = crate::lockdown::Ignores::new(&p.root);
+        let mut ignores = crate::lockdown::paths::Ignores::new(&p.root);
         assert!(ignores.ignored(&kept));
-        let v = crate::lockdown::settings(&p.root).unwrap();
+        let v = settings(&p.root).unwrap();
         let files = crate::lockdown::dispatch(&p, &v, &["files"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap();
         assert!(files.contains(".solace/ [internal]") && !files.contains("outside/src/app.gleam"), "{files}");
         let grep = crate::lockdown::dispatch(&p, &v, &["grep", "lost"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap();
@@ -806,7 +809,7 @@ mod tests {
     #[test]
     fn a_root_ignore_that_still_hides_the_store_is_flagged() {
         let s = crate::testing::project(&[("src/app.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
-        crate::board::open(&s.root).unwrap();
+        open(&s.root).unwrap();
         let root = s.root.join(".gitignore");
         fs::write(&root, format!("{STORE_IGNORE}*.db\n")).unwrap();
         let note = absorb(&s, Mode::Notice).unwrap();
@@ -966,7 +969,7 @@ fn approving_puts_the_whole_store_in_store_db() {
 #[test]
 fn an_ignore_file_that_still_hides_the_store_is_flagged() {
     let s = crate::testing::project(&[("src/app.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
-    crate::board::open(&s.root).unwrap();
+    open(&s.root).unwrap();
     fs::write(s.root.join(".solace/.gitignore"), "# mine\n*\n!/custom\n").unwrap();
     let note = absorb(&s, Mode::Notice).unwrap();
     assert!(note.contains("still ignores store.db"), "{note}");

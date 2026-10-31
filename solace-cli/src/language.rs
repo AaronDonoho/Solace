@@ -17,6 +17,8 @@ use crate::diagnostics::Diag;
 use gleam::Gleam;
 use std::collections::BTreeMap;
 use std::path::Path;
+use crate::board::setup::language_enabled;
+use crate::board::setup::language_reason;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -248,11 +250,11 @@ pub fn id(root: &Path) -> Option<&'static str> {
 
 /// Why a language's projects can't use its tools, if they can't.
 pub fn reason(id: &str) -> Result<Option<String>, Failure> {
-    crate::board::language_reason(id)
+    language_reason(id)
 }
 
 /// Whether the system settings leave the language on. An unreadable or
 /// invalid settings file is an error, never a silent yes.
 pub fn enabled(id: &str) -> Result<bool, Failure> {
-    crate::board::language_enabled(id)
+    language_enabled(id)
 }

@@ -11,8 +11,21 @@ use serde_json::Value;
 use serde_json::json;
 use std::env;
 use std::collections::HashMap;
+use crate::board::runs::claude_home;
+use crate::board::runs::transcript;
+#[cfg(test)]
+#[path = "agents_tests.rs"]
+mod tests;
+use crate::board::setup::config_path;
+use crate::board::setup::on_path;
+use crate::board::setup::efforts;
+use std::process::Command;
+use crate::board::prerequisites::Probe;
+use crate::board::prerequisites::items;
+use crate::board::prerequisites::platform_name;
+use crate::board::prerequisites::platform;
 /// One agent kind.
-pub(super) struct Kind {
+pub(crate) struct Kind {
     /// The `agent` a model names, which is also its program.
     pub name: &'static str,
     /// What the human calls it.
@@ -50,7 +63,7 @@ pub(super) struct Kind {
     pub gone: fn(&str) -> bool,
 }
 
-pub(super) const KINDS: &[Kind] = &[
+pub(crate) const KINDS: &[Kind] = &[
     Kind {
         name: "codex",
         label: "Codex",
@@ -71,7 +84,7 @@ pub(super) const KINDS: &[Kind] = &[
     Kind {
         name: "claude",
         label: "Claude Code",
-        folder: super::claude_home,
+        folder: claude_home,
         files: &[".credentials.json"],
         status: &["auth", "status"],
         keys: &["ANTHROPIC_API_KEY"],
@@ -101,15 +114,15 @@ pub(super) fn kind(agent: &str) -> Option<&'static Kind> {
 // offered for a new run.
 
 /// Where each kind's last answer is kept, beside the system settings.
-pub(super) fn models_path() -> PathBuf {
+pub(crate) fn models_path() -> PathBuf {
     config_path().with_file_name("agent-models.json")
 }
 
-fn saved_models(path: &Path) -> Value {
+pub(crate) fn saved_models(path: &Path) -> Value {
     cached(&format!("models:{}", path.display()), || jsonx::read_opt(path).filter(Value::is_object).unwrap_or_else(|| json!({})))
 }
 
-fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
+pub(crate) fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -120,17 +133,7 @@ fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The configured models (presets first, then `[[models]]`) with each kind's
-/// discovered models merged in: a discovered model replaces a preset of the
-/// same id, and a configured model keeps its entry — the human's config wins.
-/// Models a discovery dropped stay, marked `gone`, so tasks already using them
-/// keep working; they are not offered for a new run. Once a run has named the
-/// model it used, an alias's label is that run's stored label.
-pub(super) fn merge(configured: &Value) -> Vec<Value> {
-    merge_from(configured, &saved_models(&models_path()))
-}
-
-pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
+pub(crate) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
     let mut out: Vec<Value> = configured.as_array().cloned().unwrap_or_default();
     for k in KINDS {
         for m in all[k.name]["models"].as_array().unwrap_or(&vec![]).iter() {
@@ -165,7 +168,7 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
 /// config names, else `medium` when offered, else the middle of the offer.
 /// Custom runners offer none, so they take none.
 pub(super) fn default_effort(m: &Value) -> Option<String> {
-    let offered = super::efforts(m);
+    let offered = efforts(m);
     if let Some(e) = m["effort"].as_str().filter(|e| offered.iter().any(|x| x == e)) {
         return Some(e.to_string());
     }
@@ -185,40 +188,15 @@ fn plain_label(m: &Value) -> Value {
     m
 }
 
-/// How old a kind's answer may be before `/models` asks the program again.
-const STALE: u64 = 15 * 60;
 /// How long one Codex discovery may take in all, from spawning it to its last page.
 const CODEX_DEADLINE: Duration = Duration::from_secs(60);
 /// Kinds with a refresh going now, so one request starts one thread per kind.
-static REFRESHING: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+pub(crate) static REFRESHING: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
 /// One writer at a time for `agent-models.json`: each writer rewrites the
 /// whole file from a snapshot, so two at once would lose one kind's answer.
-static MODELS: LazyLock<Mutex<()>> = LazyLock::new(Default::default);
+pub(crate) static MODELS: LazyLock<Mutex<()>> = LazyLock::new(Default::default);
 
-/// Asks every kind for its models now: the server's startup refresh.
-pub(super) fn refresh_all() {
-    for k in KINDS {
-        // Register the kind first, as `refresh_stale` does: a `/models` poll
-        // during the startup refresh must not start a second refresh for it.
-        if REFRESHING.lock().unwrap().insert(k.name) {
-            refresh(k);
-        }
-    }
-}
-
-/// Asks each kind whose answer is `STALE` old, or that has none, in the
-/// background; the caller serves the last list. A model error marks its kind
-/// stale, so the next `/models` asks again.
-pub(super) fn refresh_stale() {
-    let all = saved_models(&models_path());
-    for k in KINDS {
-        if all[k.name]["time"].as_u64().is_none_or(|t| now().saturating_sub(t) >= STALE) && REFRESHING.lock().unwrap().insert(k.name) {
-            std::thread::spawn(move || refresh(k));
-        }
-    }
-}
-
-fn refresh(k: &'static Kind) {
+pub(crate) fn refresh(k: &'static Kind) {
     let found = (k.discover)();
     if !found.is_empty()
         && let Err(e) = note_models(&models_path(), k, found)
@@ -255,21 +233,6 @@ fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), F
     all[k.name] = json!({"time": now(), "models": found});
     all["gone"] = Value::Object(gone);
     save_models(path, &all)
-}
-
-/// Records that model `model` resolved to `used`, with `label` as the plain
-/// text the run showed.
-pub(super) fn record_used(model: &str, used: &str, label: &str) {
-    let _writer = MODELS.lock().unwrap();
-    let path = models_path();
-    let mut all = saved_models(&path);
-    let record = json!({"model": used, "label": label});
-    if all["used"][model] != record {
-        all["used"][model] = record;
-        if let Err(e) = save_models(&path, &all) {
-            eprintln!("solace: could not record the model a run used: {}", e.0);
-        }
-    }
 }
 
 /// Marks kind `agent`'s answer stale, so the next `/models` asks the program.
@@ -886,7 +849,7 @@ pub(super) fn observe(
 
 /// After a run of model `m`, started at `started` and ended with `outcome`:
 /// what its log says about its sign-in's usage limit or expiry.
-pub(super) fn after_run(m: &Value, log: &Path, started: u64, outcome: Option<&str>) {
+pub(crate) fn after_run(m: &Value, log: &Path, started: u64, outcome: Option<&str>) {
     if let Err(e) = observe(&holds_path(), m, log, now(), started, outcome, &zone_offset) {
         eprintln!("solace: could not record the agent's sign-in: {}", e.0);
     }
@@ -895,7 +858,7 @@ pub(super) fn after_run(m: &Value, log: &Path, started: u64, outcome: Option<&st
 
 /// Why model `m` can't start right now, and whether that is a mark a human
 /// may clear. Checks only what is on this computer, cached for `FRESH`.
-pub(super) fn availability(m: &Value) -> Option<Status> {
+pub(crate) fn availability(m: &Value) -> Option<Status> {
     if m["gone"] == true {
         return Some(Status {
             reason: m["reason"].as_str().unwrap_or("no longer offered by its agent").to_string(),
@@ -920,7 +883,7 @@ pub fn unavailable(m: &Value) -> Option<String> {
 /// "Try again": clears the mark of the sign-in `body.agent` names, or every
 /// hold that may be retried without one, and the cached availability. A
 /// usage limit that has not reset remains in force.
-pub(super) fn try_again(body: &Value) -> Result<(), Failure> {
+pub(crate) fn try_again(body: &Value) -> Result<(), Failure> {
     match body["agent"].as_str() {
         None => clear_retryable(&holds_path())?,
         Some(agent) if kind(agent).is_some() => {
@@ -977,7 +940,7 @@ pub(super) fn missing_program(m: &Value) -> String {
 
 /// Why model `m`'s run stopped, in words a human can act on, when its output
 /// says its sign-in expired or its program needs an update.
-pub(super) fn stopped(m: &Value, entries: &[Value]) -> Option<String> {
+pub(crate) fn stopped(m: &Value, entries: &[Value]) -> Option<String> {
     if !m["run"].is_null() {
         return None;
     }
@@ -1131,21 +1094,21 @@ pub(super) fn program_name(m: &Value) -> &str {
 }
 
 /// What to do when model `m`'s program is not on this computer and a task is starting.
-pub(super) fn missing_program_at_launch(m: &Value) -> String {
+pub(crate) fn missing_program_at_launch(m: &Value) -> String {
     format!("{} is not installed. Install it, then start the task again.", program_name(m))
 }
 
 /// Whether an agent can start now: one is signed in, none is installed, or one
 /// is installed but needs its sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AgentCheck {
+pub(crate) enum AgentCheck {
     Ready,
     Missing,
     SignedOut { name: &'static str, label: &'static str },
 }
 
 /// Why model `m` can't start from what is on this computer, checked now.
-pub(super) fn local_now(m: &Value) -> Option<String> {
+pub(crate) fn local_now(m: &Value) -> Option<String> {
     let keys = setup::read_keys(&setup::keys_path());
     let here = Here {
         folder: &|k| (k.folder)(),
@@ -1156,19 +1119,6 @@ pub(super) fn local_now(m: &Value) -> Option<String> {
         now: now_ms(),
     };
     local(m, &here)
-}
-
-/// Whether an agent is installed and signed in, checked now instead of from the cache.
-pub(super) fn check_now() -> AgentCheck {
-    let installed: Vec<&Kind> = KINDS.iter().filter(|k| on_path(k.name)).collect();
-    if installed.is_empty() {
-        return AgentCheck::Missing;
-    }
-    if installed.iter().any(|k| local_now(&json!({"agent": k.name})).is_none()) {
-        return AgentCheck::Ready;
-    }
-    let k = installed[0];
-    AgentCheck::SignedOut { name: k.name, label: k.label }
 }
 
 /// Codex's folder: `CODEX_HOME`, else `.codex` in the home folder.
@@ -1296,7 +1246,7 @@ pub(super) fn clear_retryable(path: &Path) -> Result<(), Failure> {
 
 /// The label a run's `used` model had when the run ended: a current entry
 /// before a gone one, the later entry among equals, else the model id.
-pub(super) fn used_label(models: &[Value], used: &str) -> String {
+pub(crate) fn used_label(models: &[Value], used: &str) -> String {
     models
         .iter()
         .filter(|m| m["gone"] == true)
@@ -1306,4 +1256,53 @@ pub(super) fn used_label(models: &[Value], used: &str) -> String {
         .last()
         .unwrap_or(used)
         .to_string()
+}
+
+/// Whether an agent is installed and signed in, checked now instead of from the cache.
+pub(super) fn check_now() -> AgentCheck {
+    let installed: Vec<&Kind> = KINDS.iter().filter(|k| on_path(k.name)).collect();
+    if installed.is_empty() {
+        return AgentCheck::Missing;
+    }
+    if installed.iter().any(|k| local_now(&json!({"agent": k.name})).is_none()) {
+        return AgentCheck::Ready;
+    }
+    let k = installed[0];
+    AgentCheck::SignedOut { name: k.name, label: k.label }
+}
+
+/// Every check, run now: nothing is cached, so **Check again** sees a newly installed tool.
+pub(crate) fn check() -> Value {
+    let platform = platform();
+    json!({
+        "platform": platform_name(platform),
+        "items": items(&Probe {
+            on_path: &on_path,
+            output: &command_output,
+            agent: &check_now,
+            sandbox: &crate::migrate::sandbox_works,
+            platform,
+        }),
+    })
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some(text)
+}
+
+/// Asks every kind for its models now: the server's startup refresh.
+pub(crate) fn refresh_all() {
+    for k in KINDS {
+        // Register the kind first, as `refresh_stale` does: a `/models` poll
+        // during the startup refresh must not start a second refresh for it.
+        if REFRESHING.lock().unwrap().insert(k.name) {
+            refresh(k);
+        }
+    }
 }

@@ -530,7 +530,7 @@ Not every check runs after every edit. From the dependency graph and the changed
 
 Fast feedback is a hard requirement. While iterating, a sub-second answer about the symbol just edited matters more than a deeper check.
 
-Tests are selected by reach (section 8.9). An ordinary test run runs the tests whose reach has changed since they last passed. It also runs every test that failed or never ran, and every test whose reach includes another process, the network or foreign code, which static analysis cannot see into. Naming symbols runs the tests that reach them, and a full run is always available. Test suites outside the ordinary test runner, such as end-to-end tests, are declared in the project settings. Solace says when a change reaches one, and never runs it unasked.
+Tests are selected by reach (section 8.9). An ordinary test run runs the tests whose reach has changed since they last passed, and every test that failed or never ran. A test that reaches another process, the network or foreign code runs only when its reach changes too. Naming symbols runs the tests that reach them, and a full run is always available. Test suites outside the ordinary test runner, such as end-to-end tests, are declared in the project settings. Solace says when a change reaches one, and never runs it unasked.
 
 ### 8.11 Performance budgets
 

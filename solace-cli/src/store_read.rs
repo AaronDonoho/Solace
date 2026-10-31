@@ -1,63 +1,31 @@
 //! Reading the store: session, view, inspect, refs, impact and find.
 
-use crate::Kind;
+use crate::failure::{Failure, Out};
+use crate::{Index, Kind, Store, Sym};
 
+use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 use std::fs;
-use rusqlite::OptionalExtension;
-impl crate::Store {
-    pub(crate) fn find(&self, query: &str) -> crate::failure::Out {
-        let ix = self.index()?;
-        let query = unquoted(query);
-        let q = query.to_lowercase();
-        let mut hits: Vec<(bool, String)> = vec![];
-        for s in &ix.syms {
-            let lines: Vec<String> = s
-                .text
-                .lines()
-                .enumerate()
-                .filter(|(_, l)| l.to_lowercase().contains(&q))
-                .map(|(n, l)| format!("  {:>3}: {}", n + 1, l.trim()))
-                .collect();
-            let name_hit = s.name.to_lowercase().contains(&q);
-            if name_hit || !lines.is_empty() {
-                let more = if lines.len() > 4 { format!("\n  … {} more lines", lines.len() - 4) } else { String::new() };
-                let shown: Vec<String> = lines.into_iter().take(4).collect();
-                hits.push((name_hit, format!("{} ({})\n{}{}", s.qname(), s.kind_text, shown.join("\n"), more)));
-            }
-        }
-        if hits.is_empty() {
-            return Ok(format!("No matches for \"{query}\".\n"));
-        }
-        hits.sort_by_key(|h| !h.0);
-        let total = hits.len();
-        let mut out: String = hits.iter().take(40).map(|h| h.1.trim_end().to_string() + "\n").collect();
-        if total > 40 {
-            out += &format!("… {} more symbols match; narrow the search.\n", total - 40);
-        }
-        Ok(out)
-    }
+use crate::lockdown::commands::trim_output;
+use crate::lockdown::files::line_ranges;
+use crate::board::briefs::plan_reading;
+use crate::board::runs::context;
+use crate::board::runs::strategy_context;
 
-}
-/// A search query without the quotes, backticks or apostrophes around it
-/// (`find "Customer(.."`: the quotes delimit the query, run 18).
-fn unquoted(query: &str) -> &str {
-    ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
-}
-
-impl crate::Store {
+impl Store {
     /// The symbol index (one line per source symbol), test modules, and open
     /// work records expanded with the context of the symbols they name.
-    pub(crate) fn session(&self, scopes: &[&str]) -> crate::failure::Out {
+    pub(crate) fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
-        let tid = crate::board::context().map(|(t, _)| t);
+        let tid = context().map(|(t, _)| t);
         let rust = crate::language::is_rust(&self.root);
         if self.lang.is_none() && !rust {
             return self.plain_session("", tid.as_deref());
         }
         let ix = self.index()?;
-        let in_scope =
-            |m: &crate::ModuleRow| scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path));
+        let in_scope = |m: &crate::ModuleRow| {
+            scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path))
+        };
         let mut out = self.project_instructions();
         out += &String::from(
             "Symbols per module (types are capitalized). `inspect <name>...` gives signatures and context; \
@@ -65,7 +33,7 @@ impl crate::Store {
         );
         let mut tests = vec![];
         for m in ix.modules.iter().filter(|m| in_scope(m)) {
-            let syms: Vec<&crate::Sym> = ix.syms.iter().filter(|s| s.module == m.path).collect();
+            let syms: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == m.path).collect();
             if crate::store::is_test(m) {
                 tests.push(format!("{} ({})", m.path, syms.len()));
                 continue;
@@ -85,7 +53,7 @@ impl crate::Store {
     /// Session start in a project of plain files (D-60): no symbols to list.
     /// `deps` is the task's unfinished dependencies, for `--task` in a board
     /// run of task `tid`.
-    fn plain_session(&self, deps: &str, tid: Option<&str>) -> crate::failure::Out {
+    fn plain_session(&self, deps: &str, tid: Option<&str>) -> Out {
         let mut out = self.project_instructions();
         out += deps;
         out += "This project has plain files and no code held as symbols of its own: `files` lists them, `read` and `write` change them, \
@@ -97,13 +65,18 @@ impl crate::Store {
     /// the other projects, the command reference, and last `call`, a first
     /// call to send, where the agent plans its reads (D-145). `tid` is the
     /// board run's task; the open work records are capped (D-151).
-    fn session_end(&self, ix: &crate::Index, call: &str, tid: Option<&str>) -> crate::failure::Out {
-        let next = crate::reference::next_call(call, crate::board::strategy_context().is_some());
+    fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>) -> Out {
+        let next = crate::reference::next_call(call, strategy_context().is_some());
         let (status, work) = self.status_within(crate::cli::WORK_CAP)?;
-        Ok(format!("{status}{}{}\n{}{next}", self.work_context(ix, &work)?, self.other_projects(tid), crate::reference::agent_reference(tid.is_some())))
+        Ok(format!(
+            "{status}{}{}\n{}{next}",
+            self.work_context(ix, &work)?,
+            self.other_projects(tid),
+            crate::reference::agent_reference(tid.is_some())
+        ))
     }
     /// The symbols `text` names as `module.name`, in order, each once.
-    pub(crate) fn named(&self, ix: &crate::Index, text: &str) -> Vec<usize> {
+    pub(crate) fn named(&self, ix: &Index, text: &str) -> Vec<usize> {
         let mut named = vec![];
         for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
             let word = word.trim_matches(|c| c == '.' || c == '/');
@@ -187,7 +160,7 @@ impl crate::Store {
         )
     }
     /// The open work records `work` expanded with the context of the symbols they name.
-    fn work_context(&self, ix: &crate::Index, work: &[String]) -> crate::failure::Out {
+    fn work_context(&self, ix: &Index, work: &[String]) -> Out {
         let mut out = String::new();
         for text in work {
             let named = self.named(ix, text);
@@ -195,7 +168,7 @@ impl crate::Store {
                 out += "\n== Context of the symbols the work record names ==\n";
                 let (full, mut shown) = (named.iter().copied().collect(), HashSet::new());
                 for &i in &named {
-                    out += &self.bundle(ix, i, true, 0, &full, &mut shown)?;
+                    out += &self.bundle(ix, i, true, None, 0, &full, &mut shown)?;
                     out += "\n";
                 }
             }
@@ -206,22 +179,22 @@ impl crate::Store {
     /// likely relevant to the task (signature and why each was picked),
     /// within a fixed budget, plus the module list. In a board run it also
     /// names the task's feature (D-138) and unfinished dependencies (D-110).
-    pub(crate) fn session_task(&self, task: &str) -> crate::failure::Out {
-        let tid = crate::board::context().map(|(tid, _)| tid);
-        let plan = tid.as_deref().map(|tid| crate::board::plan_reading(&crate::scope::top(&self.root), tid)).unwrap_or_default();
+    pub(crate) fn session_task(&self, task: &str) -> Out {
+        let tid = context().map(|(tid, _)| tid);
+        let plan = tid.as_deref().map(|tid| plan_reading(&crate::scope::top(&self.root), tid)).unwrap_or_default();
         self.task_session(task, tid.as_deref(), &plan)
     }
     /// `session start --task` for board run task `tid`, with `deps` before the
     /// symbols; the board builds a fresh run's brief with it (D-151), outside
     /// the run's environment.
-    pub(crate) fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> crate::failure::Out {
+    pub(crate) fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
         let rust = crate::language::is_rust(&self.root);
         // The task's other projects with code, by folder: the list of symbols
         // draws on them too (D-123).
         let top = crate::scope::top(&self.root);
         let mine = crate::scope::dir(&top, &self.root);
-        let others: Vec<(String, crate::Store, crate::Index)> = tid
+        let others: Vec<(String, Store, Index)> = tid
             .and_then(|t| crate::scope::of_task(&self.root, t))
             .unwrap_or_default()
             .into_iter()
@@ -230,7 +203,7 @@ impl crate::Store {
                 *d != mine && (crate::language::detect(&path).is_some() || crate::language::is_rust(&path))
             })
             .filter_map(|d| {
-                let s = crate::Store::peek(&crate::scope::path(&top, &d)).ok()?;
+                let s = Store::peek(&crate::scope::path(&top, &d)).ok()?;
                 let ix = s.index().ok()?;
                 Some((d, s, ix))
             })
@@ -239,7 +212,7 @@ impl crate::Store {
             return self.plain_session(deps, tid);
         }
         let ix = self.index()?;
-        let projects: Vec<(Option<&str>, &crate::Store, &crate::Index)> =
+        let projects: Vec<(Option<&str>, &Store, &Index)> =
             std::iter::once((None, self, &ix)).chain(others.iter().map(|(d, s, x)| (Some(d.as_str()), s, x))).collect();
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
         let grouped = !others.is_empty();
@@ -275,7 +248,11 @@ impl crate::Store {
                     .iter()
                     .map(|s| {
                         let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
-                        [crate::words(&s.name).into_iter().collect(), crate::words(&doc).into_iter().collect(), crate::words(&s.text).into_iter().collect()]
+                        [
+                            crate::words(&s.name).into_iter().collect(),
+                            crate::words(&doc).into_iter().collect(),
+                            crate::words(&s.text).into_iter().collect(),
+                        ]
                     })
                     .collect()
             })
@@ -369,15 +346,17 @@ impl crate::Store {
         } else {
             code.first()
                 .and_then(|_| {
-                    crate::reach::test_symbols(&ix).into_iter().map(|t| (t, crate::reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(
-                        |a, b| {
+                    crate::reach::test_symbols(&ix)
+                        .into_iter()
+                        .map(|t| (t, crate::reach::closure(&ix, t)))
+                        .filter(|(_, r)| r.contains(&code[0]))
+                        .max_by(|a, b| {
                             let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
                             reached(&a.1)
                                 .cmp(&reached(&b.1))
                                 .then(score[a.0].total_cmp(&score[b.0]))
                                 .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
-                        },
-                    )
+                        })
                 })
                 .map(|(t, r)| {
                     let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(0, c)).collect();
@@ -433,12 +412,12 @@ impl crate::Store {
         Ok(out)
     }
     /// Open work records and broken symbols.
-    pub(crate) fn status(&self) -> Result<String, crate::failure::Failure> {
+    pub(crate) fn status(&self) -> Result<String, Failure> {
         Ok(self.status_within(usize::MAX)?.0)
     }
     /// `status` with the open work records cut at a whole record within `cap`
     /// bytes, saying how many were left out (D-14), and the texts of those shown.
-    fn status_within(&self, cap: usize) -> Result<(String, Vec<String>), crate::failure::Failure> {
+    fn status_within(&self, cap: usize) -> Result<(String, Vec<String>), Failure> {
         let mut out = String::new();
         let work = self.open_work()?;
         if !work.is_empty() {
@@ -470,7 +449,7 @@ impl crate::Store {
     /// A module is shown as an outline unless `bodies` is set. Past `budget`,
     /// module bodies fall back to outlines, and what still doesn't fit is
     /// listed to view separately (D-14).
-    pub(crate) fn view(&self, names: &[&str], bodies: bool, budget: usize) -> crate::failure::Out {
+    pub(crate) fn view(&self, names: &[&str], bodies: bool, budget: usize) -> Out {
         self.view_with_header(names, bodies, false, budget)
     }
     /// Several names give one document: each signature is printed once, and
@@ -478,8 +457,9 @@ impl crate::Store {
     /// `budget`, the bundles are trimmed in priority order (callers, then the
     /// test example, then the signatures of what each uses); if that is not
     /// enough, the names that don't fit are listed to inspect separately.
-    pub(crate) fn inspect(&self, names: &[&str], context: bool, budget: usize) -> crate::failure::Out {
+    pub(crate) fn inspect(&self, names: &[&str], context: bool, lines: Option<&str>, budget: usize) -> Out {
         let ix = self.index()?;
+        let ranges = lines.map(line_ranges).transpose()?;
         let (mut targets, mut unknown): (Vec<(&str, Option<usize>)>, Vec<String>) = (vec![], vec![]);
         for &name in names {
             match self.resolve(&ix, name) {
@@ -508,7 +488,7 @@ impl crate::Store {
             for &(name, i) in &targets {
                 let before = shown.clone();
                 let part = match i {
-                    Some(i) => self.bundle(&ix, i, context, level, &full, &mut shown)?,
+                    Some(i) => self.bundle(&ix, i, context, ranges.as_deref(), level, &full, &mut shown)?,
                     None => self.view(&[name], false, budget)?,
                 } + "\n";
                 let last = level == LAST || !context;
@@ -551,9 +531,19 @@ impl crate::Store {
     /// `level` is how far the context is trimmed (see `inspect`); `full` holds
     /// the symbols printed in full in this reply, `shown` the signatures
     /// printed so far.
-    fn bundle(&self, ix: &crate::Index, i: usize, context: bool, level: u8, full: &HashSet<usize>, shown: &mut HashSet<usize>) -> crate::failure::Out {
+    fn bundle(
+        &self,
+        ix: &Index,
+        i: usize,
+        context: bool,
+        lines: Option<&[(usize, usize)]>,
+        level: u8,
+        full: &HashSet<usize>,
+        shown: &mut HashSet<usize>,
+    ) -> Out {
         let s = &ix.syms[i];
-        let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind_text, s.text);
+        let text = lines.map_or_else(|| s.text.clone(), |ranges| numbered_lines(&s.text, ranges));
+        let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind_text, text);
         if !context {
             return Ok(out);
         }
@@ -628,14 +618,14 @@ impl crate::Store {
         Ok(out)
     }
     /// `refs <name>...`: each symbol's users, in the order named (D-102).
-    pub(crate) fn refs_all(&self, names: &[&str], budget: usize) -> crate::failure::Out {
+    pub(crate) fn refs_all(&self, names: &[&str], budget: usize) -> Out {
         let mut out = String::new();
         for name in names {
             out += &self.refs(name)?;
         }
-        Ok(crate::lockdown::trim_output(&out, budget))
+        Ok(trim_output(&out, budget))
     }
-    pub(crate) fn refs(&self, name: &str) -> crate::failure::Out {
+    pub(crate) fn refs(&self, name: &str) -> Out {
         let ix = self.index()?;
         // `refs <module>.<Type>.<field>`: the readers of one field (D-44)
         if let Some((ty, field)) = name.rsplit_once('.')
@@ -667,9 +657,9 @@ impl crate::Store {
     /// `impact [name...]`: what changed code reaches (D-44). With no names, the
     /// task's changes in a board run, otherwise the changes since `test` last
     /// passed; a name that hasn't changed counts as changed throughout.
-    pub(crate) fn impact(&self, names: &[&str], budget: usize) -> crate::failure::Out {
+    pub(crate) fn impact(&self, names: &[&str], budget: usize) -> Out {
         let ix = self.index()?;
-        let before = match crate::board::context() {
+        let before = match context() {
             Some((tid, _)) => {
                 let mut st = self.db.prepare("SELECT entity, data FROM board_before WHERE task = ?1 AND entity LIKE 'symbol:%'")?;
                 let rows: Vec<(String, String)> = st.query_map([&tid], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
@@ -709,7 +699,7 @@ impl crate::Store {
     }
     /// The submit reply's note on what the saved change reaches (D-44).
     /// `before`: (id, text before the submit; `None` if new).
-    pub(crate) fn impact_note(&self, ix: &crate::Index, before: &[(String, Option<String>)]) -> Result<Vec<String>, crate::failure::Failure> {
+    pub(crate) fn impact_note(&self, ix: &Index, before: &[(String, Option<String>)]) -> Result<Vec<String>, Failure> {
         let origins = crate::reach::origins(ix, before);
         if origins.is_empty() {
             return Ok(vec![]);
@@ -718,12 +708,12 @@ impl crate::Store {
         let syms: Vec<usize> = impact.uses.iter().map(|u| u.sym).collect();
         Ok(crate::reach::note(ix, &impact, &crate::reach::reached(&crate::reach::suites(self, ix)?, &syms)))
     }
-    pub(crate) fn view_with_header(&self, names: &[&str], bodies: bool, header: bool, budget: usize) -> crate::failure::Out {
+    pub(crate) fn view_with_header(&self, names: &[&str], bodies: bool, header: bool, budget: usize) -> Out {
         let ix = self.index()?;
         let (mut out, mut left) = (String::new(), vec![]);
         let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
         for &name in names {
-            let (text, served): (String, Vec<&crate::Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
+            let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
                 let body = crate::store::module_text(&ix, m);
                 if bodies && fits(&out, &body) {
                     (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
@@ -741,7 +731,7 @@ impl crate::Store {
             if left.is_empty() && fits(&out, &text) {
                 out += &text;
                 let printed: Vec<String> = match self.resolve_module(&ix, name) {
-                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(crate::Sym::qname).collect(),
+                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect(),
                     None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
                 };
                 printed.into_iter().for_each(mark_shown);
@@ -763,8 +753,39 @@ impl crate::Store {
         }
         Ok(out)
     }
-
+    pub(crate) fn find(&self, query: &str) -> Out {
+        let ix = self.index()?;
+        let query = unquoted(query);
+        let q = query.to_lowercase();
+        let mut hits: Vec<(bool, String)> = vec![];
+        for s in &ix.syms {
+            let lines: Vec<String> = s
+                .text
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.to_lowercase().contains(&q))
+                .map(|(n, l)| format!("  {:>3}: {}", n + 1, l.trim()))
+                .collect();
+            let name_hit = s.name.to_lowercase().contains(&q);
+            if name_hit || !lines.is_empty() {
+                let more = if lines.len() > 4 { format!("\n  … {} more lines", lines.len() - 4) } else { String::new() };
+                let shown: Vec<String> = lines.into_iter().take(4).collect();
+                hits.push((name_hit, format!("{} ({})\n{}{}", s.qname(), s.kind_text, shown.join("\n"), more)));
+            }
+        }
+        if hits.is_empty() {
+            return Ok(format!("No matches for \"{query}\".\n"));
+        }
+        hits.sort_by_key(|h| !h.0);
+        let total = hits.len();
+        let mut out: String = hits.iter().take(40).map(|h| h.1.trim_end().to_string() + "\n").collect();
+        if total > 40 {
+            out += &format!("… {} more symbols match; narrow the search.\n", total - 40);
+        }
+        Ok(out)
+    }
 }
+
 /// Runs of capitalized words in the task, lowercased ("Desk Lamp", "TENOFF"),
 /// leaving out a single word that starts a sentence.
 fn capitalized_runs(task: &str) -> Vec<String> {
@@ -876,7 +897,7 @@ fn evidence(text: &str, terms: &[String]) -> Vec<String> {
 /// A type's users for `inspect --context` and `refs`: the sites that
 /// construct or match it with every field, one line each, then the other
 /// non-test users by name (at most `cap`).
-fn type_users(ix: &crate::Index, ty: usize, users: &[usize], tests: &[usize], cap: usize) -> String {
+fn type_users(ix: &Index, ty: usize, users: &[usize], tests: &[usize], cap: usize) -> String {
     let mut out = String::new();
     let (mut built, mut others, mut updates) = (vec![], vec![], 0);
     for &j in users.iter().chain(tests) {
@@ -906,7 +927,7 @@ fn type_users(ix: &crate::Index, ty: usize, users: &[usize], tests: &[usize], ca
 }
 
 /// The lines where `caller` calls function `f`, quoted under its entry.
-fn call_lines(ix: &crate::Index, caller: usize, f: usize) -> String {
+fn call_lines(ix: &Index, caller: usize, f: usize) -> String {
     if ix.syms[f].kind != Kind::Fn {
         return String::new();
     }
@@ -926,7 +947,7 @@ fn mark_shown(q: String) {
 }
 
 /// One user's entry under `refs`, printed once per reply.
-fn ref_entry(ix: &crate::Index, user: usize, target: usize) -> String {
+fn ref_entry(ix: &Index, user: usize, target: usize) -> String {
     let q = ix.syms[user].qname();
     let mut out =
         if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", crate::index::signature(ix, &ix.syms[user])) };
@@ -936,7 +957,7 @@ fn ref_entry(ix: &crate::Index, user: usize, target: usize) -> String {
 }
 
 /// The `refs` section for uses only type inference could settle.
-fn possible_users(ix: &crate::Index, target: usize, users: &[usize]) -> String {
+fn possible_users(ix: &Index, target: usize, users: &[usize]) -> String {
     if users.is_empty() {
         return String::new();
     }
@@ -947,3 +968,26 @@ fn possible_users(ix: &crate::Index, target: usize, users: &[usize]) -> String {
     out
 }
 
+/// A search query without the quotes, backticks or apostrophes around it
+/// (`find "Customer(.."`: the quotes delimit the query, run 18).
+fn unquoted(query: &str) -> &str {
+    ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
+}
+
+/// The lines of `text` in `ranges`, numbered as `read --lines` numbers a file.
+fn numbered_lines(text: &str, ranges: &[(usize, usize)]) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    for (n, line) in text.lines().enumerate() {
+        let n = n + 1;
+        if !ranges.iter().any(|&(a, b)| a <= n && n <= b) {
+            continue;
+        }
+        if shown > 0 && n > shown + 1 {
+            out.push_str("…\n");
+        }
+        out += &format!("{n}: {line}\n");
+        shown = n;
+    }
+    out
+}

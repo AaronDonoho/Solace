@@ -11,6 +11,9 @@ use serde_json::json;
 use std::io::Read;
 use std::env;
 #[cfg(test)] use crate::store_core::SCHEMA;
+use crate::lockdown::settings::settings;
+#[cfg(test)] use crate::board::task_model::lock;
+
 pub const COPY: &str = "solace-migration";
 const STATE: &str = ".solace/migration.json";
 const INVENTORY: &str = ".solace/migration-inventory.json";
@@ -1718,7 +1721,7 @@ mod tests {
 
     fn project_with_lock() -> (crate::testing::Project, fs::File) {
         let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let held = crate::board::lock(&p.root).unwrap();
+        let held = lock(&p.root).unwrap();
         (p, held)
     }
 
@@ -1789,7 +1792,7 @@ fn a_sandbox_in_a_solace_root_mounts_only_the_declared_reads() {
 /// The folders a project's `[sandbox] read` names, resolved against its root,
 /// so a sandboxed command can read fixtures beside the project (D-158 point 4).
 fn sandbox_reads(root: &Path) -> Result<Vec<PathBuf>, Failure> {
-    let v = crate::lockdown::settings(root)?;
+    let v = settings(root)?;
     Ok(v.get("sandbox")
         .and_then(|s| s.get("read"))
         .and_then(|r| r.as_array())

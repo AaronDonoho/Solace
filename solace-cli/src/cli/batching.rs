@@ -5,6 +5,9 @@ use super::{HELD, PROJECT_ONLY, READ_HINT, READS, STOPS};
 #[cfg(test)]
 #[path = "batching_tests.rs"]
 mod tests;
+use crate::lockdown::settings::settings_file;
+use crate::board::runs::context;
+
 /// A command's words without `--project <folder>`, which may stand anywhere on the line.
 pub(crate) fn verb_words(words: &[String]) -> Vec<&str> {
     let mut w: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -105,6 +108,7 @@ pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[Stri
                 continue;
             }
         };
+        crate::language::rust::clear_spans();
         if test && waiting.is_none() {
             waiting = match &result {
                 Err(_) => Some("the test failed".into()),
@@ -154,11 +158,12 @@ pub(crate) fn panic_reply(p: &(dyn Any + Send), line: Option<&str>) -> String {
     format!("Solace hit an internal error{at}: {message}; nothing after it ran\n")
 }
 
-/// Drops what a caught panic left with this thread — the untested changes a
-/// `test` named, and any outer transaction it held open — so the next call
-/// starts clean. A transaction's own drop guard rolls back as the panic
-/// unwinds; this covers a panic in a place without one.
+/// Drops what a caught panic left with this thread — its parser span table,
+/// the untested changes a `test` named, and any outer transaction it held
+/// open — so the next call starts clean. A transaction's own drop guard rolls
+/// back as the panic unwinds; this covers a panic in a place without one.
 pub(crate) fn reset_after_panic() {
+    crate::language::rust::clear_spans();
     crate::UNTESTED.with(|u| u.borrow_mut().take());
     let _ = crate::COMMAND_DB.try_with(|c| {
         let Ok(mut dbs) = c.try_borrow_mut() else { return };
@@ -198,9 +203,9 @@ pub(crate) fn is_question(line: &str) -> bool {
     let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
     match w.as_slice() {
         ["task", "ask", ..] | ["strategy", "task" | "feature" | "milestone" | "vision", ..] => true,
-        ["write", rest @ ..] if crate::board::context().is_some() => {
+        ["write", rest @ ..] if context().is_some() => {
             let root = crate::Store::root().ok();
-            rest.iter().any(|p| root.as_deref().is_some_and(|r| crate::lockdown::settings_file(r, &crate::file_name(Path::new(p)))))
+            rest.iter().any(|p| root.as_deref().is_some_and(|r| settings_file(r, &crate::file_name(Path::new(p)))))
         }
         _ => false,
     }

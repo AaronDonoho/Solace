@@ -740,7 +740,7 @@ fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
                 }
                 text.push(line.to_string());
             }
-            Diag { error, module, symbol, text: text.join("\n").trim_end().to_string() }
+            Diag { error, module, symbol, text: text.join("\n").trim_end().to_string(), suggestions: vec![] }
         })
         .collect()
 }

@@ -985,70 +985,18 @@ impl Store {
     /// only when the text is imports and the module comment alone — no refusals,
     /// no items — and keeps the module's `mod x;` list, taking the stored lines
     /// when the text leaves them out, since changing it adds or removes a module.
-    /// Then cargo checks the module.
+    /// An inline `mod` takes the same imports inside its braces, keeping its
+    /// opening, items and closing brace. Then cargo checks the module.
     fn submit_imports_rust(&self, m: &str, raw: &str) -> Out {
         let ix = self.index()?;
         self.refuse_drift(&ix)?;
-        let Some(module) = self.resolve_module(&ix, m).map(|r| r.path.clone()) else {
+        if let Some(module) = self.resolve_module(&ix, m).map(|r| r.path.clone()) {
+            return self.submit_file_imports(&module, raw);
+        }
+        let Some(container) = rust_container(&ix, m)?.filter(|&i| ix.syms[i].kind_text == "mod") else {
             return fail(format!("E1003 unknown module: {m}"));
         };
-        let old = self.header(&module)?;
-        let old_file = language::rust::split(&old, &module)?;
-        let new = language::rust::split(raw, &module)?;
-        if !new.refusals.is_empty() {
-            let lines: Vec<String> = new.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
-            return fail(lines.join("\n"));
-        }
-        if !new.mods.is_empty() && old_file.mods != new.mods {
-            return fail(format!(
-                concat!(
-                    "Not saved: `--imports` replaces the module's whole header, so it must ",
-                    "leave out the module's `mod` lines or keep them as they are; `view {module} --header` shows them; {note}.",
-                ),
-                module = module,
-                note = store::MODULE_NOTE,
-            ));
-        }
-        if !new.items.is_empty() {
-            return fail("E0101 --imports text may only contain imports and the module comment.");
-        }
-        let end = &old[old.trim_end().len()..];
-        let header_text = new.header.trim_end();
-        let header_text = if new.mods.is_empty() && !old_file.mods.is_empty() {
-            with_stored_mods(header_text, &old, &old_file.mods)
-        } else {
-            header_text.to_string()
-        };
-        let header =
-            if header_text.is_empty() { String::new() } else { format!("{header_text}{}", if end.is_empty() { "\n\n" } else { end }) };
-        let saved = format!("{module} imports");
-        let out = self.transaction(&[], || {
-            self.set_header(&module, &header)?;
-            let ix = self.index()?;
-            let before_broken = self.broken()?;
-            let before_warnings = self.warning_baseline()?;
-            let diags = self.check_all(&ix)?;
-            // An error on one of the module's items is this submit's too, unless it
-            // was already broken: removing a `use` an item needs must not save (D-168).
-            let own = |d: &Diag| match &d.symbol {
-                Some(s) => s.starts_with(&format!("{module}.")) && !before_broken.contains_key(s),
-                None => d.module.as_deref() == Some(module.as_str()),
-            };
-            let errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
-            if !errors.is_empty() {
-                let text: Vec<&str> = errors.iter().map(|d| d.text.as_str()).collect();
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
-            }
-            let mut out = format!("Saved {saved}.\n");
-            out += &diagnostics::warnings_report(
-                before_warnings.as_ref(),
-                diags.iter().filter(|d| !d.error && own(d)),
-                diags.iter().filter(|d| !d.error && !own(d)),
-            );
-            out += &diagnostics::broken_report(&before_broken, &diags);
-            Ok(out)
-        })?;
-        Ok(out)
+        self.submit_inline_imports(&ix, container, raw)
     }
 
     /// The stored, formatted text of one added item (D-168) for the block
@@ -1305,6 +1253,84 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    fn save_imports(&self, module: &str, saved: &str, save: impl FnOnce() -> Result<(), Failure>) -> Out {
+        self.transaction(&[], || {
+            save()?;
+            let ix = self.index()?;
+            let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
+            let diags = self.check_all(&ix)?;
+            // An error on one of the module's items is this submit's too, unless it
+            // was already broken: removing a `use` an item needs must not save (D-168).
+            let own = |d: &Diag| match &d.symbol {
+                Some(s) => s.starts_with(&format!("{module}.")) && !before_broken.contains_key(s),
+                None => d.module.as_deref() == Some(module),
+            };
+            let errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
+            if !errors.is_empty() {
+                let text: Vec<&str> = errors.iter().map(|d| d.text.as_str()).collect();
+                return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
+            }
+            let mut out = format!("Saved {saved}.\n");
+            out += &diagnostics::warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error && own(d)),
+                diags.iter().filter(|d| !d.error && !own(d)),
+            );
+            out += &diagnostics::broken_report(&before_broken, &diags);
+            Ok(out)
+        })
+    }
+
+    fn submit_file_imports(&self, module: &str, raw: &str) -> Out {
+        let old = self.header(module)?;
+        let old_file = language::rust::split(&old, module)?;
+        let new = split_imports(raw, module)?;
+        if !new.mods.is_empty() && !same_mods(&old_file.mods, &new.mods) {
+            return fail(format!(
+                concat!(
+                    "Not saved: `--imports` replaces the module's whole header, so it must ",
+                    "leave out the module's `mod` lines or keep the same declarations, in any order; ",
+                    "`view {module} --header` shows them; {note}.",
+                ),
+                module = module,
+                note = store::MODULE_NOTE,
+            ));
+        }
+        if !new.items.is_empty() {
+            return fail("E0101 --imports text may only contain imports and the module comment.");
+        }
+        let new_end = &new.header[new.header.trim_end().len()..];
+        let header_text = new.header.trim_end();
+        let header_text = if new.mods.is_empty() && !old_file.mods.is_empty() {
+            with_stored_mods(header_text, &old, &old_file.mods)
+        } else {
+            header_text.to_string()
+        };
+        let header = if header_text.is_empty() {
+            String::new()
+        } else {
+            format!("{header_text}{}", if new_end.is_empty() { "\n" } else { new_end })
+        };
+        self.save_imports(module, &format!("{module} imports"), || self.set_header(module, &header))
+    }
+
+    fn submit_inline_imports(&self, ix: &Index, container: usize, raw: &str) -> Out {
+        let sym = &ix.syms[container];
+        let module = sym.qname();
+        let saved = format!("{module} imports");
+        let (opening, old_body, closing) = language::rust::inline_mod_parts(&sym.text)?;
+        let new = split_imports(raw, &module)?;
+        if !new.mods.is_empty() || !new.items.is_empty() {
+            return fail("E0101 --imports text may only contain imports and the module comment.");
+        }
+        let base = inline_import_indent(&old_body, &opening);
+        let body = store::reindent(new.header.trim_end(), &base);
+        let text = inline_mod_text(&opening, &body, &closing);
+        let (id, name, file_module) = (sym.id.clone(), sym.name.clone(), sym.module.clone());
+        self.save_imports(&file_module, &saved, || self.set_symbol_text(&id, &name, &text))
     }
 }
 
@@ -1639,4 +1665,44 @@ fn use_blocks(source: &str) -> Vec<(usize, usize)> {
 
 fn line_of(source: &str, at: usize) -> usize {
     source[..at].bytes().filter(|b| *b == b'\n').count()
+}
+
+/// Whether two headers declare the same modules, whatever their order.
+fn same_mods(old: &[language::rust::FileMod], new: &[language::rust::FileMod]) -> bool {
+    let mut old: Vec<&str> = old.iter().map(|decl| decl.text.as_str()).collect();
+    let mut new: Vec<&str> = new.iter().map(|decl| decl.text.as_str()).collect();
+    old.sort_unstable();
+    new.sort_unstable();
+    old == new
+}
+
+fn split_imports(raw: &str, module: &str) -> Result<language::rust::File, Failure> {
+    let new = language::rust::split(raw, module)?;
+    if !new.refusals.is_empty() {
+        let lines: Vec<String> = new.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
+        return fail(lines.join("\n"));
+    }
+    Ok(new)
+}
+
+/// The indentation an inline module's imports take: its old imports' indent,
+/// or four spaces past its opening line.
+fn inline_import_indent(body: &str, opening: &str) -> String {
+    if let Some(line) = body.lines().find(|line| !line.trim().is_empty()) {
+        let indent = &line[..line.len() - line.trim_start().len()];
+        if !indent.is_empty() {
+            return indent.to_string();
+        }
+    }
+    let line = opening.rsplit('\n').next().unwrap_or("");
+    format!("{}    ", &line[..line.len() - line.trim_start().len()])
+}
+
+/// An inline module's text after its imports change: its opening, the new
+/// imports indented inside, and the closing brace when it holds no items.
+fn inline_mod_text(opening: &str, body: &str, closing: &str) -> String {
+    if body.is_empty() {
+        return if closing.is_empty() { format!("{opening}\n") } else { format!("{opening}{closing}") };
+    }
+    if closing.is_empty() { format!("{opening}\n{body}\n\n") } else { format!("{opening}\n{body}\n{closing}") }
 }

@@ -183,12 +183,15 @@ class Root(unittest.TestCase):
         (self.root/'src').mkdir()
         (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
         (self.root/'src/lib.rs').write_text(
-            'pub fn one() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ok() { assert_eq!(one(), 1); }\n\n    #[test]\n    fn bad() { assert_eq!(one(), 2); }\n}\n')
+            'pub fn one() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ok() { assert_eq!(one(), 1); }\n\n    #[test]\n    fn bad() {\n        // The failure should quote this comment.\n        assert_eq!(one(), 2);\n    }\n}\n')
         (self.root/'solace.toml').write_text('projects = []\n')
         self.start()
         out = self.cli('test', '--all', ok=False)
         self.assertIn('Ran all 2 tests.', out)
         self.assertIn('tests::bad', out)
+        self.assertIn('panicked at crate.tests::bad, line 4:', out)
+        self.assertIn('// The failure should quote this comment.', out)
+        self.assertIn('assert_eq!(one(), 2);', out)
 
     def test_a_rust_test_that_does_not_compile_names_its_symbol(self):  # D-167
         (self.root/'src').mkdir()

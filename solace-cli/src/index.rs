@@ -76,6 +76,7 @@ pub(crate) fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<Mo
     // against the module's `use` lines and the crate's item names (D-170).
     if rust {
         let g = crate::language::rust_refs::graph(&syms, &modules);
+        crate::language::rust::clear_spans();
         return Index {
             lang,
             rust,
@@ -192,9 +193,23 @@ pub(crate) fn users_split(ix: &Index, i: usize) -> (Vec<usize>, Vec<usize>) {
     let mut exact = vec![];
     let mut possible = vec![];
     for &j in &ix.used_by[i] {
-        let only_possible = ix.possible[j].iter().any(|&(t, _)| t == i)
-            && !ix.at[j].iter().any(|&(t, line)| t == i && !ix.possible[j].contains(&(t, line)));
-        if only_possible { possible.push(j) } else { exact.push(j) }
+        if only_possible(ix, j, i) { possible.push(j) } else { exact.push(j) }
     }
     (exact, possible)
+}
+
+/// The exact targets of `i`'s references, then the ones only a possible reference names.
+pub(crate) fn uses_split(ix: &Index, i: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut exact = vec![];
+    let mut possible = vec![];
+    for &t in &ix.uses[i] {
+        if only_possible(ix, i, t) { possible.push(t) } else { exact.push(t) }
+    }
+    (exact, possible)
+}
+
+/// Whether every reference from `from` to `to` is only a possible one.
+fn only_possible(ix: &Index, from: usize, to: usize) -> bool {
+    ix.possible[from].iter().any(|&(t, _)| t == to)
+        && !ix.at[from].iter().any(|&(t, line)| t == to && !ix.possible[from].contains(&(t, line)))
 }

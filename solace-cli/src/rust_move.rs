@@ -8,15 +8,12 @@ use rusqlite::params;
 use crate::rust_check::post_move_check;
 use crate::lockdown::error;
 use crate::rust_submit::{is_mod_line, mod_name, path_attr};
-use crate::{ Index, ModuleRow,  Store, file_name, language, revision};
+use crate::{Index, ModuleRow, Store, file_name, language};
 use crate::failure::Out;
 use crate::failure::Failure;
 #[cfg(test)]
 #[path = "rust_move_tests.rs"]
 mod tests;
-
-
-
 /// Moves the file of the Rust module stored at `from` to `to`, or `None` when
 /// no module's file is at `from` or it is a crate root's, which stays where
 /// cargo finds it.
@@ -56,8 +53,7 @@ fn move_module(s: &Store, ix: &Index, module: &str, parent: &ModuleRow, from: &s
             Declaration::Header(header) => s.set_header(&parent.path, header)?,
             Declaration::Item(i, text) => {
                 let x = &ix.syms[*i];
-                s.db.execute("UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1", params![x.id, text, revision(text)])?;
-                s.history(&x.id, "edit", &x.name)?;
+                s.set_symbol_text(&x.id, &x.name, text)?;
             }
         }
         post_move_check(s, &before)?;

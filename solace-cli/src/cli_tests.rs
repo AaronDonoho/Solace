@@ -1,8 +1,9 @@
 use super::*;
-use crate::board;
 use crate::testing;
 use serde_json::json;
 use crate::failure::Out;
+use crate::board::server::api;
+use crate::board::runs::with_context;
 /// D-145: from the second successful single read in a row, the reply hints to batch.
 #[test]
 fn a_second_single_read_in_a_row_gets_the_hint() {
@@ -131,9 +132,9 @@ fn an_unknown_option_is_refused_before_other_refusals() {
     let args = vec!["view".to_string(), "app.main".to_string(), "--lines".to_string(), "1..2".to_string()];
     let here = std::path::Path::new(".");
     let e = run_inner(here, here, &args, &mut || Ok(String::new()), None, 10_000).unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
+    assert!(e.starts_with("view has no --lines; --lines belongs to inspect and read"), "{e}");
     let e = read_project("no-such-project", &args, 10_000).unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
+    assert!(e.starts_with("view has no --lines; --lines belongs to inspect and read"), "{e}");
 }
 /// D-158: `--project <rust>` reads Rust items with inspect, refs and find.
 #[test]
@@ -177,10 +178,10 @@ fn read_project_finds_its_root_from_the_working_folder() {
 #[test]
 fn a_project_with_no_command_is_refused_by_the_cli() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-    let t = board::api(&p.root, "POST", "/tasks", json!({"title":"Project"})).unwrap();
+    let t = api(&p.root, "POST", "/tasks", json!({"title":"Project"})).unwrap();
     let tid = t["id"].as_str().unwrap();
     let e = with_root(&p.root, || {
-        board::with_context(tid, "r", || {
+        with_context(tid, "r", || {
             run_options(&["--project".to_string(), ".".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
         })
     })
@@ -300,5 +301,27 @@ fn module_elsewhere_names_the_other_project() {
     crate::import(&root.join("b")).unwrap();
     assert_eq!(crate::cli::module_elsewhere(&root.join("a"), "plan"), Some("b".to_string()));
     assert_eq!(crate::cli::module_elsewhere(&root.join("a"), "missing"), None);
+}
+
+/// A parser panic leaves the span table dirty; the next command must still
+/// run, and its own parse must start at the beginning of the table.
+#[test]
+fn a_command_after_a_caught_parser_panic_still_works() {
+    std::thread::spawn(|| {
+        let (_, error) = batch(&["view x"], 10_000, &mut |_: &[String], _: usize| -> Out {
+            let _: proc_macro2::TokenStream = "fn go() {}\n".parse().unwrap();
+            panic!("boom");
+        });
+        assert!(error);
+        assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
+        let (out, error) = batch(&["read a.md"], 10_000, &mut |_: &[String], _: usize| -> Out {
+            let _: proc_macro2::TokenStream = "fn go() {}\n".parse().unwrap();
+            Ok("fine".to_string())
+        });
+        assert!(!error && out.contains("fine"), "{out}");
+        assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
+    })
+    .join()
+    .unwrap();
 }
 

@@ -91,8 +91,7 @@ pub fn id_kind(kind: &str) -> Kind {
 /// The items of `source`, the file of `module` (`board::agents`, `crate`).
 pub fn split(source: &str, module: &str) -> Result<File, Failure> {
     let file = split_parsed(source, module);
-    // Spans are kept per thread for every parse; `serve` parses for as long as it runs.
-    proc_macro2::extra::invalidate_current_thread_spans();
+    clear_spans();
     file
 }
 
@@ -984,5 +983,36 @@ pub(crate) fn body_import_ranges(source: &str) -> Result<Vec<(Range<usize>, Rang
         syn::visit::Visit::visit_trait_item_fn(&mut uses, &func);
     }
     Ok(uses.0)
+}
+
+/// Clears proc-macro2's per-thread span table once a parse's spans are no
+/// longer read. Its positions only grow, so a long-lived server would
+/// eventually overflow them.
+pub(crate) fn clear_spans() {
+    proc_macro2::extra::invalidate_current_thread_spans();
+}
+
+/// An inline module's stored text split at its body: the opening through `{`,
+/// the text before its first item, and the closing brace when it holds no items
+/// (the stored text of a module with items stops before its brace).
+pub fn inline_mod_parts(text: &str) -> Result<(String, String, String), Failure> {
+    let closed = text.parse::<proc_macro2::TokenStream>().is_err();
+    let source = if closed { format!("{text}\n}}") } else { text.to_string() };
+    let ast = syn::parse_file(&source).map_err(|e| Failure(format!("line {}: {e}", e.span().start().line), 1))?;
+    let Some(Item::Mod(module)) = ast.items.first() else {
+        return Err(Failure("not an inline module".into(), 1));
+    };
+    let Some((brace, _)) = &module.content else {
+        return Err(Failure("not an inline module".into(), 1));
+    };
+    let open = brace.span.open().byte_range().start;
+    let closing = if closed {
+        String::new()
+    } else {
+        let close = brace.span.close().byte_range().start;
+        text[close..].to_string()
+    };
+    let body_end = text.len() - closing.len();
+    Ok((text[..=open].to_string(), text[open + 1..body_end].to_string(), closing))
 }
 

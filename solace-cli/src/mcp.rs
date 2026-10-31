@@ -2,20 +2,22 @@
 //! replies, and the D-145/D-157 hints. It keeps the agent-facing layer apart
 //! from the CLI (main.rs holds the rest).
 use crate::{
-    REASON, SHOWN, agent_reference,        
+    REASON, SHOWN, agent_reference,
 };
 use crate::cli::{batch, is_question, looks_like_code, panic_reply, read_hint, reset_after_panic, run_options};
 use crate::failure::usage;
-use crate::{board, reads};
+use crate::reads;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::Write;
 
 #[cfg(test)] use crate::cli::with_root;
+use crate::board::runs::context;
+use crate::board::runs::strategy_context;
 /// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
 /// and plans (D-93), so it is told only those commands.
 pub(crate) fn tool_schema() -> Value {
-    if board::strategy_context().is_some() {
+    if strategy_context().is_some() {
         return json!({
             "name": "solace",
             "description": concat!(
@@ -175,7 +177,7 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
         }
     }
     if commands.is_empty() {
-        (out, is_error) = (format!("No command given.\n\n{}", agent_reference(board::context().is_some())), true);
+        (out, is_error) = (format!("No command given.\n\n{}", agent_reference(context().is_some())), true);
     }
     // D-157: each command updated the window; the run's reads are saved once.
     if let Some(run) = run_reads {
@@ -192,18 +194,21 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
 /// One call's reply; a panic anywhere in it becomes the reply, so the tool
 /// keeps serving (task:da797576d0cfaaac).
 fn guarded(call: impl FnOnce() -> Value) -> Value {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+    let reply = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
         Ok(reply) => reply,
         Err(p) => {
             reset_after_panic();
             json!({"content": [{"type": "text", "text": panic_reply(&*p, None)}], "isError": true})
         }
-    }
+    };
+    crate::language::rust::clear_spans();
+    reply
 }
 
 /// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
 /// can pass code without shell quoting and needs no shell at all.
 pub(crate) fn mcp(budget: usize) {
+    crate::store_write::capture_running_binary();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut single_reads = 0;
@@ -231,9 +236,13 @@ mod tests {
     /// the re-read hint) is an error reply too, and the tool keeps serving.
     #[test]
     fn a_panic_anywhere_in_the_call_is_an_error_reply() {
-        let e = guarded(|| panic!("boom"));
+        let e = guarded(|| {
+            let _: proc_macro2::TokenStream = "fn go() {}\n".parse().unwrap();
+            panic!("boom");
+        });
         assert_eq!(e["isError"], json!(true));
         assert_eq!(e["content"][0]["text"], json!("Solace hit an internal error: boom; nothing after it ran\n"));
+        assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
         // A call that doesn't panic is its own reply.
         let ok = guarded(|| json!({"content": [{"type": "text", "text": "fine"}], "isError": false}));
         assert_eq!((ok["isError"].clone(), ok["content"][0]["text"].clone()), (json!(false), json!("fine")));
@@ -389,6 +398,18 @@ mod tests {
         let list = dispatch(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), 10_000, &mut single_reads, &mut run_reads).unwrap();
         assert_eq!(list["result"]["tools"][0]["name"], "solace");
         assert!(run_reads.is_none());
+    }
+
+    /// Parses that run outside `batch` in a call that succeeds must not grow the
+    /// span table for the next call.
+    #[test]
+    fn a_successful_call_leaves_no_parser_spans() {
+        let ok = guarded(|| {
+            let _: proc_macro2::TokenStream = "fn go() {}\n".parse().unwrap();
+            json!({"content": [{"type": "text", "text": "fine"}], "isError": false})
+        });
+        assert_eq!(ok["isError"], json!(false));
+        assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
     }
 }
 

@@ -5,8 +5,14 @@ use serde_json::json;
 #[cfg(test)] use crate::cli::routing::run_options;
 #[cfg(test)] use crate::cli::routing::with_root;
 use std::env;
+use crate::lockdown::paths::module_of_file;
+#[cfg(test)] use crate::tasks::store::put;
+#[cfg(test)] use crate::board::server::api;
+use crate::board::runs::context;
+#[cfg(test)] use crate::board::runs::with_context;
+
 fn owner() -> String {
-    crate::board::context().map(|(task, _)| task).unwrap_or_else(|| env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into()))
+    context().map(|(task, _)| task).unwrap_or_else(|| env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into()))
 }
 
 /// A draft's base (D-46): the text of the symbols it replaces and the headers
@@ -1473,11 +1479,11 @@ mod tests {
     #[test]
     fn a_context_owns_the_drafts_it_saves() {
         let p = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let mut t = crate::board::api(&p.root, "POST", "/tasks", json!({"title": "Drafts"})).unwrap();
+        let mut t = api(&p.root, "POST", "/tasks", json!({"title": "Drafts"})).unwrap();
         let tid = t["id"].as_str().unwrap().to_string();
         t["runs"] = json!([{"id": "run-1", "kind": "work", "state": "running"}]);
-        crate::tasks::put(&p, &t).unwrap();
-        let id = crate::board::with_context(&tid, "run-1", || {
+        put(&p, &t).unwrap();
+        let id = with_context(&tid, "run-1", || {
             assert!(submit(&p, &["submit", "app.main"], &mut || Ok("pub fn main(".into()), None).is_err());
             entries(&p, &tid).unwrap()[0].0.clone()
         });
@@ -1485,9 +1491,9 @@ mod tests {
             let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
             with_root(&p.root, || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         };
-        let viewed = crate::board::with_context(&tid, "run-1", || run(&["view", "--draft", id.as_str()])).unwrap();
+        let viewed = with_context(&tid, "run-1", || run(&["view", "--draft", id.as_str()])).unwrap();
         assert_eq!(viewed, "pub fn main(");
-        let dropped = crate::board::with_context(&tid, "run-1", || run(&["drafts", "drop", id.as_str()])).unwrap();
+        let dropped = with_context(&tid, "run-1", || run(&["drafts", "drop", id.as_str()])).unwrap();
         assert!(dropped.contains("Dropped draft"), "{dropped}");
         assert!(entries(&p, &tid).unwrap().is_empty());
     }
@@ -1595,7 +1601,7 @@ fn bad_target(s: &Store, ix: &Index, target: &str, at_line: usize) -> Failure {
     let module = s
         .resolve_module(ix, name)
         .map(|m| m.path.clone())
-        .or_else(|| ["", "src/", "test/"].iter().find_map(|prefix| crate::lockdown::module_of_file(s, &format!("{prefix}{name}"))));
+        .or_else(|| ["", "src/", "test/"].iter().find_map(|prefix| module_of_file(s, &format!("{prefix}{name}"))));
     if let Some(module) = module {
         return Failure(
             format!(

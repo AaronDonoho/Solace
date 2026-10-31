@@ -4,6 +4,10 @@ Reading
                                 callers, and the tests that use them (the
                                 smallest in full); `lockdown::dispatch` is
                                 accepted for `lockdown.dispatch`
+  inspect <name>... --lines 3,7,10..12
+                                those lines of each named symbol's source,
+                                numbered as `read --lines` numbers a file; the
+                                context still covers the whole symbol
   view <name>...                symbols' source
   view <module>...              outlines: signatures and doc lines
   view <module> --bodies        whole module; only for one you will rewrite

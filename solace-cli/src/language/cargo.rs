@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::lockdown::commands::command;
+use crate::lockdown::commands::background;
+use crate::lockdown::commands::passed;
 
 /// A Rust project's commands need this on `PATH`; without it they are refused.
 pub const MISSING: &str = "Needs the Rust toolchain (`cargo`)";
@@ -78,7 +81,7 @@ pub fn warm(root: &Path) {
     argv.extend(check_args(root));
     // Through `lockdown::background`, the path every command takes, so a
     // migration's sandbox covers this build too.
-    let _ = crate::lockdown::background(root, &argv, true);
+    let _ = background(root, &argv, true);
 }
 
 /// Fetches the project's dependencies outside the sandbox, where the network is
@@ -103,7 +106,7 @@ fn fetch_if_needed_now(root: &Path, lock: &Path) -> Result<(), Failure> {
     let had_solace = root.join(".solace").exists();
     let before = fs::read(lock).ok();
     let argv: Vec<String> = ["cargo", "fetch", "--offline"].iter().map(|s| s.to_string()).collect();
-    if matches!(crate::lockdown::command(root, &argv, 120, 4000, false, false), Ok(out) if crate::lockdown::passed(&out)) {
+    if matches!(command(root, &argv, 120, 4000, false, false), Ok(out) if passed(&out)) {
         return Ok(());
     }
     fetch_online(root, lock, before, had_solace)
@@ -156,8 +159,8 @@ fn fetch_lock_dir(root: &Path) -> Result<PathBuf, Failure> {
 /// manifest; without cargo, fall back to the folder's own lock.
 pub(crate) fn lock_file(root: &Path) -> PathBuf {
     let argv: Vec<String> = ["cargo", "locate-project", "--workspace", "--message-format", "plain"].iter().map(|s| s.to_string()).collect();
-    match crate::lockdown::command(root, &argv, 120, 4000, false, false) {
-        Ok(out) if crate::lockdown::passed(&out) => out
+    match command(root, &argv, 120, 4000, false, false) {
+        Ok(out) if passed(&out) => out
             .lines()
             .skip(1)
             .map(str::trim)
@@ -170,8 +173,8 @@ pub(crate) fn lock_file(root: &Path) -> PathBuf {
 
 fn fetch_online(root: &Path, lock: &Path, before: Option<Vec<u8>>, had_solace: bool) -> Result<(), Failure> {
     let argv: Vec<String> = ["cargo", "fetch"].iter().map(|s| s.to_string()).collect();
-    match crate::lockdown::command(root, &argv, 600, 4000, false, false) {
-        Ok(out) if crate::lockdown::passed(&out) => Ok(()),
+    match command(root, &argv, 600, 4000, false, false) {
+        Ok(out) if passed(&out) => Ok(()),
         Ok(out) => Err(fetch_failed(root, lock, before, had_solace, format!("cargo fetch failed:\n{}", out.trim_end()))),
         Err(e) => Err(fetch_failed(root, lock, before, had_solace, format!("cargo fetch failed: {}", e.0.trim_end()))),
     }
@@ -222,7 +225,7 @@ pub fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
             continue;
         }
         seen.push(text.clone());
-        diags.push(Diag { error: message["level"] == "error", module, symbol, text });
+        diags.push(Diag { error: message["level"] == "error", module, symbol, text, suggestions: suggestions(message) });
     }
     diags
 }
@@ -705,4 +708,102 @@ fn cargo_add_crate(line: &str) -> Option<(&str, &str)> {
     let help = line.trim_start().strip_prefix("= help:")?;
     let name = help.split_once("use `cargo add ")?.1.split('`').next()?;
     (!name.is_empty()).then_some((indent, name))
+}
+
+/// The fixes rustc offers under a message, including notes that name where a
+/// private item is defined.
+fn suggestions(message: &Value) -> Vec<crate::diagnostics::Suggestion> {
+    let mut out = vec![];
+    collect_suggestions(message, &mut out);
+    collect_span_labels(message, &mut out);
+    out
+}
+
+fn collect_suggestions(message: &Value, out: &mut Vec<crate::diagnostics::Suggestion>) {
+    for child in message["children"].as_array().into_iter().flatten() {
+        let spans: Vec<crate::diagnostics::SuggestionSpan> = child["spans"].as_array().into_iter().flatten().map(suggestion_span).collect();
+        if !spans.is_empty() {
+            out.push(crate::diagnostics::Suggestion { message: child["message"].as_str().unwrap_or("").to_string(), spans });
+        }
+        collect_suggestions(child, out);
+    }
+}
+
+fn suggestion_span(span: &Value) -> crate::diagnostics::SuggestionSpan {
+    crate::diagnostics::SuggestionSpan {
+        file_name: span["file_name"].as_str().unwrap_or("").to_string(),
+        line_start: span["line_start"].as_u64().unwrap_or(0) as usize,
+        line_end: span["line_end"].as_u64().unwrap_or(0) as usize,
+        column_start: span["column_start"].as_u64().unwrap_or(0) as usize,
+        column_end: span["column_end"].as_u64().unwrap_or(0) as usize,
+        replacement: span["suggested_replacement"].as_str().map(str::to_string),
+    }
+}
+
+/// A failed test's block with every project source location replaced by its
+/// symbol and line, followed by the source line and the comments above it.
+pub fn relocate_failure<'a>(text: &str, files: &[FileMap], source: impl Fn(&str) -> Option<&'a str>) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let (mut shown, mut rest, mut quotes) = (String::new(), line, vec![]);
+        while let Some(dot) = rest.find(".rs:") {
+            let before = &rest[..dot];
+            let start = before
+                .char_indices()
+                .rev()
+                .find(|(_, c)| c.is_whitespace() || matches!(c, '[' | '(' | '"' | '\''))
+                .map_or(0, |(i, c)| i + c.len_utf8());
+            let Some((path, row, _column, len)) = parse_location(&rest[start..]) else {
+                shown.push_str(&rest[..dot + 4]);
+                rest = &rest[dot + 4..];
+                continue;
+            };
+            let end = start + len;
+            let Some((_, Some((name, first)))) = locate(files, path, row) else {
+                shown.push_str(&rest[..end]);
+                rest = &rest[end..];
+                continue;
+            };
+            shown.push_str(&rest[..start]);
+            shown.push_str(&format!("{name}, line {}", row + 1 - first));
+            rest = &rest[end..];
+            if let Some(body) = source(name)
+                && let Some(quote) = source_quote(body, row + 1 - first)
+            {
+                quotes.push(quote);
+            }
+        }
+        shown.push_str(rest);
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&shown);
+        for quote in quotes {
+            out.push('\n');
+            out.push_str(&quote);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// A source line and the contiguous `//` comments directly above it.
+fn source_quote(source: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let at = line.checked_sub(1)?;
+    if at >= lines.len() {
+        return None;
+    }
+    let mut first = at;
+    while first > 0 && lines[first - 1].trim_start().starts_with("//") {
+        first -= 1;
+    }
+    Some(lines[first..=at].iter().map(|line| line.trim_end()).collect::<Vec<_>>().join("\n"))
+}
+
+/// A diagnostic's own labeled spans, such as where a private method is defined.
+fn collect_span_labels(message: &Value, out: &mut Vec<crate::diagnostics::Suggestion>) {
+    for span in message["spans"].as_array().into_iter().flatten() {
+        let Some(label) = span["label"].as_str().filter(|label| !label.is_empty()) else { continue };
+        out.push(crate::diagnostics::Suggestion { message: label.to_string(), spans: vec![suggestion_span(span)] });
+    }
 }

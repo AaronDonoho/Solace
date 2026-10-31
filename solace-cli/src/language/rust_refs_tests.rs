@@ -1335,3 +1335,129 @@ fn a_call_between_logical_ors_before_a_closure_is_a_use() {
     );
     assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).len(), 1);
 }
+
+/// A restricted `pub` header module under `#[cfg(test)]` is test code too.
+#[test]
+fn a_restricted_pub_header_module_is_test_code() {
+    let (_root, ix) = index(
+        "#[cfg(test)]\npub(crate) mod helper;\n\npub fn one() -> i32 {\n    1\n}\n",
+        &[("src/helper.rs", "pub fn two() -> i32 {\n    2\n}\n")],
+    );
+    assert!(tested(&ix, "helper.two"));
+    assert!(!tested(&ix, "crate.one"));
+}
+
+#[test]
+fn a_method_call_through_a_literal_binding_is_an_exact_use() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub struct Pair {\n    n: i32,\n}\n\nimpl Pair {\n    pub fn show(&self) -> i32 {\n        self.n\n    }\n}\n\n",
+            "pub fn unit() -> i32 {\n    let u = Unit;\n    u.show()\n}\n\n",
+            "pub fn pair() -> i32 {\n    let p = Pair { n: 1 };\n    p.show()\n}\n",
+        ),
+        &[],
+    );
+    assert!(uses(&ix, "crate.unit", "crate.Unit::show"));
+    assert!(uses(&ix, "crate.pair", "crate.Pair::show"));
+    assert!(!possible(&ix, "crate.unit", "crate.Pair::show"));
+}
+
+#[test]
+fn a_shadowing_untyped_binding_makes_a_method_call_possible() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "fn make() -> Unit {\n    Unit\n}\n\n",
+            "pub fn go() -> i32 {\n    let s = Unit;\n    {\n        let s = make();\n        s.show()\n    }\n}\n",
+        ),
+        &[],
+    );
+    assert!(!exact(&ix, "crate.go", "crate.Unit::show"));
+    assert!(possible(&ix, "crate.go", "crate.Unit::show"));
+}
+
+#[test]
+fn a_field_chain_is_not_a_local_receiver() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub struct Other;\n\nimpl Other {\n    pub fn show(&self) -> i32 {\n        2\n    }\n}\n\n",
+            "pub struct Holder {\n    pub b: Other,\n}\n\n",
+            "pub fn go(x: Holder) -> i32 {\n    let b = Unit;\n    x.b.show()\n}\n",
+        ),
+        &[],
+    );
+    assert!(!exact(&ix, "crate.go", "crate.Unit::show"));
+}
+
+#[test]
+fn a_destructured_binding_does_not_take_the_literal_type() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Pair {\n    n: i32,\n}\n\nimpl Pair {\n    pub fn show(&self) -> i32 {\n        self.n\n    }\n}\n\n",
+            "pub fn go() -> i32 {\n    let Pair { n } = Pair { n: 1 };\n    n.show()\n}\n",
+        ),
+        &[],
+    );
+    assert!(!exact(&ix, "crate.go", "crate.Pair::show"));
+}
+
+fn exact(ix: &Index, from: &str, to: &str) -> bool {
+    let from = index_of(ix, from);
+    crate::index::uses_split(ix, from).0.contains(&index_of(ix, to))
+}
+
+/// A variant or const with a struct's name must not lend that struct's method
+/// to the binding (D-170).
+#[test]
+fn an_imported_variant_is_not_a_literal_type() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub enum E {\n    Unit,\n}\n\n",
+            "mod other;\n",
+        ),
+        &[("src/other.rs", "use crate::E::Unit;\n\npub fn go() -> i32 {\n    let s = Unit;\n    s.show()\n}\n")],
+    );
+    assert!(!exact(&ix, "other.go", "crate.Unit::show"));
+}
+
+/// A same-named struct in another module must not lend its method.
+#[test]
+fn a_literal_binding_matches_only_its_own_structs_methods() {
+    let (_root, ix) = index(
+        "mod a;\n\nmod b;\n\nmod c;\n",
+        &[
+            ("src/a.rs", "pub struct Unit;\n"),
+            ("src/b.rs", "pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n"),
+            ("src/c.rs", "use crate::a::Unit;\n\npub fn go() -> i32 {\n    let s = Unit;\n    s.show()\n}\n"),
+        ],
+    );
+    assert!(!exact(&ix, "c.go", "b.Unit::show"));
+}
+
+/// A const with a struct's name must not lend that struct's method.
+#[test]
+fn an_imported_const_is_not_a_literal_type() {
+    let (_root, ix) = index(
+        concat!("pub struct Unit;\n\nimpl Unit {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n", "mod a;\n\nmod other;\n",),
+        &[
+            ("src/a.rs", "pub const Unit: i32 = 1;\n"),
+            ("src/other.rs", "use crate::a::Unit;\n\npub fn go() -> i32 {\n    let s = Unit;\n    s.show()\n}\n"),
+        ],
+    );
+    assert!(!exact(&ix, "other.go", "crate.Unit::show"));
+}
+
+/// The span table only grows; an index build must leave the next parse at
+/// the beginning of the table.
+#[test]
+fn an_index_build_starts_the_next_parse_at_the_beginning() {
+    std::thread::spawn(|| {
+        let (_root, _index) = index("pub fn go() -> i32 {\n    helper()\n}\n\nfn helper() -> i32 {\n    1\n}\n", &[]);
+        assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
+    })
+    .join()
+    .unwrap();
+}

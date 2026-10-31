@@ -118,8 +118,14 @@ fn a_plain_error_keeps_not_saved() {
 #[test]
 fn a_warning_stays_in_the_baseline_when_its_module_reports_nothing() {
     let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-    p.record_warnings(&[Diag { error: false, module: Some("a".into()), symbol: Some("a.unused".into()), text: "warning: unused".into() }])
-        .unwrap();
+    p.record_warnings(&[Diag {
+        error: false,
+        module: Some("a".into()),
+        symbol: Some("a.unused".into()),
+        text: "warning: unused".into(),
+        suggestions: vec![],
+    }])
+    .unwrap();
     p.record_warnings(&[]).unwrap();
     let baseline = p.warning_baseline().unwrap().unwrap();
     assert!(baseline.iter().any(|key| key.starts_with("a.unused\n")), "{baseline:?}");

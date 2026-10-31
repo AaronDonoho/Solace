@@ -28,7 +28,7 @@ mod tasks;
 mod view;
 mod workspace;
 
-use language::{Import, Item, Kind, Language, Ref, cargo, gleam};
+use language::{Item, Kind, Language, Ref, cargo, gleam};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -38,7 +38,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
 use std::fs;
-use store::store_rust_file;
+use store::store_rust_package;
+
 
 mod reference;
 pub(crate) use reference::*;
@@ -240,10 +241,12 @@ fn import_with(root: &Path, has_cargo: bool) -> Out {
         }
     }
     let rust_imported = rust.is_some();
-    for (rel, module, file) in rust.into_iter().flatten() {
-        written.record(&rel, file.join().as_bytes());
-        store_rust_file(&db, &module, rel.split_once('/').unwrap().0, &rel, &file)?;
-        modules += 1;
+    if let Some(files) = &rust {
+        for (rel, _, file) in files {
+            written.record(rel, file.join().as_bytes());
+        }
+        store_rust_package(&db, files)?;
+        modules += files.len();
         symbols = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
     }
     written.save()?;

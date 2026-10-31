@@ -5,19 +5,25 @@ use std::fs;
 use crate::failure::{usage, Failure, Out};
 use super::routing::{operands, unknown_option};
 use super::READS;
+use crate::lockdown::settings::settings;
+use crate::board::task_model::task;
+use crate::board::runs::context;
+use crate::board::runs::strategy_context;
+use crate::board::runs::agent_guard;
+
 /// `--project <dir>` on a command that isn't a plain read, in a board run whose
 /// task may change that project (D-61): the folder the command runs in. Plain
 /// reads, and commands outside a run, go to `read_project`.
 pub(crate) fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
     let command = args.first().map(String::as_str).unwrap_or("");
-    let (Some((tid, _)), Ok(here)) = (crate::board::context(), crate::Store::root()) else { return Ok(None) };
+    let (Some((tid, _)), Ok(here)) = (context(), crate::Store::root()) else { return Ok(None) };
     if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
         return Ok(None);
     }
     let own = crate::scope::home(&here, &tid)?;
     let top = crate::scope::top(&own);
     let dir = &crate::project_paths::project_folder(&top, Some(&here), dir, &crate::workspace::members(&top)?);
-    let projects = crate::scope::of(&crate::board::task(&own, &tid)?, &crate::scope::dir(&top, &own));
+    let projects = crate::scope::of(&task(&own, &tid)?, &crate::scope::dir(&top, &own));
     if !projects.iter().any(|p| p == dir) {
         return crate::lockdown::error(
             "E6007",
@@ -47,7 +53,7 @@ pub(crate) fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
         return crate::lockdown::error(
             "E6007",
             command,
-            if crate::board::strategy_context().is_some() {
+            if strategy_context().is_some() {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read)"
             } else {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, \
@@ -125,26 +131,29 @@ pub(crate) fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: 
     }
     let target = crate::scope::path(&root, dir);
     // A board run's agent must still be running, as for any command.
-    let _guard = match (crate::board::context(), own) {
-        (Some((tid, rid)), Some(own)) => Some(crate::board::agent_guard(&crate::scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
+    let _guard = match (context(), own) {
+        (Some((tid, rid)), Some(own)) => Some(agent_guard(&crate::scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
         _ => None,
     };
     let store = crate::Store::peek(&target)?;
-    let settings = crate::lockdown::settings(&store.root)?;
+    let settings = settings(&store.root)?;
     if let Some(out) = crate::lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
     }
     // A Rust project has no `Language`; its store's symbols are read as any
     // other's (D-158), so only a project of plain files is refused.
     if store.lang.is_none() && !crate::language::is_rust(&store.root) {
-        let task = crate::board::context().map(|(tid, _)| tid);
+        let task = context().map(|(tid, _)| tid);
         return crate::lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
     }
     let out = match a {
         ["view", rest @ ..] if !operands(rest).is_empty() => {
             store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
         }
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => {
+            let (names, lines) = crate::cli::routing::inspect_options(rest)?;
+            store.inspect(&names, rest.contains(&"--context"), lines, budget)
+        }
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),

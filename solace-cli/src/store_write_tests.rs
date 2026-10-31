@@ -1,5 +1,7 @@
 use crate::testing::*;
 use super::*;
+use crate::store_write::ImportMatch;
+
     /// A dead-code warning the submit leaves on another symbol is named under
     /// its own heading.
     #[test]
@@ -73,5 +75,101 @@ fn an_alias_to_an_unlisted_dependency_is_not_reused() {
     let ix = store.index().unwrap();
     let deps = store.dependency_modules();
     assert!(matches!(import_match(&ix, &deps, "x", false), ImportMatch::None));
+}
+
+/// Only the selector's own modules and their submodules make the compiled
+/// selection stale; another module's change leaves selection incremental.
+#[test]
+fn the_servers_own_source_newer_than_its_binary_is_stale() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod reach;\npub mod store_write;\npub mod view;\n"),
+        ("src/reach.rs", "pub mod flow;\n\npub fn test_symbols() {}\n\npub fn closure() {}\n\npub fn hash() {}\n"),
+        ("src/reach/flow.rs", "pub fn use_it() {}\n"),
+        ("src/store_write.rs", "pub struct Store;\n\nimpl Store {\n    pub fn test() {}\n}\n"),
+        ("src/view.rs", "pub fn page() {}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    let selected = selection_modules(&ix);
+    assert_eq!(selected, ["reach".to_string(), "reach::flow".to_string(), "store_write".to_string()].into_iter().collect::<HashSet<_>>());
+    let built = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(20));
+    set_time(&root.join("src/reach.rs"), 10);
+    set_time(&root.join("src/reach/flow.rs"), 10);
+    set_time(&root.join("src/store_write.rs"), 10);
+    set_time(&root.join("src/view.rs"), 30);
+    assert!(!selection_source_is_newer(&root, built, &ix.modules, &selected), "a view change does not affect selection");
+    assert!(selection_source_is_newer(&root, built, &ix.modules, &HashSet::new()), "no selector modules: every file counts");
+    set_time(&root.join("src/reach.rs"), 30);
+    assert!(selection_source_is_newer(&root, built, &ix.modules, &selected), "a reach change affects selection");
+    set_time(&root.join("src/reach.rs"), 10);
+    set_time(&root.join("src/store_write.rs"), 30);
+    assert!(selection_source_is_newer(&root, built, &ix.modules, &selected), "a store_write change affects selection");
+    set_time(&root.join("src/store_write.rs"), 10);
+    set_time(&root.join("src/reach/flow.rs"), 30);
+    assert!(selection_source_is_newer(&root, built, &ix.modules, &selected), "a reach submodule change affects selection");
+}
+
+fn set_time(path: &Path, secs: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+/// A rebuild that replaces the binary file does not hide that this process is
+/// still running the old code.
+#[test]
+fn a_rebuilt_binary_does_not_hide_the_servers_stale_code() {
+    let root = Scratch::new().with(&[("src/lib.rs", "pub fn one() {}\n")]);
+    let exe = root.join("solace");
+    std::fs::write(&exe, "").unwrap();
+    set_time(&exe, 20);
+    let built = std::fs::metadata(&exe).unwrap().modified().unwrap();
+    set_time(&exe, 40);
+    let source = || std::iter::once("src/lib.rs".to_string());
+    set_time(&root.join("src/lib.rs"), 30);
+    assert!(source_is_newer_than(&root, Some(built), source()), "the captured time, not the replaced file, decides");
+    set_time(&root.join("src/lib.rs"), 10);
+    assert!(!source_is_newer_than(&root, Some(built), source()));
+    assert!(!source_is_newer_than(&root, None, source()), "with no captured time there is nothing to compare");
+    assert!(!source_is_newer_than(&root, Some(built), std::iter::once("src/missing.rs".to_string())), "a missing file is ignored");
+}
+
+/// The stale reason appears only when the fallback forced every test, never for
+/// `--all`.
+#[test]
+fn the_stale_reason_is_shown_only_when_selection_forced_every_test() {
+    let reason = "Ran all 2 tests: Solace's own code changed since this server started; restart it to select tests again.\n";
+    assert_eq!(test_head(2, 2, &[], false, true), reason);
+    assert_eq!(test_head(2, 2, &[], true, true), "Ran all 2 tests.\n");
+    assert_eq!(test_head(2, 2, &[], false, false), "Ran all 2 tests.\n");
+    assert_eq!(test_head(1, 2, &["crate.add"], false, false), "Ran 1 of 2 tests: those that reach crate.add.\n");
+    assert_eq!(
+        test_head(1, 2, &[], false, false),
+        "Ran 1 of 2 tests; the other 1 reach nothing changed since they passed (`test --all` runs every test).\n"
+    );
+}
+
+/// Every symbol the test-selection fallback names resolves, so a rename here
+/// fails instead of silently shrinking the modules that force every test.
+#[test]
+fn every_selection_symbol_resolves_in_this_crate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(crate::store_core::SCHEMA).unwrap();
+    let files = crate::language::rust::package(root).unwrap();
+    crate::store::store_rust_package(&db, &files).unwrap();
+    let store = Store::new(Rc::new(db), root, true, true);
+    let ix = store.index().unwrap();
+    for name in SELECTION_SYMBOLS {
+        assert!(ix.syms.iter().any(|s| s.qname() == *name), "{name} names no symbol in this crate");
+    }
 }
 

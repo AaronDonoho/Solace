@@ -46,7 +46,9 @@ Changing (the new code is in `text`)
   submit <module>               replace a whole module; it must keep every symbol
   submit --imports <module>     replace a module's whole header: module comment
                                 and imports; its `mod` lines are kept
-                                (`view <module> --header` shows it)
+                                (`view <module> --header` shows it). The header
+                                keeps the submitted text's trailing newlines,
+                                or one when it has none.
   delete <name>...              removes each named symbol, in the order named; a
                                 symbol used outside the list stops the whole
                                 list, so nothing is deleted

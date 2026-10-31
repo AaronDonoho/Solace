@@ -2,24 +2,34 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-use rusqlite::params;
-
 use super::glob_reach::{reach_map, reaches};
-use super::{
-    Container, all_use_sites, allows_unused, apply, apply_import_edits, called_names_where, container_key, container_text, full_path,
-    helper_kind, is_public, is_reexport, move_tests, moved_tests_reply, rewrite_move, set_container_text, splice, use_line_removal,
-    use_visibility,
-};
+use super::{apply, called_names_where, container_key};
+use crate::extract::rust::rewrite::use_line_removal;
+use crate::extract::rust::rewrite::apply_import_edits;
+use crate::extract::rust::rewrite::use_visibility;
+use crate::extract::rust::rewrite::splice;
+use crate::extract::rust::rewrite::set_container_text;
+use crate::extract::rust::rewrite::is_reexport;
+use crate::extract::rust::rewrite::is_public;
+use crate::extract::rust::rewrite::full_path;
+use crate::extract::rust::rewrite::container_text;
+use crate::extract::rust::rewrite::allows_unused;
+use crate::extract::rust::rewrite::all_use_sites;
+use crate::extract::rust::rewrite::Container;
+use crate::extract::rust::test_files::moved_tests_reply;
+use crate::extract::rust::test_files::move_tests;
+use crate::extract::rust::plan::rewrite_move;
+use crate::extract::rust::plan::helper_kind;
 use crate::rust_check::post_move_check;
 use crate::language::rust_refs::{Site, Via};
-use crate::{ Index,  Store, Sym,  language, lockdown, revision};
+use crate::{Index, Store, Sym, language};
 use crate::failure::fail;
 use crate::failure::Out;
 use crate::failure::Failure;
 use crate::failure::usage;
 #[path = "merge_tests.rs"]
 mod tests;
-
+use crate::lockdown::commands::trim_output;
 pub(crate) fn merge(s: &Store, survivor: &str, retired: &str, budget: usize) -> Out {
     let ix = s.index()?;
     let keep_i = s.resolve(&ix, survivor)?;
@@ -583,11 +593,7 @@ struct MergePlan<'a> {
 fn apply_merge(s: &Store, ix: &Index, rewrite: &MergeRewrite, plan: &MergePlan<'_>, budget: usize) -> Out {
     for i in (0..ix.syms.len()).filter(|&i| i != plan.gone_i) {
         if rewrite.text[i] != ix.syms[i].text {
-            s.db.execute(
-                "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                params![ix.syms[i].id, rewrite.text[i], revision(&rewrite.text[i])],
-            )?;
-            s.history(&ix.syms[i].id, "edit", &ix.syms[i].name)?;
+            s.set_symbol_text(&ix.syms[i].id, &ix.syms[i].name, &rewrite.text[i])?;
         }
     }
     for (module, header) in &rewrite.headers {
@@ -645,5 +651,5 @@ fn merge_reply(ix: &Index, plan: &MergePlan<'_>, rewrite: &MergeRewrite, tests: 
     if !retired.is_empty() {
         out += &format!("Retired module {}\n", retired.join(", "));
     }
-    lockdown::trim_output(&out, budget)
+    trim_output(&out, budget)
 }

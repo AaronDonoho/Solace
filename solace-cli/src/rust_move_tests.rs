@@ -1,8 +1,8 @@
 use super::*;
 use crate::import;
 use crate::testing::{CARGO, Scratch};
-
-
+use crate::board::reviews::snapshot;
+use crate::board::reviews::restore;
 
 const A: &str = "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests;\n";
 
@@ -41,7 +41,7 @@ fn a_module_file_moves_and_keeps_its_ids() {
     let before = id(&s, "a::tests.one_is_one");
     s.db.execute("UPDATE modules SET dir = 'src/a' WHERE path = 'a::tests'", []).unwrap();
     assert_eq!(dir(&s, "a::tests"), "src/a");
-    let snapshot = crate::board::snapshot(&s).unwrap();
+    let snapshot = snapshot(&s).unwrap();
     let out = moved(&s, "src/a/tests.rs", "src/a_tests.rs").unwrap();
     assert!(out.contains("Moved src/a/tests.rs to src/a_tests.rs"), "{out}");
     assert_eq!(id(&s, "a::tests.one_is_one"), before);
@@ -50,7 +50,7 @@ fn a_module_file_moves_and_keeps_its_ids() {
     assert!(text(&root, "src/a_tests.rs").contains("fn one_is_one()"));
     assert!(text(&root, "src/a.rs").ends_with("#[cfg(test)]\n#[path = \"a_tests.rs\"]\nmod tests;\n"), "{}", text(&root, "src/a.rs"));
     let states: Vec<(String, serde_json::Value)> = snapshot.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    crate::board::restore(&s, &states).unwrap();
+    restore(&s, &states).unwrap();
     assert!(root.join("src/a/tests.rs").exists());
     assert!(!root.join("src/a_tests.rs").exists());
     assert_eq!(dir(&s, "a::tests"), "src/a");

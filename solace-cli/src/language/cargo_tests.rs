@@ -636,3 +636,50 @@ fn an_undeclared_crate_hint_names_cargo_toml() {
     let declared = diagnostics_with_dependencies(&output, &files, &["foo".to_string()]);
     assert!(declared[0].text.contains("use `cargo add foo`"), "{}", declared[0].text);
 }
+
+/// A compiler message keeps the structured fix rustc offers, not only its
+/// rendered text.
+#[test]
+fn a_suggestion_keeps_its_span_and_replacement() {
+    let output = format!(
+        "{{\"reason\":\"compiler-message\",\"message\":{{\"rendered\":\"error\",\"level\":\"error\",\"message\":\"m\",\"spans\":[{}],\
+         \"children\":[{{\"message\":\"consider importing this function\",\"level\":\"help\",\"spans\":[\
+         {{\"file_name\":\"src/lib.rs\",\"line_start\":3,\"line_end\":3,\"column_start\":5,\"column_end\":5,\
+         \"suggested_replacement\":\"use crate::reach::flow::origins;\"}}]}}]}}}}",
+        span("src/lib.rs", 3, true)
+    );
+    let diags = diagnostics(&output, &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one")]));
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].suggestions.len(), 1);
+    assert_eq!(diags[0].suggestions[0].message, "consider importing this function");
+    assert_eq!(diags[0].suggestions[0].spans[0].replacement.as_deref(), Some("use crate::reach::flow::origins;"));
+}
+
+/// A failed test's location names its symbol and quotes the source; a location
+/// outside every symbol is left as it was.
+#[test]
+fn a_failed_tests_location_names_its_symbol_and_source() {
+    let files =
+        files("orientation::tests", "/x/src/orientation_tests.rs", vec![(10, 20, "orientation::tests.the_scanner_reads_this_crate")]);
+    let source = concat!(
+        "#[test]\n",
+        "fn the_scanner_reads_this_crate() {\n",
+        "    // The top-level `drop_records`, not the one nested in `carry_file`.\n",
+        "    assert_eq!(lockdown.iter().filter(|i| i.name.ends_with(\"drop_records\")).count(), 1);\n",
+        "}\n",
+    );
+    let output = concat!(
+        "---- orientation::tests::the_scanner_reads_this_crate stdout ----\n",
+        "thread 'orientation::tests::the_scanner_reads_this_crate' panicked at src/orientation_tests.rs:13:5:\n",
+        "assertion `left == right` failed\n",
+        "  left: 0\n",
+        " right: 1\n",
+    );
+    let mapped = relocate_failure(output, &files, |name| (name == "orientation::tests.the_scanner_reads_this_crate").then_some(source));
+    assert!(mapped.contains("panicked at orientation::tests.the_scanner_reads_this_crate, line 4:"), "{mapped}");
+    assert!(mapped.contains("// The top-level `drop_records`"), "{mapped}");
+    assert!(mapped.contains("assert_eq!(lockdown.iter()"), "{mapped}");
+    assert!(mapped.contains("assertion `left == right` failed"), "{mapped}");
+    let outside = "thread 'x' panicked at src/orientation_tests.rs:30:5:\nboom";
+    assert_eq!(relocate_failure(outside, &files, |_| Some(source)), outside);
+}

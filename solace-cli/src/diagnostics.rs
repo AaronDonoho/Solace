@@ -19,6 +19,7 @@ pub(crate) struct Diag {
     pub(crate) module: Option<String>,
     pub(crate) symbol: Option<String>,
     pub(crate) text: String,
+    pub(crate) suggestions: Vec<Suggestion>,
 }
 
 pub(crate) fn strip_ansi(s: &str) -> String {
@@ -286,4 +287,21 @@ pub(crate) fn warning_module(d: &Diag) -> &str {
 /// A site's module, falling back to the part of its name before the last dot.
 fn site_module(d: &Diag) -> Option<&str> {
     d.module.as_deref().filter(|m| !m.is_empty()).or_else(|| d.symbol.as_deref()?.rsplit_once('.').map(|(m, _)| m))
+}
+
+/// One entry in rustc's output: a fix with the spans it rewrites, or a plain
+/// span label such as "private method defined here".
+pub(crate) struct Suggestion {
+    pub(crate) message: String,
+    pub(crate) spans: Vec<SuggestionSpan>,
+}
+
+/// A source range a suggestion rewrites; `replacement` is `None` for a note.
+pub(crate) struct SuggestionSpan {
+    pub(crate) file_name: String,
+    pub(crate) line_start: usize,
+    pub(crate) line_end: usize,
+    pub(crate) column_start: usize,
+    pub(crate) column_end: usize,
+    pub(crate) replacement: Option<String>,
 }

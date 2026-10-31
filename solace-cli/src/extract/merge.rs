@@ -9,6 +9,19 @@ use super::*;
 use serde_json::Value;
 use crate::diagnostics::Diag;
 use std::collections::HashMap;
+use crate::extract::deps::depends_on;
+use crate::extract::deps::covered;
+use crate::extract::deps::Dest;
+use crate::extract::deps::Dependent;
+use crate::extract::deps::merged;
+use crate::extract::plan::is_pub_text;
+use crate::extract::plan::name_map;
+use crate::extract::plan::cyclic;
+use crate::extract::plan::Plan;
+use crate::extract::plan::write_headers;
+use crate::extract::plan::bring_helpers;
+use crate::extract::apply::nested;
+
 const FORM: &str = "merge <survivor> <retired> [--to-project <folder>]";
 
 struct Args {
@@ -72,7 +85,7 @@ fn uses_list(name: &str, users: &[String]) -> String {
 /// and where it goes.
 fn dependency_line(from: &str, d: &Dest) -> String {
     let toml = if from == "." { "gleam.toml".to_string() } else { format!("{from}/gleam.toml") };
-    format!("{} = {{ path = \"{}\" }} to {toml}", workspace::name(&d.store.root), relative(from, &d.dir))
+    format!("{} = {{ path = \"{}\" }} to {toml}", workspace::name(&d.store.root), crate::extract::ffi::relative(from, &d.dir))
 }
 
 /// The rewrite of the symbols before `upto` in `x`, with every reference to
@@ -437,7 +450,7 @@ impl Store {
                         uses_list(&gone.name, &user_names)
                     ));
                 }
-                if !d.store.root.canonicalize().is_ok_and(|c| path_deps(&self.root).contains(&c)) {
+                if !d.store.root.canonicalize().is_ok_and(|c| crate::extract::deps::path_deps(&self.root).contains(&c)) {
                     let modules: BTreeSet<&str> = users.iter().map(|&j| ix.syms[j].module.as_str()).collect();
                     return fail(format!(
                         "E5009 {} use{} {}, and {mine} does not depend on {}: add {} first (`write`), then merge",
@@ -462,7 +475,7 @@ impl Store {
         for d in members.iter().filter(|d| **d != mine && dest.as_ref().is_none_or(|t| t.dir != **d)) {
             let dir = scope::path(&top, d);
             let Some(me) = self.root.canonicalize().ok() else { break };
-            if !path_deps(&dir).contains(&me) {
+            if !crate::extract::deps::path_deps(&dir).contains(&me) {
                 continue;
             }
             if covered(&dir) {
@@ -526,7 +539,7 @@ impl Store {
                     uses_list(&gone.name, &names)
                 ));
             }
-            if !d.store.root.canonicalize().is_ok_and(|c| path_deps(&dp.store.root).contains(&c)) {
+            if !d.store.root.canonicalize().is_ok_and(|c| crate::extract::deps::path_deps(&dp.store.root).contains(&c)) {
                 let modules: BTreeSet<&str> = users_there.iter().map(|&j| djx.syms[j].module.as_str()).collect();
                 return fail(format!(
                     "E5009 {} in {} use{} {}, and {} does not depend on {}: add {} first (`write --project {}`), then merge",
@@ -566,11 +579,7 @@ impl Store {
             for i in (0..n).filter(|&i| i != r) {
                 let x = &ix.syms[i];
                 if plan.newtext[i] != x.text {
-                    self.db.execute(
-                        "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                        params![x.id, plan.newtext[i], revision(&plan.newtext[i])],
-                    )?;
-                    self.history(&x.id, "edit", &x.name)?;
+                    self.set_symbol_text(&x.id, &x.name, &plan.newtext[i])?;
                 }
             }
             self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [&gone.id])?;
@@ -580,11 +589,7 @@ impl Store {
             for (dp, p) in deps.iter().zip(&dplans) {
                 for (i, x) in dp.ix.syms.iter().enumerate() {
                     if p.newtext[i] != x.text {
-                        dp.store.db.execute(
-                            "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                            params![x.id, p.newtext[i], revision(&p.newtext[i])],
-                        )?;
-                        dp.store.history(&x.id, "edit", &x.name)?;
+                        dp.store.set_symbol_text(&x.id, &x.name, &p.newtext[i])?;
                     }
                 }
                 let modules: Vec<(String, String, &Store)> =

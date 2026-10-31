@@ -8,6 +8,8 @@ use crate::cli::PROBE;
 use crate::diagnostics::FileMap;
 use crate::diagnostics::Diag;
 use std::collections::HashMap;
+use crate::lockdown::files::copy_files;
+
 /// Runs a Rust probe in the crate's reusable scratch copy. A lock serializes
 /// runs on it; each run refreshes it and restores only the probe text.
 pub(crate) fn run(s: &Store, text: &str, module: Option<&str>, from: Option<&str>) -> Out {
@@ -135,7 +137,7 @@ fn report(p: &Prepared, private: bool, output: &str) -> Out {
 /// protected and unwatched files outside `target/`, and Cargo's settings.
 /// The copied manifest is its own workspace root, away from any workspace above.
 fn copy_crate(s: &Store, dir: &Path, manifest: &toml::Value) -> Result<Vec<String>, Failure> {
-    let mut names = view::copy_files(
+    let mut names = copy_files(
         s,
         dir,
         |name, tier| {
@@ -987,7 +989,7 @@ fn copy_missing_tree(
         if !path.is_file() {
             continue;
         }
-        view::copy_if_changed(&path, &to.join(entry.file_name()))?;
+        crate::fsx::copy_if_changed(&path, &to.join(entry.file_name()))?;
         names.push(name);
     }
     Ok(())

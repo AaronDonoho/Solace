@@ -238,12 +238,16 @@ fn the_scanner_reads_this_crate() {
     let read = |f: &str| rust(&fs::read_to_string(src.join(f)).unwrap()).unwrap();
     let board = read("board.rs");
     assert!(board.iter().any(|i| i.name == "tests" && i.sig.ends_with("→ board_tests.rs")));
-    assert!(board.iter().any(|i| i.name == "brief" && i.kind == "fn"));
+    let briefs = read("board/briefs.rs");
+    assert!(briefs.iter().any(|i| i.name == "brief" && i.kind == "fn"));
     let view = read("view.rs");
     assert!(!view.iter().any(|i| i.sig.contains("fn write(path: String")), "Gleam in a raw string is not an item");
-    assert!(view.iter().any(|i| i.name == "tests::c1_graph_has_entries_effects_and_tests"));
+    assert!(view.iter().any(|i| i.name == "tests::c4_files_match_cli_listing"));
     let lockdown = read("lockdown.rs");
     assert!(lockdown.iter().any(|i| i.name == "dispatch"));
+    let recovery = read("lockdown/recovery.rs");
     // The top-level `drop_records`, not the one nested in `carry_file`.
-    assert_eq!(lockdown.iter().filter(|i| i.name.ends_with("drop_records")).count(), 1);
+    assert_eq!(recovery.iter().filter(|i| i.name.ends_with("drop_records")).count(), 1);
+    let files = read("lockdown/files.rs");
+    assert!(!files.iter().any(|i| i.name.ends_with("drop_records")));
 }

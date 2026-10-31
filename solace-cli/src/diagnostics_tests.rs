@@ -1,7 +1,7 @@
 use super::*;
 #[test]
 fn broken_symbols_counted_once() {
-    let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}") };
+    let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}"), suggestions: vec![] };
     let out = broken_report(&HashMap::new(), &[d("a.f"), d("a.g"), d("a.f")]);
     assert!(out.contains("Broken symbols (2): a.f, a.g"), "{out}");
 }
@@ -13,6 +13,7 @@ fn grouped_privacy_errors_name_the_fix_once() {
             module: None,
             symbol: Some(format!("crate.site{n}")),
             text: format!("error[E0603]: function `helper` is private\n  at crate.site{n}, line 1"),
+            suggestions: vec![],
         })
         .collect();
     diags.extend((0..6).map(|n| Diag {
@@ -20,8 +21,15 @@ fn grouped_privacy_errors_name_the_fix_once() {
         module: None,
         symbol: Some(format!("crate.call{n}")),
         text: format!("error[E0599]: no method named `open` found for struct `Store` in the current scope\n  at crate.call{n}, line 1"),
+        suggestions: vec![],
     }));
-    diags.push(Diag { error: true, module: None, symbol: Some("crate.other".into()), text: "error: something else".into() });
+    diags.push(Diag {
+        error: true,
+        module: None,
+        symbol: Some("crate.other".into()),
+        text: "error: something else".into(),
+        suggestions: vec![],
+    });
     let out = broken_report(&HashMap::new(), &diags);
     assert!(out.contains("`helper` is private (6 places): make it `pub(crate)`"), "{out}");
     assert!(out.contains("`open` is missing on `Store` (6 places): add the method or fix the call"), "{out}");
@@ -81,6 +89,7 @@ fn grouped_site(module: Option<&str>, symbol: Option<String>) -> Diag {
         module: module.map(str::to_string),
         symbol,
         text: format!("error[E0616]: field `0` of struct `Failure` is private\n  at {at}, line 1"),
+        suggestions: vec![],
     }
 }
 

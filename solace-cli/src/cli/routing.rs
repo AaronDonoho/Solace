@@ -9,6 +9,23 @@ use super::{HOST, PROJECT_ONLY, READS};
 #[cfg(test)]
 #[path = "routing_tests.rs"]
 mod tests;
+use crate::lockdown::commands::trim_output;
+use crate::lockdown::settings::settings;
+use crate::lockdown::settings::settings_file;
+use crate::lockdown::settings::cargo_settings_changed;
+use crate::lockdown::files::edited;
+use crate::board::task_model::flow;
+use crate::board::reviews::task_diff;
+use crate::board::briefs::task_peek;
+use crate::board::briefs::remember;
+use crate::board::server::serve;
+use crate::board::reviews::record_verification;
+use crate::board::setup::system;
+use crate::board::runs::context;
+use crate::board::runs::strategy_context;
+use crate::board::runs::task_command;
+use crate::board::settings::propose_settings;
+
 /// Removes `flag` and its value from `args`; a flag without a value is a usage error.
 pub(crate) fn take(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, Failure> {
     let Some(i) = args.iter().position(|a| a == flag) else { return Ok(None) };
@@ -36,7 +53,7 @@ pub(crate) fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: 
         None => env::current_dir()?,
     };
     let Ok(own) = crate::Store::root() else {
-        crate::board::flow(&here)?;
+        flow(&here)?;
         return crate::drafts::with_project(project.as_deref(), || run_inner(&here, &here, &args, input, old, budget));
     };
     let mut session = crate::command_tx::session(args, cross, dest, project, here, own)?;
@@ -211,7 +228,7 @@ pub(crate) fn run_inner(
             agent,
             Path::new(dir),
             &env::current_exe()?,
-            crate::board::system()?["task_timeout"].as_u64().unwrap_or(3600),
+            system()?["task_timeout"].as_u64().unwrap_or(3600),
         );
     }
     if a[0] == "create" {
@@ -220,8 +237,8 @@ pub(crate) fn run_inner(
 
     // run_options has put back any interrupted file write (lockdown::recover).
     let store = crate::Store::at(root)?;
-    let settings = crate::lockdown::settings(&store.root)?;
-    let task = crate::board::context().map(|(tid, _)| tid);
+    let settings = settings(&store.root)?;
+    let task = context().map(|(tid, _)| tid);
     if CARGO_TOOLS.contains(&a[0])
         && let Some(id) = crate::language::id(&store.root)
         && let Some(why) = crate::language::reason(id)?
@@ -262,7 +279,10 @@ pub(crate) fn run_inner(
         ["view", rest @ ..] if !operands(rest).is_empty() => {
             store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
         }
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => {
+            let (names, lines) = inspect_options(rest)?;
+            store.inspect(&names, rest.contains(&"--context"), lines, budget)
+        }
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["impact", names @ ..] => store.impact(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
@@ -311,8 +331,8 @@ fn probe_args<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>, Op
 
 fn command_report(result: Out, budget: usize) -> Out {
     match result {
-        Ok(text) => Ok(crate::lockdown::trim_output(&("exit code: 0\n".to_string() + &text), budget)),
-        Err(Failure(text, code)) => Err(Failure(crate::lockdown::trim_output(&format!("exit code: {code}\n{text}"), budget), code)),
+        Ok(text) => Ok(trim_output(&("exit code: 0\n".to_string() + &text), budget)),
+        Err(Failure(text, code)) => Err(Failure(trim_output(&format!("exit code: {code}\n{text}"), budget), code)),
     }
 }
 
@@ -379,12 +399,12 @@ enum SettingsWrite {
 }
 
 fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Result<Option<Out>, Failure> {
-    if let Some(rid) = crate::board::strategy_context() {
+    if let Some(rid) = strategy_context() {
         return Ok(Some(strategy_run(&rid, args, input, budget)));
     }
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if a.first() == Some(&"serve") {
-        if crate::board::context().is_some() {
+        if context().is_some() {
             return Ok(Some(crate::lockdown::error("E7010", "serve", "host command")));
         }
         let port = match a.as_slice() {
@@ -392,10 +412,10 @@ fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize)
             ["serve", "--port", p] => p.parse().map_err(|_| Failure("invalid port".into(), 2))?,
             _ => return Ok(Some(usage("serve [--port N]"))),
         };
-        return Ok(Some(crate::board::serve(crate::workspace::find(&env::current_dir()?)?, port)));
+        return Ok(Some(serve(crate::workspace::find(&env::current_dir()?)?, port)));
     }
     if a.first() == Some(&"migrate") {
-        if crate::board::context().is_some() {
+        if context().is_some() {
             return Ok(Some(crate::lockdown::error("E7010", "migrate", "host command")));
         }
         return Ok(Some(crate::migrate::command(&a[1..])));
@@ -407,7 +427,7 @@ fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize)
             "strategy commands work only in a strategy run started from the Strategy page",
         )));
     }
-    if a.first() == Some(&"task") && crate::board::context().is_none() {
+    if a.first() == Some(&"task") && context().is_none() {
         return Ok(Some(crate::lockdown::error(
             "E7010",
             "task",
@@ -415,7 +435,7 @@ fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize)
         )));
     }
     if a.as_slice() == ["session", "remember"] {
-        let Some((tid, rid)) = crate::board::context() else {
+        let Some((tid, rid)) = context() else {
             return Ok(Some(crate::lockdown::error(
                 "E7010",
                 "session remember",
@@ -423,7 +443,7 @@ fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize)
             )));
         };
         let top = crate::scope::top(&crate::Store::root()?);
-        return Ok(Some(crate::board::remember(&top, &tid, &rid, budget)));
+        return Ok(Some(remember(&top, &tid, &rid, budget)));
     }
     Ok(None)
 }
@@ -482,17 +502,17 @@ fn board_command(
 ) -> Option<Out> {
     let (tid, rid) = context.as_ref()?;
     if a.starts_with(&["task", "diff"]) {
-        return Some(crate::board::task_diff(home, tid, &a[2..], budget));
+        return Some(task_diff(home, tid, &a[2..], budget));
     }
     // In a task run, `impact` with no names is the task's own change list (D-102).
     if a.len() == 1 && a[0] == "impact" {
-        return Some(crate::board::task_diff(home, tid, &[], budget));
+        return Some(task_diff(home, tid, &[], budget));
     }
     if a.starts_with(&["task", "peek"]) {
-        return Some(crate::board::task_peek(home, tid, &a[2..], budget));
+        return Some(task_peek(home, tid, &a[2..], budget));
     }
     if a.first() == Some(&"task") {
-        return Some(crate::board::task_command(home, tid, rid, a, input, options, std::mem::take(guard)));
+        return Some(task_command(home, tid, rid, a, input, options, std::mem::take(guard)));
     }
     None
 }
@@ -513,15 +533,15 @@ fn settings_proposal(
         return Ok(SettingsWrite::None);
     }
     let Some(file) =
-        a.get(1).map(|p| crate::file_name(Path::new(p))).filter(|p| crate::lockdown::settings_file(&store.root, p) || *p == "Cargo.toml")
+        a.get(1).map(|p| crate::file_name(Path::new(p))).filter(|p| settings_file(&store.root, p) || *p == "Cargo.toml")
     else {
         return Ok(SettingsWrite::None);
     };
     let current = fs::read(store.root.join(&file)).unwrap_or_default();
-    let proposed = crate::lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
-    if crate::lockdown::settings_file(&store.root, &file) || crate::lockdown::cargo_settings_changed(&current, &proposed) {
+    let proposed = edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
+    if settings_file(&store.root, &file) || cargo_settings_changed(&current, &proposed) {
         let reason = crate::REASON.with(|r| r.borrow().clone());
-        return Ok(SettingsWrite::Proposed(crate::board::propose_settings(
+        return Ok(SettingsWrite::Proposed(propose_settings(
             home,
             &store.root,
             tid,
@@ -584,7 +604,29 @@ fn run_command(
         && a.first().is_some_and(|c| VERIFIES.contains(c))
         && !crate::command_tx::reads_only(a)
     {
-        crate::board::record_verification(&session.home, tid, a[0], &result)?;
+        record_verification(&session.home, tid, a[0], &result)?;
     }
     Ok(result)
+}
+
+/// `inspect`'s names and its `--lines` range: an option's value is not a name.
+pub(crate) fn inspect_options<'a>(args: &[&'a str]) -> Result<(Vec<&'a str>, Option<&'a str>), Failure> {
+    let mut names = vec![];
+    let mut lines = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--lines" {
+            let Some(spec) = args.get(i + 1).copied() else {
+                return usage("inspect --lines takes a range, such as 3,7,10..12");
+            };
+            lines = Some(spec);
+            i += 2;
+        } else {
+            if !args[i].starts_with("--") {
+                names.push(args[i]);
+            }
+            i += 1;
+        }
+    }
+    Ok((names, lines))
 }

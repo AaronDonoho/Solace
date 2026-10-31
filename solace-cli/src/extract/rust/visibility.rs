@@ -1,127 +1,11 @@
 use std::collections::{BTreeSet, HashSet};
-use std::ops::Range;
+use crate::extract::rust::rewrite::declaration;
 
-use super::{can_promote, helper_kind, impl_owner_symbol, is_public};
-use crate::Index;
-
-
-
-pub(super) fn promote_access(
-    ix: &Index,
-    ids: &std::collections::HashMap<&str, usize>,
-    moved: &[bool],
-    target: &str,
-    newtext: &mut [String],
-    promote: &mut BTreeSet<usize>,
-) {
-    let mut owners: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
-    for method in 0..ix.syms.len() {
-        if !moved[method] || ix.syms[method].kind_text != "fn" {
-            continue;
-        }
-        let Some(parent) = ix.syms[method].parent.as_deref() else { continue };
-        let Some(&at) = ids.get(parent) else { continue };
-        if ix.syms[at].kind_text != "impl" {
-            continue;
-        }
-        let Ok(owner) = impl_owner_symbol(ix, at) else { continue };
-        if !moved[owner] && !visible_from(&ix.syms[owner].module, target) {
-            owners.entry(owner).or_default().push(method);
-            if !is_public(&newtext[owner]) {
-                promote.insert(owner);
-            }
-        }
-        if ix.used_by[method].iter().any(|&u| !moved[u] && !visible_from(target, &ix.syms[u].module))
-            && can_promote(ix, ids, method)
-            && !is_public(&newtext[method])
-        {
-            promote.insert(method);
-        }
-        for &used in &ix.uses[method] {
-            if !moved[used]
-                && can_promote(ix, ids, used)
-                && helper_kind(&ix.syms[used].kind_text)
-                && !is_public(&newtext[used])
-                && !visible_from(&ix.syms[used].module, target)
-            {
-                promote.insert(used);
-            }
-        }
-    }
-    for (owner, methods) in owners {
-        let owner_name = &ix.syms[owner].name;
-        let used: HashSet<String> = methods.iter().flat_map(|&m| method_fields(&newtext[m], owner_name)).collect();
-        newtext[owner] = promote_fields(&newtext[owner], &used);
-    }
-    let mut used_fields: std::collections::BTreeMap<usize, HashSet<String>> = std::collections::BTreeMap::new();
-    for moved_fn in 0..ix.syms.len() {
-        if !moved[moved_fn] || ix.syms[moved_fn].kind_text != "fn" {
-            continue;
-        }
-        for &used in &ix.uses[moved_fn] {
-            if moved[used] || ix.syms[used].kind_text != "struct" {
-                continue;
-            }
-            let fields = method_fields(&newtext[moved_fn], &ix.syms[used].name);
-            if fields.is_empty() || visible_from(&ix.syms[used].module, target) {
-                continue;
-            }
-            if !is_public(&newtext[used]) {
-                promote.insert(used);
-            }
-            used_fields.entry(used).or_default().extend(fields);
-        }
-    }
-    for (owner, fields) in used_fields {
-        newtext[owner] = promote_fields(&newtext[owner], &fields);
-    }
-    for owner in 0..ix.syms.len() {
-        if !moved[owner] || ix.syms[owner].kind_text != "struct" {
-            continue;
-        }
-        newtext[owner] = promote_fields(&newtext[owner], &all_fields(&newtext[owner]));
-        promote.insert(owner);
-    }
-}
-
-fn promote_fields(text: &str, used: &HashSet<String>) -> String {
-    let Ok(item) = syn::parse_str::<syn::ItemStruct>(text) else { return text.to_string() };
-    let mut edits: Vec<(Range<usize>, String)> = vec![];
-    for (index, field) in item.fields.iter().enumerate() {
-        let name = field.ident.as_ref().map_or_else(|| index.to_string(), |name| name.to_string());
-        if !used.contains(&name) {
-            continue;
-        }
-        match &field.vis {
-            syn::Visibility::Public(_) => {}
-            syn::Visibility::Inherited => {
-                let at = match &field.ident {
-                    Some(name) => syn::spanned::Spanned::span(name).byte_range().start,
-                    None => syn::spanned::Spanned::span(&field.ty).byte_range().start,
-                };
-                edits.push((at..at, "pub(crate) ".to_string()));
-            }
-            syn::Visibility::Restricted(vis) => {
-                if vis.path.segments.len() == 1 && vis.path.segments[0].ident == "crate" {
-                    continue;
-                }
-                edits.push((syn::spanned::Spanned::span(&field.vis).byte_range(), "pub(crate) ".to_string()));
-            }
-        }
-    }
-    edits.sort_by_key(|(range, _)| range.start);
-    let mut out = text.to_string();
-    for (range, with) in edits.into_iter().rev() {
-        out.replace_range(range, &with);
-    }
-    out
-}
-
-pub(super) fn visible_from(from: &str, to: &str) -> bool {
+pub(crate) fn visible_from(from: &str, to: &str) -> bool {
     from == to || from == "crate" || to.starts_with(&format!("{from}::"))
 }
 
-pub(super) fn method_fields(text: &str, owner: &str) -> HashSet<String> {
+pub(crate) fn method_fields(text: &str, owner: &str) -> HashSet<String> {
     let (sig, block) = if let Ok(item) = syn::parse_str::<syn::ItemFn>(text) {
         (item.sig, *item.block)
     } else if let Ok(method) = syn::parse_str::<syn::ImplItemFn>(text) {
@@ -476,31 +360,13 @@ fn token_fields(tokens: &proc_macro2::TokenStream, receivers: &HashSet<String>, 
     }
 }
 
-fn all_fields(text: &str) -> HashSet<String> {
-    let Ok(item) = syn::parse_str::<syn::ItemStruct>(text) else { return HashSet::new() };
-    item.fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| field.ident.as_ref().map_or_else(|| index.to_string(), |name| name.to_string()))
-        .collect()
-}
-
 /// The narrowest visibility a `mod <name>` declaration needs so every caller
 /// can reach it, with the declaration rewritten to have it. `None` when the
 /// declaration already allows every caller, or when no such declaration is
 /// found.
 pub(super) fn raise_module(text: &str, name: &str, parent: &str, callers: &BTreeSet<String>) -> Option<(String, &'static str)> {
     let (start, mod_at, current) = module_declaration(text, name)?;
-    if callers.is_empty() || callers.iter().all(|caller| reaches(&current, parent, caller)) {
-        return None;
-    }
-    let needed = callers.iter().map(|caller| needed_from(caller, parent)).max()?;
-    let visibility = match needed {
-        Needed::Private => return None,
-        Needed::Super => "pub(super)",
-        Needed::Crate => "pub(crate)",
-    };
-    Some((format!("{}{visibility} {}", &text[..start], &text[mod_at..]), visibility))
+    raise_to_callers(text, start, mod_at, &current, parent, callers)
 }
 
 /// A `mod <name>;` or `mod <name> {` declaration's visibility start, its
@@ -667,20 +533,6 @@ fn raw_string_end(text: &str, at: usize) -> Option<usize> {
     Some(text[body..].find(&close).map_or(text.len(), |found| body + found + close.len()))
 }
 
-/// The declaration with plain `pub` visibility, so a dropped re-export keeps
-/// the reach it had.
-pub(super) fn make_public(text: &str) -> String {
-    let Some((at, code)) = super::declaration(text) else { return text.to_string() };
-    if code.starts_with("pub ") || code.starts_with("pub\n") {
-        return text.to_string();
-    }
-    if code.starts_with("pub(") {
-        let Some(end) = code.find(')') else { return text.to_string() };
-        return format!("{}pub{}", &text[..at], &text[at + end + 1..]);
-    }
-    format!("{}pub {}", &text[..at], &text[at..])
-}
-
 /// The declaration with plain `pub` visibility, so an item that reached
 /// outside the crate before the move still does.
 pub(super) fn make_module_public(text: &str, name: &str) -> Option<String> {
@@ -692,6 +544,45 @@ pub(super) fn make_module_public(text: &str, name: &str) -> Option<String> {
 }
 
 pub(super) fn is_plain_public(text: &str) -> bool {
-    let Some((_, code)) = super::declaration(text) else { return false };
+    let Some((_, code)) = declaration(text) else { return false };
     code.starts_with("pub ") || code.starts_with("pub\n")
+}
+
+/// The narrowest visibility a parent needs for `callers` to reach what it
+/// declares, or `None` when the parent's own scope already reaches them.
+pub(super) fn visibility_for(parent: &str, callers: &BTreeSet<String>) -> Option<&'static str> {
+    let needed = callers.iter().map(|caller| needed_from(caller, parent)).max()?;
+    match needed {
+        Needed::Private => None,
+        Needed::Super => Some("pub(super)"),
+        Needed::Crate => Some("pub(crate)"),
+    }
+}
+
+/// The narrowest visibility a declaration needs so every caller can reach
+/// it, with the declaration rewritten to have it. `None` when the
+/// declaration already allows every caller.
+pub(super) fn raise_declaration(text: &str, module: &str, callers: &BTreeSet<String>) -> Option<(String, &'static str)> {
+    let (at, code) = crate::extract::rust::rewrite::declaration(text)?;
+    let (current, used) = visibility_at(code);
+    raise_to_callers(text, at, at + used, current, module, callers)
+}
+
+/// `text` with the visibility every caller reaches, written at `start`; `None`
+/// when the current visibility already reaches them.
+fn raise_to_callers(
+    text: &str,
+    start: usize,
+    rest_at: usize,
+    current: &str,
+    scope: &str,
+    callers: &BTreeSet<String>,
+) -> Option<(String, &'static str)> {
+    if callers.is_empty() || callers.iter().all(|caller| reaches(current, scope, caller)) {
+        return None;
+    }
+    let visibility = visibility_for(scope, callers)?;
+    let rest = &text[rest_at..];
+    let spacing = if rest.is_empty() || rest.starts_with(char::is_whitespace) { "" } else { " " };
+    Some((format!("{}{visibility}{spacing}{}", &text[..start], rest), visibility))
 }

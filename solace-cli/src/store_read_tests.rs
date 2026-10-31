@@ -97,9 +97,15 @@ fn a_rust_module_body_is_the_file() {
 #[test]
 fn inspect_shows_a_rust_item() {
     let (_root, store) = sample();
-    let out = store.inspect(&["crate.Store::open"], false, usize::MAX).unwrap();
+    let out = store.inspect(&["crate.Store::open"], false, None, usize::MAX).unwrap();
     assert!(out.contains("crate.Store::open (fn)"), "{out}");
-    let out = store.inspect(&["crate.helper"], true, usize::MAX).unwrap();
+    let out = store.inspect(&["crate.Store::open"], false, Some("1..1,4..4"), usize::MAX).unwrap();
+    let line1 = out.lines().find(|line| line.starts_with("1: ")).unwrap();
+    let line4 = out.lines().find(|line| line.starts_with("4: ")).unwrap();
+    assert!(line1.trim_end().ends_with("/// Opens it."), "{out}");
+    assert!(line4.trim_end().ends_with('}'), "{out}");
+    assert!(out.lines().any(|line| line == "…"), "{out}");
+    let out = store.inspect(&["crate.helper"], true, None, usize::MAX).unwrap();
     assert!(out.contains("crate.helper (fn)"), "{out}");
     assert!(out.contains("== Uses ==") && out.contains("crate.Store::open"), "{out}");
 }
@@ -649,4 +655,77 @@ fn an_undeclared_crate_in_a_test_names_cargo_toml() {
     let err = store.test(&["--all"]).unwrap_err().0;
     assert!(err.contains("`foo_not_a_dep` isn't a dependency of this project; add it to `Cargo.toml` first."), "{err}");
     assert!(!err.contains("cargo add"), "{err}");
+}
+
+/// A move reruns the tests that reach the moved code, not every test in the
+/// modules whose headers it changed.
+#[test]
+fn a_move_runs_only_the_tests_that_reach_it() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project(concat!(
+        "pub fn one() -> i32 {\n    1\n}\n\n",
+        "pub fn two() -> i32 {\n    2\n}\n\n",
+        "pub fn go() -> i32 {\n    one() + two()\n}\n\n",
+        "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+        "    #[test]\n    fn go_works() {\n        assert_eq!(go(), 3);\n    }\n\n",
+        "    #[test]\n    fn two_works() {\n        assert_eq!(two(), 2);\n    }\n}\n",
+    ));
+    let all = store.test(&[]).unwrap();
+    assert!(all.starts_with("Ran all 2 tests."), "{all}");
+    store.extract(&["crate.one", "--to", "helpers"], usize::MAX).unwrap();
+    let out = store.test(&[]).unwrap();
+    assert!(out.starts_with("Ran 1 of 2 tests;"), "{out}");
+    let ix = store.index().unwrap();
+    let text = module_text(&ix, ix.modules.iter().find(|m| m.path == "crate").unwrap());
+    let broken = text.replace(" + two()\n}", " + two() + 1\n}");
+    assert_ne!(broken, text, "go's body was not found to break");
+    store.submit(Target::Module("crate"), &broken).unwrap();
+    let out = store.test(&[]).unwrap_err().0;
+    assert!(out.starts_with("Ran 1 of 2 tests;"), "{out}");
+    assert!(out.contains("go_works"), "the failing test is not named: {out}");
+    assert!(!out.contains("two_works"), "two_works ran instead of go_works: {out}");
+}
+
+/// A test reaching a process-spawning helper runs when its reach changes, not
+/// on every run.
+#[test]
+fn a_process_test_skips_when_nothing_it_reaches_changed() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project(concat!(
+        "pub fn spawn() -> bool {\n",
+        "    std::process::Command::new(std::env::current_exe().unwrap())\n",
+        "        .arg(\"--list\")\n",
+        "        .status()\n",
+        "        .unwrap()\n",
+        "        .success()\n",
+        "}\n\n",
+        "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+        "    #[test]\n    fn spawn_works() {\n        assert!(spawn());\n    }\n}\n",
+    ));
+    let all = store.test(&[]).unwrap();
+    assert!(all.starts_with("Ran all 1 tests."), "{all}");
+    let out = store.test(&[]).unwrap();
+    assert!(out.starts_with("Ran 0 of 1 tests;"), "{out}");
+    store
+        .submit_symbols(
+            Some("crate.spawn"),
+            None,
+            concat!(
+                "pub fn spawn() -> bool {\n",
+                "    std::process::Command::new(std::env::current_exe().unwrap())\n",
+                "        .arg(\"--list\")\n",
+                "        .env(\"SOLACE_TEST_PROBE\", \"1\")\n",
+                "        .status()\n",
+                "        .unwrap()\n",
+                "        .success()\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+    let out = store.test(&[]).unwrap();
+    assert!(out.starts_with("Ran all 1 tests."), "{out}");
 }

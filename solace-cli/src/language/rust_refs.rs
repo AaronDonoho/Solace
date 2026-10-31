@@ -50,7 +50,7 @@ pub fn graph(syms: &[Sym], modules: &[ModuleRow]) -> Graph {
             if scopes.imports.iter().any(|import| import.start <= mention.range.start && mention.range.end <= import.end) {
                 continue;
             }
-            let (exact, maybe) = classify(&refs, m, i, &mention, &scopes);
+            let (exact, maybe) = classify(&refs, m, i, text, &mention, &scopes);
             for (targets, is_possible) in [(exact, false), (maybe, true)] {
                 for t in targets {
                     if t == i {
@@ -381,7 +381,7 @@ fn is_type(s: &Sym) -> bool {
 
 /// One `use` line's import: the path to the imported item (`[]` for a glob's
 /// module), the name it binds, and whether it imports a whole module.
-struct Import {
+pub(crate) struct Import {
     path: Vec<String>,
     local: String,
     glob: bool,
@@ -708,15 +708,7 @@ impl<'a> Refs<'a> {
 
     /// The enclosing `impl` or `trait`'s name, for `Self::`.
     fn container_name(&self, i: usize) -> Option<String> {
-        let mut p = self.syms[i].parent.clone();
-        while let Some(id) = p {
-            let &k = self.by_id.get(id.as_str())?;
-            if self.syms[k].kind_text == "impl" || self.syms[k].kind_text == "trait" {
-                return Some(self.syms[k].name.clone());
-            }
-            p = self.syms[k].parent.clone();
-        }
-        None
+        self.container_symbol(i).map(|k| self.syms[k].name.clone())
     }
 
     fn fallback(&self, segs: &[String]) -> Vec<usize> {
@@ -841,6 +833,19 @@ impl<'a> Refs<'a> {
         out.extend(self.import_visible(m, i, name));
         out
     }
+
+    /// The enclosing `impl` or `trait`, for a method's owner.
+    fn container_symbol(&self, i: usize) -> Option<usize> {
+        let mut p = self.syms[i].parent.clone();
+        while let Some(id) = p {
+            let &k = self.by_id.get(id.as_str())?;
+            if self.syms[k].kind_text == "impl" || self.syms[k].kind_text == "trait" {
+                return Some(k);
+            }
+            p = self.syms[k].parent.clone();
+        }
+        None
+    }
 }
 
 /// Whether each symbol is test code (D-170): the `tests/` folder, anything
@@ -891,14 +896,16 @@ fn header_cfg_mods(header: &str, parent: &str, out: &mut HashSet<(String, String
             flag = false;
             continue;
         }
-        if !(t.starts_with("use ") || t.starts_with("pub use") || t.starts_with("extern crate")) {
-            flag = false;
-        }
+        flag = false;
     }
 }
 
 fn mod_decl_name(line: &str) -> Option<String> {
-    let line = line.strip_prefix("pub ").unwrap_or(line);
+    let line = if let Some(rest) = line.strip_prefix("pub(") {
+        rest.split_once(')')?.1.trim_start()
+    } else {
+        line.strip_prefix("pub ").unwrap_or(line)
+    };
     let rest = line.strip_prefix("mod ")?.trim();
     if !rest.ends_with(';') {
         return None;
@@ -952,6 +959,8 @@ struct Binding {
     /// Whether the name is a type or module, so it also shadows the start of
     /// a longer path.
     types: bool,
+    /// The struct a plain literal binding names, when it is known.
+    ty: Option<usize>,
 }
 
 /// The names an item's text binds, with the part of the text each covers.
@@ -981,7 +990,7 @@ fn shadowed(scopes: &Scopes, segs: &[String], at: usize) -> bool {
 /// The mention ranges that are declarations or are shadowed by a binding; a
 /// `member` of an `impl` or `trait` does not bind its own name. A `use` inside
 /// a block is a site or shadows its local name, never an ordinary path mention.
-fn bound(text: &str, mentions: &[Spanned], member: bool, context: &ScopeContext<'_, '_>) -> (HashSet<std::ops::Range<usize>>, Vec<Site>) {
+fn bound(text: &str, mentions: &[Spanned], member: bool, context: &ScopeContext<'_, '_>) -> (HashSet<std::ops::Range<usize>>, Scopes) {
     let scopes = scan_scopes(text, member, context);
     let in_import =
         |range: &std::ops::Range<usize>| scopes.imports.iter().any(|import| import.start <= range.start && range.end <= import.end);
@@ -995,7 +1004,7 @@ fn bound(text: &str, mentions: &[Spanned], member: bool, context: &ScopeContext<
         })
         .map(|m| m.range.clone())
         .collect();
-    (hidden, scopes.sites)
+    (hidden, scopes)
 }
 
 /// A name in a pattern: a binding, or a field name that is only an exclusion.
@@ -1060,11 +1069,11 @@ fn struct_pattern(group: &proc_macro2::Group, text: &str, starts: &[usize], out:
     }
 }
 
-fn add_pattern(names: Vec<PatternName>, from: usize, to: usize, out: &mut Vec<Binding>) {
+fn add_pattern(names: Vec<PatternName>, from: usize, to: usize, ty: Option<usize>, out: &mut Vec<Binding>) {
     for name in names {
-        out.push(Binding { name: name.name.clone(), range: name.range, types: false });
+        out.push(Binding { name: name.name.clone(), range: name.range, types: false, ty });
         if name.binds {
-            out.push(Binding { name: name.name, range: from..to, types: false });
+            out.push(Binding { name: name.name, range: from..to, types: false, ty });
         }
     }
 }
@@ -1235,7 +1244,7 @@ fn field_names(group: &proc_macro2::Group, text: &str, starts: &[usize], out: &m
                 TokenTree::Ident(id) => {
                     let name = id.to_string();
                     if !is_keyword(&name) && !name.starts_with('_') {
-                        out.push(Binding { name, range: token_range(&part[i], text, starts), types: false });
+                        out.push(Binding { name, range: token_range(&part[i], text, starts), types: false, ty: None });
                     }
                     break;
                 }
@@ -1342,7 +1351,7 @@ fn match_arms(trees: &[TokenTree], text: &str, starts: &[usize], out: &mut Vec<B
                 (end, comma + 1)
             }
         };
-        add_pattern(pattern_names(pattern, text, starts), end, body_end, out);
+        add_pattern(pattern_names(pattern, text, starts), end, body_end, None, out);
         from = next;
     }
 }
@@ -1380,6 +1389,9 @@ pub struct Site {
     pub symbol: Option<usize>,
     /// Whether the site is a name captured inside a format string.
     pub format: bool,
+    /// Whether a local binding hides the item's own name here, so a bare
+    /// mention would name the binding instead.
+    pub shadowed: bool,
 }
 
 /// Every unshadowed path mention of `syms[target]`, in any symbol's text.
@@ -1546,6 +1558,7 @@ fn recurse_use_tree(
                     via: Via::Import(leaf),
                     symbol,
                     format: false,
+                    shadowed: false,
                 });
             }
         }
@@ -1572,6 +1585,7 @@ fn recurse_use_tree(
                     via,
                     symbol,
                     format: false,
+                    shadowed: false,
                 });
             }
         }
@@ -1650,8 +1664,21 @@ fn path_site(refs: &Refs, i: usize, range: &std::ops::Range<usize>, segs: &[Stri
         if found != target {
             return None;
         }
+        if k < segs.len() && !names_path_head(&refs.syms[found]) {
+            return None;
+        }
         let end = if k == segs.len() { range.end } else { prefix_end(&symbol.text, range, &segs[..k])? };
-        Some(Site { range: range.start..end, alias: None, segs: segs[..k].to_vec(), outside: 0, target, via, symbol: Some(i), format })
+        Some(Site {
+            range: range.start..end,
+            alias: None,
+            segs: segs[..k].to_vec(),
+            outside: 0,
+            target,
+            via,
+            symbol: Some(i),
+            format,
+            shadowed: false,
+        })
     })
 }
 
@@ -1719,7 +1746,7 @@ fn word_bindings(
 ) {
     match trees[i].to_string().as_str() {
         "let" if is_condition_let(trees, i) => condition_let_binding(trees, i, text, starts, &mut out.bindings),
-        "let" => let_binding(trees, i, scope.end, text, starts, &mut out.bindings),
+        "let" => let_binding(trees, i, scope.end, text, starts, context, &mut out.bindings),
         "for" => for_binding(trees, i, text, starts, &mut out.bindings),
         "match" => match_binding(trees, i, text, starts, &mut out.bindings),
         "use" => use_binding(trees, i, scope.end, text, starts, context, out),
@@ -1736,15 +1763,24 @@ fn condition_let_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[us
     let Some(sep) = find_punct(trees, i + 1, '=') else { return };
     let Some(body) = next_group(trees, sep + 1, Delimiter::Brace) else { return };
     let names = pattern_names(before_colon(&trees[i + 1..sep]), text, starts);
-    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, out);
+    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, None, out);
 }
 
 /// A `let` statement: the pattern binds from its `;` to the end of the scope.
-fn let_binding(trees: &[TokenTree], i: usize, scope_end: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+fn let_binding(
+    trees: &[TokenTree],
+    i: usize,
+    scope_end: usize,
+    text: &str,
+    starts: &[usize],
+    context: &ScopeContext<'_, '_>,
+    out: &mut Vec<Binding>,
+) {
     let sep = find_punct(trees, i + 1, '=').or_else(|| find_punct(trees, i + 1, ';')).unwrap_or(trees.len());
     let pattern = before_colon(&trees[i + 1..sep]);
     let end = find_punct(trees, i + 1, ';').map_or(scope_end, |s| token_range(&trees[s], text, starts).end);
-    add_pattern(pattern_names(pattern, text, starts), end, scope_end, out);
+    let ty = if simple_binding(pattern) { literal_type(context.refs, context.module, context.symbol, trees, sep) } else { None };
+    add_pattern(pattern_names(pattern, text, starts), end, scope_end, ty, out);
 }
 
 /// A `for` loop: the pattern binds in the loop's body. `for<'a>` and an
@@ -1756,7 +1792,7 @@ fn for_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out:
     let Some(at) = find_word(trees, i + 1, "in") else { return };
     let Some(body) = next_group(trees, at + 1, Delimiter::Brace) else { return };
     let names = pattern_names(&trees[i + 1..at], text, starts);
-    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, out);
+    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, None, out);
 }
 
 /// Whether `impl` comes before `i` in the same statement.
@@ -1803,7 +1839,7 @@ fn use_binding(
     use_tree_sites(context.refs, context.module, tree_start, tree, Some(context.symbol), context.target, &mut out.sites);
     for import in parse_use(tree).into_iter().filter(|import| !import.glob) {
         if block_use_binds(context.refs, context.module, symbol_scope(context.refs, context.symbol), context.target, &import.path) {
-            out.bindings.push(Binding { name: import.local, range: semi_range.end..scope_end, types: true });
+            out.bindings.push(Binding { name: import.local, range: semi_range.end..scope_end, types: true, ty: None });
         }
     }
 }
@@ -1826,7 +1862,7 @@ fn fn_binding(
     let body = body.map(|b| token_range(&trees[b], text, starts)).unwrap_or(scope.end..scope.end);
     let kids: Vec<TokenTree> = g.stream().into_iter().collect();
     for part in comma_parts(&kids) {
-        add_pattern(pattern_names(before_colon(part), text, starts), body.start, body.end, out);
+        add_pattern(pattern_names(before_colon(part), text, starts), body.start, body.end, None, out);
     }
 }
 
@@ -1865,9 +1901,9 @@ fn declaration(
     starts: &[usize],
 ) -> Vec<Binding> {
     let word = trees[name].to_string();
-    let mut out = vec![Binding { name: word.clone(), range: token_range(&trees[name], text, starts), types }];
+    let mut out = vec![Binding { name: word.clone(), range: token_range(&trees[name], text, starts), types, ty: None }];
     if !container {
-        out.push(Binding { name: word, range: scope.clone(), types });
+        out.push(Binding { name: word, range: scope.clone(), types, ty: None });
     }
     out
 }
@@ -1893,7 +1929,7 @@ fn closure_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], 
     let names = pattern_names(&trees[i + 1..close], text, starts);
     let bar_end = token_range(&trees[close], text, starts).end;
     let body = closure_body(trees, close + 1, text, starts, bar_end);
-    add_pattern(names, bar_end, body, out);
+    add_pattern(names, bar_end, body, None, out);
     close
 }
 
@@ -2209,16 +2245,25 @@ pub(crate) fn impl_owner_batch(syms: &[Sym], modules: &[ModuleRow], indices: &[u
 }
 
 fn impl_owner_in(refs: &Refs<'_>, i: usize) -> ImplOwner {
-    let Some(segs) = impl_self_type(&refs.syms[i].name) else {
-        return ImplOwner::Other;
+    let name = impl_self_type(&refs.syms[i].name);
+    let text = impl_text_self_type(&refs.syms[i].text);
+    let name_owner = name.as_deref().map(|segs| impl_owner_named(refs, i, segs));
+    let explicit = |segs: &Option<Vec<String>>| {
+        segs.as_ref().and_then(|segs| segs.first()).is_some_and(|head| matches!(head.as_str(), "crate" | "self" | "super"))
     };
-    let mut targets = exact_targets(refs, &refs.syms[i].module, i, &segs);
-    targets.sort_unstable();
-    targets.dedup();
-    match targets.as_slice() {
-        [one] => ImplOwner::One(*one),
-        [] => ImplOwner::Other,
-        many => ImplOwner::Ambiguous(many.to_vec()),
+    let text_owner = if explicit(&text) || matches!(name_owner, Some(ImplOwner::Other) | None) {
+        text.as_deref().map(|segs| impl_owner_named(refs, i, segs))
+    } else {
+        None
+    };
+    if explicit(&text) && (!explicit(&name) || name_owner != text_owner) {
+        if let Some(owner) = text_owner.clone().filter(|owner| *owner != ImplOwner::Other) {
+            return owner;
+        }
+    }
+    match name_owner {
+        Some(ImplOwner::Other) | None => text_owner.unwrap_or(ImplOwner::Other),
+        Some(owner) => owner,
     }
 }
 
@@ -2393,15 +2438,25 @@ fn rewrite_sites_in(refs: &Refs, syms: &[Sym], target: usize) -> Vec<Site> {
         let text = &symbol.text;
         let mentions = scanned(text);
         let context = ScopeContext { refs: &refs, module: symbol.module.as_str(), symbol: i, target: Some(target) };
-        let (bound, sites) = bound(text, &mentions, refs.container_name(i).is_some(), &context);
-        out.extend(sites);
+        let (bound, scopes) = bound(text, &mentions, refs.container_name(i).is_some(), &context);
+        out.extend(scopes.sites.iter().cloned());
+        let target_name = [leaf(&syms[target].name).to_string()];
         for mention in mentions {
             if bound.contains(&mention.range) {
                 continue;
             }
             match &mention.mention {
-                Mention::Path(segs) => out.extend(path_site(&refs, i, &mention.range, segs, target, false)),
-                Mention::Format(name) => out.extend(format_site(&refs, i, &mention.range, name).filter(|site| site.target == target)),
+                Mention::Path(segs) => {
+                    if let Some(mut site) = path_site(&refs, i, &mention.range, segs, target, false) {
+                        site.shadowed = shadowed(&scopes, &target_name, site.range.start);
+                        out.push(site);
+                    }
+                }
+                Mention::Format(name) => {
+                    if let Some(site) = format_site(&refs, i, &mention.range, name).filter(|site| site.target == target) {
+                        out.push(site);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2445,7 +2500,7 @@ pub(crate) fn std_trait_methods(path: &[String]) -> Option<&'static [&'static st
 }
 
 /// A mention's exact targets and the targets only its possible reading names.
-fn classify(refs: &Refs, m: &str, i: usize, mention: &Spanned, scopes: &Scopes) -> (Vec<usize>, Vec<usize>) {
+fn classify(refs: &Refs, m: &str, i: usize, text: &str, mention: &Spanned, scopes: &Scopes) -> (Vec<usize>, Vec<usize>) {
     let (exact, mut possible) = match &mention.mention {
         Mention::Path(segs) => {
             if shadowed(scopes, segs, mention.range.start) {
@@ -2470,7 +2525,10 @@ fn classify(refs: &Refs, m: &str, i: usize, mention: &Spanned, scopes: &Scopes) 
             if targets.len() == 1 { (targets, vec![]) } else { (vec![], targets) }
         }
         Mention::Macro(_) | Mention::Field(_) => (vec![], refs.resolve(m, i, &mention.mention)),
-        Mention::Method(name) => (vec![], method_targets(refs, name)),
+        Mention::Method(name) => match receiver_type(scopes, text, mention.range.start).and_then(|ty| method_targets_on(refs, name, ty)) {
+            Some(target) => (vec![target], vec![]),
+            None => (vec![], method_targets(refs, name)),
+        },
     };
     let mut expanded = exact.clone();
     expanded.extend(possible.iter().copied());
@@ -2486,7 +2544,10 @@ fn classify(refs: &Refs, m: &str, i: usize, mention: &Spanned, scopes: &Scopes) 
 /// A bare name's targets, with a test module's sibling hiding its parent's.
 fn bare_candidates(refs: &Refs, i: usize, m: &str, name: &str) -> Vec<usize> {
     let siblings = refs.test_siblings(i, name);
-    if siblings.is_empty() { bare_targets(refs, m, i, name) } else { item_targets(refs, siblings) }
+    let mut candidates = if siblings.is_empty() { bare_targets(refs, m, i, name) } else { item_targets(refs, siblings) };
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
 }
 
 /// The methods and associated functions a method call `.name()` may name.
@@ -2640,13 +2701,16 @@ fn reexport_targets(refs: &Refs, module: &str, name: &str) -> Vec<usize> {
 
 /// The item the longest resolving prefix of a path names.
 fn prefix_exact(refs: &Refs, m: &str, i: usize, segs: &[String]) -> Option<usize> {
-    (2..segs.len()).rev().find_map(|k| resolve_exact(refs, m, i, &segs[..k]).map(|(target, _)| target))
+    (2..segs.len()).rev().find_map(|k| {
+        let (target, _) = resolve_exact(refs, m, i, &segs[..k])?;
+        names_path_head(&refs.syms[target]).then_some(target)
+    })
 }
 
 fn format_site(refs: &Refs, i: usize, range: &std::ops::Range<usize>, name: &str) -> Option<Site> {
     let segs = vec![name.to_string()];
     let (target, via) = resolve_exact(refs, &refs.syms[i].module, i, &segs)?;
-    Some(Site { range: range.clone(), alias: None, segs, outside: 0, target, via, symbol: Some(i), format: true })
+    Some(Site { range: range.clone(), alias: None, segs, outside: 0, target, via, symbol: Some(i), format: true, shadowed: false })
 }
 
 /// The names a format-like macro's named arguments supply: a slot with one of
@@ -2793,4 +2857,98 @@ fn container_trees(text: &str) -> Result<(Option<String>, Vec<(usize, String)>),
 
 fn use_tree_texts(trees: Vec<(usize, &str)>) -> Vec<(usize, String)> {
     trees.into_iter().map(|(base, tree)| (base, tree.to_string())).collect()
+}
+
+/// The self type an `impl`'s text names. Its stored name can keep the source's
+/// shorter spelling after a move rewrites the text to a crate path.
+fn impl_text_self_type(text: &str) -> Option<Vec<String>> {
+    let item = match syn::parse_str::<syn::ItemImpl>(text) {
+        Ok(item) => item,
+        Err(_) if text.trim_end().ends_with('{') => syn::parse_str::<syn::ItemImpl>(&format!("{text}\n}}")).ok()?,
+        Err(_) => return None,
+    };
+    type_path(&item.self_ty)
+}
+
+fn impl_owner_named(refs: &Refs<'_>, i: usize, segs: &[String]) -> ImplOwner {
+    let mut targets = exact_targets(refs, &refs.syms[i].module, i, segs);
+    targets.sort_unstable();
+    targets.dedup();
+    match targets.as_slice() {
+        [one] => ImplOwner::One(*one),
+        [] => ImplOwner::Other,
+        many => ImplOwner::Ambiguous(many.to_vec()),
+    }
+}
+
+/// Whether a symbol can start a longer path: a module or a type, never a
+/// function, const or static.
+fn names_path_head(s: &Sym) -> bool {
+    s.kind_text == "mod" || is_type(s)
+}
+
+/// The struct a `let` binding names when its value is a unit or struct literal.
+fn literal_type(refs: &Refs, module: &str, symbol: usize, trees: &[TokenTree], sep: usize) -> Option<usize> {
+    if !matches!(trees.get(sep), Some(TokenTree::Punct(p)) if p.as_char() == '=') {
+        return None;
+    }
+    let end = find_punct(trees, sep + 1, ';').unwrap_or(trees.len());
+    let value = trees.get(sep + 1..end)?;
+    let TokenTree::Ident(name) = value.first()? else { return None };
+    let name = name.to_string();
+    if !name.chars().next().is_some_and(char::is_uppercase) {
+        return None;
+    }
+    match value {
+        [TokenTree::Ident(_)] => {}
+        [TokenTree::Ident(_), TokenTree::Group(group)] if group.delimiter() == Delimiter::Brace => {}
+        _ => return None,
+    }
+    let targets = bare_targets(refs, module, symbol, &name);
+    match targets.as_slice() {
+        [t] if refs.syms[*t].kind_text == "struct" => Some(*t),
+        _ => None,
+    }
+}
+
+/// The struct of the value a method call names, when its receiver is a known literal binding.
+fn receiver_type(scopes: &Scopes, text: &str, at: usize) -> Option<usize> {
+    let before = text.get(..at)?.trim_end().strip_suffix('.')?.trim_end();
+    let start = before.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
+    let name = &before[start..];
+    if name.is_empty() {
+        return None;
+    }
+    let prefix = &before[..start];
+    if prefix.ends_with('.') || prefix.ends_with("::") {
+        return None;
+    }
+    scopes
+        .bindings
+        .iter()
+        .filter(|binding| binding.name == name && binding.range.contains(&at))
+        .min_by_key(|binding| binding.range.end - binding.range.start)
+        .and_then(|binding| binding.ty)
+}
+
+/// The one method `name` a receiver of struct `target` names, when exactly one matches.
+fn method_targets_on(refs: &Refs, name: &str, target: usize) -> Option<usize> {
+    let mut found = method_targets(refs, name).into_iter().filter(|&i| {
+        refs.container_symbol(i).is_some_and(|container| matches!(impl_owner_in(refs, container), ImplOwner::One(owner) if owner == target))
+    });
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
+
+/// Whether a `let` pattern is one plain identifier, optionally `mut`.
+fn simple_binding(pattern: &[TokenTree]) -> bool {
+    let plain = |id: &proc_macro2::Ident| {
+        let name = id.to_string();
+        name != "_" && !is_keyword(&name)
+    };
+    match pattern {
+        [TokenTree::Ident(name)] => plain(name),
+        [TokenTree::Ident(kind), TokenTree::Ident(name)] => kind.to_string() == "mut" && plain(name),
+        _ => false,
+    }
 }

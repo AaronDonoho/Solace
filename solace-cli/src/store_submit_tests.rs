@@ -134,13 +134,15 @@ fn imports_replace_the_header_only() {
     let (root, store) = rust_project(lib);
     let out = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\nuse std::io;\n").unwrap();
     assert!(out.contains("Saved crate imports"), "{out}");
-    let header = "use std::fmt;\nuse std::io;\n\npub fn one() -> i32 {\n    1\n}\n";
+    assert_eq!(store.header("crate").unwrap(), "use std::fmt;\nuse std::io;\n");
+    let header = "use std::fmt;\nuse std::io;\npub fn one() -> i32 {\n    1\n}\n";
     assert_eq!(text_of(&root, "src/lib.rs"), header);
     let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\n\npub fn extra() -> i32 {\n    1\n}\n").unwrap_err().0;
     assert!(err.contains("--imports text may only contain imports"), "{err}");
     let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\nmod extra;\n").unwrap_err().0;
     assert!(
-        err.contains("must leave out the module's `mod` lines or keep them as they are") && err.contains("view crate --header"),
+        err.contains("must leave out the module's `mod` lines or keep the same declarations, in any order")
+            && err.contains("view crate --header"),
         "{err}"
     );
     assert_eq!(text_of(&root, "src/lib.rs"), header);
@@ -2023,7 +2025,11 @@ fn adding_a_use_to_a_fsx_shaped_module_keeps_its_mods() {
     let no_cfg =
         concat!("//! File primitives.\n\n", "use std::fs;\n", "use std::thread;\n\n", "#[path = \"fsx_tests.rs\"]\n", "mod tests;\n",);
     let err = store.submit(crate::store::Target::Imports("fsx"), no_cfg).unwrap_err().0;
-    assert!(err.contains("must leave out the module's `mod` lines or keep them as they are") && err.contains("view fsx --header"), "{err}");
+    assert!(
+        err.contains("must leave out the module's `mod` lines or keep the same declarations, in any order")
+            && err.contains("view fsx --header"),
+        "{err}"
+    );
     assert!(!err.contains(". a new module"), "{err}");
     assert_eq!(text_of(&root, "src/fsx.rs"), saved);
 }
@@ -2056,7 +2062,7 @@ fn a_use_only_submit_keeps_the_stored_mods_around_its_uses() {
     assert_eq!(
         text_of(&root, "src/lib.rs"),
         concat!(
-            "mod a;\nuse b::c;\nuse std::time::Duration;\npub mod d;\n\n",
+            "mod a;\nuse b::c;\nuse std::time::Duration;\npub mod d;\n",
             "pub fn one() -> i32 {\n    c()\n}\n\n",
             "pub mod b {\n    pub fn c() -> i32 {\n        1\n    }\n}\n",
         )
@@ -2078,5 +2084,176 @@ fn a_use_only_submit_can_drop_imports_around_a_stored_mod() {
     let store = Store::at(&root).unwrap();
     let out = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\n").unwrap();
     assert!(out.contains("Saved crate imports"), "{out}");
-    assert_eq!(text_of(&root, "src/lib.rs"), concat!("use std::fmt;\nmod a;\n\n", "pub fn one() -> i32 {\n    1\n}\n",));
+    assert_eq!(text_of(&root, "src/lib.rs"), concat!("use std::fmt;\nmod a;\n", "pub fn one() -> i32 {\n    1\n}\n",));
+}
+
+#[test]
+fn a_use_only_submit_may_reorder_stored_mods() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod a;\nmod b;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/a.rs", ""),
+        ("src/b.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit(crate::store::Target::Imports("crate"), "mod b;\nmod a;\n").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "mod b;\nmod a;\npub fn one() -> i32 {\n    1\n}\n");
+}
+
+#[test]
+fn an_unchanged_header_without_a_blank_line_drops_it() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("use std::fmt;\n\npub fn one() -> i32 {\n    1\n}\n");
+    let out = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    assert_eq!(store.header("crate").unwrap(), "use std::fmt;\n");
+}
+
+/// `--imports` names an inline module and replaces only its own imports.
+#[test]
+fn an_import_added_to_an_inline_module_keeps_its_items() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub mod helper {\n",
+        "    pub fn write() {}\n",
+        "}\n\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    use super::*;\n\n",
+        "    #[test]\n",
+        "    fn write_runs() {\n",
+        "        write();\n",
+        "    }\n",
+        "}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let out = store.submit(crate::store::Target::Imports("tests"), "use super::*;\nuse crate::helper::write;\n").unwrap();
+    assert!(out.contains("Saved crate.tests imports"), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert!(
+        text.contains(concat!(
+            "mod tests {\n",
+            "    use super::*;\n",
+            "    use crate::helper::write;\n\n",
+            "    #[test]\n",
+            "    fn write_runs() {\n",
+            "        write();\n",
+            "    }\n",
+            "}",
+        )),
+        "{text}"
+    );
+}
+
+/// `--imports` on an inline module takes imports only: items and `mod` lines
+/// are refused and nothing is saved.
+#[test]
+fn an_inline_imports_submit_refuses_items_and_mods() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn one() {}\n}\n";
+    let (root, store) = rust_project(lib);
+    for text in ["use super::*;\nfn extra() {}\n", "use super::*;\nmod extra;\n"] {
+        let err = store.submit(crate::store::Target::Imports("tests"), text).unwrap_err().0;
+        assert!(err.contains("E0101 --imports text may only contain imports"), "{err}");
+        assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    }
+}
+
+/// Dropping an import an inline test needs is refused, and the file is unchanged.
+#[test]
+fn an_inline_import_a_test_needs_is_not_dropped() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub mod helper {\n",
+        "    pub fn write() {}\n",
+        "}\n\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    use super::*;\n",
+        "    use crate::helper::write;\n\n",
+        "    #[test]\n",
+        "    fn write_runs() {\n",
+        "        write();\n",
+        "    }\n",
+        "}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let err = store.submit(crate::store::Target::Imports("tests"), "use super::*;\n").unwrap_err().0;
+    assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// An empty inline module takes imports inside its braces.
+#[test]
+fn an_import_added_to_an_empty_inline_module_keeps_its_brace() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("#[cfg(test)]\nmod tests {}\n");
+    let out = store.submit(crate::store::Target::Imports("tests"), "use std::fmt;\n").unwrap();
+    assert!(out.contains("Saved crate.tests imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {\n    use std::fmt;\n}\n");
+    let out = store.submit(crate::store::Target::Imports("tests"), "").unwrap();
+    assert!(out.contains("Saved crate.tests imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {}\n");
+}
+
+/// Only a module takes `--imports`: an `impl` named the same way is not one.
+#[test]
+fn an_imports_submit_to_another_container_is_unknown() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub struct S;\n\nimpl S {}\n");
+    let err = store.submit(crate::store::Target::Imports("S"), "use std::fmt;\n").unwrap_err().0;
+    assert!(err.contains("E1003 unknown module: S"), "{err}");
+}
+
+/// `--imports` with no text clears an inline module's imports and keeps its items.
+#[test]
+fn clearing_an_inline_modules_imports_keeps_its_items() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "#[cfg(test)]\nmod tests {\n    use std::fmt;\n\n    #[test]\n    fn one() {}\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit(crate::store::Target::Imports("tests"), "").unwrap();
+    assert!(out.contains("Saved crate.tests imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n}\n");
+}
+
+/// An item below an inline module does not name the module for `--imports`.
+#[test]
+fn an_imports_submit_names_the_inline_module_not_its_items() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n}\n");
+    let err = store.submit(crate::store::Target::Imports("tests::one"), "use std::fmt;\n").unwrap_err().0;
+    assert!(err.contains("E1003 unknown module: tests::one"), "{err}");
+}
+
+/// A duplicate in an inline `--imports` text names the module, not the save label.
+#[test]
+fn an_imports_submit_names_the_module_in_a_duplicate_refusal() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n}\n");
+    let err = store.submit(crate::store::Target::Imports("tests"), "use super::*;\nmod extra;\nmod extra;\n").unwrap_err().0;
+    assert!(err.contains("defined twice in `crate.tests`"), "{err}");
+    assert!(!err.contains("crate.tests imports"), "{err}");
 }

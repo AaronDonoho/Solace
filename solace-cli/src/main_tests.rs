@@ -4,6 +4,14 @@ use super::*;
 use serde_json::json;
 use crate::cli::{hinted, is_process, reset_after_panic, run_inner, run_options, with_root};
 use std::env;
+use crate::tasks::store::put;
+use crate::board::task_model::task;
+use crate::board::reviews::changes_of;
+use crate::board::server::api;
+use crate::board::task_model::open;
+use crate::board::runs::with_context;
+use crate::board::setup::with_config;
+
 /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
 fn reference_layout(text: &str) -> (bool, String) {
     let dir = Scratch::new().with(&[("reference.txt", text)]);
@@ -235,7 +243,9 @@ fn agent_reference_leaves_out_host_and_task_commands() {
     assert!(!r.contains("*** Update File: <path>"), "code and file headers in one patch: {r}");
     // D-123: where a line runs, and that options belong to one command.
     assert!(
-        r.contains("Each line runs in one project") && r.contains("`--lines` is `read`'s") && r.contains("`help <command>`\nlists them")
+        r.contains("Each line runs in one project")
+            && r.contains("`--lines` is `read`'s and `inspect`'s")
+            && r.contains("`help <command>`\nlists them")
     );
     // `help` for agents: every option, but no host or task commands here.
     let h = agent_help(None);
@@ -332,7 +342,7 @@ fn dependencies_show_their_public_api() {
         assert!(!out.contains(hidden), "{hidden}: {out}");
     }
     // A symbol: all of its doc; `inspect` falls back to the same view; store names still win.
-    let one = store.inspect(&["dep/api.make", "app.main"], true, usize::MAX).ok().unwrap();
+    let one = store.inspect(&["dep/api.make", "app.main"], true, None, usize::MAX).ok().unwrap();
     assert!(one.contains("/// Second doc line.\npub fn make(size: Int) -> Widget") && !one.contains("secret(size)"), "{one}");
     assert!(one.contains("app.main"), "{one}");
     assert!(store.view(&["dep/api.secret"], false, usize::MAX).unwrap_err().0.contains("E1001"));
@@ -353,12 +363,12 @@ fn inspect_dedups_and_fits_budget() {
     let names = ["store.put_shipment", "shipments.dispatch", "shipments.deliver", "fulfillment.ship"];
     let ok = |r: Out| r.ok().unwrap();
 
-    let out = ok(store.inspect(&names, true, usize::MAX));
+    let out = ok(store.inspect(&names, true, None, usize::MAX));
     assert_eq!(out.matches("-- pilot/shipments.Shipment\n").count(), 1);
     assert!(out.contains("-- pilot/shipments.Shipment (above)"));
     assert!(!out.contains("Trimmed") && !out.contains("Not shown"));
 
-    let small = ok(store.inspect(&names, true, 3_000));
+    let small = ok(store.inspect(&names, true, None, 3_000));
     assert!(small.contains("Trimmed to fit the size limit"));
     assert!(small.contains("Not shown, to fit the size limit: `solace inspect "));
     assert!(small.len() < out.len());
@@ -367,18 +377,18 @@ fn inspect_dedups_and_fits_budget() {
     }
 
     // an unknown name is reported after the others, not instead of them
-    let mixed = ok(store.inspect(&["shipments.deliver", "shipping.standard_cost_cents"], false, usize::MAX));
+    let mixed = ok(store.inspect(&["shipments.deliver", "shipping.standard_cost_cents"], false, None, usize::MAX));
     assert!(mixed.contains("// ── pilot/shipments.deliver ") && mixed.contains("E1001 unknown name: shipping.standard_cost_cents"));
-    assert!(store.inspect(&["shipping.nope"], false, usize::MAX).is_err());
+    assert!(store.inspect(&["shipping.nope"], false, None, usize::MAX).is_err());
     // D-46: a type's users split into the sites that list every field and
     // the rest by name; a function's callers show the call line.
-    let ty = ok(store.inspect(&["customer.Customer"], true, usize::MAX));
+    let ty = ok(store.inspect(&["customer.Customer"], true, None, usize::MAX));
     assert!(ty.contains("== Constructed by (") && ty.contains("-- pilot/seed.customers, line 3: Customer("), "{ty}");
     assert!(ty.contains("-- pilot/accounts.register, line 11: customer.Customer(\n"), "{ty}");
     assert!(ty.contains("== Other users (") && !ty.contains("== Used by"), "{ty}");
     // commands in one MCP call share what was printed: `refs` says (above)
     SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
-    let f = ok(store.inspect(&["pricing.quote"], true, usize::MAX));
+    let f = ok(store.inspect(&["pricing.quote"], true, None, usize::MAX));
     assert!(f.contains("-- pilot/checkout.quote\n") && f.contains("  > line "), "{f}");
     let r = ok(store.refs("pricing.quote"));
     assert!(r.contains("-- pilot/checkout.quote (above)\n  > line "), "{r}");
@@ -591,8 +601,8 @@ fn unchanged_submit_skips_check() {
     assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), "not gleam");
 }
 
-/// D-44: `test` runs the tests whose reach changed since they passed, those
-/// that failed, and those reaching foreign code; the rest are skipped.
+/// D-44: `test` runs the tests whose reach changed since they passed and those
+/// that failed or never ran; the rest are skipped.
 #[test]
 fn test_runs_what_reaches_a_change() {
     let store = Scratch::new()
@@ -622,23 +632,23 @@ fn test_runs_what_reaches_a_change() {
     // First run: everything; sub_test fails.
     let err = store.test(&[]).unwrap_err().0;
     assert!(err.starts_with("Ran all 4 tests.") && err.contains("sub_test"), "{err}");
-    // The failing test runs again, as does the one reaching foreign code.
+    // The failing test runs again; the one reaching foreign code does not.
     store.submit_symbols(Some("calc_test.sub_test"), None, "pub fn sub_test() {\n  assert calc.sub(3, 1) == 2\n}").unwrap();
     assert_eq!(
         first(store.test(&[])),
-        "Ran 2 of 4 tests; the other 2 reach nothing changed since they passed (`test --all` runs every test)."
+        "Ran 1 of 4 tests; the other 3 reach nothing changed since they passed (`test --all` runs every test)."
     );
     // A change reaches only the tests that can see it, and the files match the store afterwards.
     store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int {\n  b + a\n}").unwrap();
     let out = store.test(&[]).unwrap();
-    assert!(out.starts_with("Ran 3 of 4 tests;") && out.contains("3 passed"), "{out}");
+    assert!(out.starts_with("Ran 2 of 4 tests;") && out.contains("2 passed"), "{out}");
     let file = fs::read_to_string(store.root.join("test/calc_test.gleam")).unwrap();
     assert_eq!(file.matches("pub fn ").count(), 4, "{file}");
     assert_eq!(first(store.test(&["--all"])), "Ran all 4 tests.");
     assert_eq!(first(store.test(&["calc.double"])), "Ran 1 of 4 tests: those that reach calc.double.");
     assert!(store.test(&["calc.nope"]).unwrap_err().0.starts_with("E1001"));
-    // With nothing changed, only the test reaching foreign code runs.
-    assert!(first(store.test(&[])).starts_with("Ran 1 of 4 tests;"));
+    // With nothing changed, no test runs.
+    assert!(first(store.test(&[])).starts_with("Ran 0 of 4 tests;"));
 }
 
 /// D-44: the packet quotes code that names the task's terms, and names a
@@ -1866,7 +1876,7 @@ fn a_language_reason_refusal_covers_extract_and_merge() {
     for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let err = with_root(&root, || {
-            crate::board::with_config(&off.join("system.toml"), || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+            with_config(&off.join("system.toml"), || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         })
         .unwrap_err();
         assert!(err.0.contains("E6013") && err.0.contains(reason), "{args:?}: {}", err.0);
@@ -1890,23 +1900,23 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
     let rust = root.join("r");
     import(&web).unwrap();
     import(&rust).unwrap();
-    let s = crate::board::open(&root).unwrap();
-    let mut t = crate::board::api(&root, "POST", "/tasks", json!({"title": "Extract"})).unwrap();
+    let s = open(&root).unwrap();
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Extract"})).unwrap();
     let tid = t["id"].as_str().unwrap().to_string();
     t["scope"] = json!(["r", "web"]);
     t["runs"] = json!([{"id": "run", "kind": "work", "state": "running"}]);
-    crate::tasks::put(&s, &t).unwrap();
+    put(&s, &t).unwrap();
     let args = ["extract", "crate.helper", "--to", "helpers", "--to-project", "web"].map(String::from);
     let e = with_root(&rust, || {
-        crate::board::with_context(&tid, "run", || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        with_context(&tid, "run", || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
     })
     .unwrap_err();
     assert!(e.0.contains("E6013") && e.0.contains("not available for Rust") && e.0.contains("D-185"), "{}", e.0);
-    let t = crate::board::task(&root, &tid).unwrap();
-    assert!(crate::board::changes_of(&s, &t).unwrap().is_empty(), "no change recorded");
+    let t = task(&root, &tid).unwrap();
+    assert!(changes_of(&s, &t).unwrap().is_empty(), "no change recorded");
     for project in [&rust, &web] {
         assert!(!crate::extract::ahead::waiting(project), "{} left an ahead record", project.display());
-        let store = crate::board::open(project).unwrap();
+        let store = open(project).unwrap();
         store
             .db
             .execute_batch("BEGIN IMMEDIATE")
@@ -1917,7 +1927,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "95079c226e7f3cedc7c2de051472b8aa3ad4549d523c9a9f8d49a72ce1d93999");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "87e079c43580f9d819a8cc2ffaa541f196f89050ce36afc2f6bff9d7189e0fc8");
 }
 
 #[test]

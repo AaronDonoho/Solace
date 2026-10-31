@@ -28,8 +28,11 @@ Adding
                                 `<module>::tests`; its items come from the
                                 submitted text
   submit --imports <module>     a module's header: module comment and imports;
-                                its `mod` lines are kept
-                                (`view <module> --header` shows it)
+                                for an inline `mod`, only the lines after its
+                                `{`. Its own `mod` lines are kept (`view
+                                <module> --header` shows it). The header keeps
+                                the submitted text's trailing newlines, or one
+                                when it has none.
   submit <module>               a whole module: keep every stored item; ids
                                 stay by name, and only changed items are reformatted
   submit <container>            an existing block changes item by item; submit

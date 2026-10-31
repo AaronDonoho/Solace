@@ -22,7 +22,7 @@ const OUTLINE_CAP: usize = 3000;
 
 /// The task run's reads as this MCP call started; `None` outside a task run or
 /// before its first call.
-pub(super) fn window_reads() -> Option<Value> {
+pub(crate) fn window_reads() -> Option<Value> {
     WINDOW.with(|v| v.borrow().clone())
 }
 
@@ -121,7 +121,7 @@ impl Run {
 /// `outline` of the run, within `budget`. What did not fit is named; when the
 /// context itself does not fit, it is cut and the notice says so. It reads
 /// only: it records nothing and has no once-per-window rule.
-pub(super) fn remember_reply(context: &str, reads: &Value, top: &Path, outline: &dyn Fn(usize) -> String, budget: usize) -> String {
+pub(crate) fn remember_reply(context: &str, reads: &Value, top: &Path, outline: &dyn Fn(usize) -> String, budget: usize) -> String {
     let reads = Reads::from_json(reads);
     const VIEWS_HEAD: &str = "What this run read or changed since its last change, as it is now:\n";
     const STORY_HEAD: &str = "This run so far, one step per line:\n";

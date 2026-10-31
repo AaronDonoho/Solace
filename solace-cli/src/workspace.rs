@@ -11,6 +11,8 @@ use super::*;
 
 use serde_json::Value;
 use serde_json::json;
+#[cfg(test)] use crate::board::setup::with_config;
+
 fn invalid<T>(why: impl std::fmt::Display) -> Result<T, Failure> {
     Err(lockdown::invalid_settings(why))
 }
@@ -740,7 +742,7 @@ mod tests {
         let root = Scratch::new().with(&[("Cargo.toml", crate::testing::CARGO)]);
         fs::create_dir_all(root.join(".solace")).unwrap();
         let bad = Scratch::new().with(&[("system.toml", "[languages]\nrust = 1\n")]);
-        crate::board::with_config(&bad.join("system.toml"), || reopen(&root));
+        with_config(&bad.join("system.toml"), || reopen(&root));
         let reported = fs::read_to_string(root.join(".solace/fetch-failed")).unwrap();
         assert!(reported.contains("E6020"), "{reported}");
     }

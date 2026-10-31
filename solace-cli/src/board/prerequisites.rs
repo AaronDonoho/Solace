@@ -1,14 +1,10 @@
 //! What this computer needs to run Solace: the app's first-run checklist asks here.
 
 use super::agents;
-use super::on_path;
-use crate::migrate;
 use serde_json::{Value, json};
 use std::fs;
-use std::process::Command;
-
 /// What a check reads from this computer, so tests can give their own answers.
-pub(super) struct Probe<'a> {
+pub(crate) struct Probe<'a> {
     pub on_path: &'a dyn Fn(&str) -> bool,
     pub output: &'a dyn Fn(&str, &[&str]) -> Option<String>,
     pub agent: &'a dyn Fn() -> agents::AgentCheck,
@@ -37,22 +33,7 @@ enum Tool {
 #[cfg(test)]
 const TOOLS: [Tool; 5] = [Tool::Gleam, Tool::Erlang, Tool::Agent, Tool::Bubblewrap, Tool::Git];
 
-/// Every check, run now: nothing is cached, so **Check again** sees a newly installed tool.
-pub(super) fn check() -> Value {
-    let platform = platform();
-    json!({
-        "platform": platform_name(platform),
-        "items": items(&Probe {
-            on_path: &on_path,
-            output: &command_output,
-            agent: &agents::check_now,
-            sandbox: &migrate::sandbox_works,
-            platform,
-        }),
-    })
-}
-
-fn items(p: &Probe) -> Vec<Value> {
+pub(crate) fn items(p: &Probe) -> Vec<Value> {
     let mut out = vec![item(p, Tool::Gleam), item(p, Tool::Erlang), item(p, Tool::Agent), item(p, Tool::Git)];
     if platform_linux(p.platform) {
         out.insert(3, item(p, Tool::Bubblewrap));
@@ -142,7 +123,7 @@ fn tool_label(tool: Tool) -> &'static str {
         .expect("tool label")
 }
 
-fn platform_name(platform: Platform) -> &'static str {
+pub(crate) fn platform_name(platform: Platform) -> &'static str {
     match platform {
         Platform::Macos => "macos",
         Platform::Debian => "debian",
@@ -172,7 +153,7 @@ fn install(platform: Platform, tool: Tool) -> Vec<Step> {
         .unwrap_or_default()
 }
 
-fn platform() -> Platform {
+pub(crate) fn platform() -> Platform {
     if cfg!(target_os = "macos") {
         Platform::Macos
     } else if cfg!(target_os = "linux") {
@@ -198,16 +179,6 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
         let (name, value) = line.split_once('=')?;
         (name.trim() == key).then(|| value.trim().trim_matches('"'))
     })
-}
-
-fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Some(text)
 }
 
 fn version(text: &str) -> Option<(u32, u32, u32)> {

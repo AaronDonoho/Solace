@@ -5,11 +5,12 @@
 #[test]
 fn an_option_a_command_doesnt_take_is_refused_by_name() {
     let e = unknown_option(&["view", "strategy.update", "--lines", "50..80"]).unwrap().unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies, --header"), "{e}");
+    assert!(e.starts_with("view has no --lines; --lines belongs to inspect and read. view takes: --bodies, --header"), "{e}");
     let e = unknown_option(&["view", "strategy.update", "--context"]).unwrap().unwrap_err().0;
     assert!(e.contains("`--context` belongs to `inspect`: `inspect <name> --context`"), "{e}");
     assert!(unknown_option(&["read", "a.md", "--lines", "1..2"]).is_none());
     assert!(unknown_option(&["inspect", "a.b", "--context"]).is_none());
+    assert!(unknown_option(&["inspect", "a.b", "--lines", "1..2"]).is_none());
     assert!(unknown_option(&["view", "a", "--bodies"]).is_none());
     assert!(unknown_option(&["view", "a", "--header"]).is_none());
     assert!(unknown_option(&["view", "--draft", "x"]).is_none(), "view --draft is in the reference");

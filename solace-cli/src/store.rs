@@ -290,7 +290,7 @@ fn parent_prefix(name: &str) -> String {
 /// `text` with `base` in front of every line: rustfmt takes a wrapper's own
 /// indentation away, so a nested parent's is added back (D-168). A line inside
 /// a string literal is left as written, so a multi-line literal doesn't change.
-fn reindent(text: &str, base: &str) -> String {
+pub(crate) fn reindent(text: &str, base: &str) -> String {
     if base.is_empty() {
         return text.to_string();
     }
@@ -781,4 +781,13 @@ pub(crate) enum Target<'a> {
     Imports(&'a str),
     /// A whole module's text, as `view <module>` shows it.
     Module(&'a str),
+}
+
+/// Stores every file of a split Rust package under its module and path.
+pub fn store_rust_package(db: &Connection, files: &[(String, String, language::rust::File)]) -> Result<(), Failure> {
+    for (file, module, split) in files {
+        let dir = file.split_once('/').map_or("", |(dir, _)| dir);
+        store_rust_file(db, module, dir, file, split)?;
+    }
+    Ok(())
 }

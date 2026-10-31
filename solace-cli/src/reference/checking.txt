@@ -1,7 +1,7 @@
 Checking
   test                          run the tests that can see a change since they
-                                last passed (and any that failed); shows
-                                failures only
+                                last passed (and any that failed or never ran);
+                                shows failures only
   test <name>...                run the tests that reach these symbols
   test --all                    run every test
   check [--warnings]            type-check everything; lists broken symbols

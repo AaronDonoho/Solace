@@ -6,26 +6,26 @@ use super::*;
 
 use serde_json::Value;
 use serde_json::json;
-/// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
-/// is its turn: a fresh agent, briefed with every note, takes the next one.
-pub(super) fn start_strategy(top: PathBuf, rid: String) {
-    std::thread::spawn(move || {
-        let result = (|| {
-            let mut result = strategy_process(&top, &rid);
-            while let Err(Failure(_, REPLIED)) = result {
-                wait_strategy(&top, &rid)?;
-                result = strategy_process(&top, &rid);
-            }
-            result
-        })();
-        if let Err(e) = result {
-            let _ = Watch::Strategy(&top).fail(&rid, &e.0);
-        }
-    });
-}
+use crate::board::task_model::all_tasks;
+#[cfg(test)] use crate::board::task_model::adopt_tasks;
+use crate::board::runs::REPLIED;
+use crate::board::runs::persists;
+use crate::board::runs::spawn_agent;
+use crate::board::runs::GRACEFUL_EXIT;
+use crate::board::runs::supervise;
+use crate::board::runs::Watch;
+use crate::board::runs::cut_line;
+use crate::board::runs::step_line;
+use crate::board::runs::transcript;
+use crate::board::setup::system;
+use crate::board::setup::chosen_model;
+use crate::board::runs::STRATEGY;
+use crate::board::runs::REJECTED;
+use crate::board::runs::failed_step_line;
+
 /// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
 /// conversation, in a folder beside the run's log, removed after.
-pub(super) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
+pub(crate) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
     if run["state"] == "ended" {
         return Ok(());
@@ -246,7 +246,7 @@ pub(super) fn strategy_note_show(top: &Path, tid: &str, notes: &str) -> Result<V
     Ok(json!({"task": tid, "notes": picked}))
 }
 /// A list like `3,7,10..12`: numbers and ranges within `1..=n`; `noun` names the items in an error.
-pub(super) fn parse_number_list(spec: &str, n: usize, noun: &str) -> Result<Vec<usize>, Failure> {
+pub(crate) fn parse_number_list(spec: &str, n: usize, noun: &str) -> Result<Vec<usize>, Failure> {
     let bad = || Failure(format!("E7001 {noun} are numbers and ranges such as 3,7,10..12, within 1..{n}; or `all`"), 1);
     let mut out = vec![];
     for part in spec.split(',') {
@@ -332,7 +332,7 @@ fn within(text: String, budget: usize) -> String {
 /// limit by itself comes in parts: as much of its longest text as fits, and a
 /// `Next:` line ending in `--from <n>`. `from` starts the first one's longest
 /// text at character `from`.
-pub(super) fn in_parts(mut reply: Value, key: &str, number: &str, next: &str, from: usize, budget: usize) -> Out {
+pub(crate) fn in_parts(mut reply: Value, key: &str, number: &str, next: &str, from: usize, budget: usize) -> Out {
     let mut items = match reply[key].take() {
         Value::Array(a) => a,
         _ => vec![],
@@ -583,7 +583,7 @@ fn wait_answer(top: &Path, rid: &str, qid: &str) -> Out {
 }
 /// Holds a strategy run's reply until the human writes again or ends the run,
 /// as `wait_discussion` does. Waiting doesn't count toward the timeout.
-fn wait_strategy(top: &Path, rid: &str) -> Out {
+pub(crate) fn wait_strategy(top: &Path, rid: &str) -> Out {
     loop {
         std::thread::sleep(Duration::from_millis(50));
         // No server, so the human can't reply: return rather than wait forever.
@@ -670,7 +670,7 @@ mod tests {
             "runs": [{"id": "r1", "kind": "work", "state": "ended", "outcome": "finished", "model": "fake", "log": log.to_str().unwrap()}],
         });
         let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
-        super::super::adopt_tasks(&root, &root).unwrap();
+        adopt_tasks(&root, &root).unwrap();
         let (run, steps) = super::run_with_steps(&root, "t1", "r1").unwrap();
         assert_eq!((run["id"].as_str(), steps.len()), (Some("r1"), 1));
         let full = super::strategy_run_show(&root, "t1", "r1", None).unwrap();
@@ -687,7 +687,7 @@ mod tests {
         let root = crate::testing::Scratch::new();
         let task = json!({"id": "t1", "column": "backlog", "notes": [], "runs": []});
         let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
-        super::super::adopt_tasks(&root, &root).unwrap();
+        adopt_tasks(&root, &root).unwrap();
         let no_notes = super::strategy_note_show(&root, "t1", "all").unwrap_err().0;
         assert!(no_notes.starts_with("E7001") && no_notes.contains("task t1 has no notes"), "{no_notes}");
         let unknown = super::strategy_note_show(&root, "t2", "all").unwrap_err().0;
@@ -727,4 +727,22 @@ fn run_header(run: &Value) -> String {
     let field = |k: &str| run[k].as_str().unwrap_or("");
     let outcome = run["outcome"].as_str().or_else(|| run["state"].as_str()).unwrap_or("");
     format!("{} {} {} {}", field("id"), field("kind"), field("model"), outcome)
+}
+
+/// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
+/// is its turn: a fresh agent, briefed with every note, takes the next one.
+pub(super) fn start_strategy(top: PathBuf, rid: String) {
+    std::thread::spawn(move || {
+        let result = (|| {
+            let mut result = strategy_process(&top, &rid);
+            while let Err(Failure(_, REPLIED)) = result {
+                wait_strategy(&top, &rid)?;
+                result = strategy_process(&top, &rid);
+            }
+            result
+        })();
+        if let Err(e) = result {
+            let _ = Watch::Strategy(&top).fail(&rid, &e.0);
+        }
+    });
 }

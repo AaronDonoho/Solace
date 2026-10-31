@@ -11,11 +11,56 @@ use std::rc::Rc;
 use std::env;
 use std::fs;
 use crate::language::Kind;
-impl crate::Store {
+use crate::failure::Failure;
+use crate::{Index, Store, Sym};
+use crate::lockdown::commands::command;
+use crate::lockdown::commands::passed;
+
+/// Ends a command's outer transaction on every path out of `run_options`: one
+/// left open by an early `?` rolls back, and the shared connection is let go,
+/// so a longer-lived caller never keeps the store's write lock.
+pub(crate) struct OuterTransaction(pub(crate) Rc<Connection>);
+
+impl Drop for OuterTransaction {
+    fn drop(&mut self) {
+        if !self.0.is_autocommit() {
+            let _ = self.0.execute_batch("ROLLBACK");
+        }
+        crate::COMMAND_DB.set(vec![]);
+    }
+}
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT, owns_dir INTEGER);
+CREATE TABLE symbols(id TEXT PRIMARY KEY, module TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+  text TEXT NOT NULL, ord INTEGER NOT NULL, revision TEXT NOT NULL, live INTEGER NOT NULL DEFAULT 1,
+  parent TEXT, sep TEXT, tail TEXT NOT NULL DEFAULT '');
+CREATE TABLE history(seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, symbol TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE broken(symbol TEXT PRIMARY KEY, diagnostic TEXT NOT NULL);
+CREATE TABLE work(id INTEGER PRIMARY KEY, text TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1);
+";
+
+/// Tables added after `SCHEMA`, made when a store opens so older stores have them too.
+pub(crate) const LATER_TABLES: &str = "
+-- per-test results and the source as of the last full pass (D-44)
+CREATE TABLE IF NOT EXISTS test_runs(test TEXT PRIMARY KEY, reach TEXT NOT NULL, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);
+-- rejected submissions, kept to retry (D-46)
+CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args TEXT NOT NULL, text TEXT NOT NULL, base TEXT NOT NULL);
+-- the task board
+CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
+CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
+-- the warnings as of the last check, so a submit can name the new ones
+CREATE TABLE IF NOT EXISTS warnings(key TEXT PRIMARY KEY, module TEXT NOT NULL DEFAULT 'project');
+CREATE TABLE IF NOT EXISTS warning_checks(one INTEGER PRIMARY KEY CHECK (one = 1));
+";
+
+impl Store {
     /// The store of the project at `root`, with every table this version uses.
-    pub(crate) fn at(root: &Path) -> Result<crate::Store, crate::failure::Failure> {
-        let shared =
-            crate::COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| crate::project_paths::same_project(r, root)).map(|(_, db)| db.clone()));
+    pub(crate) fn at(root: &Path) -> Result<Store, Failure> {
+        let shared = crate::COMMAND_DB
+            .with_borrow(|c| c.iter().find(|(r, _)| crate::project_paths::same_project(r, root)).map(|(_, db)| db.clone()));
         if let Some(db) = shared {
             return Ok(crate::Store::new(db, root, true, true));
         }
@@ -34,7 +79,7 @@ impl crate::Store {
     }
     /// Columns added after their tables: `board_touches`' `run` and `name`
     /// (D-77 point 4), nested Rust items (D-158). Older stores get them.
-    fn add_columns(db: &Connection) -> Result<(), crate::failure::Failure> {
+    fn add_columns(db: &Connection) -> Result<(), Failure> {
         for (table, col, decl) in [
             ("board_touches", "run", "TEXT"),
             ("board_touches", "name", "TEXT"),
@@ -56,7 +101,7 @@ impl crate::Store {
     }
     /// Another project's store, only to read: a plain connection, which
     /// creates no tables and takes no lock (D-57).
-    pub(crate) fn peek(root: &Path) -> Result<crate::Store, crate::failure::Failure> {
+    pub(crate) fn peek(root: &Path) -> Result<Store, Failure> {
         let file = root.join(".solace/store.db");
         if !file.exists() {
             return crate::failure::fail(format!("no Solace store in {}", root.display()));
@@ -70,7 +115,7 @@ impl crate::Store {
         Ok(crate::Store::new(Rc::new(db), root, nested, owns_dir))
     }
     /// The project the working folder is in: the nearest folder up with a store.
-    pub(crate) fn root() -> Result<PathBuf, crate::failure::Failure> {
+    pub(crate) fn root() -> Result<PathBuf, Failure> {
         #[cfg(test)]
         if let Some(root) = crate::TEST_ROOT.with(|r| r.borrow().clone()) {
             return Ok(root);
@@ -88,15 +133,15 @@ impl crate::Store {
             }
         }
     }
-    pub(crate) fn index(&self) -> Result<crate::Index, crate::failure::Failure> {
+    pub(crate) fn index(&self) -> Result<Index, Failure> {
         // A store only peeked at may be older than its nested-item columns (checked once in `peek`).
         let nested = if self.nested { "parent, sep, tail" } else { "NULL, NULL, ''" };
         let mut stmt =
             self.db.prepare(&format!("SELECT id, module, name, kind, text, {nested} FROM symbols WHERE live = 1 ORDER BY module, ord"))?;
-        let syms: Vec<crate::Sym> = stmt
+        let syms: Vec<Sym> = stmt
             .query_map([], |r| {
                 let kind: String = r.get(3)?;
-                Ok(crate::Sym {
+                Ok(Sym {
                     id: r.get(0)?,
                     module: r.get(1)?,
                     name: r.get(2)?,
@@ -113,7 +158,9 @@ impl crate::Store {
         let owns = if self.owns_dir { "owns_dir" } else { "NULL" };
         let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file}, {owns} FROM modules ORDER BY dir, path"))?;
         let modules: Vec<crate::ModuleRow> = stmt
-            .query_map([], |r| Ok(crate::ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? }))?
+            .query_map([], |r| {
+                Ok(crate::ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? })
+            })?
             .collect::<Result<_, _>>()?;
 
         Ok(crate::index::build(self.lang(), syms, modules, crate::language::is_rust(&self.root)))
@@ -121,12 +168,17 @@ impl crate::Store {
     // --- writing files ------------------------------------------------------------
     /// Writes every module's file from the store. Returns, per file, the line
     /// range of each symbol, for mapping compiler output back to symbols.
-    pub(crate) fn materialize(&self, ix: &crate::Index) -> Result<Vec<crate::diagnostics::FileMap>, crate::failure::Failure> {
+    pub(crate) fn materialize(&self, ix: &Index) -> Result<Vec<crate::diagnostics::FileMap>, Failure> {
         self.materialize_to(ix, &self.root, &HashMap::new())
     }
     /// `stops`: where an undo stops removing the folders a deleted module file
     /// leaves empty (D-136; `Written::prune`).
-    pub(crate) fn materialize_to(&self, ix: &crate::Index, target: &Path, stops: &HashMap<String, String>) -> Result<Vec<crate::diagnostics::FileMap>, crate::failure::Failure> {
+    pub(crate) fn materialize_to(
+        &self,
+        ix: &Index,
+        target: &Path,
+        stops: &HashMap<String, String>,
+    ) -> Result<Vec<crate::diagnostics::FileMap>, Failure> {
         // A file changed outside Solace is never written over (D-58); the next command reads it in.
         let mut written = (target == self.root).then(|| crate::outside::Written::load(&self.root));
         let mut maps = vec![];
@@ -156,7 +208,7 @@ impl crate::Store {
     }
     /// Solace's own short-lived rewrite of a module file (tests made private,
     /// traced functions), put back by `materialize` afterwards.
-    pub(crate) fn rewrite(&self, path: &Path, content: &str) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn rewrite(&self, path: &Path, content: &str) -> Result<(), Failure> {
         fs::write(path, content)?;
         let mut w = crate::outside::Written::load(&self.root);
         if w.known {
@@ -166,35 +218,35 @@ impl crate::Store {
         Ok(())
     }
     /// Runs the language's tool (`gleam check`, `gleam test`) in the project.
-    pub(crate) fn tool(&self, args: &[&str]) -> Result<(bool, String), crate::failure::Failure> {
+    pub(crate) fn tool(&self, args: &[&str]) -> Result<(bool, String), Failure> {
         if let Some(id) = crate::language::id(&self.root)
             && let Some(why) = crate::language::reason(id)?
         {
-            return Err(crate::failure::Failure(format!("E6013 {why}"), 1));
+            return Err(Failure(format!("E6013 {why}"), 1));
         }
         let mut argv = vec![self.lang().tool().to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
-        let text = crate::lockdown::command(&self.root, &argv, 120, usize::MAX, false, false)?;
-        Ok((crate::lockdown::passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
+        let text = command(&self.root, &argv, 120, usize::MAX, false, false)?;
+        Ok((passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
     }
     /// Runs `cargo` in the project (D-158): the exit code and its output.
-    pub(crate) fn cargo(&self, args: &[&str], timeout: u64) -> Result<(bool, String), crate::failure::Failure> {
+    pub(crate) fn cargo(&self, args: &[&str], timeout: u64) -> Result<(bool, String), Failure> {
         if let Some(why) = crate::language::reason(crate::language::RUST)? {
-            return Err(crate::failure::Failure(format!("E6013 {why}"), 1));
+            return Err(Failure(format!("E6013 {why}"), 1));
         }
         let mut argv = vec!["cargo".to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
-        let text = crate::lockdown::command(&self.root, &argv, timeout, usize::MAX, false, true)?;
-        Ok((crate::lockdown::passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
+        let text = command(&self.root, &argv, timeout, usize::MAX, false, true)?;
+        Ok((passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
     }
     /// Type-checks the project and records which symbols are broken, with
     /// their errors, so the next reply can report only what changed (D-46).
-    pub(crate) fn check_all(&self, ix: &crate::Index) -> Result<Vec<crate::diagnostics::Diag>, crate::failure::Failure> {
+    pub(crate) fn check_all(&self, ix: &Index) -> Result<Vec<crate::diagnostics::Diag>, Failure> {
         if let Some(id) = crate::language::id(&self.root)
             && let Some(why) = crate::language::reason(id)?
         {
-            return Err(crate::failure::Failure(format!("E6013 {why}"), 1));
+            return Err(Failure(format!("E6013 {why}"), 1));
         }
         let files = self.materialize(ix)?;
         self.refuse_drift(ix)?;
@@ -207,7 +259,13 @@ impl crate::Store {
             // write) is cargo's exit with no located diagnostic, so the
             // check must add it or it would report a pass (D-158 point 4).
             if !passed && !diags.iter().any(|d| d.error) {
-                diags.push(crate::diagnostics::Diag { error: true, module: None, symbol: None, text: crate::language::cargo::failure_text(&output) });
+                diags.push(crate::diagnostics::Diag {
+                    error: true,
+                    module: None,
+                    symbol: None,
+                    text: crate::language::cargo::failure_text(&output),
+                    suggestions: vec![],
+                });
             }
             diags
         } else {
@@ -228,14 +286,14 @@ impl crate::Store {
         Ok(diags)
     }
     /// The broken symbols as last checked, each with its errors.
-    pub(crate) fn broken(&self) -> Result<HashMap<String, String>, crate::failure::Failure> {
+    pub(crate) fn broken(&self) -> Result<HashMap<String, String>, Failure> {
         Ok(self
             .db
             .prepare("SELECT symbol, diagnostic FROM broken")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?)
     }
-    pub(crate) fn resolve(&self, ix: &crate::Index, input: &str) -> Result<usize, crate::failure::Failure> {
+    pub(crate) fn resolve(&self, ix: &Index, input: &str) -> Result<usize, Failure> {
         let mut found: Vec<usize> = crate::store::matching(ix, input);
         // In a Rust store a type and its `impl` share a name; the item wins (D-158).
         if ix.rust {
@@ -300,17 +358,17 @@ impl crate::Store {
         let doc: String = item.text.lines().filter(|l| l.starts_with("///")).map(|l| format!("{l}\n")).collect();
         Some(format!("// ── {name} in {title} ({}) ──\n{doc}{}\n\n", item.kind.as_str(), declaration(&item)))
     }
-    pub(crate) fn resolve_module<'a>(&self, ix: &'a crate::Index, input: &str) -> Option<&'a crate::ModuleRow> {
+    pub(crate) fn resolve_module<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a crate::ModuleRow> {
         crate::store::module_named(ix, input)
     }
-    pub(crate) fn open_work(&self) -> Result<Vec<(i64, String)>, crate::failure::Failure> {
+    pub(crate) fn open_work(&self) -> Result<Vec<(i64, String)>, Failure> {
         let mut stmt = self.db.prepare("SELECT id, text FROM work WHERE open = 1")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
         Ok(rows)
     }
     /// Runs `body` in one store transaction: committed, or rolled back with
     /// `created` files removed and the project files written again from the store.
-    pub(crate) fn transaction<T>(&self, created: &[PathBuf], body: impl FnOnce() -> Result<T, crate::failure::Failure>) -> Result<T, crate::failure::Failure> {
+    pub(crate) fn transaction<T>(&self, created: &[PathBuf], body: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
         // A savepoint, so it nests inside a command's outer transaction (D-77 point 7).
         self.db.execute_batch("SAVEPOINT solace_tx")?;
         match body() {
@@ -328,19 +386,19 @@ impl crate::Store {
             }
         }
     }
-    pub(crate) fn header(&self, module: &str) -> Result<String, crate::failure::Failure> {
+    pub(crate) fn header(&self, module: &str) -> Result<String, Failure> {
         Ok(self.db.query_row("SELECT header FROM modules WHERE path = ?1", [module], |r| r.get(0))?)
     }
-    pub(crate) fn set_header(&self, module: &str, header: &str) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn set_header(&self, module: &str, header: &str) -> Result<(), Failure> {
         self.db.execute("UPDATE modules SET header = ?2 WHERE path = ?1", params![module, header])?;
         Ok(())
     }
     /// Takes a symbol out of the project; its history stays.
-    pub(crate) fn retire(&self, id: &str, detail: &str) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn retire(&self, id: &str, detail: &str) -> Result<(), Failure> {
         self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [id])?;
         self.history(id, "retire", detail)
     }
-    pub(crate) fn history(&self, id: &str, action: &str, detail: &str) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn history(&self, id: &str, action: &str, detail: &str) -> Result<(), Failure> {
         self.db.execute(
             "INSERT INTO history(at, symbol, action, detail) VALUES (?1, ?2, ?3, ?4)",
             params![crate::now() as i64, id, action, detail],
@@ -349,7 +407,7 @@ impl crate::Store {
     }
     /// The first Rust module file that no longer matches the store: its
     /// differing symbols, and the one command that repairs it.
-    fn drift_error(&self, ix: &crate::Index) -> Result<Option<crate::failure::Failure>, crate::failure::Failure> {
+    fn drift_error(&self, ix: &Index) -> Result<Option<Failure>, Failure> {
         if !crate::language::is_rust(&self.root) {
             return Ok(None);
         }
@@ -358,7 +416,7 @@ impl crate::Store {
             let Ok(disk) = fs::read_to_string(self.root.join(&rel)) else { continue };
             let names = crate::store::drift(ix, m, &disk);
             if !names.is_empty() {
-                return Ok(Some(crate::failure::Failure(
+                return Ok(Some(Failure(
                     format!(
                         "E0104 {rel} differs from the store in: {}. Nothing was saved. Run `format {}` to replace it \
                          with the store's text; the replaced file is kept under `.solace/outside/`.",
@@ -373,21 +431,21 @@ impl crate::Store {
     }
     /// Accepts a module file's bytes as what Solace last wrote, so the next
     /// projection writes over a file left behind by an interrupted change.
-    pub(crate) fn record_module_file(&self, m: &crate::ModuleRow, bytes: &[u8]) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn record_module_file(&self, m: &crate::ModuleRow, bytes: &[u8]) -> Result<(), Failure> {
         let rel = m.rel();
         let mut written = crate::outside::Written::load(&self.root);
         written.record(&rel, bytes);
         written.save()
     }
     /// Refuses while a module file differs from the store.
-    pub(crate) fn refuse_drift(&self, ix: &crate::Index) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn refuse_drift(&self, ix: &Index) -> Result<(), Failure> {
         match self.drift_error(ix)? {
             Some(e) => Err(e),
             None => Ok(()),
         }
     }
     /// The warnings of the last check; `None` before a check has ever run.
-    pub(crate) fn warning_baseline(&self) -> Result<Option<HashSet<String>>, crate::failure::Failure> {
+    pub(crate) fn warning_baseline(&self) -> Result<Option<HashSet<String>>, Failure> {
         let checked: i64 = self.db.query_row("SELECT COUNT(*) FROM warning_checks", [], |r| r.get(0))?;
         if checked == 0 {
             return Ok(None);
@@ -395,7 +453,7 @@ impl crate::Store {
         Ok(Some(self.db.prepare("SELECT key FROM warnings")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?))
     }
     /// Keeps this check's warnings, so a submit can name only the ones it adds.
-    pub(crate) fn record_warnings(&self, diags: &[crate::diagnostics::Diag]) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn record_warnings(&self, diags: &[crate::diagnostics::Diag]) -> Result<(), Failure> {
         let warnings: Vec<&crate::diagnostics::Diag> = diags.iter().filter(|d| !d.error).collect();
         let modules: HashSet<&str> = warnings.iter().map(|d| crate::diagnostics::warning_module(d)).collect();
         for module in modules {
@@ -411,11 +469,11 @@ impl crate::Store {
         Ok(())
     }
     /// A store whose shared fields are set the same way by every constructor.
-    pub(crate) fn new(db: Rc<Connection>, root: &Path, nested: bool, owns_dir: bool) -> crate::Store {
+    pub(crate) fn new(db: Rc<Connection>, root: &Path, nested: bool, owns_dir: bool) -> Store {
         crate::Store { db, root: root.into(), lang: crate::language::detect(root), nested, owns_dir, deps: std::cell::RefCell::new(None) }
     }
     /// Drops warnings for source a later cleanup removed.
-    pub(crate) fn forget_warnings(&self, diags: &[&crate::diagnostics::Diag]) -> Result<(), crate::failure::Failure> {
+    pub(crate) fn forget_warnings(&self, diags: &[&crate::diagnostics::Diag]) -> Result<(), Failure> {
         for d in diags {
             self.db.execute(
                 "DELETE FROM warnings WHERE key = ?1 AND module = ?2",
@@ -425,49 +483,15 @@ impl crate::Store {
         Ok(())
     }
 
-}
-/// Ends a command's outer transaction on every path out of `run_options`: one
-/// left open by an early `?` rolls back, and the shared connection is let go,
-/// so a longer-lived caller never keeps the store's write lock.
-pub(crate) struct OuterTransaction(pub(crate) Rc<Connection>);
-
-impl Drop for OuterTransaction {
-    fn drop(&mut self) {
-        if !self.0.is_autocommit() {
-            let _ = self.0.execute_batch("ROLLBACK");
-        }
-        crate::COMMAND_DB.set(vec![]);
+    pub(crate) fn set_symbol_text(&self, id: &str, name: &str, text: &str) -> Result<(), Failure> {
+        self.db.execute("UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1", params![id, text, crate::revision(text)])?;
+        self.history(id, "edit", name)
     }
+
 }
-
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT, owns_dir INTEGER);
-CREATE TABLE symbols(id TEXT PRIMARY KEY, module TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
-  text TEXT NOT NULL, ord INTEGER NOT NULL, revision TEXT NOT NULL, live INTEGER NOT NULL DEFAULT 1,
-  parent TEXT, sep TEXT, tail TEXT NOT NULL DEFAULT '');
-CREATE TABLE history(seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, symbol TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
-CREATE TABLE broken(symbol TEXT PRIMARY KEY, diagnostic TEXT NOT NULL);
-CREATE TABLE work(id INTEGER PRIMARY KEY, text TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1);
-";
-
-/// Tables added after `SCHEMA`, made when a store opens so older stores have them too.
-pub(crate) const LATER_TABLES: &str = "
--- per-test results and the source as of the last full pass (D-44)
-CREATE TABLE IF NOT EXISTS test_runs(test TEXT PRIMARY KEY, reach TEXT NOT NULL, result TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);
--- rejected submissions, kept to retry (D-46)
-CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args TEXT NOT NULL, text TEXT NOT NULL, base TEXT NOT NULL);
--- the task board
-CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
-CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
--- the warnings as of the last check, so a submit can name the new ones
-CREATE TABLE IF NOT EXISTS warnings(key TEXT PRIMARY KEY, module TEXT NOT NULL DEFAULT 'project');
-CREATE TABLE IF NOT EXISTS warning_checks(one INTEGER PRIMARY KEY CHECK (one = 1));
-";
 
 /// Whether `table` has the column `col`.
-fn has_column(db: &Connection, table: &str, col: &str) -> Result<bool, crate::failure::Failure> {
+fn has_column(db: &Connection, table: &str, col: &str) -> Result<bool, Failure> {
     Ok(db.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?1"), params![col], |r| r.get(0))?)
 }
 

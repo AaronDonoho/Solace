@@ -11,6 +11,25 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::store_core::OuterTransaction;
+use crate::extract::ffi::js_files;
+use crate::extract::deps::dependents;
+use crate::lockdown::files::move_args;
+use crate::lockdown::recovery::recover;
+use crate::lockdown::recovery::mark;
+use crate::lockdown::recovery::drop_records;
+use crate::lockdown::files::patch_snapshot;
+use crate::board::task_model::task;
+use crate::board::task_model::flow;
+use crate::board::reviews::snapshot;
+use crate::board::reviews::record;
+use crate::board::reviews::existing_folders;
+use crate::board::reviews::files_under;
+use crate::board::reviews::file_snapshot;
+use crate::board::task_model::lock;
+use crate::board::task_model::open;
+use crate::board::runs::context;
+use crate::board::runs::agent_guard;
+
 /// May change the project: recorded on the task in a board run, and refused in
 /// read-only runs, except `build`, which reviews run to verify.
 pub(crate) const CHANGES: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move", "run", "format", "build"];
@@ -83,19 +102,19 @@ fn dependency_files(root: &Path) -> serde_json::Map<String, Value> {
 /// uses (D-103): the records of both sides cover every `.mjs` under src/ and
 /// test/, so undo puts a carried file back and takes away its copy.
 fn script_files(root: &Path) -> serde_json::Map<String, Value> {
-    crate::extract::js_files(root).into_iter().map(|n| (format!("file:{n}"), json!(fs::read(root.join(&n)).ok()))).collect()
+    js_files(root).into_iter().map(|n| (format!("file:{n}"), json!(fs::read(root.join(&n)).ok()))).collect()
 }
 
 /// A store's snapshot with its JavaScript files.
 fn with_scripts(d: &crate::Store) -> Result<Value, Failure> {
-    let mut v = crate::board::snapshot(d)?;
+    let mut v = snapshot(d)?;
     v.as_object_mut().unwrap().extend(script_files(&d.root));
     Ok(v)
 }
 
 /// A store's snapshot with its dependency files (D-103).
 fn with_toml(d: &crate::Store) -> Result<Value, Failure> {
-    let mut v = crate::board::snapshot(d)?;
+    let mut v = snapshot(d)?;
     v.as_object_mut().unwrap().extend(dependency_files(&d.root));
     Ok(v)
 }
@@ -103,10 +122,10 @@ fn with_toml(d: &crate::Store) -> Result<Value, Failure> {
 /// A project's before or after state for a change: its live rows, the files
 /// the command names, and an extract's dependency and script files (D-103).
 pub(crate) fn snapshot_change(store: &crate::Store, a: &[&str], files: &[String]) -> Result<Value, Failure> {
-    let mut v = crate::board::snapshot(store)?;
-    v.as_object_mut().unwrap().extend(crate::board::file_snapshot(&store.root, a)?.as_object().unwrap().clone());
+    let mut v = snapshot(store)?;
+    v.as_object_mut().unwrap().extend(file_snapshot(&store.root, a)?.as_object().unwrap().clone());
     for f in files {
-        v.as_object_mut().unwrap().extend(crate::lockdown::patch_snapshot(&store.root, Some(f)));
+        v.as_object_mut().unwrap().extend(patch_snapshot(&store.root, Some(f)));
     }
     if a[0] == "extract" && a.contains(&"--to-project") {
         v.as_object_mut().unwrap().extend(dependency_files(&store.root));
@@ -136,8 +155,8 @@ pub(crate) fn changes<'a>(
         (Some(_), Some(_)) if a[0] == "merge" => None,
         (Some(d), Some(_)) if a[0] == "extract" => Some((d, None, with_scripts(d)?)),
         (Some(d), Some(_)) => {
-            let (_, to, _) = crate::lockdown::move_args(&store.root, a)?;
-            Some((d, Some(to.to_string()), Value::Object(crate::board::files_under(&d.root, to))))
+            let (_, to, _) = move_args(&store.root, a)?;
+            Some((d, Some(to.to_string()), Value::Object(files_under(&d.root, to))))
         }
         _ => None,
     };
@@ -148,9 +167,9 @@ pub(crate) fn changes<'a>(
             vec![]
         };
     // The folders each project had, so undo removes only those the task made (D-136).
-    let folders = before.as_ref().map(|_| crate::board::existing_folders(&store.root));
-    let dest_folders = dest_before.as_ref().map(|(d, ..)| crate::board::existing_folders(&d.root));
-    let deps_folders: Vec<_> = deps_before.iter().map(|(d, _)| crate::board::existing_folders(&d.root)).collect();
+    let folders = before.as_ref().map(|_| existing_folders(&store.root));
+    let dest_folders = dest_before.as_ref().map(|(d, ..)| existing_folders(&d.root));
+    let deps_folders: Vec<_> = deps_before.iter().map(|(d, _)| existing_folders(&d.root)).collect();
     Ok(Changes { before, dest_before, deps_before, folders, dest_folders, deps_folders })
 }
 
@@ -163,7 +182,7 @@ pub(crate) fn session(
     own: PathBuf,
 ) -> Result<Session, Failure> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let context = crate::board::context();
+    let context = context();
     let home_path = match &context {
         Some((tid, _)) => crate::scope::home(&own, tid).unwrap_or_else(|_| own.clone()),
         None => own.clone(),
@@ -175,8 +194,8 @@ pub(crate) fn session(
     let deps: Vec<PathBuf> = match (&context, &dest) {
         (Some((tid, _)), d) if (a[0] == "extract" && d.is_some()) || a[0] == "merge" => {
             let top = crate::scope::top(&root);
-            let projects = crate::scope::of(&crate::board::task(&home_path, tid)?, &crate::scope::dir(&top, &home_path));
-            crate::extract::dependents(&top, &root, &projects).into_iter().filter(|p| Some(p) != d.as_ref()).collect()
+            let projects = crate::scope::of(&task(&home_path, tid)?, &crate::scope::dir(&top, &home_path));
+            dependents(&top, &root, &projects).into_iter().filter(|p| Some(p) != d.as_ref()).collect()
         }
         _ => vec![],
     };
@@ -184,14 +203,14 @@ pub(crate) fn session(
         // Away from home, the project the agent works in is locked too.
         let away = (cross.is_none() && !crate::project_paths::same_project(&root, &home_path)).then(|| root.clone());
         let also: Vec<&Path> = cross.iter().chain(&away).chain(&dest).chain(&deps).map(PathBuf::as_path).collect();
-        crate::board::agent_guard(&home_path, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
+        agent_guard(&home_path, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
     } else {
-        vec![crate::board::lock(&root)?]
+        vec![lock(&root)?]
     };
-    let store = crate::board::open(&root)?;
-    let home = crate::board::open(&home_path)?;
-    let dest = dest.map(|d| crate::board::open(&d)).transpose()?;
-    let deps = deps.iter().map(|d| crate::board::open(d)).collect::<Result<Vec<_>, _>>()?;
+    let store = open(&root)?;
+    let home = open(&home_path)?;
+    let dest = dest.map(|d| open(&d)).transpose()?;
+    let deps = deps.iter().map(|d| open(d)).collect::<Result<Vec<_>, _>>()?;
     Ok(Session { args, project, here, root, context, deps, dest, home, store, guard })
 }
 
@@ -205,14 +224,14 @@ pub(crate) fn recover_all(
     let mut held = vec![store.root.clone(), home.root.clone()];
     held.extend(dest.iter().copied().chain(deps).map(|d| d.root.clone()));
     crate::extract::ahead::recover(&held)?;
-    crate::lockdown::recover(&store.root, store, guard)?;
+    recover(&store.root, store, guard)?;
     if let Some(d) = dest {
-        crate::lockdown::recover(&d.root, d, guard)?;
+        recover(&d.root, d, guard)?;
     }
     for d in deps {
-        crate::lockdown::recover(&d.root, d, guard)?;
+        recover(&d.root, d, guard)?;
     }
-    crate::board::flow(&store.root)?;
+    flow(&store.root)?;
     crate::outside::absorb(store, crate::outside::Mode::Notice)
 }
 
@@ -234,12 +253,12 @@ pub(crate) fn begin_transactions(session: &Session, changes: &Changes<'_>, a: &[
     }
     let deps: Vec<OuterTransaction> = deps_before.iter().map(|(d, _)| OuterTransaction(d.db.clone())).collect();
     if let (Some(_), Some((tid, rid))) = (before, context) {
-        crate::lockdown::mark(&store.root, tid, rid)?;
+        mark(&store.root, tid, rid)?;
         if let Some(d) = mark_dest {
-            crate::lockdown::mark(&d.root, tid, rid)?;
+            mark(&d.root, tid, rid)?;
         }
         for (d, _) in deps_before {
-            crate::lockdown::mark(&d.root, tid, rid)?;
+            mark(&d.root, tid, rid)?;
         }
     }
     // An extract into another project is written ahead: its record is in each of
@@ -285,14 +304,14 @@ pub(crate) fn commit(
         stores.extend(changes.deps_before.iter().zip(&deps_after).map(|((d, b), a)| (*d, b, a)));
         crate::extract::ahead::complete(record, &stores)?;
         crash_after("complete");
-        crate::board::record(d, tid, rid, d_before, &d_after, changes.dest_folders.as_ref())?;
+        crate::board::reviews::record(d, tid, rid, d_before, &d_after, changes.dest_folders.as_ref())?;
         d.db.execute_batch("COMMIT")?;
         crash_after("destination");
-        crate::board::record(store, tid, rid, before, after, changes.folders.as_ref())?;
+        crate::board::reviews::record(store, tid, rid, before, after, changes.folders.as_ref())?;
         store.db.execute_batch("COMMIT")?;
         crash_after("source");
         for (((d, d_before), d_after), f) in changes.deps_before.iter().zip(&deps_after).zip(&changes.deps_folders) {
-            crate::board::record(d, tid, rid, d_before, d_after, Some(f))?;
+            crate::board::reviews::record(d, tid, rid, d_before, d_after, Some(f))?;
             d.db.execute_batch("COMMIT")?;
         }
         crate::extract::ahead::end(record)?;
@@ -300,25 +319,25 @@ pub(crate) fn commit(
     } else {
         // A merge's dependents commit before the source.
         for ((d, d_before), f) in changes.deps_before.iter().zip(&changes.deps_folders) {
-            crate::board::record(d, tid, rid, d_before, &with_toml(d)?, Some(f))?;
+            record(d, tid, rid, d_before, &with_toml(d)?, Some(f))?;
             d.db.execute_batch("COMMIT")?;
-            crate::lockdown::drop_records(&d.root, rid)?;
+            drop_records(&d.root, rid)?;
         }
         if !changes.deps_before.is_empty() {
             crash_after("others");
         }
-        crate::board::record(store, tid, rid, before, after, changes.folders.as_ref())?;
+        record(store, tid, rid, before, after, changes.folders.as_ref())?;
         store.db.execute_batch("COMMIT")?;
         crash_after("commit");
         // The task lists its changes from the rows that committed (D-77 point 4),
         // computed by changes_of, so there is nothing to write here.
-        crate::lockdown::drop_records(&store.root, rid)?;
+        drop_records(&store.root, rid)?;
     }
     if let Some((d, Some(to), files)) = &changes.dest_before {
         d.db.execute_batch("BEGIN IMMEDIATE")?;
-        crate::board::record(d, tid, rid, files, &Value::Object(crate::board::files_under(&d.root, to)), changes.dest_folders.as_ref())?;
+        record(d, tid, rid, files, &Value::Object(files_under(&d.root, to)), changes.dest_folders.as_ref())?;
         d.db.execute_batch("COMMIT")?;
-        crate::lockdown::drop_records(&d.root, rid)?;
+        drop_records(&d.root, rid)?;
     }
     Ok(())
 }
@@ -332,7 +351,7 @@ pub(crate) fn commit(
 /// `others` after a merge's dependents commit, before the source does).
 /// Only in a board run, so a plain CLI call is never interrupted.
 pub(crate) fn crash_after(point: &str) {
-    if crate::board::context().is_none() {
+    if context().is_none() {
         return;
     }
     #[cfg(test)]
