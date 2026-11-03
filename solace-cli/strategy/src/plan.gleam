@@ -808,6 +808,7 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
             task: "",
             base: base,
             label: label,
+            placeholder: "",
             text: p.text,
             on_input: p.on_text,
             on_format: p.on_format,

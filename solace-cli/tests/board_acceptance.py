@@ -9,12 +9,14 @@ import tempfile
 import time
 import unittest
 
+from acceptance_wait import wait_for
+
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = str(Path(__file__).with_name('fake_agent.py'))
 
 class Board(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='solace-board-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='solace-board-', ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)/'fixture'
         self.root.mkdir()
@@ -226,10 +228,21 @@ class Board(unittest.TestCase):
             self.action(t, 'complete')
             self.wait(t, lambda x: x.get('conversation') is None and not home.exists())
 
-    def review(self, t, steps=None):
+    def test_a_director_brief_reaches_the_agent(self):
+        # The fake agent can't judge wording, but the prompt it receives must carry the Director section.
+        config = self.root/'system.toml'
+        config.write_text('involvement = "director"\n' + config.read_text())
+        t = self.completed([])
+        prompt = (self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text()
+        self.assertIn('How to talk to the human (Director)', prompt)
+        self.assertIn('`### Calls made` heading', prompt)
+        self.assertIn('`### Summary` heading', prompt)
+        self.assertNotIn('How to talk to the human (Collaborator)', prompt)
+
+    def review(self, t, steps=None, model='fake'):
         if steps is not None:
             self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps(steps)})
-        t = self.action(t, 'review', model='fake')
+        t = self.action(t, 'review', model=model)
         rid = t['runs'][-1]['id']
         t = self.wait(t, lambda x:x['runs'][-1]['state']=='ended')
         prompt = (self.root/'.solace'/(rid+'.prompt')).read_text()
@@ -287,6 +300,34 @@ class Board(unittest.TestCase):
         self.assertNotEqual(t['runs'][-1]['outcome'], 'reviewed')
         self.assertEqual(t['column'], 'needs_review')
         self.assertIn('without finishing', t['attention']['reason'])
+
+    def test_a_review_that_recovered_from_a_transient_notice_records_its_assessment(self):
+        assessment = '**Assessment: Looks good**\n\n### Findings\n\nFine.'
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'notice': 'Reconnecting... 1/5'}, {'say': assessment}])
+        rid = t['runs'][-1]['id']
+        self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
+        self.assertEqual((t['notes'][-1]['author'], t['notes'][-1]['run'], t['notes'][-1]['text']), ('agent', rid, assessment))
+        self.assertIsNone(t['attention'])
+        # An error after the last message still fails.
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'say': assessment}, {'notice': 'reconnect failed'}])
+        self.assertEqual(t['column'], 'needs_review')
+        self.assertEqual(
+            t['runs'][-1]['outcome'],
+            'agent exited without finishing (exit status: 0):\n\nreconnect failed'
+        )
+        self.assertIn('without finishing', t['attention']['reason'])
+
+    def test_a_claude_reply_split_into_blocks_records_the_whole_assessment(self):
+        assessment = '**Assessment: Looks good**\n\n### Findings\n\nFine.'
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'say': assessment}, {'say': 'Done.'}], model='native-claude')
+        rid = t['runs'][-1]['id']
+        self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
+        self.assertEqual((t['notes'][-1]['run'], t['notes'][-1]['text']), (rid, assessment+'\n\nDone.'))
+        log = [json.loads(line) for line in Path(t['runs'][-1]['log']).read_text().splitlines()]
+        self.assertEqual([e['message']['content'][0]['text'] for e in log if e.get('type')=='assistant'], [assessment, 'Done.'])
 
     def test_completed_reviews_file_tech_debt(self):  # D-112
         f = self.api('POST', '/features', {'title':'Search'})
@@ -1035,15 +1076,14 @@ class Board(unittest.TestCase):
         self.assertNotIn('codex-gpt-6-fake-hidden',models,'a hidden model is left out')
         self.assertNotIn('gpt-6-fake',(self.root/'system.toml').read_text(),'no config change asked for the model')
         # Claude Code has no list command: the pick lists one entry per family —
-        # the family's live preset, and an alias only for a family with no preset.
-        self.assertIn('claude-opus-5-5',models)
-        self.assertNotIn('claude-opus',models,"the alias stands behind the family's live model")
-        self.assertIn('claude-fable-5-1',models)
-        self.assertEqual(models['claude-fable-5-1']['label'],'Fable 5.1')
-        self.assertNotIn('claude-fable',models,"the alias stands behind the family's live model")
-        self.assertIn('claude-haiku-5-5',models)
-        self.assertEqual(models['claude-haiku-5-5']['label'],'Haiku 5.5')
-        self.assertNotIn('claude-haiku',models,"the alias stands behind the family's live model")
+        # the alias names the latest model, so a shipped exact preset gives way to it.
+        self.assertNotIn('claude-opus-5-5',models,"the alias names the latest model")
+        self.assertIn('claude-opus',models)
+        self.assertEqual(models['claude-opus']['label'],'Opus (latest)')
+        self.assertNotIn('claude-fable-5-1',models,"the alias names the latest model")
+        self.assertIn('claude-fable',models)
+        self.assertNotIn('claude-haiku-5-5',models,"the alias names the latest model")
+        self.assertIn('claude-haiku',models)
         self.assertNotIn('claude-haiku-4-5',models,"the stale exact preset is gone")
 
     def test_a_run_shows_the_model_it_used(self):
@@ -1067,6 +1107,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertEqual(e['vision']['text'],'')
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1151,14 +1192,12 @@ class Board(unittest.TestCase):
         t=self.action(t,'discuss',model='fake',text='What about X?')
         rid=t['runs'][-1]['id']
         prompt=self.root/'.solace'/(rid+'.prompt')
-        end=time.monotonic()+8
-        while time.monotonic()<end and not prompt.exists():time.sleep(.05)
-        self.assertTrue(prompt.exists(),'the discussion agent never started')
+        self.assertTrue(wait_for(prompt,8),'the discussion agent never started')
         self.stop()
         responses=self.root/'.solace'/(rid+'.responses')
-        end=time.monotonic()+4
-        while time.monotonic()<end and not responses.exists():time.sleep(.1)
-        self.assertTrue(responses.exists(),'the note call never returned')
+        self.assertTrue(wait_for(responses,4),'the note call never returned')
+        exited=self.root/'.solace'/(rid+'.exited')
+        self.assertTrue(wait_for(exited,4),'the discussion agent never exited')
         self.assertIn('reaches the board',responses.read_text())
         inbox=self.root/'.solace/tasks/inbox'
         self.assertEqual(len(list(inbox.iterdir())),1)
@@ -1167,19 +1206,64 @@ class Board(unittest.TestCase):
         self.assertEqual([n['text'] for n in t['notes']],['What about X?','reply'])
         self.assertEqual(list(inbox.iterdir()),[])
 
+    def test_a_queued_review_note_finishes_after_the_server_restarts(self):
+        # A queued note finishes the review when the server returns, rather than
+        # landing as feedback on an ended run.
+        note = '**Assessment: Needs work**\n\n### Findings\n\nLate feedback.'
+        t = self.completed([])
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'sleep':.5},{'command':'task note','text':note}])})
+        t = self.action(t, 'review', model='fake')
+        rid = t['runs'][-1]['id']
+        prompt = self.root/'.solace'/(rid+'.prompt')
+        self.assertTrue(wait_for(prompt, 8), 'the review agent never started')
+        self.stop()
+        responses = self.root/'.solace'/(rid+'.responses')
+        self.assertTrue(wait_for(responses, 4), 'the note call never returned')
+        exited = self.root/'.solace'/(rid+'.exited')
+        self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+        self.assertIn('reaches the board', responses.read_text())
+        self.serve()
+        t = self.wait(t, lambda x: x['runs'][-1]['outcome']=='reviewed'
+                     and len([n for n in x['notes'] if n['author']=='agent' and n['run']==rid])==1)
+        self.assertEqual([n['text'] for n in t['notes'] if n['author']=='agent' and n['run']==rid], [note])
+        self.assertEqual(t['finished']['outcome'], 'reviewed')
+
+    def test_a_queued_review_note_after_its_assessment_adds_no_second_note(self):
+        # The assessment already finished the review: a queued note that arrives
+        # afterward is dropped instead of becoming a second agent note.
+        assessment = '**Assessment: Looks good**\n\nFine.'
+        note = '**Assessment: Needs work**\n\n### Findings\n\nLate feedback.'
+        t = self.completed([])
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([
+            {'sleep':.5}, {'command':'task note','text':note}, {'say':assessment}])})
+        t = self.action(t, 'review', model='fake')
+        rid = t['runs'][-1]['id']
+        prompt = self.root/'.solace'/(rid+'.prompt')
+        self.assertTrue(wait_for(prompt, 8), 'the review agent never started')
+        self.stop()
+        responses = self.root/'.solace'/(rid+'.responses')
+        self.assertTrue(wait_for(responses, 4), 'the note call never returned')
+        exited = self.root/'.solace'/(rid+'.exited')
+        self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+        self.assertIn('reaches the board', responses.read_text())
+        self.serve()
+        t = self.wait(t, lambda x: x['runs'][-1]['outcome']=='reviewed'
+                     and len([n for n in x['notes'] if n['author']=='agent' and n['run']==rid])==1)
+        self.assertEqual([n['text'] for n in t['notes'] if n['author']=='agent' and n['run']==rid], [note])
+        self.assertEqual(t['finished']['outcome'], 'reviewed')
+        self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
+
     def test_a_stopped_server_queues_an_ask(self):
         # The same for a question: the agent is told it is queued, not left waiting.
         t=self.assign([{'sleep':.5},{'command':'task ask','text':'Which?','options':['a','b']}])
         rid=t['runs'][-1]['id']
         prompt=self.root/'.solace'/(rid+'.prompt')
-        end=time.monotonic()+8
-        while time.monotonic()<end and not prompt.exists():time.sleep(.05)
-        self.assertTrue(prompt.exists(),'the work agent never started')
+        self.assertTrue(wait_for(prompt,8),'the work agent never started')
         self.stop()
         responses=self.root/'.solace'/(rid+'.responses')
-        end=time.monotonic()+4
-        while time.monotonic()<end and not responses.exists():time.sleep(.1)
-        self.assertTrue(responses.exists(),'the ask call never returned')
+        self.assertTrue(wait_for(responses,4),'the ask call never returned')
+        exited=self.root/'.solace'/(rid+'.exited')
+        self.assertTrue(wait_for(exited,4),'the work agent never exited')
         self.assertIn('reaches the board',responses.read_text())
         self.serve()
         # The restart ended the run before the question was applied: the question
@@ -1274,6 +1358,7 @@ class Board(unittest.TestCase):
         seq,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertIn('vision',e)
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1305,6 +1390,7 @@ class Board(unittest.TestCase):
         stream=self.stream()
         while 'vision' not in (e:=self.next_event(stream)[1]):pass
         self.assertEqual(e['vision']['text'],'')
+        _,personas=self.next_event(stream);self.assertEqual(personas,{'personas':[]})
         _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,hp=self.next_event(stream);self.assertEqual(hp,{'noProject':True,'tasks':[]})
@@ -1322,6 +1408,39 @@ class Board(unittest.TestCase):
         while 'vision' not in (e:=self.next_event(fresh)[1]):pass
         self.assertEqual(e,{'vision':v})
 
+    def test_personas_are_one_root_list(self):  # D-216
+        stream=self.stream()
+        while 'personas' not in (e:=self.next_event(stream)[1]):pass
+        self.assertEqual(e,{'personas':[]})
+        self.assertEqual(self.next_event(stream)[1],{'strategyRuns':[]})
+        self.assertEqual(self.next_event(stream)[1],{'noProject':True,'tasks':[]})
+        p=self.api('POST','/personas',{'name':'  Ada  ','objectives':'Ship','tools':'Rust','concerns':'Risk','other':'Notes'})
+        self.assertEqual((p['name'],p['objectives'],p['tools'],p['concerns'],p['other']),('Ada','Ship','Rust','Risk','Notes'))
+        self.assertTrue(p['revision'].startswith('sha256:'))
+        self.assertEqual(self.api('GET','/personas'),[p])
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[p]})
+        body=dict(p,objectives='Ship well');del body['revision'];body['base']=p['revision']
+        q=self.api('PUT','/personas/'+p['id'],body)
+        self.assertNotEqual(q['revision'],p['revision'])
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[q]})
+        status,body=self.bare('PUT','/personas/'+p['id'],{'Content-Type':'application/json'},json.dumps({'name':'Lost','base':p['revision']}))
+        self.assertEqual((status,json.loads(body)['code']),(409,'E7028'))
+        self.assertEqual(self.api('GET','/personas'),[q])
+        status,body=self.bare('POST','/personas',{'Content-Type':'application/json'},json.dumps({'name':' '}))
+        self.assertEqual((status,json.loads(body)['code']),(400,'E7001'))
+        status,body=self.bare('POST','/personas',{'Content-Type':'application/json'},json.dumps({'name':'Long','other':'é'*1000}))
+        self.assertEqual((status,json.loads(body)['code']),(400,'E7029'))
+        self.assertEqual(self.api('GET','/personas'),[q])
+        gone=self.api('DELETE','/personas/'+p['id'])
+        self.assertEqual(gone['id'],p['id'])
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
+        self.assertEqual(self.api('GET','/personas'),[])
+        status,body=self.bare('PUT','/personas/'+p['id'],{'Content-Type':'application/json'},json.dumps({'name':'Back','base':q['revision']}))
+        self.assertEqual((status,json.loads(body)['code']),(404,'E7023'))
+        fresh=self.stream()
+        while 'personas' not in (e:=self.next_event(fresh)[1]):pass
+        self.assertEqual(e,{'personas':[]})
+
     def wait_run(self,rid,predicate,timeout=10):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
@@ -1336,6 +1455,7 @@ class Board(unittest.TestCase):
     def test_strategy_runs_start_refuse_note_and_end(self):  # D-93, A19
         stream=self.stream()
         while 'vision' not in (e:=self.next_event(stream)[1]):pass
+        _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         m=self.api('POST','/milestones',{'title':'M1'})
         f=self.api('POST','/features',{'title':'Feature F1','milestone':m['id']})
@@ -1425,9 +1545,10 @@ class Board(unittest.TestCase):
         listed=self.api('GET','/strategy/runs')
         self.assertEqual(([r['id'] for r in listed],'notes' in listed[0]),([rid],False))
         self.assertEqual(self.api('GET',f'/strategy/runs/{rid}')['notes'],ended['notes'])
-        # A new connection replays the runs after the vision.
+        # A new connection replays the runs after the vision and personas.
         fresh=self.stream()
         while 'vision' not in (e:=self.next_event(fresh)[1]):pass
+        _,e=self.next_event(fresh);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(fresh);self.assertEqual(e,{'strategyRuns':listed})
 
     def test_strategy_proposals_wait_for_approval(self):  # D-93, A19
@@ -1620,6 +1741,15 @@ class Board(unittest.TestCase):
         while self.api('GET',f'/strategy/runs/{rid}')['state']!='waiting' and time.monotonic()<end:time.sleep(.05)
         while 'codex' in json.loads(limits.read_text()) and time.monotonic()<end:time.sleep(.05)
         self.assertNotIn('codex',json.loads(limits.read_text()))
+
+    def test_a_batched_review_note_is_recorded_before_the_agent_exits(self):
+        # A batched note waits for the board, so the review is not failed by the exit.
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'command':'task diff\ntask note','text':'**Assessment: Looks good** batched'}])
+        self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
+        notes = [n for n in t['notes'] if n['author'] == 'agent' and 'batched' in n['text']]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(t['notes'][-1]['text'], '**Assessment: Looks good** batched')
 
 if __name__=='__main__':unittest.main()
 

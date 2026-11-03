@@ -56,6 +56,8 @@ pub(super) use crate::tasks::strategy::strategy_api;
 pub(super) use crate::tasks::strategy::VISION_LIMIT;
 pub(super) use crate::tasks::strategy::vision;
 pub(super) use crate::tasks::strategy::vision_api;
+pub(super) use crate::tasks::strategy::personas;
+pub(super) use crate::tasks::strategy::personas_api;
 pub(super) use crate::tasks::strategy::strategy_runs;
 pub(super) use crate::tasks::strategy::strategy_run;
 pub(super) use crate::tasks::strategy::update_run;
@@ -339,7 +341,10 @@ mod tests {
         let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
         let on_f = json!({"kind": "feature", "id": f["id"]});
         let run = call("POST", &[], json!({"model": "fake", "text": "Plan F", "context": on_f})).unwrap();
-        assert_eq!((run["kind"].as_str(), run["state"].as_str(), &run["context"]), (Some("strategy"), Some("running"), &on_f));
+        assert_eq!(
+            (run["kind"].as_str(), run["state"].as_str(), &run["context"]),
+            (Some(crate::board::roles::STRATEGY_RUN), Some("running"), &on_f)
+        );
         assert_eq!((run["notes"][0]["author"].as_str(), run["notes"][0]["text"].as_str()), (Some("human"), Some("Plan F")));
         let rid = run["id"].as_str().unwrap();
         let e = call("POST", &[], json!({"model": "fake", "text": "Again", "context": on_f})).unwrap_err();
@@ -2347,5 +2352,93 @@ mod tests {
         let t = task(&root, id);
         assert_eq!((t["column"].as_str(), t["home"].as_str()), (Some("planning"), Some(".")));
         assert_eq!(t["onBoard"], json!(true));
+    }
+
+    /// D-216: personas are one root list; an id is never reused, a replace
+    /// needs its persona's current revision, and the fields share one limit.
+    #[test]
+    fn personas_are_created_replaced_and_deleted_with_revision_checks() {
+        let root = root();
+        assert_eq!(personas(&root), Vec::<Value>::new());
+        let p = personas_api(
+            &root,
+            "POST",
+            &[],
+            json!({"name": "  Ada  ", "objectives": "Ship", "tools": "Rust", "concerns": "Risk", "other": "Notes"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (p["name"].as_str(), p["objectives"].as_str(), p["tools"].as_str(), p["concerns"].as_str(), p["other"].as_str()),
+            (Some("Ada"), Some("Ship"), Some("Rust"), Some("Risk"), Some("Notes"))
+        );
+        let id = p["id"].as_str().unwrap().to_string();
+        assert!(p["revision"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(personas(&root), [p.clone()]);
+
+        let mut q = p.clone();
+        q["objectives"] = json!("Ship well");
+        q["base"] = p["revision"].clone();
+        let q = personas_api(&root, "PUT", &[&id], q).unwrap();
+        assert_ne!(q["revision"], p["revision"]);
+        let e = personas_api(&root, "PUT", &[&id], json!({"name": "Lost", "base": p["revision"]})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7028")), (409, true), "{}", e.1.0);
+        assert_eq!(personas(&root), [q.clone()], "nothing was written");
+        // D-216: the name is required, and all the fields share one limit.
+        let e = personas_api(&root, "POST", &[], json!({"name": "  "})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7001")), (400, true), "{}", e.1.0);
+        let e = personas_api(&root, "POST", &[], json!({"name": "Long", "other": "é".repeat(crate::tasks::strategy::PERSONA_LIMIT)}))
+            .unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7029")), (400, true), "{}", e.1.0);
+        assert_eq!(personas(&root), [q.clone()], "nothing was written");
+        let full = personas_api(
+            &root,
+            "PUT",
+            &[&id],
+            json!({"name": "Ada", "other": "é".repeat(crate::tasks::strategy::PERSONA_LIMIT - 3), "base": q["revision"]}),
+        )
+        .unwrap();
+        assert_eq!(full["other"].as_str().unwrap().chars().count(), crate::tasks::strategy::PERSONA_LIMIT - 3);
+        // A delete remembers the id, so it is never handed out again.
+        assert_eq!(personas_api(&root, "DELETE", &[&id], json!({})).unwrap()["id"], id);
+        assert!(personas(&root).is_empty());
+        let e = personas_api(&root, "PUT", &[&id], json!({"name": "Back", "base": full["revision"]})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7023")), (404, true), "{}", e.1.0);
+        let retired: Vec<String> = crate::jsonx::read(&crate::tasks::strategy::personas_file(&root)).unwrap()["retired"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(retired, [id]);
+
+        let rows = root_events(&root);
+        assert_eq!(rows, [json!({"personas": [p]}), json!({"personas": [q]}), json!({"personas": [full]}), json!({"personas": []})]);
+    }
+
+    /// D-216: a damaged personas file is refused, never replaced by an empty list.
+    #[test]
+    fn a_damaged_personas_file_is_not_overwritten() {
+        use crate::tasks::strategy::personas_file;
+        let root = root();
+        let file = personas_file(&root);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        for text in ["{", r#"{"personas":{}}"#, r#"{"personas":[],"retired":{}}"#] {
+            std::fs::write(&file, text).unwrap();
+            let e = personas_api(&root, "POST", &[], json!({"name": "Ada"})).unwrap_err();
+            assert_eq!((e.0, e.1.0.starts_with("E7030")), (409, true), "{}", e.1.0);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        }
+        assert_eq!(personas(&root), Vec::<Value>::new());
+    }
+
+    /// D-216: a method or path the persona routes don't take is a bad request.
+    #[test]
+    fn an_unknown_persona_route_is_a_bad_request_and_writes_nothing() {
+        let root = root();
+        for (method, parts) in [("GET", vec!["x"]), ("PATCH", vec![])] {
+            let e = personas_api(&root, method, &parts, json!({})).unwrap_err();
+            assert_eq!((e.0, e.1.0.starts_with("E7001")), (400, true), "{}", e.1.0);
+        }
+        assert!(root_events(&root).is_empty());
     }
 }

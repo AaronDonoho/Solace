@@ -988,6 +988,16 @@ fn a_patch_changing_a_modules_imports_is_refused() {
         "{err}"
     );
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    let both = concat!(
+        "*** Begin Patch\n*** Update: crate\n@@\n-use std::fmt;\n+use std::io;\n",
+        "@@\n-pub fn one() -> fmt::Result {\n-    Ok(())\n-}\n+pub fn one() -> std::io::Result<()> {\n+    Ok(())\n+}\n*** End Patch\n",
+    );
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(both.into()), None).unwrap_err().0;
+    assert!(
+        err.contains("submit --imports crate") && err.contains("submit crate") && err.contains("send item changes separately"),
+        "{err}"
+    );
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
 /// A whole module whose text defines a name twice is refused without saving
@@ -1967,7 +1977,7 @@ fn a_method_for_a_type_without_an_impl_says_to_add_one() {
         drafts::submit(&store, &["submit"], &mut || Ok(patch.clone()), None).unwrap_err().0
     };
     let err = add("crate.Y::c");
-    assert!(err.starts_with("E1003 crate.Y has no `impl`: add one with `*** Add: crate` and a whole `impl Y { … }` block"), "{err}");
+    assert!(err.starts_with("E1003 crate.Y has no `impl`: add a whole `impl Y { … }` block to `crate`"), "{err}");
     let err = add("crate.E::c");
     assert!(err.starts_with("E1003 crate.E has no"), "{err}");
     let err = add("crate.T::c");
@@ -2256,4 +2266,277 @@ fn an_imports_submit_names_the_module_in_a_duplicate_refusal() {
     let err = store.submit(crate::store::Target::Imports("tests"), "use super::*;\nmod extra;\nmod extra;\n").unwrap_err().0;
     assert!(err.contains("defined twice in `crate.tests`"), "{err}");
     assert!(!err.contains("crate.tests imports"), "{err}");
+}
+
+/// A patch Add creates a nested module with its type, impl and const beside its
+/// parent's file, together with the patch's other sections (D-171).
+#[test]
+fn a_patch_add_creates_a_nested_module_with_its_impl() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        ("src/board.rs", "pub mod agents;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/board/agents.rs", "pub fn two() -> i32 {\n    2\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add: board::roles\n",
+        "+pub(crate) enum Role {\n",
+        "+    Worker,\n",
+        "+}\n",
+        "+\n",
+        "+pub(crate) const ROLES: [Role; 1] = [Role::Worker];\n",
+        "+\n",
+        "+impl Role {\n",
+        "+    pub(crate) fn worker() -> Self {\n",
+        "+        Self::Worker\n",
+        "+    }\n",
+        "+}\n",
+        "*** Update: board.one\n",
+        "@@\n",
+        "-pub fn one() -> i32 {\n",
+        "-    1\n",
+        "-}\n",
+        "+pub fn one() -> i32 {\n",
+        "+    4\n",
+        "+}\n",
+        "*** End Patch\n",
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module board::roles (src/board/roles.rs; added mod roles; to board)"), "{out}");
+    assert!(out.contains("board::roles.Role") && out.contains("board::roles.ROLES") && out.contains("board::roles.Role::worker"), "{out}");
+    assert!(out.contains("board.one"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/board/roles.rs"),
+        concat!(
+            "pub(crate) enum Role {\n    Worker,\n}\n\n",
+            "pub(crate) const ROLES: [Role; 1] = [Role::Worker];\n\n",
+            "impl Role {\n    pub(crate) fn worker() -> Self {\n        Self::Worker\n    }\n}\n",
+        )
+    );
+    assert_eq!(text_of(&root, "src/board.rs"), "pub mod agents;\nmod roles;\n\npub fn one() -> i32 {\n    4\n}\n");
+    assert_eq!(store.index().unwrap().modules.iter().filter(|m| m.path == "board::roles").count(), 1);
+}
+
+/// An Add that can't create its module names the missing parent or the keyword,
+/// rather than only saying the module is unknown (D-171).
+#[test]
+fn a_patch_add_refusal_names_the_reason() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    for (target, why) in [("missing::child", "no module `missing`"), ("crate::struct", "keyword")] {
+        let patch = format!("*** Begin Patch\n*** Add: {target}\n+pub fn side() -> i32 {{\n+    1\n+}}\n*** End Patch\n");
+        let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.clone()), None).unwrap_err().0;
+        assert!(err.contains("E1003") && err.contains(why) && !err.contains("unknown module"), "{target}: {err}");
+    }
+    assert!(!root.join("src/missing/child.rs").exists());
+}
+
+/// A patch Add names its module exactly: `roles` beside a stored `board::roles`
+/// creates the top-level module rather than adding to the nested one.
+#[test]
+fn an_add_beside_a_nested_module_creates_the_top_level_one() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        ("src/board.rs", "pub mod roles;\n"),
+        ("src/board/roles.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = "*** Begin Patch\n*** Add: roles\n+pub fn side() -> i32 {\n+    2\n+}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module roles (src/roles.rs; added mod roles; to crate)"), "{out}");
+    assert_eq!(text_of(&root, "src/roles.rs"), "pub fn side() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub mod board;\nmod roles;\n");
+    assert_eq!(text_of(&root, "src/board/roles.rs"), "pub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A new module's parent is exactly the path named: `board::roles` beside only
+/// `a::board` says `board` is missing rather than creating `a::board::roles`.
+#[test]
+fn a_new_modules_parent_is_an_exact_path() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\n"),
+        ("src/a.rs", "pub mod board;\n"),
+        ("src/a/board.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = "*** Begin Patch\n*** Add: board::roles\n+pub fn side() -> i32 {\n+    2\n+}\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("E1003") && err.contains("no module `board`") && !err.contains("unknown module"), "{err}");
+    assert!(!root.join("src/board/roles.rs").exists());
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub mod a;\n");
+}
+
+/// A nested patch Add saves a trait impl with the type it belongs to.
+#[test]
+fn a_nested_patch_add_holds_a_trait_impl() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\n"),
+        ("src/a.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add: a::b\n",
+        "+pub struct T;\n",
+        "+\n",
+        "+impl Default for T {\n",
+        "+    fn default() -> Self {\n",
+        "+        Self\n",
+        "+    }\n",
+        "+}\n",
+        "*** End Patch\n",
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module a::b (src/a/b.rs; added mod b; to a)"), "{out}");
+    assert_eq!(text_of(&root, "src/a/b.rs"), "pub struct T;\n\nimpl Default for T {\n    fn default() -> Self {\n        Self\n    }\n}\n");
+    assert_eq!(text_of(&root, "src/a.rs"), "mod b;\n\npub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A child cannot be placed beside a module that has no file of its own.
+#[test]
+fn a_new_module_without_a_file_of_its_own_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let mut ix = store.index().unwrap();
+    ix.modules.push(crate::index::ModuleRow { path: "inner".into(), dir: "src".into(), header: String::new(), file: None, owns_dir: None });
+    let err = store.rust_created(&ix, "inner::child").err().unwrap().0;
+    assert_eq!(err, "E1003 `inner` has no file of its own, so `inner::child` can't go beside it.");
+}
+
+/// A name that would land on a module the store already has is refused.
+#[test]
+fn a_new_module_landing_on_an_existing_one_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", ""), ("tests/x.rs", ""), ("tests/y.rs", "")]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    let err = store.rust_created(&ix, "integration::x::y").err().unwrap().0;
+    assert_eq!(err, "E1003 integration::x::y would land on integration::y, which is already a module.");
+}
+
+/// An explicit `module.item` Add names its module exactly: when only a nested
+/// module matches, the refusal names that module instead of creating a stray one.
+#[test]
+fn an_add_by_short_module_name_names_the_nested_match() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        ("src/board.rs", "pub mod roles;\n"),
+        ("src/board/roles.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = "*** Begin Patch\n*** Add: roles.side\n+pub fn side() -> i32 {\n+    2\n+}\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("names no module `roles`") && err.contains("`board::roles` matches it"), "{err}");
+    assert!(err.contains("use `board::roles.side` to add there"), "{err}");
+    assert_eq!(text_of(&root, "src/board/roles.rs"), "pub fn one() -> i32 {\n    1\n}\n");
+    assert!(!root.join("src/roles.rs").exists());
+}
+
+/// A plain block, not a patch, names its module exactly too: a short module
+/// name beside a nested match refuses instead of creating a stray top-level module.
+#[test]
+fn a_block_add_by_short_module_name_names_the_nested_match() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        ("src/board.rs", "pub mod roles;\n"),
+        ("src/board/roles.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let blocks = "// ── roles.side ──\npub fn side() -> i32 {\n    2\n}\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(blocks.into()), None).unwrap_err().0;
+    assert!(err.starts_with("E1003"), "{err}");
+    assert!(err.contains("names no module `roles`") && err.contains("`board::roles` matches it"), "{err}");
+    assert!(err.contains("use `board::roles.side` to add there"), "{err}");
+    assert_eq!(text_of(&root, "src/board/roles.rs"), "pub fn one() -> i32 {\n    1\n}\n");
+    assert!(!root.join("src/roles.rs").exists());
+}
+
+/// A plain block names a whole impl and a module, not patch syntax.
+#[test]
+fn a_block_for_a_type_without_an_impl_says_to_add_one() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub struct Y;\n");
+    let block = "// ── Y::c ──\npub fn c() -> i32 {\n    1\n}\n";
+    let err = store.submit_symbols(None, None, block).unwrap_err().0;
+    assert!(err.starts_with("E1003 crate.Y has no `impl`: add a whole `impl Y { … }` block to `crate`"), "{err}");
+    assert!(!err.contains("*** Add:"), "{err}");
+}
+
+/// `--imports` may change a `mod` line's visibility (D-168).
+#[test]
+fn an_imports_submit_changes_a_mod_lines_visibility() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "mod a;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/a.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit(crate::store::Target::Imports("crate"), "pub(crate) mod a;").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub(crate) mod a;\npub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A whole-module submit may change a `mod` line's visibility (D-168).
+#[test]
+fn a_whole_module_submit_changes_a_mod_lines_visibility() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "mod a;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/a.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    let row = ix.modules.iter().find(|m| m.path == "crate").unwrap();
+    let edited = super::module_text(&ix, row).replace("mod a;", "pub(crate) mod a;");
+    let out = store.submit(crate::store::Target::Module("crate"), &edited).unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), edited);
 }

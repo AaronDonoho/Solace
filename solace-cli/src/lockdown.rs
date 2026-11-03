@@ -1031,6 +1031,8 @@ mod tests {
             assert!(call(&s, &v, &[cmd, "../.solace/tasks/x.json"], "x", None).unwrap_err().0.contains("E6006"));
             // The vision (D-91).
             assert!(call(&s, &v, &[cmd, ".solace/strategy/vision.md"], "x", None).unwrap_err().0.contains("E6006"));
+            // Personas (D-216), in the same internal folder.
+            assert!(call(&s, &v, &[cmd, ".solace/strategy/personas.json"], "x", None).unwrap_err().0.contains("E6006"));
         }
         std::os::unix::fs::symlink(s.root.join("src/main.gleam"), s.root.join("priv/link")).unwrap();
         assert!(call(&s, &v, &["write", "priv/link"], "x", None).is_err());

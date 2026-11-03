@@ -85,14 +85,30 @@ fn only_a_clean_labeled_review_recovers() {
     assert_eq!(recoverable_review(&review, true, &said).as_deref(), Some(assessment));
     assert!(recoverable_review(&review, false, &said).is_none());
     let error = [json!({"kind":"error","text":"boom"}), json!({"kind":"message","text":assessment})];
-    assert!(recoverable_review(&review, true, &error).is_none());
+    assert_eq!(recoverable_review(&review, true, &error).as_deref(), Some(assessment));
+    assert!(recoverable_review(&review, false, &error).is_none());
+    let after = [json!({"kind":"message","text":assessment}), json!({"kind":"error","text":"boom"})];
+    assert!(recoverable_review(&review, true, &after).is_none());
+    let alone = [json!({"kind":"error","text":"Reconnecting... 5/5"})];
+    assert!(recoverable_review(&review, true, &alone).is_none());
+    let fatal = [json!({"kind":"error","text":"boom","fatal":true}), json!({"kind":"message","text":assessment})];
+    assert!(recoverable_review(&review, true, &fatal).is_none());
+    let server = [
+        json!({"kind":"error","text":"solace mcp: stdin read failed","source":crate::board::runs::SERVER}),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert_eq!(recoverable_review(&review, true, &server).as_deref(), Some(assessment));
     for kind in ["work", "investigate"] {
         let run = json!({"kind":kind});
         assert!(recoverable_review(&run, true, &said).is_none(), "{kind}");
     }
-    for text in ["**Assessment: Looks good** extra", "**Assessment: Looks good", "Assessment: Looks good"] {
-        let wrong = [json!({"kind":"message","text":text})];
-        assert!(recoverable_review(&review, true, &wrong).is_none(), "{text}");
+    let wrong = [json!({"kind":"message","text":"**Assessment: Looks good** extra"})];
+    assert!(recoverable_review(&review, true, &wrong).is_none());
+    let plain = [json!({"kind":"message","text":"Assessment: Looks good"})];
+    assert_eq!(recoverable_review(&review, true, &plain).as_deref(), Some("Assessment: Looks good"));
+    for text in ["**Assessment: Looks good", "Assessment: Looks_good"] {
+        let plain = [json!({"kind":"message","text":text})];
+        assert!(recoverable_review(&review, true, &plain).is_none(), "{text}");
     }
     assert!(recoverable_review(&review, true, &[]).is_none());
     let recorded = [
@@ -109,7 +125,7 @@ fn only_a_clean_labeled_review_recovers() {
         }),
         json!({"kind":"message","text":assessment}),
     ];
-    assert!(recoverable_review(&review, true, &queued).is_none());
+    assert_eq!(recoverable_review(&review, true, &queued).as_deref(), Some(assessment));
     let batched = [
         json!({
             "kind":"tool",
@@ -124,12 +140,16 @@ fn only_a_clean_labeled_review_recovers() {
         json!({
             "kind":"tool",
             "title":"solace task note\ninspect a",
-            "output":"==== solace task note ====\nRecorded; it reaches the board when `solace serve` runs.\n==== solace inspect a ====\nfn a() {}\n",
+            "output": concat!(
+                "==== solace task note ====\n",
+                "Recorded; it reaches the board when `solace serve` runs.\n",
+                "==== solace inspect a ====\nfn a() {}\n",
+            ),
             "status":"ok"
         }),
         json!({"kind":"message","text":assessment}),
     ];
-    assert!(recoverable_review(&review, true, &batched_queued).is_none());
+    assert_eq!(recoverable_review(&review, true, &batched_queued).as_deref(), Some(assessment));
     let batched_refused = [
         json!({
             "kind":"tool",
@@ -150,8 +170,14 @@ fn only_a_clean_labeled_review_recovers() {
 #[test]
 fn a_single_reply_with_the_batch_marker_is_recorded() {
     assert!(note_recorded("Recorded.\n==== solace read a ====\n"));
-    assert!(note_recorded("Recorded; ==== solace task note ==== was in the text\n"));
+    assert!(!note_recorded("Recorded; ==== solace task note ==== was in the text\n"));
+    assert!(!note_recorded("Recorded\n"));
     assert!(!note_recorded("==== solace inspect a ====\nRecorded.\n"));
+    assert!(note_recorded("==== solace inspect a ====\nfn a() {}\n==== solace task note ====\nRecorded.\n"));
+    assert!(!note_recorded(concat!(
+        "==== solace inspect a ====\nRecorded.\n",
+        "==== solace task note ====\nRecorded; it reaches the board when `solace serve` runs.\n"
+    )));
 }
 
 /// D-112: a `### Tech debt` section gives one finding per top-level bullet,
@@ -341,7 +367,9 @@ fn a_review_brief_holds_the_task_diff() {
     tasks::put(&s, &t).unwrap();
     fs::write(s.root.join("first.txt"), "first").unwrap();
     record_listed(&s, &tid, &json!({"file:first.txt":null}), &json!({"file:first.txt":b"first".to_vec()}));
-    let brief = |t: &Value| continuation_brief(t, &json!({"id":"r1","kind":"review"}), false, &p.root, &p.root, false).0;
+    let brief = |t: &Value| {
+        continuation_brief(t, &json!({"id":"r1","kind":"review"}), false, &p.root, &p.root, false, "engineer", "standard", "balanced").0
+    };
     t = task(&s.root, &tid).unwrap();
     let first = brief(&t);
     assert!(first.contains("first.txt (added)") && first.contains("(the whole task)"), "{first}");
@@ -406,5 +434,57 @@ fn cancel_keeps_an_edited_file_of_a_module_the_task_created() {
     tasks::put(&s, &t).unwrap();
     api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
     assert_eq!(fs::read_to_string(&file).unwrap(), "pub fn side() {\n  22\n}\n");
+}
+
+#[test]
+fn a_split_reply_is_joined_after_the_last_tool_call() {
+    let review = json!({"kind":"review"});
+    let blocks = [
+        json!({"kind":"message","text":"**Assessment: Looks good**"}),
+        json!({"kind":"thinking","text":"Checking."}),
+        json!({"kind":"usage","text":"10 input tokens"}),
+        json!({"kind":"message","text":"Done."}),
+        json!({"kind":"error","text":"solace mcp: stdin closed","source":crate::board::runs::SERVER}),
+    ];
+    assert_eq!(recoverable_review(&review, true, &blocks).as_deref(), Some("**Assessment: Looks good**\n\nDone."));
+    let before_tool = [
+        json!({"kind":"message","text":"**Assessment: Needs work**"}),
+        json!({"kind":"tool","title":"solace inspect a","output":"fn a() {}","status":"ok"}),
+        json!({"kind":"message","text":"**Assessment: Looks good**"}),
+    ];
+    assert_eq!(recoverable_review(&review, true, &before_tool).as_deref(), Some("**Assessment: Looks good**"));
+}
+
+#[test]
+fn an_assessment_label_may_be_emphasized_or_headed_on_any_line() {
+    let review = json!({"kind":"review"});
+    let preamble = "Here is my review.\n\n**Assessment:** Looks good";
+    assert_eq!(recoverable_review(&review, true, &[json!({"kind":"message","text":preamble})]).as_deref(), Some(preamble));
+    for label in [
+        "**Assessment:** Looks good",
+        "## Assessment: Needs work",
+        "*Assessment: Looks good*",
+        "__Assessment: Needs work__",
+        "## **Assessment: Looks good**",
+        "**Assessment:** Needs work",
+    ] {
+        let expected = format!("{label}\n\nDone.");
+        let said = [json!({"kind":"message","text":expected.clone()})];
+        assert_eq!(recoverable_review(&review, true, &said).as_deref(), Some(expected.as_str()), "{label}");
+    }
+    for label in ["Assessment: Looks_good", "**Assessment: Looks** good"] {
+        let said = [json!({"kind":"message","text":label})];
+        assert!(recoverable_review(&review, true, &said).is_none(), "{label}");
+    }
+    let no_label = [json!({"kind":"message","text":"Done."})];
+    assert!(recoverable_review(&review, true, &no_label).is_none());
+    let extra = [json!({"kind":"message","text":"**Assessment: Looks good** extra"})];
+    assert!(recoverable_review(&review, true, &extra).is_none());
+    let conflict =
+        [json!({"kind":"message","text":"**Assessment: Looks good**"}), json!({"kind":"message","text":"## Assessment: Needs work"})];
+    assert!(recoverable_review(&review, true, &conflict).is_none());
+    let agree =
+        [json!({"kind":"message","text":"**Assessment: Looks good**"}), json!({"kind":"message","text":"## Assessment: Looks good"})];
+    assert_eq!(recoverable_review(&review, true, &agree).as_deref(), Some("**Assessment: Looks good**\n\n## Assessment: Looks good"));
 }
 

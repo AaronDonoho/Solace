@@ -6,11 +6,9 @@ use crate::failure::{usage, Failure, Out};
 use super::routing::{operands, unknown_option};
 use super::READS;
 use crate::lockdown::settings::settings;
-use crate::board::task_model::task;
 use crate::board::runs::context;
 use crate::board::runs::strategy_context;
 use crate::board::runs::agent_guard;
-
 /// `--project <dir>` on a command that isn't a plain read, in a board run whose
 /// task may change that project (D-61): the folder the command runs in. Plain
 /// reads, and commands outside a run, go to `read_project`.
@@ -20,19 +18,24 @@ pub(crate) fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Fail
     if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
         return Ok(None);
     }
-    let own = crate::scope::home(&here, &tid)?;
-    let top = crate::scope::top(&own);
-    let dir = &crate::project_paths::project_folder(&top, Some(&here), dir, &crate::workspace::members(&top)?);
-    let projects = crate::scope::of(&task(&own, &tid)?, &crate::scope::dir(&top, &own));
-    if !projects.iter().any(|p| p == dir) {
-        return crate::lockdown::error(
-            "E6007",
-            dir,
-            format!(
-                "not one of this task's projects ({}); if the task needs it, ask the human to add it with `task ask`",
-                projects.join(", ")
-            ),
-        );
+    let top = crate::scope::top(&here);
+    let members = crate::workspace::members(&top)?;
+    let dir = &crate::project_paths::project_folder(&top, Some(&here), dir, &members);
+    if !members.iter().any(|m| m == dir) {
+        return crate::lockdown::error("E6007", dir, format!("not a project on this board; its projects: {}", members.join(", ")));
+    }
+    match crate::scope::retry_task(|| crate::scope::task_in(&here, &tid)) {
+        Ok((own, t)) => {
+            let projects = crate::scope::of(&t, &crate::scope::dir(&top, &own));
+            if !projects.iter().any(|p| p == dir) {
+                return crate::lockdown::error(
+                    "E6007",
+                    dir,
+                    format!("not one of this task's projects ({}). {}", projects.join(", "), crate::scope::ASK_FOR_PROJECT),
+                );
+            }
+        }
+        Err(e) => return Err(e),
     }
     if command == "task" {
         return crate::lockdown::error("E6007", command, "task commands belong to the task's own project; leave out --project");

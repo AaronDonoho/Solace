@@ -254,6 +254,9 @@ To add models or change the built-in ones, edit `~/.config/solace/config.toml` (
 
 ```toml
 task_timeout = 3600          # seconds an agent may work on a task; waiting for an answer doesn't count
+involvement = "collaborator" # how agents talk with you: director, collaborator or engineer
+detail = "standard"          # how much they write: concise, standard or thorough
+asking = "balanced"          # how readily they ask: often, balanced or rarely
 # presets = false            # hide the built-in models
 
 [[models]]                   # an OpenAI-compatible endpoint, through Codex

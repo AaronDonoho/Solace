@@ -37,6 +37,7 @@ use crate::board::runs::transcript;
 use crate::board::task_model::created;
 use crate::board::setup::system;
 use crate::board::setup::chosen_model;
+use crate::board::roles::STRATEGY_RUN;
 /// Moves task `t` from Backlog to Planning when its feature is `active`
 /// (D-134), as `board::plan_for_feature` says. Whether it moved.
 pub(crate) fn plan(top: &Path, t: &mut Value) -> bool {
@@ -490,7 +491,8 @@ fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Resul
     }
     let id = unique_id();
     let log = strategy_dir(top, "runs").join(format!("{id}.jsonl"));
-    let mut run = json!({"id": id, "kind": "strategy", "model": m["id"], "effort": m["effort"], "state": "running", "started": now(),
+    let mut run = json!({"id": id, "kind": STRATEGY_RUN, "model": m["id"],
+        "effort": m["effort"], "state": "running", "started": now(),
         "log": log, "context": context, "notes": [], "questions": []});
     note(&mut run, "human", Some(&id), text);
     put_run(top, &run)?;
@@ -752,4 +754,182 @@ pub fn plan_active(top: &Path) -> Result<(), Failure> {
         }
         Ok(())
     })
+}
+
+pub const PERSONA_LIMIT: usize = VISION_LIMIT;
+
+pub(crate) const PERSONA_FIELDS: [(&str, &str); 4] =
+    [("objectives", "Objectives"), ("tools", "Tools"), ("concerns", "Concerns"), ("other", "Other")];
+
+/// The personas' file (D-216): internal, next to the vision.
+pub(crate) fn personas_file(top: &Path) -> PathBuf {
+    top.join(".solace/strategy/personas.json")
+}
+
+/// Every persona, in creation order.
+pub fn personas(top: &Path) -> Vec<Value> {
+    persona_store(top).map(|(list, _)| list).unwrap_or_default()
+}
+
+/// The personas and retired ids. A missing file is empty; a damaged one is a
+/// failure, so a write never replaces it with an empty list (D-216).
+fn persona_store(top: &Path) -> Result<(Vec<Value>, Vec<String>), Failure> {
+    let path = personas_file(top);
+    if !path.exists() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let v = jsonx::read(&path).map_err(|_| persona_damaged())?;
+    let Some(personas) = v["personas"].as_array() else { return Err(persona_damaged()) };
+    let retired = match v.get("retired") {
+        None => Vec::new(),
+        Some(Value::Array(ids)) => {
+            ids.iter().map(|id| id.as_str().map(str::to_string).ok_or_else(persona_damaged)).collect::<Result<_, _>>()?
+        }
+        Some(_) => return Err(persona_damaged()),
+    };
+    Ok((personas.clone(), retired))
+}
+
+fn save_personas(top: &Path, list: &[Value], retired: &[String]) -> Result<(), Failure> {
+    let doc = json!({"personas": list, "retired": retired});
+    fsx::replace_bytes(personas_file(top).parent().unwrap(), "personas.json", &serde_json::to_vec_pretty(&doc).unwrap())?;
+    log(top, "", &json!({"personas": list}));
+    Ok(())
+}
+
+fn fresh_persona_id(list: &[Value], retired: &[String]) -> String {
+    loop {
+        let id = unique_id();
+        if !retired.contains(&id) && !list.iter().any(|p| p["id"] == id.as_str()) {
+            return id;
+        }
+    }
+}
+
+fn persona_fields(body: &Value) -> Result<Value, Failure> {
+    let Some(name) = body["name"].as_str() else { return board::err("E7001", "name must be a string") };
+    let name = name.trim();
+    if name.is_empty() {
+        return board::err("E7001", "a persona needs a name");
+    }
+    let mut p = json!({"name": name});
+    for (key, _) in PERSONA_FIELDS {
+        let text = match body.get(key) {
+            None => "",
+            Some(Value::String(text)) => text.as_str(),
+            Some(_) => return board::err("E7001", format!("{key} must be a string")),
+        };
+        p[key] = json!(text);
+    }
+    persona_within_limit(&p)?;
+    Ok(p)
+}
+
+fn persona_revision(p: &Value) -> String {
+    let text: Vec<&str> =
+        std::iter::once("name").chain(PERSONA_FIELDS.iter().map(|(key, _)| *key)).map(|key| p[key].as_str().unwrap_or("")).collect();
+    format!("sha256:{}", sha256(text.join("\u{0}")))
+}
+
+fn persona_within_limit(p: &Value) -> Result<(), Failure> {
+    let count: usize = std::iter::once("name")
+        .chain(PERSONA_FIELDS.iter().map(|(key, _)| *key))
+        .map(|key| p[key].as_str().unwrap_or("").chars().count())
+        .sum();
+    if count > PERSONA_LIMIT {
+        return board::err("E7029", format!("the persona is {count} characters; the limit is {PERSONA_LIMIT}"));
+    }
+    Ok(())
+}
+
+fn create_persona(top: &Path, body: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let mut p = persona_fields(body).map_err(|e| {
+        *status = 400;
+        e
+    })?;
+    let (mut list, retired) = persona_store(top).map_err(|e| {
+        *status = 409;
+        e
+    })?;
+    p["id"] = json!(fresh_persona_id(&list, &retired));
+    p["revision"] = json!(persona_revision(&p));
+    list.push(p.clone());
+    save_personas(top, &list, &retired)?;
+    Ok(p)
+}
+
+fn replace_persona(top: &Path, id: &str, body: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let (mut list, retired) = persona_store(top).map_err(|e| {
+        *status = 409;
+        e
+    })?;
+    let Some(i) = list.iter().position(|p| p["id"] == id) else {
+        *status = 404;
+        return board::err("E7023", format!("unknown persona {id}"));
+    };
+    let Some(base) = body["base"].as_str() else {
+        *status = 400;
+        return board::err("E7001", "base must be a string");
+    };
+    let mut p = persona_fields(body).map_err(|e| {
+        *status = 400;
+        e
+    })?;
+    if list[i]["revision"] != base {
+        *status = 409;
+        return board::err("E7028", "the persona changed since this edit began; reload it");
+    }
+    p["id"] = json!(id);
+    p["revision"] = json!(persona_revision(&p));
+    list[i] = p.clone();
+    save_personas(top, &list, &retired)?;
+    Ok(p)
+}
+
+fn delete_persona(top: &Path, id: &str, status: &mut u16) -> Result<Value, Failure> {
+    let (mut list, mut retired) = persona_store(top).map_err(|e| {
+        *status = 409;
+        e
+    })?;
+    let Some(i) = list.iter().position(|p| p["id"] == id) else {
+        *status = 404;
+        return board::err("E7023", format!("unknown persona {id}"));
+    };
+    let removed = list.remove(i);
+    retired.push(id.to_string());
+    save_personas(top, &list, &retired)?;
+    Ok(removed)
+}
+
+fn persona_change(top: &Path, method: &str, parts: &[&str], body: &Value, status: &mut u16) -> Result<Value, Failure> {
+    match (method, parts.len()) {
+        ("POST", 0) => create_persona(top, body, status),
+        ("PUT", 1) => replace_persona(top, parts[0], body, status),
+        ("DELETE", 1) => delete_persona(top, parts[0], status),
+        _ => {
+            *status = 400;
+            board::err("E7001", "unknown route")
+        }
+    }
+}
+
+/// `/personas` (D-216), at the root only: the list, create, replace over one
+/// persona's revision, and delete. A refusal writes nothing.
+pub fn personas_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, (u16, Failure)> {
+    if method == "GET" && parts.is_empty() {
+        return Ok(json!(personas(top)));
+    }
+    let (root, method) = (top.to_path_buf(), method.to_string());
+    let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+    let done = op(top, move || {
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let mut status = 409;
+        Ok(persona_change(&root, &method, &parts, &body, &mut status).map_err(|e| (status, e)))
+    })
+    .map_err(|e| (409, e))?;
+    done
+}
+
+fn persona_damaged() -> Failure {
+    Failure("E7030 the personas file is unreadable; it was left as it is".into(), 1)
 }

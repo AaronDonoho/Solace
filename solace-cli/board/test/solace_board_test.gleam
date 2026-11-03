@@ -74,7 +74,7 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           solace_task.Workflow(
-            [solace_task.Column("needs_review", "Review", [], False)],
+            [solace_task.Column("needs_review", "Review", [], False, "")],
             dict.new(),
           ),
           [new],
@@ -107,6 +107,7 @@ pub fn replay_shows_end_result_without_notices_test() {
   let #(model, _) = board.update(model, board.Live(event("running", "")))
   let #(model, _) = board.update(model, board.Live(event("ended", "reviewed")))
   let assert [notice] = model.notices
+  let notice = notice.notice
   notice.heading |> should.equal("Reviewed T")
   notice.id |> should.equal("1")
   notice.tab |> should.equal("runs")
@@ -190,12 +191,15 @@ pub fn workspace_lanes_test() {
     )
   model.notices
   |> should.equal([
-    solace_task.Notice(
-      "web: Finished In web",
-      "The agent finished its work.",
-      "web",
-      "1",
-      "runs",
+    as_toast(
+      solace_task.Notice(
+        "web: Finished In web",
+        "The agent finished its work.",
+        "web",
+        "1",
+        "runs",
+      ),
+      False,
     ),
   ])
   // Different workflows: each lane names its own columns.
@@ -498,11 +502,15 @@ pub fn notice_opens_task_on_its_tab_test() {
       "runs",
     )
   let #(model, _) = board.init(Nil)
-  let model = board.Model(..model, notices: [question, without])
+  let model =
+    board.Model(..model, notices: [
+      as_toast(question, True),
+      as_toast(without, False),
+    ])
   let #(model, _) = board.update(model, board.Open(question))
   model.selected_card |> should.equal(Some(#("", "1")))
   model.reveal |> should.equal(#("questions", "1", 1))
-  model.notices |> should.equal([without])
+  model.notices |> should.equal([as_toast(without, False)])
   let #(model, _) = board.update(model, board.Open(without))
   model.reveal |> should.equal(#("runs", "1", 2))
   model.notices |> should.equal([])
@@ -655,7 +663,13 @@ pub fn notice_shows_only_its_heading_test() {
     )
   let #(model, _) = board.init(Nil)
   let rendered =
-    board.view(board.Model(..model, notices: [question, reply, stopped]))
+    board.view(
+      board.Model(..model, notices: [
+        as_toast(question, True),
+        as_toast(reply, False),
+        as_toast(stopped, False),
+      ]),
+    )
     |> element.to_string
   rendered |> string.contains("Question on T") |> should.be_true
   rendered |> string.contains("Reply on T") |> should.be_true
@@ -664,31 +678,46 @@ pub fn notice_shows_only_its_heading_test() {
   rendered |> string.contains("Why this?") |> should.be_false
   rendered |> string.contains("Here is my answer") |> should.be_false
   rendered |> string.contains("run ended") |> should.be_false
+  notice_of(rendered, "Question on T")
+  |> string.contains("needs-attention")
+  |> should.be_true
+  notice_of(rendered, "Reply on T")
+  |> string.contains("needs-attention")
+  |> should.be_false
 }
 
-/// Close All shows only when more than 5 toasts are showing, and dismisses
-/// every one.
-pub fn close_all_shows_above_five_toasts_test() {
+/// Close All shows from 3 toasts up, below the last one, and dismisses every
+/// one.
+pub fn close_all_shows_from_three_toasts_test() {
   let toast = fn(n) {
-    solace_task.Notice(
-      "Question on T" <> int.to_string(n),
-      "",
-      "",
-      int.to_string(n),
-      "questions",
+    as_toast(
+      solace_task.Notice(
+        "Question on T" <> int.to_string(n),
+        "",
+        "",
+        int.to_string(n),
+        "questions",
+      ),
+      True,
     )
   }
-  let shows = fn(model) {
+  let rendered = fn(model) {
     board.view(model) |> element.to_string |> string.contains("Close All")
   }
   let #(model, _) = board.init(Nil)
-  shows(board.Model(..model, notices: list.map([1, 2, 3, 4, 5], toast)))
+  rendered(board.Model(..model, notices: list.map([1, 2], toast)))
   |> should.be_false
-  let six = board.Model(..model, notices: list.map([1, 2, 3, 4, 5, 6], toast))
-  shows(six) |> should.be_true
-  let #(cleared, _) = board.update(six, board.DismissAll)
+  let three = board.Model(..model, notices: list.map([1, 2, 3], toast))
+  rendered(three) |> should.be_true
+  let assert Ok(before_button) =
+    board.view(three)
+    |> element.to_string
+    |> string.split("Close All")
+    |> list.first
+  before_button |> string.contains("Question on T3") |> should.be_true
+  let #(cleared, _) = board.update(three, board.DismissAll)
   cleared.notices |> should.equal([])
-  shows(cleared) |> should.be_false
+  rendered(cleared) |> should.be_false
 }
 
 /// D-95: a card in a final column has an Archive button; an open one has none,
@@ -942,7 +971,11 @@ pub fn dependency_in_another_project_dims_the_card_test() {
 /// A live update that adds a notice asks for attention; one that adds none,
 /// such as a replay, doesn't.
 pub fn a_new_notice_raises_attention_test() {
-  let n = solace_task.Notice("Reply on Fix", "Done.", ".", "t1", "notes")
+  let n =
+    as_toast(
+      solace_task.Notice("Reply on Fix", "Done.", ".", "t1", "notes"),
+      False,
+    )
   assert board.raised([], [n])
   assert !board.raised([n], [n])
   assert !board.raised([], [])
@@ -1144,11 +1177,15 @@ pub fn dismissed_notices_go_test() {
   let #(model, _) = board.init(Nil)
   let one = solace_task.Notice("Reviewed A", "done", "", "1", "runs")
   let two = solace_task.Notice("Reviewed B", "done", "", "2", "runs")
-  let model = board.Model(..model, notices: [one, two])
+  let model =
+    board.Model(..model, notices: [
+      as_toast(one, False),
+      as_toast(two, False),
+    ])
   let #(model, _) = board.update(model, board.Dismiss(one))
-  model.notices |> should.equal([two])
+  model.notices |> should.equal([as_toast(two, False)])
   let #(model, _) = board.update(model, board.Dismiss(one))
-  model.notices |> should.equal([two])
+  model.notices |> should.equal([as_toast(two, False)])
 }
 
 /// The detail is a band pinned to the bottom of the board page: selecting a
@@ -1770,12 +1807,15 @@ pub fn unreadable_task_does_not_hide_its_lane_test() {
   card_of(model, "Planned") |> string.contains("Planned") |> should.be_true
   model.notices
   |> should.equal([
-    solace_task.Notice(
-      "a: Can't read task Broken",
-      "The board can't read this task's record, so its card is hidden.",
-      "a",
-      "broken",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "a: Can't read task Broken",
+        "The board can't read this task's record, so its card is hidden.",
+        "a",
+        "broken",
+        "details",
+      ),
+      False,
     ),
   ])
 }
@@ -1804,12 +1844,15 @@ pub fn unreadable_task_event_is_told_test() {
   card_of(model, "Kept") |> string.contains("Kept") |> should.be_true
   model.notices
   |> should.equal([
-    solace_task.Notice(
-      "a: Can't read task Broken",
-      "The board can't read this task's record, so its card is hidden.",
-      "a",
-      "bad",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "a: Can't read task Broken",
+        "The board can't read this task's record, so its card is hidden.",
+        "a",
+        "bad",
+        "details",
+      ),
+      False,
     ),
   ])
 }
@@ -1819,12 +1862,15 @@ pub fn unreadable_task_event_is_told_test() {
 pub fn unreadable_task_without_an_id_has_no_show_button_test() {
   let model =
     board.Model(..deps_board(), notices: [
-      solace_task.Notice(
-        "Can't read a task",
-        "The board can't read this task's record, so its card is hidden.",
-        "a",
-        "",
-        "details",
+      as_toast(
+        solace_task.Notice(
+          "Can't read a task",
+          "The board can't read this task's record, so its card is hidden.",
+          "a",
+          "",
+          "details",
+        ),
+        False,
       ),
     ])
   let rendered = board.view(model) |> element.to_string
@@ -1856,12 +1902,15 @@ pub fn unreadable_update_keeps_the_card_it_already_shows_test() {
   card_of(model, "Kept") |> string.contains("Kept") |> should.be_true
   model.notices
   |> should.equal([
-    solace_task.Notice(
-      "a: Can't read task Kept",
-      "The board can't read this task's record, so its card shows an older version.",
-      "a",
-      "1",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "a: Can't read task Kept",
+        "The board can't read this task's record, so its card shows an older version.",
+        "a",
+        "1",
+        "details",
+      ),
+      False,
     ),
   ])
 }
@@ -1869,12 +1918,15 @@ pub fn unreadable_update_keeps_the_card_it_already_shows_test() {
 /// A details notice about a task doesn't hide an unreadable notice about it.
 pub fn another_details_notice_does_not_hide_an_unreadable_task_test() {
   let other =
-    solace_task.Notice(
-      "Repairing Broken",
-      "The task moved.",
-      "a",
-      "broken",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "Repairing Broken",
+        "The task moved.",
+        "a",
+        "broken",
+        "details",
+      ),
+      False,
     )
   let broken =
     "{\"id\":\"broken\",\"title\":\"Broken\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}],\"onBoard\":true}"
@@ -1888,12 +1940,15 @@ pub fn another_details_notice_does_not_hide_an_unreadable_task_test() {
   model.notices
   |> should.equal([
     other,
-    solace_task.Notice(
-      "a: Can't read task Broken",
-      "The board can't read this task's record, so its card is hidden.",
-      "a",
-      "broken",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "a: Can't read task Broken",
+        "The board can't read this task's record, so its card is hidden.",
+        "a",
+        "broken",
+        "details",
+      ),
+      False,
     ),
   ])
 }
@@ -1910,14 +1965,191 @@ pub fn a_renamed_unreadable_task_keeps_one_notice_test() {
     )
   let #(model, _) = board.update(deps_board(), first)
   let #(model, _) = board.update(model, second)
-  list.filter(model.notices, fn(n) { n.dir == "a" && n.id == "1" })
+  list.filter(model.notices, fn(t) { t.notice.dir == "a" && t.notice.id == "1" })
   |> should.equal([
-    solace_task.Notice(
-      "a: Can't read task First",
-      "The board can't read this task's record, so its card is hidden.",
-      "a",
-      "1",
-      "details",
+    as_toast(
+      solace_task.Notice(
+        "a: Can't read task First",
+        "The board can't read this task's record, so its card is hidden.",
+        "a",
+        "1",
+        "details",
+      ),
+      False,
     ),
   ])
+}
+
+/// A Tech Debt card takes its feature's color like any other card; without a
+/// feature it keeps the gray stripe. Its badge marks the category either way
+/// (D-112, D-114).
+pub fn tech_debt_card_takes_its_feature_color_test() {
+  let model =
+    deps_board()
+    |> board.update(board.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"colorSlot\":0,\"state\":\"active\"}]}",
+    ))
+    |> fn(r) { r.0 }
+    |> put_task("a", "1", "Loose debt", "planning", ",\"techDebt\":true")
+    |> put_task(
+      "a",
+      "2",
+      "Search debt",
+      "planning",
+      ",\"techDebt\":true,\"feature\":\"f1\"",
+    )
+  string.contains(card_of(model, "Loose debt"), "class=\"debt\"")
+  |> should.be_true
+  string.contains(card_of(model, "Loose debt"), "--tab") |> should.be_false
+  string.contains(card_of(model, "Search debt"), "class=\"debt\"")
+  |> should.be_true
+  card_of(model, "Search debt")
+  |> string.contains("style=\"--tab:" <> solace_task.feature_color(0))
+  |> should.be_true
+  string.contains(board.view(model) |> element.to_string, ".card:has(.debt)")
+  |> should.be_false
+}
+
+/// The rendered notice whose heading is `heading`.
+fn notice_of(rendered: String, heading: String) -> String {
+  let assert Ok(notice) =
+    rendered
+    |> string.split("<div class=\"notice")
+    |> list.find(fn(s) {
+      string.contains(s, "role=\"alert\"><strong>" <> heading <> "</strong>")
+    })
+  notice
+}
+
+/// A notice gets the attention border for a failed run or a discussion
+/// waiting on the human, not for a finished or human-stopped run.
+pub fn notice_border_follows_a_failed_run_or_waiting_discussion_test() {
+  let running_work =
+    ",\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]"
+  let model =
+    deps_board()
+    |> put_task("a", "1", "Failed", "planning", running_work)
+    |> put_task(
+      "a",
+      "1",
+      "Failed",
+      "planning",
+      ",\"attention\":{\"reason\":\"the run failed\",\"time\":1},\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"the run failed\",\"failed\":true}]",
+    )
+    |> put_task(
+      "a",
+      "2",
+      "Discussing",
+      "planning",
+      ",\"runs\":[{\"id\":\"r1\",\"kind\":\"discuss\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+    |> put_task(
+      "a",
+      "2",
+      "Discussing",
+      "planning",
+      ",\"notes\":[{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"Here is my take\",\"time\":2}],\"runs\":[{\"id\":\"r1\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+    |> put_task("a", "3", "Finished", "complete", running_work)
+    |> put_task(
+      "a",
+      "3",
+      "Finished",
+      "complete",
+      ",\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]",
+    )
+    |> put_task("a", "4", "Stopped", "planning", running_work)
+    |> put_task(
+      "a",
+      "4",
+      "Stopped",
+      "planning",
+      ",\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"stopped\"}]",
+    )
+  model.notices
+  |> list.map(fn(t) { t.attention })
+  |> should.equal([True, True, False, False])
+  let rendered = board.view(model) |> element.to_string
+  notice_of(rendered, "a: Stopped Failed: the run failed")
+  |> string.contains("needs-attention")
+  |> should.be_true
+  notice_of(rendered, "a: Reply on Discussing")
+  |> string.contains("needs-attention")
+  |> should.be_true
+  notice_of(rendered, "a: Finished Finished")
+  |> string.contains("needs-attention")
+  |> should.be_false
+  notice_of(rendered, "a: Stopped Stopped: stopped")
+  |> string.contains("needs-attention")
+  |> should.be_false
+  rendered
+  |> string.contains("border:2px solid var(--warn-text)")
+  |> should.be_true
+}
+
+/// A board toast around `notice`, marked with whether it needs attention.
+fn as_toast(notice: solace_task.Notice, attention: Bool) -> board.Toast {
+  board.Toast(notice: notice, attention: attention)
+}
+
+/// A notice's attention is fixed when it is raised: stale attention does not
+/// color a finished notice, and clearing it does not remove an error's
+/// border.
+pub fn notice_attention_is_fixed_when_raised_test() {
+  let model =
+    deps_board()
+    |> put_task(
+      "a",
+      "1",
+      "T",
+      "planning",
+      ",\"attention\":{\"reason\":\"an earlier question\",\"time\":1},\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+    |> put_task(
+      "a",
+      "1",
+      "T",
+      "complete",
+      ",\"attention\":{\"reason\":\"an earlier question\",\"time\":1},\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]",
+    )
+  let assert [finished] = model.notices
+  finished.attention |> should.be_false
+  let model =
+    model
+    |> put_task(
+      "a",
+      "1",
+      "T",
+      "planning",
+      ",\"attention\":{\"reason\":\"an earlier question\",\"time\":1},\"runs\":[{\"id\":\"r2\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+    |> put_task(
+      "a",
+      "1",
+      "T",
+      "planning",
+      ",\"attention\":{\"reason\":\"an earlier question\",\"time\":2},\"runs\":[{\"id\":\"r2\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"the model crashed\",\"failed\":true}]",
+    )
+  let assert [finished, failed] = model.notices
+  finished.attention |> should.be_false
+  failed.attention |> should.be_true
+  let model =
+    put_task(
+      model,
+      "a",
+      "1",
+      "T",
+      "planning",
+      ",\"runs\":[{\"id\":\"r2\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"the model crashed\",\"failed\":true}]",
+    )
+  let assert [finished, failed] = model.notices
+  finished.attention |> should.be_false
+  failed.attention |> should.be_true
+  let rendered = board.view(model) |> element.to_string
+  notice_of(rendered, "a: Finished T")
+  |> string.contains("needs-attention")
+  |> should.be_false
+  notice_of(rendered, "a: Stopped T: the model crashed")
+  |> string.contains("needs-attention")
+  |> should.be_true
 }

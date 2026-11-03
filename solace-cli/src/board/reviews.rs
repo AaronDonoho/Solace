@@ -1139,14 +1139,21 @@ fn review_feedback_recorded(t: &Value, rid: &str) -> bool {
     t["notes"].as_array().is_some_and(|notes| notes.iter().any(|n| n["author"] == "agent" && n["run"] == rid))
 }
 
-/// A review's final message counts only when its first line is exactly an assessment label.
+/// A review's final reply counts when it holds one assessment label, with no other label disagreeing.
 fn review_assessment(reply: &str) -> bool {
-    matches!(reply.trim().lines().next().map(str::trim_end), Some("**Assessment: Looks good**" | "**Assessment: Needs work**"))
+    let mut labels = reply.lines().filter_map(assessment_label);
+    let Some(first) = labels.next() else {
+        return false;
+    };
+    labels.all(|label| label == first)
 }
 
-/// A clean review's last message, when nothing already recorded its feedback.
+/// A clean review's final reply, when nothing already recorded its feedback.
 pub(crate) fn recoverable_review(r: &Value, success: bool, entries: &[Value]) -> Option<String> {
-    if r["kind"] != "review" || !success || entries.iter().any(|e| e["kind"] == "error") {
+    if r["kind"] != "review" || !success {
+        return None;
+    }
+    if crate::board::runs::has_blocking_agent_error(entries) {
         return None;
     }
     let recorded = entries.iter().any(|e| {
@@ -1157,8 +1164,10 @@ pub(crate) fn recoverable_review(r: &Value, success: bool, entries: &[Value]) ->
     if recorded {
         return None;
     }
-    let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str())?;
-    review_assessment(reply).then(|| reply.trim().to_string())
+    let after_tool = entries.iter().rposition(|e| e["kind"] == "tool").map_or(0, |i| i + 1);
+    let reply =
+        entries[after_tool..].iter().filter(|e| e["kind"] == "message").filter_map(|e| e["text"].as_str()).collect::<Vec<_>>().join("\n\n");
+    review_assessment(&reply).then(|| reply.trim().to_string())
 }
 
 /// Records a review's recovered assessment through the same path as `task note`.
@@ -1245,15 +1254,73 @@ fn note_recorded(output: &str) -> bool {
     }
     let batch = output.lines().next().and_then(|line| header(line)).is_some();
     if !batch {
-        return output.starts_with("Recorded");
+        return output.lines().next().is_some_and(|line| line.trim() == "Recorded.");
     }
     let mut in_note = false;
     for line in output.lines() {
         if let Some(command) = header(line) {
             in_note = command.trim() == "task note";
-        } else if in_note && line.starts_with("Recorded") {
+        } else if in_note && line.trim() == "Recorded." {
             return true;
         }
     }
     false
+}
+
+const CHANGED_DURING_REVIEW: &str = concat!(
+    "Project or instructions changed during review. This feedback applies to the review-start checkpoint, ",
+    "not a verified finish-time state; recheck affected changes.",
+);
+
+/// Whether a review ended for a reason its late feedback can still finish.
+/// A stopped, canceled or replaced run was ended on purpose; an agent's exit or
+/// a server restart was not.
+fn ended_failed(r: &Value) -> bool {
+    r["failed"] == true
+}
+
+/// Records review feedback, including a note that arrives after its run ended.
+pub(crate) fn record_note(t: &mut Value, rid: &str, text: &str, changed_during_review: bool) -> Result<(), Failure> {
+    let i = run_at(t, rid)?;
+    if t["runs"][i]["state"] == "ended" {
+        if review_feedback_recorded(t, rid) {
+            return Ok(());
+        }
+        if !ended_failed(&t["runs"][i]) {
+            note(t, "agent", Some(rid), text);
+            return Ok(());
+        }
+        if t["attention"]["reason"].as_str().is_some_and(|reason| reason.starts_with(crate::board::runs::UNFINISHED_EXIT)) {
+            t["attention"] = Value::Null;
+        }
+    }
+    note(t, "agent", Some(rid), text);
+    if changed_during_review {
+        note(t, "solace", Some(rid), CHANGED_DURING_REVIEW);
+    }
+    crate::board::task_model::end_run(&mut t["runs"][i], "reviewed");
+    t["finished"] = json!({"kind":"review","outcome":"reviewed","time":crate::now()});
+    Ok(())
+}
+
+/// The assessment a line names, once surrounding Markdown heading and emphasis markers are removed.
+fn assessment_label(line: &str) -> Option<&'static str> {
+    let line = line.trim().trim_start_matches('#').trim();
+    let marker = line.chars().next().filter(|c| matches!(c, '*' | '_'));
+    let plain = marker
+        .and_then(|marker| {
+            let markers: String = line.chars().take_while(|c| *c == marker).collect();
+            let rest = line.strip_prefix(&markers)?;
+            if let Some(inner) = rest.strip_suffix(&markers) {
+                return Some(inner.trim().to_string());
+            }
+            let after = rest.strip_prefix("Assessment:")?.strip_prefix(&markers)?;
+            Some(format!("Assessment:{}", after).trim().to_string())
+        })
+        .unwrap_or_else(|| line.to_string());
+    match plain.as_str() {
+        "Assessment: Looks good" => Some("Assessment: Looks good"),
+        "Assessment: Needs work" => Some("Assessment: Needs work"),
+        _ => None,
+    }
 }

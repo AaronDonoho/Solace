@@ -728,6 +728,7 @@ fn transcripts_read_codex_and_claude_logs() {
     let t = transcript(&log);
     let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["tool", "message", "usage", "output"]);
+    assert_eq!(t[2]["text"], "10 input tokens (4 cached, 40% cache hit), 2 output tokens");
     assert_eq!(
         (t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()),
         (Some("solace view a"), Some("ok"), Some("pub fn a()"))
@@ -861,8 +862,17 @@ fn transcripts_read_codex_and_claude_logs() {
     let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
     assert_eq!(
         usage[0]["text"],
-        "200356 input tokens (166278 read from cache, 34062 written to cache), 4040 output tokens; last context 300 tokens"
+        "200356 input tokens (166278 read from cache, 34062 written to cache, 83% cache hit), 4040 output tokens; last context 300 tokens"
     );
+    // A missing cache count leaves the ratio, and the cached count, out.
+    let result = json!({"type":"result","usage":{"input_tokens":40,"output_tokens":1}}).to_string();
+    fs::write(&log, result).unwrap();
+    let usage = transcript(&log).into_iter().find(|e| e["kind"] == "usage").unwrap();
+    assert_eq!(usage["text"], "40 input tokens, 1 output tokens");
+    let turn = json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}).to_string();
+    fs::write(&log, turn).unwrap();
+    let usage = transcript(&log).into_iter().find(|e| e["kind"] == "usage").unwrap();
+    assert_eq!(usage["text"], "10 input tokens, 2 output tokens");
     assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
 }
 
@@ -1036,8 +1046,8 @@ fn clear_retryable_keeps_a_usage_limit_that_has_not_reset() {
     assert!(agents::held_mark(&holds, "signed", now).is_none());
 }
 
-/// The shipped presets and Claude's aliases show one entry per family, and the
-/// Haiku entry is the latest model rather than the exact one a preset once named.
+/// The shipped presets give way to Claude's aliases: one entry per family, and
+/// the Haiku entry is the latest model rather than the exact one a preset once named.
 #[test]
 fn the_shipped_presets_show_the_latest_claude_models() {
     let mut models = parse_system("").unwrap()["models"].as_array().unwrap().clone();
@@ -1045,9 +1055,9 @@ fn the_shipped_presets_show_the_latest_claude_models() {
     let picked = served(&models);
     let haiku: Vec<&Value> = picked.iter().filter(|m| agents::family(m) == Some("haiku")).collect();
     assert_eq!(haiku.len(), 1, "one Haiku entry");
-    assert_eq!(haiku[0]["id"], "claude-haiku-5-5");
-    assert_eq!(haiku[0]["label"], "Haiku 5.5");
-    assert_eq!(haiku[0]["model"], "claude-haiku-5-5");
+    assert_eq!(haiku[0]["id"], "claude-haiku");
+    assert_eq!(haiku[0]["label"], "Haiku (latest)");
+    assert_eq!(haiku[0]["model"], "haiku");
     for family in ["opus", "sonnet", "haiku", "fable"] {
         assert_eq!(picked.iter().filter(|m| agents::family(m) == Some(family)).count(), 1, "one {family} entry");
     }

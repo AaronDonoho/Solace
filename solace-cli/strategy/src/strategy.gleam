@@ -20,6 +20,7 @@ import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
+import personas
 import plan
 import roadmap
 import solace_task
@@ -32,6 +33,7 @@ pub fn main() {
 
 pub type Tab {
   Vision
+  Personas
   Features
   Roadmap
   Tasks
@@ -80,6 +82,8 @@ pub type Model {
     /// A save sent and not yet answered.
     saving: Bool,
     vision_error: String,
+    /// The Personas tab's saved list and open form (D-216).
+    persona_state: personas.State,
     /// The feature being written on the Features tab, None when no form is open.
     feature_draft: Option(features.Draft),
     /// Whether the feature band is collapsed to its bar.
@@ -164,8 +168,12 @@ pub type Model {
     plan_jump: Bool,
     /// The models a run may use, from `GET /models`, and the one picked.
     models: List(solace_task.Agent),
+    /// The default model assigned to each role.
+    role_models: List(solace_task.RoleModel),
     plan_model: String,
     plan_effort: String,
+    /// Where the plan's current model pick came from.
+    plan_source: solace_task.ModelSource,
     /// A model refresh sent and not yet answered.
     plan_refreshing: Bool,
     /// The shadow root, once it has rendered, for the editor's tools.
@@ -241,6 +249,26 @@ pub type Msg {
   VisionSaved(String)
   /// Drops the draft and edits the vision as it is now.
   ReloadVision
+  /// Opens the form for a new persona.
+  NewPersona
+  /// Opens the form on the persona with this id.
+  EditPersona(String)
+  CancelPersona
+  PersonaName(String)
+  PersonaText(personas.Field, String)
+  PersonaFormat(personas.Field, String, String)
+  PersonaBlock(personas.Field, String)
+  SavePersona
+  /// The reply to a persona save: the persona as it is now, or a refusal.
+  PersonaSaved(String)
+  /// Drops the draft and edits the saved persona as it is now.
+  ReloadPersona
+  /// Asks to confirm deleting the persona with this id.
+  DeletePersona(String)
+  CancelDeletePersona
+  ConfirmDeletePersona
+  /// The reply to a delete: the deleted persona, or a refusal.
+  PersonaDeleted(String)
   /// Opens the form for a new feature.
   NewFeature
   /// Opens the form on the feature with this id.
@@ -355,8 +383,10 @@ pub type Msg {
   PlanEffort(String)
   /// The reply to `GET /models`.
   ModelsLoaded(String)
+  /// The server's default model for each role.
+  RoleModelsLoaded(String)
   /// The models fetched again on catch-up or a live run or task update: a
-  /// failed reply changes nothing, and a pick the list still has stays.
+  /// failed reply changes nothing, and a pick that can start stays.
   ModelsRefreshed(String)
   /// Try again: recheck every model and clear the holds.
   TryAgainModel
@@ -388,13 +418,14 @@ pub type Msg {
 fn tab_query() -> String
 
 pub fn tabs() -> List(Tab) {
-  [Vision, Features, Roadmap, Tasks]
+  [Vision, Personas, Features, Roadmap, Tasks]
 }
 
 /// The tab's name in the URL: `/strategy?tab=<name>`.
 pub fn tab_name(tab: Tab) -> String {
   case tab {
     Vision -> "vision"
+    Personas -> "personas"
     Features -> "features"
     Roadmap -> "roadmap"
     Tasks -> "tasks"
@@ -404,6 +435,7 @@ pub fn tab_name(tab: Tab) -> String {
 pub fn label(tab: Tab) -> String {
   case tab {
     Vision -> "Vision"
+    Personas -> "Personas"
     Features -> "Features"
     Roadmap -> "Roadmap"
     Tasks -> "Tasks"
@@ -447,6 +479,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     fn() { navigation_events(model, msg) },
     fn() { connection_events(model, msg) },
     fn() { vision_events(model, msg) },
+    fn() { persona_format_events(model, msg) },
+    fn() { persona_events(model, msg) },
     fn() { feature_events(model, msg) },
     fn() { milestone_events(model, msg) },
     fn() { task_events(model, msg) },
@@ -494,6 +528,7 @@ pub fn view(model: Model) -> Element(Msg) {
         case tab {
           Tasks -> tasks_view(model)
           Vision -> vision_view(model)
+          Personas -> personas_view(model)
           Features -> features_view(model)
           Roadmap -> roadmap_view(model)
         },
@@ -516,6 +551,7 @@ const view_styles =
   <> roadmap_styles
   <> detail_styles
   <> vision_styles
+  <> persona_styles
   <> solace_task.table_styles
   <> narrow_styles
   <> solace_task.editor_styles
@@ -646,6 +682,7 @@ pub fn new(tab: Tab) -> Model {
     draft: None,
     saving: False,
     vision_error: "",
+    persona_state: personas.blank(),
     feature_draft: None,
     feature_collapsed: False,
     feature_saving: False,
@@ -685,8 +722,10 @@ pub fn new(tab: Tab) -> Model {
     plan_new: False,
     plan_jump: False,
     models: [],
+    role_models: [],
     plan_model: "",
     plan_effort: "",
+    plan_source: solace_task.RoleDefault,
     plan_refreshing: False,
     root: no_root(),
     reveal: #("", 0),
@@ -715,6 +754,7 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
     effect.batch([
       get(model, "/projects", ProjectsLoaded),
       models,
+      get(model, "/role-models", RoleModelsLoaded),
       effect.from(fn(send) {
         send(
           Listening(
@@ -780,7 +820,7 @@ pub fn live(model: Model, text: String) -> Model {
   }
 }
 
-/// Applies a message about the root's features, milestones, vision and
+/// Applies a message about the root's features, milestones, vision, personas and
 /// strategy runs, which names no project (D-87); an error for any other
 /// message.
 fn records(model: Model, text: String) -> Result(Model, Nil) {
@@ -820,6 +860,15 @@ fn records(model: Model, text: String) -> Result(Model, Nil) {
   |> result.lazy_or(fn() {
     at(text, "vision", vision_decoder())
     |> result.map(fn(v) { Model(..model, vision: v) })
+  })
+  |> result.lazy_or(fn() {
+    at(text, "personas", decode.list(personas.decoder()))
+    |> result.map(fn(rs) {
+      Model(
+        ..model,
+        persona_state: personas.State(..model.persona_state, personas: rs),
+      )
+    })
   })
   // The list holds no notes: a run's stay until the run comes in full.
   |> result.lazy_or(fn() {
@@ -1503,6 +1552,7 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
             task: "",
             base: model.prefix,
             label: "Vision",
+            placeholder: "",
             text: text,
             on_input: Draft,
             on_format: VisionFormat,
@@ -2097,6 +2147,7 @@ fn new_task_view(model: Model) -> Element(Msg) {
             task: "",
             base: model.prefix,
             label: "Description",
+            placeholder: "",
             text: d.body,
             on_input: NewTaskText,
             on_format: NewTaskFormat,
@@ -2578,6 +2629,7 @@ fn row_task(row: Row, no_project: Bool) -> solace_task.Task {
         started: 0,
         ended: 0,
         used: "",
+        failed: False,
       )
     }),
     links: [],
@@ -3490,7 +3542,13 @@ fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     }
     CaughtUp -> {
       let model = restore_forms(resync(settle(Model(..model, caught_up: True))))
-      Some(#(model, get(model, "/models", ModelsRefreshed)))
+      Some(#(
+        model,
+        effect.batch([
+          get(model, "/models", ModelsRefreshed),
+          get(model, "/role-models", RoleModelsLoaded),
+        ]),
+      ))
     }
     _ -> None
   }
@@ -4542,7 +4600,15 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       ))
     // Efforts differ between models, so a new model starts at its default.
     PlanModel(id) ->
-      Some(#(Model(..model, plan_model: id, plan_effort: ""), effect.none()))
+      Some(#(
+        Model(
+          ..model,
+          plan_model: id,
+          plan_effort: "",
+          plan_source: solace_task.Human,
+        ),
+        effect.none(),
+      ))
     PlanEffort(effort) ->
       Some(#(Model(..model, plan_effort: effort), effect.none()))
     // The model picked stays while it is available; without the list the
@@ -4564,44 +4630,61 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     ModelsLoaded(text) ->
       Some(case json.parse(text, decode.list(solace_task.agent_decoder())) {
         Ok(models) -> {
-          let #(plan_model, plan_effort) =
-            solace_task.models_chosen(
-              models,
-              model.plan_model,
-              model.plan_effort,
-            )
-          #(
-            Model(
-              ..model,
-              models: models,
-              plan_model: plan_model,
-              plan_effort: plan_effort,
-              plan_refreshing: False,
-            ),
-            effect.none(),
-          )
+          let model = Model(..model, models: models, plan_refreshing: False)
+          let model = case model.plan_source {
+            solace_task.Human ->
+              case
+                list.find(models, fn(a) {
+                  a.id == model.plan_model && a.available
+                })
+              {
+                Ok(a) ->
+                  Model(
+                    ..model,
+                    plan_effort: solace_task.kept_effort(a, model.plan_effort),
+                  )
+                Error(_) ->
+                  choose_plan_model(
+                    Model(..model, plan_source: solace_task.RoleDefault),
+                  )
+              }
+            solace_task.RoleDefault -> choose_plan_model(model)
+          }
+          #(model, effect.none())
         }
         Error(_) -> #(Model(..model, plan_refreshing: False), effect.none())
       })
     ModelsRefreshed(text) ->
       Some(case json.parse(text, decode.list(solace_task.agent_decoder())) {
         Ok(models) -> {
-          let #(plan_model, plan_effort) =
-            solace_task.models_refreshed(
-              models,
-              model.plan_model,
-              model.plan_effort,
-            )
-          #(
-            Model(
-              ..model,
-              models: models,
-              plan_model: plan_model,
-              plan_effort: plan_effort,
-            ),
-            effect.none(),
-          )
+          let model = case
+            list.find(models, fn(a) { a.id == model.plan_model && a.available })
+          {
+            Ok(a) ->
+              Model(
+                ..model,
+                models: models,
+                plan_effort: solace_task.kept_effort(a, model.plan_effort),
+              )
+            Error(_) ->
+              choose_plan_model(
+                Model(
+                  ..model,
+                  models: models,
+                  plan_source: solace_task.RoleDefault,
+                ),
+              )
+          }
+          #(model, effect.none())
         }
+        Error(_) -> #(model, effect.none())
+      })
+    RoleModelsLoaded(text) ->
+      Some(case json.parse(text, solace_task.role_models_decoder()) {
+        Ok(role_models) -> #(
+          choose_plan_model(Model(..model, role_models: role_models)),
+          effect.none(),
+        )
         Error(_) -> #(model, effect.none())
       })
     StartPlan ->
@@ -4825,5 +4908,165 @@ fn search_rank(query: String, row: Row) -> Int {
         True -> 1
         False -> 2
       }
+  }
+}
+
+/// The Personas tab: the form while one is open, and the saved personas.
+fn personas_view(model: Model) -> List(Element(Msg)) {
+  personas.view(
+    model.prefix,
+    model.persona_state.personas,
+    persona_editor(model),
+  )
+}
+
+fn persona_editor(model: Model) -> personas.Editor(Msg) {
+  personas.Editor(
+    draft: model.persona_state.draft,
+    saving: model.persona_state.saving,
+    error: model.persona_state.error,
+    on_new: NewPersona,
+    on_edit: EditPersona,
+    on_cancel: CancelPersona,
+    on_name: PersonaName,
+    on_text: PersonaText,
+    on_format: PersonaFormat,
+    on_block: PersonaBlock,
+    on_save: SavePersona,
+    on_reload: ReloadPersona,
+    deleting: personas.confirming(model.persona_state),
+    on_delete: DeletePersona,
+    on_confirm_delete: ConfirmDeletePersona,
+    on_cancel_delete: CancelDeletePersona,
+  )
+}
+
+fn persona_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  let change = case msg {
+    NewPersona -> Ok(personas.New)
+    EditPersona(id) -> Ok(personas.Edit(id))
+    CancelPersona -> Ok(personas.Cancel)
+    ReloadPersona -> Ok(personas.Reload)
+    PersonaName(name) -> Ok(personas.Name(name))
+    PersonaText(field, text) -> Ok(personas.Text(field, text))
+    SavePersona -> Ok(personas.Save)
+    PersonaSaved(text) -> Ok(personas.Saved(persona_reply(text)))
+    DeletePersona(id) -> Ok(personas.Delete(id))
+    CancelDeletePersona -> Ok(personas.CancelDelete)
+    ConfirmDeletePersona -> Ok(personas.ConfirmDelete)
+    PersonaDeleted(text) -> Ok(personas.Deleted(persona_reply(text)))
+    _ -> Error(Nil)
+  }
+  case change {
+    Error(_) -> None
+    Ok(change) -> {
+      let #(state, request) = personas.update(model.persona_state, change)
+      let fx = case request {
+        personas.Idle -> effect.none()
+        personas.SaveRequest(draft) -> persona_save_effect(model, draft)
+        personas.DeleteRequest(id) -> persona_delete_effect(model, id)
+      }
+      Some(#(Model(..model, persona_state: state), fx))
+    }
+  }
+}
+
+const persona_styles =
+  ".persona{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}
+.persona h3{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin:0 0 var(--space-2);font-size:var(--h4)}
+.persona h3 button{"
+  <> solace_task.small_control
+  <> ";padding:0 var(--space-2);margin-left:var(--space-1)}.persona h3 button:hover{background:var(--hover)}
+.persona h4{margin:var(--space-2) 0 var(--space-1);font-size:var(--h4)}
+.persona-field{margin:var(--space-2) 0 0}
+.persona-form .composer solace-md-editor{--md-min-height:180px}"
+
+fn persona_format_events(
+  model: Model,
+  msg: Msg,
+) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    PersonaFormat(field, before, after) ->
+      Some(
+        persona_format_effect(model, field, fn(text) {
+          solace_task.wrap(
+            model.root,
+            personas.field_id(field),
+            text,
+            before,
+            after,
+          )
+        }),
+      )
+    PersonaBlock(field, kind) ->
+      Some(
+        persona_format_effect(model, field, fn(text) {
+          solace_task.block(model.root, personas.field_id(field), text, kind)
+        }),
+      )
+    _ -> None
+  }
+}
+
+fn persona_format_effect(
+  model: Model,
+  field: personas.Field,
+  change: fn(String) -> String,
+) -> #(Model, Effect(Msg)) {
+  case model.persona_state.draft {
+    Some(draft) -> #(
+      model,
+      effect.from(fn(send) {
+        send(PersonaText(field, change(personas.field_text(draft, field))))
+      }),
+    )
+    None -> #(model, effect.none())
+  }
+}
+
+fn persona_reply(text: String) -> Result(personas.Persona, String) {
+  case json.parse(text, personas.decoder()) {
+    Ok(persona) -> Ok(persona)
+    Error(_) -> Error(error(text))
+  }
+}
+
+fn persona_save_effect(model: Model, draft: personas.Draft) -> Effect(Msg) {
+  let #(path, method, body) = case draft.id {
+    None -> #("/personas", "POST", personas.create_body(draft))
+    Some(id) -> #("/personas/" <> id, "PUT", personas.replace_body(draft))
+  }
+  effect.from(fn(send) {
+    request(model.prefix, path, method, json.to_string(body), fn(reply) {
+      send(PersonaSaved(reply))
+    })
+  })
+}
+
+fn persona_delete_effect(model: Model, id: String) -> Effect(Msg) {
+  effect.from(fn(send) {
+    request(model.prefix, "/personas/" <> id, "DELETE", "", fn(reply) {
+      send(PersonaDeleted(reply))
+    })
+  })
+}
+
+fn choose_plan_model(model: Model) -> Model {
+  case model.plan_source {
+    solace_task.Human -> model
+    solace_task.RoleDefault -> {
+      let id =
+        solace_task.role_model_chosen(
+          model.models,
+          model.role_models,
+          "strategist",
+        )
+      Model(
+        ..model,
+        plan_model: id,
+        plan_effort: "",
+        plan_source: solace_task.RoleDefault,
+      )
+    }
   }
 }

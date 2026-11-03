@@ -589,6 +589,7 @@ pub fn form(
         task: "",
         base: base,
         label: "Description",
+        placeholder: "",
         text: draft.body,
         on_input: editor.on_text,
         on_format: editor.on_format,

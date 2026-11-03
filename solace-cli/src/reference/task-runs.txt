@@ -24,7 +24,14 @@ marked `allowed_in_reviews = true`.
                                 The question's `text` gives each option a
                                 short example of its outcome.
                                 Never asks the human to change a file: make the
-                                change yourself, or ask to add a project
+                                change yourself. To change a project the task
+                                doesn't cover, name each project's folder
+                                exactly as the task's scope lists it (for
+                                example `solace-cli/components`), say in a few
+                                words what you would change there, and tell the
+                                human to first add it in the task's Scope tab
+                                and then answer; no option's wording says that
+                                pressing it adds the project
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task.
                                 A work run is refused while a draft holds unsaved

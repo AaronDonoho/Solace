@@ -10,6 +10,7 @@ pub(super) mod task_model;
 pub(super) mod reviews;
 pub(super) mod briefs;
 pub(super) mod settings;
+pub(super) mod roles;
 
 use serde_json::Value;
 use std::env;

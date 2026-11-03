@@ -279,6 +279,7 @@ impl Store {
             .path
             .clone();
         let mut notes = vec![];
+        let mut baseline = Vec::new();
         let header = &ix.modules.iter().find(|m| m.path == module).unwrap().header;
         let out = self.transaction(&[], || {
             let target_name: Option<String> = match target {
@@ -360,6 +361,8 @@ impl Store {
                     self.callee_hint(&own_errors, &module_syms)? + &unknown_module_hint(self, &now, &deps, &own_errors)?
                 ));
             }
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
             if whole_module {
                 let after = self.index()?;
                 let before: crate::Before = after
@@ -381,8 +384,10 @@ impl Store {
                 diags.iter().filter(|d| !d.error).filter(|d| !own(d)),
             );
             out += &crate::diagnostics::broken_report(&before_broken, &diags);
+            out += &dependents.message;
             Ok(out)
         })?;
+        self.remember_dependent_errors(&baseline)?;
         Ok(crate::note_lines(&notes) + &out)
     }
     /// Replaces or adds symbols in one transaction, type-checked together, so a
@@ -502,6 +507,7 @@ impl Store {
                 "E0101 the new module's file already exists outside the store; import or resolve it before creating this module",
             );
         }
+        let mut baseline = Vec::new();
         let out = self.transaction(&created_files, || {
             for (path, dir, header) in &created {
                 self.db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, dir, header])?;
@@ -608,6 +614,8 @@ impl Store {
                         + &unknown_module_hint(self, &now, &deps, &own_errors)?
                 ));
             }
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
             let after = now;
             let before: crate::Before = plan
                 .iter()
@@ -627,6 +635,7 @@ impl Store {
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
             out += &crate::diagnostics::broken_report(&before_broken, &diags);
+            out += &dependents.message;
             // The compiler stops at the first module with errors, so name the
             // other callers of a changed function, or the sites that construct a
             // changed type, from the reference graph (D-46).
@@ -660,6 +669,7 @@ impl Store {
             }
             Ok(out)
         })?;
+        self.remember_dependent_errors(&baseline)?;
         Ok(crate::note_lines(&notes) + &out)
     }
     /// For a rejected submit whose every error is a call, with the wrong arity
@@ -746,7 +756,9 @@ impl Store {
             out += &format!("Deleted {}{retired}.\n", ix.syms[i].qname());
         }
         let diags = self.check_all(&self.index()?)?;
-        Ok(trim_output(&out, budget) + &crate::diagnostics::broken_report(&before, &diags))
+        let dependents = self.check_dependents()?;
+        self.remember_dependent_errors(&dependents.baseline)?;
+        Ok(trim_output(&out, budget) + &crate::diagnostics::broken_report(&before, &diags) + &dependents.message)
     }
     #[cfg(test)]
     pub(crate) fn delete(&self, name: &str) -> Out {
@@ -780,149 +792,54 @@ impl Store {
     /// When the server's own selection code is newer than the binary running it,
     /// its selection is out of date, so every test runs and the reply says why.
     pub(crate) fn test(&self, args: &[&str]) -> Out {
-        let rust = crate::language::is_rust(&self.root);
-        let ix = self.index()?;
+        let all = args.contains(&"--all");
         let names = operands(args);
-        let named: Vec<usize> = names.iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
-        let all_flag = args.contains(&"--all");
-        let stale = !all_flag && named.is_empty() && server_needs_every_test(&self.root, &ix);
-        let all = all_flag || stale;
-        let tests = crate::reach::test_symbols(&ix);
-        let revisions: Vec<String> = ix.syms.iter().map(|s| crate::revision(&s.text)).collect();
-        let mut rows: HashMap<String, (String, String)> = self
-            .db
-            .prepare("SELECT test, reach, result FROM test_runs")?
-            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
-            .collect::<Result<_, _>>()?;
-        let (mut run, mut hashes) = (vec![], HashMap::new());
-        let mut reached = HashSet::new();
-        for &t in &tests {
-            let reach = crate::reach::closure(&ix, t);
-            let hash = crate::reach::hash(&ix, &reach, &revisions, &self.root);
-            let due = if all {
-                true
-            } else if !named.is_empty() {
-                named.iter().any(|n| reach.contains(n))
-            } else {
-                rows.get(&ix.syms[t].qname()).is_none_or(|(h, r)| *h != hash || r != "pass")
-            };
-            // a test other code calls can't be made private
-            if due || ix.uses.iter().enumerate().any(|(j, u)| j != t && u.contains(&t)) {
-                run.push(t);
-            }
-            hashes.insert(t, hash);
-            reached.extend(reach);
-        }
-        let untested = self.task_untested(&ix, &reached);
-        crate::UNTESTED.with(|u| *u.borrow_mut() = untested.clone());
-        let next = next_step(untested.as_deref(), work_run(&self.root));
-        let untested = untested.map_or(String::new(), |names| format!("No test reaches {names}.\n"));
-        // Suites outside `gleam test` that reach a change since tests last passed.
-        let changed: Vec<usize> =
-            self.since_pass()?.unwrap_or_default().iter().filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id)).collect();
-        let suites = crate::reach::reached(&crate::reach::suites(self, &ix)?, &changed);
-        let head = test_head(run.len(), tests.len(), &names, all_flag, stale);
-        let also = if suites.is_empty() { String::new() } else { format!("Also reached: {}.\n", suites.join(", ")) };
-        if run.is_empty() {
-            // gleeunit fails when it finds no tests; type-check instead
-            let errors: Vec<String> = self.check_all(&ix)?.into_iter().filter(|d| d.error).map(|d| d.text).collect();
-            if !errors.is_empty() {
-                return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
-            }
-            return Ok(head + &also + &untested + &next);
-        }
-        let files = self.materialize(&ix)?;
-        let result = if rust {
-            // Rust runs the chosen tests by libtest name, and the whole suite
-            // when every test is due (D-170).
-            let names: Vec<String> = run.iter().map(|&t| crate::reach::libtest_name(&ix, t)).collect();
-            let filters = if run.len() == tests.len() { vec![] } else { names };
-            let args = crate::language::cargo::test_args(&self.root, &filters);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.cargo(&argv, 600)
+        let targets = if all || names.is_empty() {
+            None
         } else {
-            let skipped: Vec<(usize, String)> = tests
-                .iter()
-                .filter(|t| !run.contains(t))
-                .map(|&t| (t, ix.syms[t].text.replacen(&format!("pub fn {}(", ix.syms[t].name), &format!("fn {}(", ix.syms[t].name), 1)))
-                .collect();
-            let rewritten = self.rewritten(&ix, &skipped)?;
-            let result = (|| {
-                for (path, content) in &rewritten {
-                    self.rewrite(path, content)?;
+            let ix = self.index()?;
+            let ids = names.iter().map(|n| self.resolve(&ix, n).map(|i| ix.syms[i].id.clone())).collect::<Result<Vec<_>, _>>()?;
+            Some(ReachTargets { names: names.iter().map(|n| (*n).to_string()).collect(), ids })
+        };
+        let mut out = self.test_with(args, targets.as_ref(), true)?;
+        if all {
+            return Ok(out);
+        }
+        let top = crate::scope::top(&self.root);
+        let members = crate::workspace::members(&top).unwrap_or_default();
+        // A board run already holds its home project's lock; a dependent that is
+        // its home runs under that lock rather than waiting for a second one.
+        let held = context().and_then(|(tid, _)| crate::scope::retry_task(|| crate::scope::home(&self.root, &tid)).ok());
+        let roots = crate::extract::deps::all_dependents(&top, &self.root, &members);
+        if roots.is_empty() {
+            return Ok(out);
+        }
+        let to_lock: Vec<PathBuf> =
+            roots.iter().filter(|root| held.as_ref().is_none_or(|home| !crate::project_paths::same_project(root, home))).cloned().collect();
+        let _guards = crate::scope::lock_all(&to_lock)?;
+        let mut errors = vec![];
+        for root in roots {
+            let dir = crate::scope::dir(&top, &root);
+            let run = crate::Store::at(&root).and_then(|dep| {
+                if crate::reach::test_symbols(&dep.index()?).is_empty() {
+                    return Ok(String::new());
                 }
-                self.tool(&["test"])
-            })();
-            if !rewritten.is_empty() {
-                self.materialize(&ix)?;
+                dep.test_with(&[], targets.as_ref(), false)
+            });
+            match run {
+                Ok(text) if !text.is_empty() => out += &format!("\n== In {dir} ==\n{text}"),
+                Ok(_) => {}
+                Err(Failure(message, code)) => errors.push((dir, code, message)),
             }
-            result
-        };
-        let (ok, output) = result?;
-        let diags = if rust {
-            crate::language::cargo::diagnostics_for(&self.root, &output, &files)
-        } else {
-            self.lang().diagnostics(&output, &files)
-        };
-        let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
+        }
         if !errors.is_empty() {
-            return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+            let code = errors[0].1;
+            for (dir, _, message) in errors {
+                out += &format!("\n== In {dir} ==\n{message}");
+            }
+            return Err(Failure(out, code));
         }
-        let failed = if rust { crate::language::cargo::failures(&output) } else { self.lang().failures(&output) };
-        // Record results only from a run that finished; passes only when every
-        // failure it counted was attributed to a test.
-        let summary = output.lines().find(|l| l.contains(" passed, "));
-        let complete = if rust {
-            let (passed, count) = crate::language::cargo::totals(&output);
-            if !ok && passed + count == 0 {
-                // cargo stopped before the tests ran: its own words say why.
-                return crate::failure::fail(format!("Tests did not run.\n\n{}", output.trim()));
-            }
-            ok || count == failed.len()
-        } else {
-            summary.is_some_and(|l| {
-                let number =
-                    |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
-                let count = if l.contains("no failures") { Some(0) } else { number(" failure") };
-                ok || count == Some(failed.len())
-            })
-        };
-        if rust || summary.is_some() {
-            for &t in &run {
-                let q = ix.syms[t].qname();
-                let key = if rust { crate::reach::libtest_name(&ix, t) } else { q.clone() };
-                let result = match failed.get(&key) {
-                    Some(_) => "fail",
-                    None if complete => "pass",
-                    None => continue,
-                };
-                self.db.execute("INSERT OR REPLACE INTO test_runs VALUES (?1, ?2, ?3)", params![q, hashes[&t], result])?;
-                rows.insert(q, (hashes[&t].clone(), result.to_string()));
-            }
-            if tests.iter().all(|t| rows.get(&ix.syms[*t].qname()).is_some_and(|(h, r)| *h == hashes[t] && r == "pass")) {
-                self.db.execute_batch("DELETE FROM test_base; INSERT INTO test_base SELECT id, text FROM symbols WHERE live = 1;")?;
-            }
-        }
-        let mut out = head;
-        if rust {
-            for (name, (_, text)) in &failed {
-                let text = crate::language::cargo::relocate_failure(text, &files, |symbol| {
-                    ix.syms.iter().find(|s| s.qname() == symbol).map(|s| s.text.as_str())
-                });
-                out += &format!("\n{name}:\n{text}\n");
-            }
-        } else {
-            for line in self.lang().quiet(&output).lines() {
-                let line = line.trim_start_matches('.');
-                if line.trim().is_empty() || line.trim().starts_with("Checking ") {
-                    continue;
-                }
-                out += &self.lang().relocate(line, &files);
-                out.push('\n');
-            }
-        }
-        out += &also;
-        if ok { Ok(out + &untested + &next) } else { crate::failure::fail(out) }
+        Ok(out)
     }
     /// D-152: this task's changed symbols in this project, outside test modules,
     /// that no test reaches (`reached`: what the tests reach), named for a reply;
@@ -1156,6 +1073,180 @@ impl Store {
     }
     pub(crate) fn work_list(&self) -> Out {
         self.status()
+    }
+
+    fn test_with(&self, args: &[&str], targets: Option<&ReachTargets>, report: bool) -> Out {
+        let rust = crate::language::is_rust(&self.root);
+        let ix = self.index()?;
+        let names = operands(args);
+        let named: Vec<usize> = names.iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
+        let all_flag = args.contains(&"--all");
+        let stale = !all_flag && named.is_empty() && targets.is_none() && server_needs_every_test(&self.root, &ix);
+        let all = all_flag || stale;
+        let tests = crate::reach::test_symbols(&ix);
+        let project = crate::extract::deps::project_reach(&self.root, &ix)?;
+        let (reach_ix, own_start) = match &project {
+            Some(project) => (&project.index, project.own_start),
+            None => (&ix, 0),
+        };
+        let roots: Vec<&Path> = match &project {
+            Some(project) => project.roots.iter().map(PathBuf::as_path).collect(),
+            None => vec![self.root.as_path()],
+        };
+        let revisions: Vec<String> = reach_ix.syms.iter().map(|s| crate::revision(&s.text)).collect();
+        let target_positions: Vec<usize> = targets
+            .map(|targets| {
+                reach_ix
+                    .syms
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, symbol)| targets.ids.iter().any(|id| id.as_str() == symbol.id))
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut rows: HashMap<String, (String, String)> = self
+            .db
+            .prepare("SELECT test, reach, result FROM test_runs")?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+            .collect::<Result<_, _>>()?;
+        let (mut run, mut hashes) = (vec![], HashMap::new());
+        let mut reached = HashSet::new();
+        for &t in &tests {
+            let at = own_start + t;
+            let reach = crate::reach::closure(reach_ix, at);
+            let hash = crate::reach::hash(reach_ix, &reach, &revisions, &roots);
+            let due = if all {
+                true
+            } else if targets.is_some() {
+                target_positions.iter().any(|&n| reach.contains(&n))
+            } else if !named.is_empty() {
+                named.iter().any(|n| reach.contains(&(own_start + n)))
+            } else {
+                rows.get(&ix.syms[t].qname()).is_none_or(|(h, r)| *h != hash || r != "pass")
+            };
+            // a test other code calls can't be made private
+            if due || reach_ix.uses.iter().enumerate().any(|(j, u)| j != at && u.contains(&at)) {
+                run.push(t);
+            }
+            hashes.insert(t, hash);
+            reached.extend(reach);
+        }
+        // Only the project whose change started the run reports the task's
+        // untested symbols and next step; a dependent must not replace them.
+        let untested = if report { self.task_untested(reach_ix, &reached) } else { None };
+        if report {
+            crate::UNTESTED.with(|u| *u.borrow_mut() = untested.clone());
+        }
+        let next = if report { next_step(untested.as_deref(), work_run(&self.root)) } else { String::new() };
+        let untested = if report { untested.map_or(String::new(), |names| format!("No test reaches {names}.\n")) } else { String::new() };
+        // Suites outside `gleam test` that reach a change since tests last passed.
+        let changed: Vec<usize> =
+            self.since_pass()?.unwrap_or_default().iter().filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id)).collect();
+        let suites = crate::reach::reached(&crate::reach::suites(self, &ix)?, &changed);
+        let shown: Vec<&str> = targets.map_or_else(|| names.clone(), |targets| targets.names.iter().map(String::as_str).collect());
+        let head = test_head(run.len(), tests.len(), &shown, all_flag, stale);
+        let also = if suites.is_empty() { String::new() } else { format!("Also reached: {}.\n", suites.join(", ")) };
+        if run.is_empty() {
+            // gleeunit fails when it finds no tests; type-check instead
+            let errors: Vec<String> = self.check_all(&ix)?.into_iter().filter(|d| d.error).map(|d| d.text).collect();
+            if !errors.is_empty() {
+                return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+            }
+            return Ok(head + &also + &untested + &next);
+        }
+        let files = self.materialize(&ix)?;
+        let result = if rust {
+            // Rust runs the chosen tests by libtest name, and the whole suite
+            // when every test is due (D-170).
+            let names: Vec<String> = run.iter().map(|&t| crate::reach::libtest_name(&ix, t)).collect();
+            let filters = if run.len() == tests.len() { vec![] } else { names };
+            let args = crate::language::cargo::test_args(&self.root, &filters);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.cargo(&argv, 600)
+        } else {
+            let skipped: Vec<(usize, String)> = tests
+                .iter()
+                .filter(|t| !run.contains(t))
+                .map(|&t| (t, ix.syms[t].text.replacen(&format!("pub fn {}(", ix.syms[t].name), &format!("fn {}(", ix.syms[t].name), 1)))
+                .collect();
+            let rewritten = self.rewritten(&ix, &skipped)?;
+            let result = (|| {
+                for (path, content) in &rewritten {
+                    self.rewrite(path, content)?;
+                }
+                self.tool(&["test"])
+            })();
+            if !rewritten.is_empty() {
+                self.materialize(&ix)?;
+            }
+            result
+        };
+        let (ok, output) = result?;
+        let diags = if rust {
+            crate::language::cargo::diagnostics_for(&self.root, &output, &files)
+        } else {
+            self.lang().diagnostics(&output, &files)
+        };
+        let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
+        if !errors.is_empty() {
+            return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+        }
+        let failed = if rust { crate::language::cargo::failures(&output) } else { self.lang().failures(&output) };
+        // Record results only from a run that finished; passes only when every
+        // failure it counted was attributed to a test.
+        let summary = output.lines().find(|l| l.contains(" passed, "));
+        let complete = if rust {
+            let (passed, count) = crate::language::cargo::totals(&output);
+            if !ok && passed + count == 0 {
+                // cargo stopped before the tests ran: its own words say why.
+                return crate::failure::fail(format!("Tests did not run.\n\n{}", output.trim()));
+            }
+            ok || count == failed.len()
+        } else {
+            summary.is_some_and(|l| {
+                let number =
+                    |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
+                let count = if l.contains("no failures") { Some(0) } else { number(" failure") };
+                ok || count == Some(failed.len())
+            })
+        };
+        if rust || summary.is_some() {
+            for &t in &run {
+                let q = ix.syms[t].qname();
+                let key = if rust { crate::reach::libtest_name(&ix, t) } else { q.clone() };
+                let result = match failed.get(&key) {
+                    Some(_) => "fail",
+                    None if complete => "pass",
+                    None => continue,
+                };
+                self.db.execute("INSERT OR REPLACE INTO test_runs VALUES (?1, ?2, ?3)", params![q, hashes[&t], result])?;
+                rows.insert(q, (hashes[&t].clone(), result.to_string()));
+            }
+            if tests.iter().all(|t| rows.get(&ix.syms[*t].qname()).is_some_and(|(h, r)| *h == hashes[t] && r == "pass")) {
+                self.db.execute_batch("DELETE FROM test_base; INSERT INTO test_base SELECT id, text FROM symbols WHERE live = 1;")?;
+            }
+        }
+        let mut out = head;
+        if rust {
+            for (name, (_, text)) in &failed {
+                let text = crate::language::cargo::relocate_failure(text, &files, |symbol| {
+                    ix.syms.iter().find(|s| s.qname() == symbol).map(|s| s.text.as_str())
+                });
+                out += &format!("\n{name}:\n{text}\n");
+            }
+        } else {
+            for line in self.lang().quiet(&output).lines() {
+                let line = line.trim_start_matches('.');
+                if line.trim().is_empty() || line.trim().starts_with("Checking ") {
+                    continue;
+                }
+                out += &self.lang().relocate(line, &files);
+                out.push('\n');
+            }
+        }
+        out += &also;
+        if ok { Ok(out + &untested + &next) } else { crate::failure::fail(out) }
     }
 }
 
@@ -1467,6 +1558,7 @@ fn running_binary_time() -> Option<std::time::SystemTime> {
 /// Records the running binary's time at startup, before a rebuild can replace the file.
 pub(crate) fn capture_running_binary() {
     let _ = running_binary_time();
+    let _ = running_binary_path();
 }
 
 /// The first line of a `test` reply: what ran, and why a stale server forced
@@ -1474,7 +1566,7 @@ pub(crate) fn capture_running_binary() {
 fn test_head(run: usize, tests: usize, names: &[&str], all: bool, stale: bool) -> String {
     if run == tests {
         if stale && !all {
-            format!("Ran all {tests} tests: Solace's own code changed since this server started; restart it to select tests again.\n")
+            format!("Ran all {tests} tests: Solace's own code changed since this server started, so test selection is out of date.\n")
         } else {
             format!("Ran all {tests} tests.\n")
         }
@@ -1491,4 +1583,47 @@ fn test_head(run: usize, tests: usize, names: &[&str], all: bool, stale: bool) -
 /// Whether `path` is `root` or a submodule of it.
 fn in_module(root: &str, path: &str) -> bool {
     path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with("::"))
+}
+
+static BINARY_PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+static STALE_BINARY_NOTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The running executable's path, taken once so a rebuild at the same path is noticed.
+fn running_binary_path() -> Option<&'static std::path::PathBuf> {
+    BINARY_PATH.get_or_init(|| std::env::current_exe().ok()).as_ref()
+}
+
+fn binary_is_newer(built: Option<std::time::SystemTime>, current: Option<std::time::SystemTime>) -> bool {
+    matches!((built, current), (Some(built), Some(current)) if current > built)
+}
+
+/// One note per process when its executable was replaced after startup.
+pub(crate) fn stale_binary_notice() -> Option<&'static str> {
+    stale_binary_notice_from(&STALE_BINARY_NOTE, running_binary_time(), || {
+        running_binary_path().and_then(|path| fs::metadata(path).and_then(|m| m.modified()).ok())
+    })
+}
+
+fn stale_binary_notice_from(
+    sent: &std::sync::atomic::AtomicBool,
+    built: Option<std::time::SystemTime>,
+    current: impl FnOnce() -> Option<std::time::SystemTime>,
+) -> Option<&'static str> {
+    if sent.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let stale = binary_is_newer(built, current());
+    if !stale || sent.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(concat!(
+        "Solace's own program was rebuilt after this server started; this reply comes from the older copy, ",
+        "so newer code may not be in effect. Mention this in your summary.\n",
+    ))
+}
+
+struct ReachTargets {
+    names: Vec<String>,
+    ids: Vec<String>,
 }

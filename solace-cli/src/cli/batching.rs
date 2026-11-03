@@ -57,12 +57,14 @@ pub(crate) fn command_words(command: &str) -> Vec<String> {
 }
 
 /// Several commands, one per line, run in order; they share `budget`, since the
-/// agent cuts the reply as a whole. D-119: after a failed change the rest are
-/// skipped. D-152: after a test that failed or left a change no test reaches,
-/// a `task done` is skipped. A repeated failed command names its copy. The
-/// reply, and whether a command failed.
+/// agent cuts the reply as a whole. A `session remember` gets its own room, so
+/// its output doesn't shrink the commands beside it. D-119: after a failed
+/// change the rest are skipped. D-152: after a test that failed or left a change
+/// no test reaches, a `task done` is skipped. A repeated failed command names
+/// its copy. The reply, and whether a command failed.
 pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize) -> Out) -> (String, bool) {
     let (mut out, mut failed, mut skipped, mut stopped) = (String::new(), vec![], vec![], false);
+    let mut remembered = 0usize;
     let (mut waiting, mut held) = (None::<String>, false);
     for (at, &command) in commands.iter().enumerate() {
         let command = bare_command(command);
@@ -72,6 +74,7 @@ pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[Stri
         }
         let words = command_words(command);
         let verb = verb_words(&words);
+        let remember = verb.starts_with(&["session", "remember"]);
         if let Some(why) = &waiting
             && verb.starts_with(&["task", "done"])
         {
@@ -80,15 +83,16 @@ pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[Stri
             continue;
         }
         if commands.len() > 1 {
-            out += &format!("==== solace {command} ====\n");
+            add_reply(&mut out, &mut remembered, remember, &format!("==== solace {command} ====\n"));
         }
         if words.first().is_some_and(|w| w == "help") {
-            out += &crate::reference::agent_help(words.get(1).map(|w| w.as_str()));
+            let help = crate::reference::agent_help(words.get(1).map(|w| w.as_str()));
+            add_reply(&mut out, &mut remembered, remember, &help);
             continue;
         }
         // `--project` names where its command runs, not a command of its own.
         if verb.is_empty() && words.iter().any(|w| w == "--project") {
-            out += PROJECT_ONLY;
+            add_reply(&mut out, &mut remembered, remember, PROJECT_ONLY);
             failed.push(failed_copy(command, commands, at));
             continue;
         }
@@ -96,13 +100,15 @@ pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[Stri
         if test {
             crate::UNTESTED.with(|u| u.borrow_mut().take());
         }
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&words, budget.saturating_sub(out.len())))) {
+        let room = if remember { budget } else { budget.saturating_sub(out.len().saturating_sub(remembered)) };
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&words, room))) {
             Ok(result) => result,
             Err(p) => {
                 // A panic is this line's error, not the tool's: the lines after
                 // it are skipped, and the next call starts clean.
                 reset_after_panic();
-                out += &panic_reply(&*p, Some(command));
+                let reply = panic_reply(&*p, Some(command));
+                add_reply(&mut out, &mut remembered, remember, &reply);
                 failed.push(failed_copy(command, commands, at));
                 stopped = true;
                 continue;
@@ -116,15 +122,17 @@ pub(crate) fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[Stri
             };
         }
         match result {
-            Ok(o) => out += &o,
+            Ok(o) => {
+                add_reply(&mut out, &mut remembered, remember, &o);
+            }
             Err(Failure(msg, _)) => {
-                out += &msg;
+                add_reply(&mut out, &mut remembered, remember, &msg);
                 failed.push(failed_copy(command, commands, at));
                 stopped = words.first().is_some_and(|w| STOPS.contains(&w.as_str()));
             }
         }
         if commands.len() > 1 && !out.ends_with('\n') {
-            out.push('\n');
+            add_reply(&mut out, &mut remembered, remember, "\n");
         }
     }
     // D-109, D-119: a batch names the commands that failed and those it skipped, for the agent and the run log.
@@ -225,4 +233,13 @@ fn failed_copy(command: &str, commands: &[&str], at: usize) -> String {
     }
     let copy = commands[..=at].iter().filter(|c| bare_command(c) == command).count();
     format!("{command} (copy {copy})")
+}
+
+/// Adds to the reply, setting a `session remember` line's bytes aside so the
+/// shared room counts only the other commands.
+fn add_reply(out: &mut String, remembered: &mut usize, remember: bool, text: &str) {
+    out.push_str(text);
+    if remember {
+        *remembered += text.len();
+    }
 }

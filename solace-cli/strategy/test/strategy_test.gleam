@@ -19,6 +19,7 @@ pub fn main() -> Nil {
 
 pub fn tab_from_url_test() {
   assert strategy.tab_from("?tab=tasks") == strategy.Tasks
+  assert strategy.tab_from("?tab=personas") == strategy.Personas
   assert strategy.tab_from("x=1&tab=roadmap") == strategy.Roadmap
   assert strategy.tab_from("") == strategy.Vision
   assert strategy.tab_from("?tab=nope") == strategy.Vision
@@ -34,7 +35,7 @@ pub fn one_tab_is_selected_test() {
   let html = element.to_string(strategy.view(strategy.new(strategy.Tasks)))
   assert list.length(string.split(html, "aria-selected=\"true\"")) == 2
   assert string.contains(html, "id=\"tab-features\"")
-  assert list.length(string.split(html, " hidden")) == 4
+  assert list.length(string.split(html, " hidden")) == 5
 }
 
 fn step(model: strategy.Model, msg: strategy.Msg) -> strategy.Model {
@@ -1472,6 +1473,12 @@ pub fn shared_labels_on_the_pages_test() {
   assert string.contains(shown(model), button("new_milestone"))
   let model = step(model, strategy.ToggleMilestone("m1"))
   assert string.contains(shown(model), button("dependencies"))
+  // Personas: New persona, Save and Cancel.
+  let model = step(model, strategy.Select(strategy.Personas))
+  assert string.contains(shown(model), button("new_persona"))
+  let model = step(model, strategy.NewPersona)
+  assert string.contains(shown(model), button("save"))
+  assert string.contains(shown(model), button("cancel"))
   // Vision: Save and Cancel.
   let model = step(model, strategy.Select(strategy.Vision))
   let model = step(model, strategy.EditVision)
@@ -1532,6 +1539,7 @@ pub fn tabs_have_no_heading_of_their_own_test() {
   // Any heading level counts: a tab's name must not return as one.
   assert !string.contains(page, ">Tasks</h")
   assert !string.contains(page, ">Vision</h")
+  assert !string.contains(page, ">Personas</h")
   assert !string.contains(page, ">Features</h")
   assert !string.contains(page, ">Roadmap</h")
   // The plan panel's heading names the panel, not a tab, and stays.
@@ -2705,18 +2713,19 @@ pub fn a_second_move_waits_for_the_first_test() {
   assert moved.feature_saving
 }
 
-/// A fresh list chooses the first model that can start; a refresh keeps a pick
-/// the list still has, even when it can't start, and narrows its effort. A
-/// failed refresh changes nothing.
+/// A fresh list chooses the Strategist's default when it can start; a refresh
+/// keeps a pick that can still start and narrows its effort, and otherwise
+/// returns to the role's default. A failed refresh changes nothing.
 pub fn the_plan_models_follow_refreshes_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let initial =
-    step(
-      quiet_planned(),
-      strategy.ModelsLoaded(
-        "[{\"id\":\"a\",\"label\":\"A\",\"available\":false,\"reason\":\"not installed\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
-      ),
-    )
+    quiet_planned()
+    |> step(strategy.RoleModelsLoaded(
+      "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"b\"}]",
+    ))
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"a\",\"label\":\"A\",\"available\":false,\"reason\":\"not installed\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
+    ))
   assert initial.plan_model == "b"
   let chosen =
     initial
@@ -2726,29 +2735,44 @@ pub fn the_plan_models_follow_refreshes_test() {
   assert failed.models == chosen.models
   assert failed.plan_model == "b"
   assert failed.plan_effort == "high"
-  let held =
-    step(
-      chosen,
-      strategy.ModelsRefreshed(
-        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true,\"efforts\":[\"low\",\"high\"]}]",
-      ),
-    )
-  assert held.plan_model == "b"
-  assert held.plan_effort == "high"
-  assert string.contains(shown(held), "B: Codex usage limit reached")
-  assert string.contains(shown(held), "aria-label=\"Try again\"")
   let narrowed =
     step(
-      held,
+      chosen,
       strategy.ModelsRefreshed(
         "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\"]}]",
       ),
     )
   assert narrowed.plan_model == "b"
   assert narrowed.plan_effort == ""
+  let held =
+    step(
+      narrowed,
+      strategy.ModelsRefreshed(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true,\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  assert held.plan_model == ""
+  assert held.plan_source == solace_task.RoleDefault
+  assert held.plan_effort == ""
+  assert string.contains(shown(held), "Select a model")
+  assert string.contains(shown(held), "B: Codex usage limit reached")
+  assert string.contains(shown(held), "aria-label=\"Try again\"")
+  let recovered =
+    step(
+      held,
+      strategy.ModelsRefreshed(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  assert recovered.plan_model == "b"
+  assert recovered.plan_source == solace_task.RoleDefault
+  assert recovered.plan_effort == ""
   let dropped =
-    step(narrowed, strategy.ModelsRefreshed("[{\"id\":\"a\",\"label\":\"A\"}]"))
-  assert dropped.plan_model == "a"
+    step(
+      recovered,
+      strategy.ModelsRefreshed("[{\"id\":\"a\",\"label\":\"A\"}]"),
+    )
+  assert dropped.plan_model == ""
   assert dropped.plan_effort == ""
 }
 
@@ -3687,6 +3711,7 @@ pub fn record_state_labels_share_one_color_class_test() {
 pub fn the_plan_draws_the_shared_effort_pick_test() {
   let model =
     quiet_planned()
+    |> step(strategy.PlanModel("m"))
     |> step(strategy.ModelsLoaded(
       "[{\"id\":\"m\",\"label\":\"M\",\"effort\":\"medium\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]},{\"id\":\"n\",\"label\":\"N\",\"effort\":\"high\",\"efforts\":[\"low\",\"high\"]}]",
     ))
@@ -4246,4 +4271,51 @@ fn quiet_planned() -> strategy.Model {
       ),
     ),
   )
+}
+
+/// The plan's model pick starts on the Strategist's default, or none when it
+/// can't start; a manual pick stays.
+pub fn the_plan_follows_the_strategist_default_and_manual_choice_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let roles =
+    "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"b\"}]"
+  let ready =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]"
+  let held =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"available\":false},{\"id\":\"c\",\"label\":\"C\"}]"
+  let start = fn(roles, models) {
+    quiet_planned()
+    |> step(strategy.RoleModelsLoaded(roles))
+    |> step(strategy.ModelsLoaded(models))
+  }
+  let default = start(roles, ready)
+  assert default.plan_model == "b"
+  assert default.plan_source == solace_task.RoleDefault
+  assert !string.contains(shown(default), "Strategist default")
+  let unavailable = start(roles, held)
+  assert unavailable.plan_model == ""
+  assert unavailable.plan_source == solace_task.RoleDefault
+  assert string.contains(shown(unavailable), "Select a model")
+  assert !string.contains(shown(unavailable), "Strategist default")
+  let none =
+    start(
+      "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"\"}]",
+      ready,
+    )
+  assert none.plan_model == ""
+  assert none.plan_source == solace_task.RoleDefault
+  assert string.contains(shown(none), "Select a model")
+  let manual = step(default, strategy.PlanModel("a"))
+  assert manual.plan_model == "a"
+  assert manual.plan_source == solace_task.Human
+  assert !string.contains(shown(manual), "Your choice")
+  let kept =
+    step(
+      manual,
+      strategy.RoleModelsLoaded(
+        "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"c\"}]",
+      ),
+    )
+  assert kept.plan_model == "a"
+  assert kept.plan_source == solace_task.Human
 }

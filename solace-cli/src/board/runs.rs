@@ -57,7 +57,7 @@ use crate::unique_id;
 use crate::failure::Out;
 use crate::failure::usage;
 use crate::board::task_model::message;
-
+use crate::board::roles::STRATEGY_RUN;
 pub(crate) fn after(root: &Path, t: &Value, after: After) {
     match after {
         After::Start(rid, m) => start(root.to_path_buf(), t.clone(), rid, m),
@@ -221,8 +221,12 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     // task names (D-123); a resumed conversation stays where it was.
     let here = run_project(previous, resume.is_some(), root, t);
     let at = scope::path(&scope::top(root), &here);
-    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, &at, m["run"].is_array());
-    let timeout = system()?["task_timeout"].as_u64().unwrap_or(3600);
+    let settings = system()?;
+    let involvement = crate::board::setup::involvement(&settings);
+    let detail = crate::board::setup::detail(&settings);
+    let asking = crate::board::setup::asking(&settings);
+    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, &at, m["run"].is_array(), involvement, detail, asking);
+    let timeout = settings["task_timeout"].as_u64().unwrap_or(3600);
     if author {
         // Only an exited process has a reusable session; a server crash during
         // a turn falls back instead of resuming a possibly orphaned process.
@@ -694,6 +698,7 @@ pub fn transcript(log: &Path) -> Vec<Value> {
     // Claude Code: the context of its latest API call, and output per call (events repeat per content block).
     let (mut context, mut output, mut ended) = (None, HashMap::new(), false);
     let text = fs::read_to_string(log).unwrap_or_default();
+    let ends = fs::read_to_string(server_end_log(log)).unwrap_or_default();
     for line in text.lines() {
         let Ok(e) = serde_json::from_str::<Value>(line) else {
             if line.trim().is_empty() {
@@ -737,10 +742,18 @@ pub fn transcript(log: &Path) -> Vec<Value> {
             ("item.completed", "error") => out.push(json!({"kind":"error","text":item["message"]})),
             ("turn.completed", _) => {
                 let u = &e["usage"];
-                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens", u["input_tokens"], u["cached_input_tokens"], u["output_tokens"])}));
+                let input = u["input_tokens"].as_u64().unwrap_or(0);
+                let cached = u["cached_input_tokens"].as_u64();
+                let cache = cached
+                    .map(|n| {
+                        let ratio = cache_ratio(Some(n), input).map(|r| format!(", {r}")).unwrap_or_default();
+                        format!(" ({n} cached{ratio})")
+                    })
+                    .unwrap_or_default();
+                out.push(json!({"kind":"usage","text":format!("{input} input tokens{cache}, {} output tokens", u["output_tokens"])}));
             }
             ("error", _) => out.push(json!({"kind":"error","text":e["message"]})),
-            ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"]})),
+            ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"],"fatal":true})),
             // Claude Code
             ("assistant", _) => {
                 let u = &e["message"]["usage"];
@@ -778,17 +791,32 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                 let u = &e["usage"];
                 let last = context.map(|c| format!("; last context {c} tokens")).unwrap_or_default();
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                let input = context_tokens(u);
+                let cached = u["cache_read_input_tokens"].as_u64();
                 let written = if u.get("cache_creation_input_tokens").is_some() {
                     format!(", {} written to cache", n("cache_creation_input_tokens"))
                 } else {
                     String::new()
                 };
-                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} read from cache{written}), {} output tokens{last}", context_tokens(u), n("cache_read_input_tokens"), n("output_tokens"))}));
+                let cache = match cached {
+                    Some(c) => {
+                        let ratio = cache_ratio(Some(c), input).map(|r| format!(", {r}")).unwrap_or_default();
+                        format!(" ({c} read from cache{written}{ratio})")
+                    }
+                    None if written.is_empty() => String::new(),
+                    None => format!(" ({} written to cache)", n("cache_creation_input_tokens")),
+                };
+                out.push(json!({"kind":"usage","text":format!("{input} input tokens{cache}, {} output tokens{last}", n("output_tokens"))}));
                 if e["is_error"] == true {
-                    out.push(json!({"kind":"error","text":text_of(&e["result"])}));
+                    out.push(json!({"kind":"error","text":text_of(&e["result"]),"fatal":true}));
                 }
             }
             _ => {}
+        }
+    }
+    for line in ends.lines() {
+        if !line.trim().is_empty() {
+            out.push(json!({"kind":"error","text":line,"source":SERVER}));
         }
     }
     if let (Some(c), false) = (context, ended) {
@@ -822,6 +850,7 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
         // Only a failed work run moves the task; a failed review or investigation stays in its column.
         let work = r["kind"] == "work";
         if let Some(message) = &failure {
+            r["failed"] = json!(true);
             note(t, "solace", Some(&rid), message);
             if work {
                 hold(t, message);
@@ -848,7 +877,7 @@ fn write_review_checkpoint(root: &Path, t: &Value, rid: &str) -> Result<(), Fail
 fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::process::ExitStatus) -> Result<(), Failure> {
     let RunContext { run: r, log, model: m, resumed, retried } = context;
     let entries = transcript(log);
-    let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
+    let blocked = has_blocking_agent_error(&entries);
     let raw = fs::read_to_string(log).unwrap_or_default().to_lowercase();
     // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
     if resumed
@@ -863,7 +892,7 @@ fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::p
     // A discussion or strategy agent that replied in plain text and exited
     // cleanly has taken its turn: the reply is its note, and the run waits.
     let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
-    if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && error.is_empty() && !reply.is_empty() {
+    if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && !blocked && !reply.is_empty() {
         watch.reply(rid, reply.to_string())?;
         return Err(Failure("discussion reply".into(), REPLIED));
     }
@@ -877,14 +906,14 @@ fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::p
     }
     // A custom `run` command writes a log in its own format, so its tool
     // entries can't say whether the Solace tool was offered.
-    if m["run"].is_null() && status.success() && error.is_empty() && !called_solace(&entries) {
+    if m["run"].is_null() && status.success() && !blocked && !called_solace(&entries) {
         if retried || matches!(watch, Watch::Strategy(..)) {
             return watch.fail(rid, NO_TOOL_MESSAGE);
         }
         return Err(Failure("no Solace call; trying a fresh agent".into(), NO_TOOL));
     }
-    let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
-    let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
+    let said = exit_error(&entries).map(str::to_string).or_else(|| last_words(&entries));
+    let message = format!("{} ({status}){}", UNFINISHED_EXIT, said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
     watch.fail(rid, &message)
 }
 
@@ -986,17 +1015,12 @@ pub fn context() -> Option<(String, String)> {
 
 /// The task run's ids: both of them, and the task is not a strategy run's.
 pub(super) fn task_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
-    Some((task.filter(|t| t != STRATEGY)?, run?))
+    Some((task.filter(|t| t != STRATEGY_RUN)?, run?))
 }
-
-/// `SOLACE_TASK` in a strategy run's agent (D-93). No task has this id: task
-/// ids are hex digits.
-pub(super) const STRATEGY: &str = "strategy";
 
 /// A strategy run's id, from its agent's environment.
 pub fn strategy_context() -> Option<String> {
-    env::var("SOLACE_TASK").ok().filter(|t| t == STRATEGY)?;
-    env::var("SOLACE_RUN").ok()
+    strategy_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok()).map(|(_, rid)| rid)
 }
 
 /// Waits until the run may act. A `task` command takes no lock: it sends the
@@ -1006,12 +1030,16 @@ pub fn strategy_context() -> Option<String> {
 /// project's too (D-61).
 pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]) -> Result<Vec<fs::File>, Failure> {
     loop {
-        let guard = if a.first() == Some(&"task") {
-            vec![]
-        } else {
-            scope::lock_all(&[root].iter().chain(also).map(|p| p.to_path_buf()).collect::<Vec<_>>())?
-        };
-        let t = task(root, tid)?;
+        // A task file is replaced while the server saves it; a check that arrives
+        // in that moment waits for it rather than reporting it missing.
+        let (guard, t) = scope::retry_task(|| {
+            let guard = if a.first() == Some(&"task") {
+                vec![]
+            } else {
+                scope::lock_all(&[root].iter().chain(also).map(|p| p.to_path_buf()).collect::<Vec<_>>())?
+            };
+            Ok((guard, task(root, tid)?))
+        })?;
         let r = &t["runs"][run_at(&t, rid)?];
         if r["state"] == "ended" {
             return err("E7003", "run ended");
@@ -1119,6 +1147,11 @@ pub fn task_command(
         Some("note") => {
             if t["runs"][i]["kind"] == "review" {
                 m = review_message(s, tid, &t, rid, &text)?;
+                let mut next = t.clone();
+                message(&w, &mut next, &m)?;
+                let sent = tasks::send(&top, m)?;
+                drop(guard);
+                return review_reply(&top, &sent);
             }
         }
         Some("done") => {
@@ -1127,6 +1160,11 @@ pub fn task_command(
             }
             if t["runs"][i]["kind"] == "work"
                 && let Some(refusal) = draft_refusal(s, &t)?
+            {
+                return err("E7001", refusal);
+            }
+            if t["runs"][i]["kind"] == "work"
+                && let Some(refusal) = dependent_refusal(s, &t)?
             {
                 return err("E7001", refusal);
             }
@@ -1314,4 +1352,152 @@ fn command_copy(command: &str) -> (&str, usize) {
         },
         None => (command, 1),
     }
+}
+
+/// Appends `line` to the log of the run this process serves, if it serves one:
+/// where the harness keeps the server's stderr to itself, the log is the only
+/// place the board sees why the server ended. Best effort.
+pub(crate) fn record_server_end(line: &str) {
+    let root = Store::root().ok().or_else(|| env::current_dir().ok()).unwrap_or_default();
+    let ids = context().or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)));
+    record_server_end_for(&root, ids, line);
+}
+
+/// Appends `line` to task or strategy run `rid`'s log, when the run has one.
+fn append_to_run_log(root: &Path, tid: &str, rid: &str, line: &str) {
+    let run = if tid == STRATEGY_RUN { tasks::strategy::strategy_run(&scope::top(root), rid) } else { run_record(root, tid, rid) };
+    let Some(path) = run.as_ref().and_then(|r| r["log"].as_str()) else { return };
+    if let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(server_end_log(Path::new(path))) {
+        let _ = writeln!(log, "{line}");
+    }
+}
+
+/// A run's server-end lines: beside its log, so an append cannot be overwritten
+/// by the agent still writing the log.
+fn server_end_log(log: &Path) -> PathBuf {
+    log.with_extension("server-end")
+}
+
+/// Records a server-end line for the run `ids` names, if any.
+fn record_server_end_for(root: &Path, ids: Option<(String, String)>, line: &str) {
+    let Some((tid, rid)) = ids else { return };
+    append_to_run_log(root, &tid, &rid, line);
+}
+
+/// A strategy run's task and run ids from an agent's environment values.
+fn strategy_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
+    Some((task.filter(|t| t == STRATEGY_RUN)?, run?))
+}
+
+fn agent_error(entries: &[Value]) -> Option<&str> {
+    entries.iter().rev().find(|e| is_agent_error(e)).and_then(error_message)
+}
+
+fn exit_error(entries: &[Value]) -> Option<&str> {
+    agent_error(entries).or_else(|| entries.iter().rev().find(|e| e["kind"] == "error").and_then(error_message))
+}
+
+fn error_message(entry: &Value) -> Option<&str> {
+    entry["text"].as_str().filter(|text| !text.is_empty())
+}
+
+/// The transcript tag for a line Solace wrote about itself, not the agent.
+pub(crate) const SERVER: &str = "server";
+
+/// Whether a transcript entry is the agent's own failure, rather than a server-end line.
+pub(crate) fn is_agent_error(e: &Value) -> bool {
+    e["kind"] == "error" && e["source"] != SERVER
+}
+
+/// The share of input tokens that came from cache, when the agent reports them.
+fn cache_ratio(cached: Option<u64>, input: u64) -> Option<String> {
+    let cached = cached?;
+    if input == 0 || cached > input {
+        return None;
+    }
+    let percent = (u128::from(cached) * 100 + u128::from(input) / 2) / u128::from(input);
+    Some(format!("{percent}% cache hit"))
+}
+
+/// A review's note counts as recorded only once the server has applied it.
+fn review_reply(top: &Path, sent: &Path) -> Out {
+    if !tasks::applied(top, sent) {
+        return Ok(format!("{}\n", tasks::QUEUED));
+    }
+    if tasks::rejected(top, sent) {
+        return err(
+            "E7001",
+            format!(
+                "the board set this note aside at {}; the note was not recorded, so resend it",
+                tasks::server::failed_path(top, sent).display()
+            ),
+        );
+    }
+    Ok("Recorded.\n".into())
+}
+
+/// The start of an agent's failure message when its process exited early.
+pub(crate) const UNFINISHED_EXIT: &str = "agent exited without finishing";
+
+/// Why `task done` waits, if a covered project depends on this task's projects
+/// and still has errors it did not have before. An earlier error is old only
+/// when its symbol and kind match, so a new error on an already broken symbol
+/// still waits.
+fn dependent_refusal(s: &Store, t: &Value) -> Result<Option<String>, Failure> {
+    let top = scope::top(&s.root);
+    let allowed = scope::of(t, &scope::dir(&top, &s.root));
+    let changed: Vec<String> =
+        crate::board::reviews::changes_of(s, t)?.iter().filter_map(|c| c["project"].as_str().map(String::from)).collect();
+    let mut seen: Vec<String> = vec![];
+    let mut lines: Vec<String> = vec![];
+    for dir in &allowed {
+        if !changed.contains(dir) {
+            continue;
+        }
+        let store = open(&scope::path(&top, dir))?;
+        for (dependent, new, all) in store.dependent_errors_since()? {
+            if !scope::covers(&top, &allowed, &dependent) {
+                continue;
+            }
+            if seen.contains(&dependent) {
+                continue;
+            }
+            let errors: Vec<String> = match t["dependent_errors"].get(&dependent).and_then(Value::as_array) {
+                Some(base) => all.into_iter().filter(|e| !baseline_has(base, e)).map(|e| e.text).collect(),
+                None => new.into_iter().map(|e| e.text).collect(),
+            };
+            if errors.is_empty() {
+                continue;
+            }
+            seen.push(dependent.clone());
+            let first = errors.first().cloned().unwrap_or_default();
+            let more = if errors.len() > 1 { format!("\n  … {} more", errors.len() - 1) } else { String::new() };
+            lines.push(format!("- {dependent}: {first}{more}"));
+        }
+    }
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "task done is refused: a project this task changed still has errors it did not have before.\n{}\n\nFix them before finishing.",
+        lines.join("\n")
+    )))
+}
+
+/// Whether the task's saved errors for a dependent already hold this error. An
+/// entry written before kinds were stored names only a symbol.
+fn baseline_has(base: &[Value], e: &crate::store_core::DependentError) -> bool {
+    base.iter().any(|b| match b {
+        Value::String(symbol) => symbol == &e.symbol,
+        Value::Array(pair) => {
+            pair.first().and_then(Value::as_str) == Some(e.symbol.as_str()) && pair.get(1).and_then(Value::as_str) == Some(e.kind.as_str())
+        }
+        _ => false,
+    })
+}
+
+/// Whether an agent error blocks a clean exit: a fatal one, or one after the reply's last message.
+pub(crate) fn has_blocking_agent_error(entries: &[Value]) -> bool {
+    let last_message = entries.iter().rposition(|e| e["kind"] == "message");
+    entries.iter().enumerate().any(|(i, e)| is_agent_error(e) && (e["fatal"] == true || last_message.is_none_or(|last| i > last)))
 }

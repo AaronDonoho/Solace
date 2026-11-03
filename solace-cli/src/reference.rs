@@ -40,7 +40,7 @@ pub(crate) fn agent_reference(in_task: bool) -> String {
                 .replace("ask with `task ask`, or say so", "say so")
                 .replace("every part\n   of the task is changed", "every part\n   of the change is made")
                 .replace("the code is done: finish with `task done`.", "the code is done.")
-                .replace("A project outside the task's reach: `task ask` to add it, then make\nthe change there. ", "")
+                .replace("A project outside the task's reach: ask with `task ask` to add it.\nName each project's folder exactly as the task's scope lists it (for example\n`solace-cli/components`), say in a few words what you would change there,\nand tell the human to first add it in the task's Scope tab and then answer;\nno option's wording says that pressing it adds the project. Then make the\nchange there. ", "")
         )
     }
 }

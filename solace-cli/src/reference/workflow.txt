@@ -3,8 +3,12 @@ through this tool (no file access or shell). If it can't do what the task
 needs, don't work around it: ask with `task ask`, or say so in your summary.
 The human never edits files or runs commands: make every change yourself with
 `submit` or `write` (settings files: `write` with `reason`, which the human
-approves). A project outside the task's reach: `task ask` to add it, then make
-the change there. A question never asks the human to change a file.
+approves). A project outside the task's reach: ask with `task ask` to add it.
+Name each project's folder exactly as the task's scope lists it (for example
+`solace-cli/components`), say in a few words what you would change there,
+and tell the human to first add it in the task's Scope tab and then answer;
+no option's wording says that pressing it adds the project. Then make the
+change there. A question never asks the human to change a file.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
 (`checkout.pay`). Tests are symbols in test modules (`x_test`).
 Each line runs in one project: yours (session start names it) or its
@@ -53,7 +57,9 @@ call is a turn that re-reads the conversation, so work in few calls:
      ...
      *** End Patch
    A rejected patch is fixed with `--replace`; `old` and `text` are separate
-   arguments holding patch lines, prefixes included, never lines of `command`:
+   arguments, never lines of `command`. `old` matches the draft as
+   `view --draft <id>` shows it, whether that is patch lines, prefixes
+   included, or the merged blocks of a patch that applied:
     argument command:
      submit --draft <id> --replace
      test
@@ -72,8 +78,9 @@ call is a turn that re-reads the conversation, so work in few calls:
    last path segment (`sqlight`, `gleam/json`), when the standard library does,
    or when another module already imports that name as the qualifier; several
    matches are refused and listed. `submit --imports <module>` replaces a
-   module's whole header: module comment and imports; its `mod` lines are kept
-   (`view <module> --header`). Rust adds no import automatically. Work out
+   module's whole header: module comment and imports; its `mod` lines are kept,
+   though a declaration's visibility may change (`view <module> --header`). Rust
+   adds no import automatically. Work out
    expected values from the task's numbers and the code's own rules, never
    from running the code.
    Write code the way the code around it is written: reuse the helpers, types

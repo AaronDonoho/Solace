@@ -171,7 +171,13 @@ fn strategy_runs_read_the_graph() {
     .unwrap();
     assert!(!strategy_list(&top, false).unwrap().contains("t9") && strategy_list(&top, true).unwrap().contains("t9 complete f:- m:- Gone"));
     fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\nWhy: x\n## Notes\n").unwrap();
-    let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
+    let brief = strategy_brief(
+        &top,
+        &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}),
+        "engineer",
+        "standard",
+        "balanced",
+    );
     assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
     assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
     assert!(
@@ -214,24 +220,31 @@ fn strategy_runs_read_the_graph() {
     // Only the latest decisions, and how to find the rest.
     let many: String = (1..=14).map(|n| format!("## D-{n} Thing {n}\n")).collect();
     fs::write(top.join("DECISIONS.md"), many).unwrap();
-    let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}));
+    let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}), "engineer", "standard", "balanced");
     assert!(brief.contains("- D-5 Thing 5") && brief.contains("- D-14 Thing 14") && !brief.contains("- D-4 Thing"), "{brief}");
     assert!(brief.contains("… 4 earlier decisions: `grep D-` lists them."), "{brief}");
 }
 
-/// D-27: a strategy brief for a folder of projects leaves the root's skills
-/// out, as it leaves the root's own files unread.
+/// D-27: a strategy brief for a folder of projects carries the workspace's
+/// skills for its role in full, and leaves another role's out.
 #[test]
 fn a_strategy_brief_leaves_out_a_folder_of_projects_skills() {
     let root = testing::Scratch::new().with(&[
         ("solace.toml", "projects = [\"a\"]\n"),
         ("a/gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n"),
         ("a/src/app.gleam", "pub fn main() { 1 }\n"),
-        ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n"),
+        (
+            "skills/design/SKILL.md",
+            "---\nname: design\ndescription: Layout and color.\nroles: strategist\n---\n# Design\n\nPick a palette.\n",
+        ),
+        ("skills/review.md", "---\nname: review\ndescription: Review UI.\nroles: reviewer\n---\nReview every screen.\n"),
+        ("skills/general.md", "General rules\n"),
     ]);
-    let brief = strategy_brief(&root, &json!({"context":{"kind":"page"},"notes":[]}));
+    let brief = strategy_brief(&root, &json!({"context":{"kind":"page"},"notes":[]}), "engineer", "standard", "balanced");
     assert!(brief.contains("folder of projects"), "{brief}");
-    assert!(!brief.contains("Skills ("), "{brief}");
+    assert!(brief.contains("### design") && brief.contains("Pick a palette."), "{brief}");
+    assert!(!brief.contains("### review") && !brief.contains("Review every screen."), "{brief}");
+    assert!(!brief.contains("- general:") && !brief.contains("General rules"), "{brief}");
 }
 
 /// D-158/D-166: undo carries a module's `file` and a nested symbol's parent, separator and tail,
@@ -1420,7 +1433,7 @@ fn reverting_reports_invalid_settings() {
     assert_eq!(fs::read_to_string(s.root.join("priv/note")).unwrap(), "original");
 }
 
-/// A model save and a language save share one lock, so neither update is lost.
+/// A model, language and behavior save share one lock, so no update is lost.
 #[test]
 fn parallel_model_and_language_writes_keep_both() {
     let root = testing::Scratch::new().with(&[("system.toml", "task_timeout = 42\n")]);
@@ -1436,28 +1449,36 @@ fn parallel_model_and_language_writes_keep_both() {
         })
     };
     let model = {
-        let (config, keys, done) = (config.clone(), keys.clone(), done_tx);
+        let (config, keys, done) = (config.clone(), keys.clone(), done_tx.clone());
         std::thread::spawn(move || {
             let body = json!({"label": "Local", "agent": "codex", "model": "gpt-5", "base_url": "http://localhost:1"});
             done.send(setup::save(&config, &keys, &body).map(|_| ())).unwrap();
         })
     };
+    let behavior = {
+        let (config, done) = (config.clone(), done_tx);
+        std::thread::spawn(move || {
+            done.send(setup::save_agent_setting(&config, &json!({"key": "involvement", "value": "engineer"})).map(|_| ())).unwrap();
+        })
+    };
     let lock = config.with_extension("lock");
     let mut waiting = 0;
-    while waiting < 2 {
+    while waiting < 3 {
         waiting += usize::from(attempt_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() == lock);
     }
     assert!(done_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "a settings write ran while the lock was held");
     *setup::LOCK_ATTEMPT.lock().unwrap() = None;
     drop(held);
-    for _ in 0..2 {
+    for _ in 0..3 {
         done_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap();
     }
     language.join().unwrap();
     model.join().unwrap();
+    behavior.join().unwrap();
     let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
     assert_eq!(v["languages"]["rust"].as_bool(), Some(false));
     assert!(v["models"].as_array().unwrap().iter().any(|m| m["id"].as_str() == Some("local")));
+    assert_eq!(v["involvement"].as_str(), Some("engineer"));
     assert_eq!(v["task_timeout"].as_integer(), Some(42));
 }
 
@@ -2186,7 +2207,7 @@ fn a_resumed_brief_names_drafts_in_every_project() {
         .unwrap();
     let t = task(&web.root, &tid).unwrap();
     let run = json!({"id": "r1", "kind": "work", "state": "running"});
-    let brief = continuation_brief(&t, &run, true, &web.root, &web.root, false).0;
+    let brief = continuation_brief(&t, &run, true, &web.root, &web.root, false, "engineer", "standard", "balanced").0;
     assert!(brief.contains("Retained drafts") && brief.contains("view --draft d1 --project components"), "{brief}");
 }
 
@@ -2447,6 +2468,7 @@ fn a_second_run_without_a_solace_call_says_the_tool_was_missing() {
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["runs"][0]["state"], "ended");
     assert_eq!(t["runs"][0]["outcome"], NO_TOOL_MESSAGE);
+    assert_eq!(t["runs"][0]["failed"], true);
     assert_eq!(t["attention"]["reason"], NO_TOOL_MESSAGE);
     assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "solace" && n["text"] == NO_TOOL_MESSAGE));
     assert!(!t["runs"][0]["outcome"].as_str().unwrap().contains("without finishing"));
@@ -2534,4 +2556,379 @@ fn a_run_without_a_model_stops_when_it_starts() {
 fn setup_keeps_keys_beside_the_system_settings() {
     let config = crate::board::setup::config_path();
     assert_eq!(crate::board::setup::keys_path(), config.with_file_name("keys.json"));
+}
+
+/// The agent behavior route serves the defaults for missing or bad values and
+/// saves one choice, keeping the other system settings.
+#[test]
+fn agent_settings_api_serves_defaults_and_saves() {
+    let root = testing::Scratch::new();
+    let config = root.join("config.toml");
+    setup::with_config(&config, || {
+        let board = event_board(root.to_path_buf());
+        let defaults = json!({"involvement": "collaborator", "detail": "standard", "asking": "balanced"});
+        assert_eq!(board.projects_api("GET", "/agent-settings", &json!({})).unwrap(), defaults);
+        fs::write(&config, "task_timeout = 42\n").unwrap();
+        let saved = board.projects_api("POST", "/agent-settings", &json!({"key": "detail", "value": "thorough"})).unwrap();
+        assert_eq!(saved["detail"], "thorough");
+        assert_eq!(saved["involvement"], "collaborator");
+        let e = board.projects_api("POST", "/agent-settings", &json!({"key": "detail", "value": "verbose"})).unwrap_err();
+        assert_eq!(e.0, "E7001 detail must be concise, standard or thorough");
+        fs::write(&config, "involvement = \"boss\"\ndetail = 5\nasking = []\ntask_timeout = 42\n").unwrap();
+        assert_eq!(board.projects_api("GET", "/agent-settings", &json!({})).unwrap(), defaults);
+        let system = setup::system().unwrap();
+        assert_eq!(system["detail"], "standard");
+        assert!(!system["models"].as_array().unwrap().is_empty());
+        assert_eq!(board.projects_api("GET", "/languages", &json!({})).unwrap().as_array().unwrap().len(), 2);
+        let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(v["task_timeout"].as_integer(), Some(42));
+    });
+}
+
+/// The Strategy brief follows the involvement setting as every task brief does.
+#[test]
+fn strategy_briefs_speak_at_each_involvement_level() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let run = json!({"context":{"kind":"page"},"notes":[]});
+    let director = strategy_brief(&top, &run, "director", "standard", "balanced");
+    assert!(director.contains("How to talk to the human (Director)"), "{director}");
+    assert!(!director.contains("`task note`"), "{director}");
+    assert!(director.contains("`strategy note`") && director.contains("`### Calls made` heading"), "{director}");
+    assert!(!director.contains("Each question option"), "{director}");
+    assert!(!director.contains("(Collaborator)") && !director.contains("(Engineer)"), "{director}");
+    let collaborator = strategy_brief(&top, &run, "collaborator", "standard", "balanced");
+    assert!(collaborator.contains("How to talk to the human (Collaborator)"), "{collaborator}");
+    assert!(collaborator.contains("`strategy note`") && !collaborator.contains("`task note`"), "{collaborator}");
+    assert!(!collaborator.contains("(Director)"), "{collaborator}");
+    let engineer = strategy_brief(&top, &run, "engineer", "standard", "balanced");
+    assert!(!engineer.contains("How to talk to the human"), "{engineer}");
+    assert!(engineer.contains(super::strategy::STRATEGY_ROLE), "{engineer}");
+    for brief in [&director, &collaborator, &engineer] {
+        assert!(brief.contains(crate::board::briefs::UI_DETAILS_ASK), "{brief}");
+        assert!(
+            brief.contains("Write a task, feature or milestone body so it names only the user-interface behavior the human asked for"),
+            "{brief}"
+        );
+    }
+    let detailed = strategy_brief(&top, &run, "engineer", "thorough", "often");
+    assert!(detailed.contains("How much to write (Thorough)") && detailed.contains("When to ask (Often)"), "{detailed}");
+}
+
+fn review_run() -> (testing::Project, String) {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Review"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id": "r1", "kind": "review", "state": "running"}]);
+    tasks::put(&s, &t).unwrap();
+    (p, tid)
+}
+
+/// A fake task server: holds the serve lock, waits for one inbox message, then
+/// acts on it. It lets go of the lock after five seconds, so a broken test
+/// returns instead of waiting forever.
+fn fake_server(top: &Path, act: impl FnOnce(&Path, &Path) + Send + 'static) -> std::sync::mpsc::Receiver<()> {
+    let top = top.to_path_buf();
+    let (ready, waiting) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _lock = fsx::try_lock_file(&store_dir(&top).join("server.lock")).unwrap().unwrap();
+        ready.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let sent = std::fs::read_dir(store_dir(&top).join("inbox"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|x| x == "json"));
+            if let Some(sent) = sent {
+                act(&top, &sent);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    waiting
+}
+
+#[test]
+fn a_review_note_is_recorded_only_after_the_board_applies_it() {
+    let (p, tid) = review_run();
+    let s = open(&p.root).unwrap();
+    let server = fake_server(&s.root, |top, _| tasks::drain(top));
+    server.recv_timeout(Duration::from_secs(5)).unwrap();
+    let out =
+        task_command(&s, &tid, "r1", &["task", "note", "**Assessment: Looks good**"], &mut || Ok(String::new()), &[], vec![]).unwrap();
+    assert_eq!(out, "Recorded.\n");
+    let t = task(&s.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["outcome"], "reviewed");
+    let notes = t["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["author"], "agent");
+}
+
+#[test]
+fn a_review_note_the_board_sets_aside_is_refused() {
+    let (p, tid) = review_run();
+    let s = open(&p.root).unwrap();
+    let server = fake_server(&s.root, |top, sent| {
+        let failed = store_dir(top).join("inbox/failed");
+        std::fs::create_dir_all(&failed).unwrap();
+        std::fs::rename(sent, failed.join(sent.file_name().unwrap())).unwrap();
+    });
+    server.recv_timeout(Duration::from_secs(5)).unwrap();
+    let e = task_command(&s, &tid, "r1", &["task", "note", "feedback"], &mut || Ok(String::new()), &[], vec![]).unwrap_err().0;
+    let failed = store_dir(&s.root).join("inbox/failed");
+    let file = std::fs::read_dir(&failed).unwrap().next().unwrap().unwrap().path();
+    assert!(e.contains("set this note aside"), "{e}");
+    assert!(e.contains(file.file_name().unwrap().to_str().unwrap()), "{e}");
+    assert!(e.contains(".solace/tasks/inbox/failed"), "{e}");
+    assert!(!e.lines().any(|line| line.starts_with("Recorded")), "{e}");
+}
+
+#[test]
+fn a_review_note_without_a_server_is_queued() {
+    let (p, tid) = review_run();
+    let s = open(&p.root).unwrap();
+    let out = task_command(&s, &tid, "r1", &["task", "note", "feedback"], &mut || Ok(String::new()), &[], vec![]).unwrap();
+    assert_eq!(out, format!("{}\n", tasks::QUEUED));
+    assert_eq!(std::fs::read_dir(store_dir(&s.root).join("inbox")).unwrap().count(), 1);
+}
+
+#[test]
+fn a_batched_review_note_set_aside_is_not_recorded() {
+    let (p, tid) = review_run();
+    let s = open(&p.root).unwrap();
+    let server = fake_server(&s.root, |top, sent| {
+        let failed = store_dir(top).join("inbox/failed");
+        std::fs::create_dir_all(&failed).unwrap();
+        std::fs::rename(sent, failed.join(sent.file_name().unwrap())).unwrap();
+    });
+    server.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (out, failed) = batch(&["task diff", "task note"], 10_000, &mut |words: &[String], _: usize| -> Out {
+        let args: Vec<String> = words.to_vec();
+        with_root(&s.root, || {
+            with_context(&tid, "r1", || run_options(&args, &mut || Ok("**Assessment: Needs work**".to_string()), None, 10_000, &[]))
+        })
+    });
+    assert!(failed, "{out}");
+    assert!(out.contains("==== solace task note ===="), "{out}");
+    assert!(!out.lines().any(|line| line.starts_with("Recorded")), "{out}");
+    assert!(out.contains(".solace/tasks/inbox/failed"), "{out}");
+}
+
+/// D-218: a strategy brief carries every persona whole, as task briefs do.
+#[test]
+fn strategy_briefs_carry_personas() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let run = json!({"context":{"kind":"page"},"notes":[]});
+    assert!(!strategy_brief(&top, &run, "engineer", "standard", "balanced").contains("Personas ("));
+    let strategy = top.join(".solace/strategy");
+    std::fs::create_dir_all(&strategy).unwrap();
+    std::fs::write(
+        strategy.join("personas.json"),
+        concat!(
+            r#"{"personas":[{"name":"Ada","objectives":"Ship it.","tools":"A debugger.","#,
+            r#""concerns":"","other":""}],"retired":[]}"#
+        ),
+    )
+    .unwrap();
+    let brief = strategy_brief(&top, &run, "engineer", "standard", "balanced");
+    let section = concat!(
+        "\nPersonas (who the software is for, or who works on it, kept on the Strategy page; ",
+        "let them guide your choices):\nAda\n  Objectives: Ship it.\n  Tools: A debugger.\n"
+    );
+    assert!(brief.contains(section), "{brief}");
+}
+
+/// D-220: the roles route serves the one role list, with the run kinds each covers.
+#[test]
+fn roles_api_serves_the_role_set_and_run_kinds() {
+    let root = testing::Scratch::new();
+    let board = event_board(root.to_path_buf());
+    let roles = board.projects_api("GET", "/roles", &json!({})).unwrap();
+    let listed = roles.as_array().unwrap();
+    let ids: Vec<&str> = listed.iter().map(|role| role["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["strategist", "investigator", "worker", "reviewer", "coordinator"]);
+    for (kind, id) in [
+        ("strategy", "strategist"),
+        ("investigate", "investigator"),
+        ("discuss", "investigator"),
+        ("work", "worker"),
+        ("new_work", "worker"),
+        ("review", "reviewer"),
+    ] {
+        let found = listed.iter().find(|role| role["runs"].as_array().unwrap().iter().any(|run| run.as_str() == Some(kind)));
+        assert_eq!(found.map(|role| role["id"].as_str().unwrap()), Some(id), "{kind}");
+    }
+    let coordinator = listed.iter().find(|role| role["id"] == "coordinator").unwrap();
+    assert!(coordinator["runs"].as_array().unwrap().is_empty());
+    assert!(listed.iter().all(|role| role.get("model").is_none()));
+}
+
+/// D-27: Settings saves a skill file in the workspace's skills folder, lists
+/// the skills it manages, edits their roles, and refuses a bad skill without
+/// writing anything.
+#[test]
+fn skills_api_saves_lists_and_removes_role_skills() {
+    let root = testing::Scratch::new();
+    let board = event_board(root.to_path_buf());
+    assert_eq!(board.projects_api("GET", "/skills", &json!({})).unwrap(), json!([]));
+    let saved = board
+        .projects_api(
+            "POST",
+            "/skills",
+            &json!({"name":"house-review","description":"Review UI changes.","body":"Check contrast and focus.","roles":["reviewer"]}),
+        )
+        .unwrap();
+    assert_eq!(
+        saved,
+        json!([{"name":"house-review","description":"Review UI changes.","body":"Check contrast and focus.","roles":["reviewer"]}])
+    );
+    let file = root.join("skills/house-review.md");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("roles: reviewer") && text.contains("Check contrast and focus."), "{text}");
+    let edited = board
+        .projects_api(
+            "POST",
+            "/skills",
+            &json!({
+                "original":"house-review","name":"house-review","description":"Review UI changes.",
+                "body":"Check contrast and focus.","roles":["reviewer","worker"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(edited[0]["roles"], json!(["reviewer", "worker"]));
+    // A hand-written folder skill is not edited, and a saved name may not take its place.
+    fs::create_dir_all(root.join("skills/folder")).unwrap();
+    fs::write(root.join("skills/folder/SKILL.md"), "Folder skill\n").unwrap();
+    let general = root.join("skills/general.md");
+    fs::write(&general, "General rules\n").unwrap();
+    let before = fs::read_dir(root.join("skills")).unwrap().count();
+    let bad = [
+        json!({"name":"","description":"x","body":"x","roles":["reviewer"]}),
+        json!({"name":"empty","description":"x","body":"  ","roles":["reviewer"]}),
+        json!({"name":"long","description":"x","body":"x".repeat(1001),"roles":["reviewer"]}),
+        json!({"name":"../escape","description":"x","body":"x","roles":["reviewer"]}),
+        json!({"name":"README","description":"x","body":"x","roles":["reviewer"]}),
+        json!({"name":"two lines","description":"one\ntwo","body":"x","roles":["reviewer"]}),
+        json!({"name":"unknown","description":"x","body":"x","roles":["nobody"]}),
+        json!({"name":"folder","description":"x","body":"x","roles":["reviewer"]}),
+        json!({"name":"house-review","description":"x","body":"x","roles":["reviewer"]}),
+        json!({"original":"gone","name":"gone","description":"x","body":"x","roles":["reviewer"]}),
+    ];
+    for body in bad {
+        assert!(board.projects_api("POST", "/skills", &body).is_err(), "{body}");
+        assert_eq!(fs::read_dir(root.join("skills")).unwrap().count(), before, "{body}");
+    }
+    assert!(
+        board
+            .projects_api(
+                "POST",
+                "/skills",
+                &json!({"original":"general","name":"general","description":"x","body":"x","roles":["reviewer"]}),
+            )
+            .is_err(),
+        "a hand-written skill is not overwritten"
+    );
+    assert_eq!(fs::read_to_string(&general).unwrap(), "General rules\n");
+    assert!(board.projects_api("DELETE", "/skills/general", &json!({})).is_err(), "a hand-written skill is not deleted");
+    assert_eq!(fs::read_to_string(&general).unwrap(), "General rules\n");
+    assert_eq!(board.projects_api("DELETE", "/skills/house-review", &json!({})).unwrap(), json!([]));
+    assert!(!file.exists());
+    assert!(board.projects_api("DELETE", "/skills/folder", &json!({})).is_err(), "a folder skill is not deleted");
+    assert!(root.join("skills/folder/SKILL.md").is_file());
+}
+
+/// Role models are served for every role, save to the machine settings, come
+/// back after a restart, and a broken or unknown value is empty or kept
+/// without blocking the page.
+#[test]
+fn role_models_api_round_trips_and_falls_back() {
+    let root = testing::Scratch::new();
+    let config = root.join("config.toml");
+    setup::with_config(&config, || {
+        let board = event_board(root.to_path_buf());
+        let empty = board.projects_api("GET", "/role-models", &json!({})).unwrap();
+        let listed = empty.as_array().unwrap();
+        assert_eq!(listed.len(), 5);
+        assert!(listed.iter().all(|role| role["default"] == "" && role.get("backup").is_none()));
+        assert_eq!(listed.iter().find(|role| role["role"] == "worker").unwrap()["name"], "Worker");
+        let saved = board.projects_api("POST", "/role-models", &json!({"role": "worker", "default": "cc"})).unwrap();
+        let worker = saved.as_array().unwrap().iter().find(|role| role["role"] == "worker").unwrap();
+        assert_eq!(worker["default"].as_str(), Some("cc"));
+        assert!(worker.get("backup").is_none());
+        assert_eq!(board.projects_api("GET", "/role-models", &json!({})).unwrap(), saved);
+        let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(v["role_models"]["worker"]["default"].as_str(), Some("cc"));
+        assert!(v["role_models"]["worker"].get("backup").is_none());
+        let e = board.projects_api("POST", "/role-models", &json!({"role": "nobody", "default": "cc"})).unwrap_err();
+        assert_eq!(e.0, "E7001 role must be a known role");
+        let stale = board.projects_api("POST", "/role-models", &json!({"role": "reviewer", "default": "gone"})).unwrap();
+        let reviewer = stale.as_array().unwrap().iter().find(|role| role["role"] == "reviewer").unwrap();
+        assert_eq!(reviewer["default"], "gone");
+        fs::write(
+            &config,
+            concat!(
+                "task_timeout = 42\n",
+                "role_models = { worker = { default = 5, backup = \"\" }, ",
+                "reviewer = { default = \"kept\", backup = \"spare\" }, ",
+                "ghost = { default = \"x\" } }\n",
+            ),
+        )
+        .unwrap();
+        let broken = board.projects_api("GET", "/role-models", &json!({})).unwrap();
+        let listed = broken.as_array().unwrap();
+        assert_eq!(listed.len(), 5);
+        let worker = listed.iter().find(|role| role["role"] == "worker").unwrap();
+        assert_eq!(worker["default"].as_str(), Some(""));
+        assert!(worker.get("backup").is_none());
+        let reviewer = listed.iter().find(|role| role["role"] == "reviewer").unwrap();
+        assert_eq!(reviewer["default"].as_str(), Some("kept"));
+        assert!(reviewer.get("backup").is_none());
+        assert!(listed.iter().all(|role| role["role"] != "ghost"));
+        assert_eq!(setup::system().unwrap()["task_timeout"], 42, "other settings stay");
+        board.projects_api("POST", "/role-models", &json!({"role": "worker", "default": "new"})).unwrap();
+        let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(v["role_models"]["worker"]["default"].as_str(), Some("new"));
+        assert!(v["role_models"]["worker"].get("backup").is_none(), "an old backup is removed on save");
+    });
+}
+
+/// Changing a role's assignment changes later picks, never an open run's model.
+#[test]
+fn role_model_changes_leave_a_run_model_alone() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Keep"})).unwrap();
+    t["model"] = json!("first");
+    t["runs"] = json!([{"id":"r1","kind":"work","model":"first","effort":"","state":"running","started":1,"log":""}]);
+    tasks::put(&s, &t).unwrap();
+    let config_dir = testing::Scratch::new();
+    let config = config_dir.join("config.toml");
+    fs::write(&config, "role_models = { worker = { default = \"second\", backup = \"old\" } }\n").unwrap();
+    setup::with_config(&config, || {
+        let board = event_board(p.root.clone());
+        board.projects_api("POST", "/role-models", &json!({"role":"worker","default":"second"})).unwrap();
+        let got = api(&p.root, "GET", &format!("/tasks/{}", t["id"].as_str().unwrap()), json!({})).unwrap();
+        assert_eq!(got["model"], "first");
+        assert_eq!(got["runs"][0]["model"], "first");
+    });
+}
+
+#[test]
+fn a_review_that_recovered_from_a_transient_error_is_reviewed() {
+    let assessment = "**Assessment: Looks good**\n\n### Findings\n\nFine.";
+    let notice = json!({"type":"error","message":"Reconnecting... 1/5"});
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[notice, agent_says(assessment)]);
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, false, Duration::from_secs(3600), GRACEFUL_EXIT,)
+            .unwrap()
+    );
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["outcome"], "reviewed");
+    assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "agent" && n["run"] == "r1" && n["text"] == assessment));
+    assert!(t["attention"].is_null());
 }

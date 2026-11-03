@@ -73,7 +73,9 @@ pub type Model {
     /// Its details are `<solace-task>`, which loads them itself.
     selected_card: Option(#(String, String)),
     error: String,
-    notices: List(solace_task.Notice),
+    /// The toasts at the board's corner, each with whether it asked for the
+    /// human's attention when it was raised.
+    notices: List(Toast),
     caught_up: Bool,
     replay: List(String),
     collapsed: List(String),
@@ -508,7 +510,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
     DismissAll -> #(Model(..model, notices: []), effect.none())
     Dismiss(notice) -> #(
-      Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
+      Model(
+        ..model,
+        notices: list.filter(model.notices, fn(t) { t.notice != notice }),
+      ),
       effect.none(),
     )
     // `<solace-task>` shows the notice's tab and scrolls into view, now or
@@ -524,7 +529,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           },
           copy: #(model.copy.0 + 1, ""),
           reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
-          notices: list.filter(model.notices, fn(n) { n != notice }),
+          notices: list.filter(model.notices, fn(t) { t.notice != notice }),
         ),
       ),
       effect.none(),
@@ -601,6 +606,7 @@ pub fn view(model: Model) -> Element(Msg) {
         <> detail_band_styles
         <> selected_card_styles
         <> notice_styles
+        <> notice_attention_styles
         <> archive_styles
         <> waiting_styles,
     ),
@@ -613,7 +619,46 @@ pub fn view(model: Model) -> Element(Msg) {
     h.div(
       [a.class("notices")],
       list.append(
-        case list.length(model.notices) > 5 {
+        list.map(model.notices, fn(toast) {
+          let n = toast.notice
+          h.div(
+            [
+              a.class(case toast.attention {
+                True -> "notice needs-attention"
+                False -> "notice"
+              }),
+              a.role("alert"),
+            ],
+            [
+              h.strong([], [h.text(n.heading)]),
+              case n.id {
+                "" -> h.text("")
+                _ ->
+                  h.button([a.class("show"), e.on_click(Open(n))], [
+                    h.text(solace_task.ui_label("show_task")),
+                  ])
+              },
+              h.button(
+                [
+                  a.class("close"),
+                  a.attribute("aria-label", solace_task.ui_label("dismiss")),
+                  a.title(solace_task.ui_label("dismiss")),
+                  e.on_click(Dismiss(n)),
+                ],
+                [
+                  svg.svg(
+                    [
+                      a.attribute("viewBox", "0 0 24 24"),
+                      a.attribute("aria-hidden", "true"),
+                    ],
+                    [svg.path([a.attribute("d", "M6 6l12 12M18 6L6 18")])],
+                  ),
+                ],
+              ),
+            ],
+          )
+        }),
+        case list.length(model.notices) >= 3 {
           True -> [
             h.button([a.class("close-all"), e.on_click(DismissAll)], [
               h.text(solace_task.ui_label("close_all")),
@@ -621,35 +666,6 @@ pub fn view(model: Model) -> Element(Msg) {
           ]
           False -> []
         },
-        list.map(model.notices, fn(n) {
-          h.div([a.class("notice"), a.role("alert")], [
-            h.strong([], [h.text(n.heading)]),
-            case n.id {
-              "" -> h.text("")
-              _ ->
-                h.button([a.class("show"), e.on_click(Open(n))], [
-                  h.text(solace_task.ui_label("show_task")),
-                ])
-            },
-            h.button(
-              [
-                a.class("close"),
-                a.attribute("aria-label", solace_task.ui_label("dismiss")),
-                a.title(solace_task.ui_label("dismiss")),
-                e.on_click(Dismiss(n)),
-              ],
-              [
-                svg.svg(
-                  [
-                    a.attribute("viewBox", "0 0 24 24"),
-                    a.attribute("aria-hidden", "true"),
-                  ],
-                  [svg.path([a.attribute("d", "M6 6l12 12M18 6L6 18")])],
-                ),
-              ],
-            ),
-          ])
-        }),
       ),
     ),
     h.div(
@@ -1060,7 +1076,7 @@ button:disabled{color:var(--soft)}a:focus-visible,summary:focus-visible{outline:
 .card::after{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
 .card:hover{background:var(--hover)}.card+.card{margin-top:8px}
 .attention{font-weight:700}.stamp{margin-right:6px}
-.debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}.card:has(.debt){--tab:var(--test)}
+.debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
 
 .notices .notice{background:var(--ink);color:var(--paper);box-shadow:4px 8px 24px var(--shadow)}.notice .close{color:var(--paper)}
@@ -1316,10 +1332,7 @@ const waiting_styles =
 
 /// Whether a live update raised a notice: the host hears `attention`, which
 /// flags the Board tab while another page shows. `live` only adds notices.
-pub fn raised(
-  old: List(solace_task.Notice),
-  new: List(solace_task.Notice),
-) -> Bool {
+pub fn raised(old: List(Toast), new: List(Toast)) -> Bool {
   list.length(new) > list.length(old)
 }
 
@@ -1787,19 +1800,24 @@ fn unreadable_tasks(
     let #(id, title) = label
     let heading = unreadable_heading(model, dir, title, id)
     case
-      list.any(model.notices, fn(n) { is_unreadable_notice(model, dir, id, n) })
+      list.any(model.notices, fn(t) {
+        is_unreadable_notice(model, dir, id, t.notice)
+      })
     {
       True -> model
       False ->
         Model(
           ..model,
           notices: list.append(model.notices, [
-            solace_task.Notice(
-              heading,
-              unreadable_text(model, dir, id),
-              dir,
-              id,
-              "details",
+            Toast(
+              notice: solace_task.Notice(
+                heading,
+                unreadable_text(model, dir, id),
+                dir,
+                id,
+                "details",
+              ),
+              attention: False,
             ),
           ]),
         )
@@ -1872,18 +1890,19 @@ fn task_notices(
   model: Model,
   lane: Lane,
   task: solace_task.Task,
-) -> List(solace_task.Notice) {
+) -> List(Toast) {
   case list.find(lane.tasks, fn(t) { t.id == task.id }) {
     Error(_) -> []
     Ok(old) ->
       solace_task.notices(old, task)
       |> list.map(fn(n) {
         let n = solace_task.Notice(..n, dir: lane.dir)
-        case model.workspace {
+        let n = case model.workspace {
           True ->
             solace_task.Notice(..n, heading: lane.label <> ": " <> n.heading)
           False -> n
         }
+        Toast(notice: n, attention: needs_attention(old, task, n))
       })
   }
 }
@@ -1976,4 +1995,66 @@ fn unreadable_prefix(model: Model, dir: String) -> String {
     True, Ok(lane) -> lane.label <> ": Can't read "
     _, _ -> "Can't read "
   }
+}
+
+/// A notice that asks the human for an answer is framed in the attention
+/// color the rest of the board uses.
+const notice_attention_styles =
+  ".notices .notice.needs-attention{border:2px solid var(--warn-text)}"
+
+/// Whether the update that raised `notice` asks the human for an answer: a
+/// question, a failed run, or a discussion waiting on the human. A question
+/// is its own tab; a run records its failure, and the task's change tells
+/// whether a discussion waits.
+fn needs_attention(
+  old: solace_task.Task,
+  task: solace_task.Task,
+  notice: solace_task.Notice,
+) -> Bool {
+  case notice.tab {
+    "questions" -> True
+    _ ->
+      failed_run_notice(old, task)
+      || waiting_discussion_notice(old, task, notice)
+  }
+}
+
+/// A notice at the board's corner and whether it needs the human's
+/// attention. The flag is fixed when the notice is raised, so a later task
+/// update can't add or remove the border.
+pub type Toast {
+  Toast(notice: solace_task.Notice, attention: Bool)
+}
+
+/// Whether a run that ended in this update failed.
+fn failed_run_notice(old: solace_task.Task, task: solace_task.Task) -> Bool {
+  list.any(task.runs, fn(r) { newly_ended(old, r) && r.failed })
+}
+
+/// Whether `notice` is the agent's reply that left a discussion waiting.
+fn waiting_discussion_notice(
+  old: solace_task.Task,
+  task: solace_task.Task,
+  notice: solace_task.Notice,
+) -> Bool {
+  notice.tab == "notes"
+  && list.any(task.runs, fn(r) {
+    r.kind == "discuss"
+    && newly_waiting(old, r)
+    && list.any(task.notes, fn(n) {
+      n.author == "agent" && n.run == r.id && n.text == notice.text
+    })
+  })
+}
+
+/// Whether `run` ended in this update.
+fn newly_ended(old: solace_task.Task, run: solace_task.Run) -> Bool {
+  run.state == "ended"
+  && !list.any(old.runs, fn(o) { o.id == run.id && o.state == "ended" })
+}
+
+/// Whether `run` started waiting in this update.
+fn newly_waiting(old: solace_task.Task, run: solace_task.Run) -> Bool {
+  run.state == "waiting"
+  && !list.any(old.runs, fn(o) { o.id == run.id && o.state == "waiting" })
 }

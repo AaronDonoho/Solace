@@ -146,9 +146,7 @@ pub(crate) fn place(d: &Diag) -> String {
 /// An error's title and the compiler's note at its caret, e.g. "Incorrect
 /// arity: Expected 6 arguments, got 5".
 fn error_message(d: &Diag) -> String {
-    let title = d.text.lines().next().unwrap_or("").trim_start_matches("error:").trim();
-    let note = d.text.lines().rev().find_map(|l| l.rsplit_once('^')).map_or("", |(_, n)| n.trim());
-    if note.is_empty() { title.to_string() } else { format!("{title}: {note}") }
+    error_kind(&d.text)
 }
 
 /// The source line an error is at, from its excerpt.
@@ -304,4 +302,46 @@ pub(crate) struct SuggestionSpan {
     pub(crate) column_start: usize,
     pub(crate) column_end: usize,
     pub(crate) replacement: Option<String>,
+}
+
+/// The errors not in a project's stored broken set: a save's dependent check
+/// compares against what was already broken there. An error is new when its
+/// symbol and kind were not stored, so a different error on a broken symbol is
+/// still new. An error with no symbol is always new (D-103, D-117).
+pub(crate) fn new_errors<'a>(before: &HashMap<String, String>, diags: &'a [Diag]) -> Vec<&'a Diag> {
+    diags
+        .iter()
+        .filter(|d| d.error)
+        .filter(|d| match d.symbol.as_ref().and_then(|s| before.get(s)) {
+            Some(stored) => !stored_has_kind(stored, d),
+            None => true,
+        })
+        .collect()
+}
+
+/// An error's title and the compiler's note at its caret, e.g. "Incorrect
+/// arity: Expected 6 arguments, got 5". A moved error keeps its kind.
+pub(crate) fn error_kind(text: &str) -> String {
+    let (title, note) = title_and_note(text);
+    if note.is_empty() { title.to_string() } else { format!("{title}: {note}") }
+}
+
+/// Whether `stored`, one symbol's diagnostics, already holds this error's
+/// title and caret note. A moved line keeps them; a different error does not.
+fn stored_has_kind(stored: &str, d: &Diag) -> bool {
+    let (title, note) = title_and_note(&d.text);
+    stored.lines().any(|line| strip_error_prefix(line) == title) && (note.is_empty() || stored.contains(note))
+}
+
+/// An error's title, without the `error:` prefix, and the compiler's note at
+/// its caret, if any. A stored error keeps both when its line moves.
+fn title_and_note(text: &str) -> (&str, &str) {
+    let title = strip_error_prefix(text.lines().next().unwrap_or(""));
+    let note = text.lines().rev().find_map(|l| l.rsplit_once('^')).map_or("", |(_, n)| n.trim());
+    (title, note)
+}
+
+/// A diagnostic line without its `error:` prefix and surrounding space.
+fn strip_error_prefix(line: &str) -> &str {
+    line.trim_start_matches("error:").trim()
 }

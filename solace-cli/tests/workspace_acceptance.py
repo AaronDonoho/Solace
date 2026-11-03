@@ -10,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+from acceptance_wait import wait_for
+
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = str(Path(__file__).with_name('fake_agent.py'))
 BWRAP = shutil.which('bwrap') is not None and subprocess.run(['bwrap', '--dev-bind', '/', '/', 'true'], capture_output=True).returncode == 0
@@ -33,7 +35,7 @@ def cargo_package(path, name='pkg', body='fn main() {}\n'):
 
 class Root(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='solace-root-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='solace-root-', ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)/'fixture'
         self.root.mkdir()
@@ -564,6 +566,7 @@ class Root(unittest.TestCase):
         self.assertEqual(self.next_event(events)[1], {'milestones': []})
         self.assertEqual(self.next_event(events)[1], {'features': []})
         self.assertEqual(self.next_event(events)[1]['vision']['text'], '')
+        self.assertEqual(self.next_event(events)[1], {'personas': []})
         self.assertEqual(self.next_event(events)[1], {'strategyRuns': []})
         # D-129: the tasks with no project follow the runs, marked.
         self.assertEqual(self.next_event(events)[1], {'noProject': True, 'tasks': []})
@@ -598,7 +601,7 @@ class Root(unittest.TestCase):
         # D-87: the root's records are not a project's; its stream and routes leave them out.
         keys = set(data)
         while (e := self.next_event(single))[0] != 'ready': keys |= set(e[1])
-        self.assertFalse(keys & {'milestones', 'features', 'milestone', 'feature', 'vision', 'strategyRuns', 'strategyRun'}, keys)
+        self.assertFalse(keys & {'milestones', 'features', 'milestone', 'feature', 'vision', 'personas', 'strategyRuns', 'strategyRun'}, keys)
         self.refused('GET', '/p/a/milestones', None, 'unknown route')
         self.refused('GET', '/p/a/vision', None, 'unknown route')
         self.refused('GET', '/p/a/strategy/runs', None, 'unknown route')
@@ -858,7 +861,7 @@ class Root(unittest.TestCase):
             ident, data = self.next_event(events)
             if ident == 'ready': break
             # D-87: the root's records come with the snapshot, with no project to name.
-            if 'milestones' in data or 'features' in data or 'vision' in data or 'strategyRuns' in data or data.get('noProject'): continue
+            if 'milestones' in data or 'features' in data or 'vision' in data or 'personas' in data or 'strategyRuns' in data or data.get('noProject'): continue
             projects.add(data['project'])
         self.assertEqual(projects, {'.', 'frontend'})
         # The root project's agents can't reach into the project below it, only read it.
@@ -1052,7 +1055,8 @@ class Root(unittest.TestCase):
                 self.assertIn('You are in a (alpha).', replies[0])
                 self.assertIn('Read only: b (beta), . (the root).', replies[0])
                 self.assertIn('(`--project b`)', replies[0])
-                self.assertIn('ask the human with `task ask` to add that project', replies[0])
+                self.assertIn("name each project's folder exactly as the task's scope lists it", replies[0])
+                self.assertIn('Scope tab', replies[0])
             self.assertIn('pub fn answer() { 42 }', replies[1])
             self.assertIn('The answer', replies[2])
             # A task changes the projects it covers (D-61): a's doesn't cover b; b's own is b.
@@ -1113,9 +1117,7 @@ class Root(unittest.TestCase):
         self.assertIn('- D-1 First thing', prompt); self.assertIn('`read DECISIONS.md --lines a..b`', prompt)
         self.assertNotIn('folder of projects', prompt)
         self.assertEqual(self.api('POST', f'/strategy/runs/{rid}/end')['outcome'], 'planned')
-        end = time.monotonic() + 10
-        while not (self.root/'.solace'/(rid + '.exited')).exists() and time.monotonic() < end: time.sleep(.05)
-        self.assertTrue((self.root/'.solace'/(rid + '.exited')).exists())
+        self.assertTrue(wait_for(self.root/'.solace'/(rid + '.exited'), 10))
 
     def test_a_question_is_alone_in_its_call_and_a_settings_reason_is_part_of_it(self):
         # A note beside a question is refused with nothing recorded; the why goes in `reason`.
@@ -1207,7 +1209,10 @@ class Root(unittest.TestCase):
             value = self.wait('/p/a', t, lambda x:x['runs'][-1]['state']=='ended')
             rid = value['runs'][-1]['id']
             prompt = (self.root/'a/.solace'/(rid+'.prompt')).read_text()
-            replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid+'.responses')).read_text().splitlines()]
+            responses = self.root/'a/.solace'/(rid+'.responses')
+            exited = self.root/'a/.solace'/(rid+'.exited')
+            self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+            replies = [json.loads(l)['result']['content'][0]['text'] for l in responses.read_text().splitlines()]
             return prompt, replies
         review([{'command':'task note baseline'}])
         self.api('PATCH', url, {'body':json.dumps([

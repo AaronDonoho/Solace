@@ -22,7 +22,7 @@ fn the_skills_folder_lists_each_skill_by_name_description_and_path() {
             ("plain", "Plain style", "skills/plain.md"),
         ]
     );
-    let s = section(&root);
+    let s = section_for(&[&root], Some(&root), "work");
     assert!(s.contains("\nSkills (the project's house rules"), "{s}");
     assert!(s.contains("- impeccable: Design direction for apps: layout, color and type. (`read skills/impeccable/SKILL.md`)"), "{s}");
     assert!(s.contains("- plain: Plain style (`read skills/plain.md`)"), "{s}");
@@ -34,7 +34,7 @@ fn the_skills_folder_lists_each_skill_by_name_description_and_path() {
 #[test]
 fn a_project_without_skills_has_no_section() {
     let root = Scratch::new().with(&[("README.md", "x\n")]);
-    assert!(list(&root).is_empty() && section(&root).is_empty());
+    assert!(list(&root).is_empty() && section_for(&[&root], Some(&root), "work").is_empty());
 }
 
 /// A CRLF skill file: the body starts after the closing `---` line, so a
@@ -64,5 +64,36 @@ fn the_skills_key_overrides_the_default_folder() {
     let skills = list(&root);
     let shown: Vec<&str> = skills.iter().map(|s| s.path.as_str()).collect();
     assert_eq!(shown, vec!["house/x.md"]);
-    assert!(section(&root).contains("- x: X rules. (`read house/x.md`)"), "{}", section(&root));
+    let shown = section_for(&[&root], Some(&root), "work");
+    assert!(shown.contains("- x: X rules. (`read house/x.md`)"), "{shown}");
+}
+
+/// D-27: a skill with roles reaches only that role's brief, in full; a skill
+/// with no roles stays one line for every role.
+#[test]
+fn role_skills_reach_only_their_role_in_full() {
+    let root = Scratch::new().with(&[
+        ("skills/review.md", "---\nname: review\ndescription: Review UI.\nroles: reviewer\n---\nCheck contrast.\n"),
+        ("skills/work.md", "---\nname: work\ndescription: Work style.\nroles: worker, reviewer\n---\nKeep it small.\n"),
+        ("skills/folder/SKILL.md", "---\nname: folder\ndescription: A folder skill.\nroles: reviewer\n---\nFolder rules.\n"),
+        ("skills/general.md", "General rules\nKeep it simple.\n"),
+        ("skills/nobody.md", "---\nname: nobody\ndescription: Nobody's rules.\nroles:\n---\nNothing.\n"),
+    ]);
+    let review = section_for(&[&root], Some(&root), "review");
+    assert!(review.contains("### review") && review.contains("Check contrast."), "{review}");
+    assert!(review.contains("### work") && review.contains("Keep it small."), "{review}");
+    assert!(review.contains("- general: General rules (`read skills/general.md`)"), "{review}");
+    assert!(review.contains("- nobody: Nobody's rules. (`read skills/nobody.md`)"), "{review}");
+    let work = section_for(&[&root], Some(&root), "work");
+    assert!(work.contains("### work") && !work.contains("### review") && !work.contains("Check contrast."), "{work}");
+    assert!(work.contains("- general: General rules"), "{work}");
+    let investigation = section_for(&[&root], Some(&root), "investigate");
+    assert!(!investigation.contains("### work") && !investigation.contains("### review"), "{investigation}");
+    assert!(investigation.contains("- general: General rules"), "{investigation}");
+    let api = api(&root);
+    assert_eq!(api.as_array().unwrap().len(), 2, "Settings manages only skills with roles: {api}");
+    assert!(
+        api.as_array().unwrap().iter().all(|skill| skill["name"] != "general" && skill["name"] != "folder" && skill["name"] != "nobody"),
+        "Settings manages only single-file skills with roles: {api}"
+    );
 }

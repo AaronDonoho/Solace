@@ -224,7 +224,9 @@ impl Store {
         {
             return Err(Failure(format!("E6013 {why}"), 1));
         }
-        let mut argv = vec![self.lang().tool().to_string()];
+        let tool = self.lang().tool();
+        let program = crate::language::tool_path(tool).unwrap_or_else(|| PathBuf::from(tool));
+        let mut argv = vec![program.to_string_lossy().into_owned()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
         let text = command(&self.root, &argv, 120, usize::MAX, false, false)?;
@@ -243,46 +245,8 @@ impl Store {
     /// Type-checks the project and records which symbols are broken, with
     /// their errors, so the next reply can report only what changed (D-46).
     pub(crate) fn check_all(&self, ix: &Index) -> Result<Vec<crate::diagnostics::Diag>, Failure> {
-        if let Some(id) = crate::language::id(&self.root)
-            && let Some(why) = crate::language::reason(id)?
-        {
-            return Err(Failure(format!("E6013 {why}"), 1));
-        }
-        let files = self.materialize(ix)?;
-        self.refuse_drift(ix)?;
-        let diags = if crate::language::is_rust(&self.root) {
-            let args = crate::language::cargo::check_args(&self.root);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let (passed, output) = self.cargo(&argv, 120)?;
-            let mut diags = crate::language::cargo::diagnostics_for(&self.root, &output, &files);
-            // A build script that fails this way (no network, a refused
-            // write) is cargo's exit with no located diagnostic, so the
-            // check must add it or it would report a pass (D-158 point 4).
-            if !passed && !diags.iter().any(|d| d.error) {
-                diags.push(crate::diagnostics::Diag {
-                    error: true,
-                    module: None,
-                    symbol: None,
-                    text: crate::language::cargo::failure_text(&output),
-                    suggestions: vec![],
-                });
-            }
-            diags
-        } else {
-            let (_, output) = self.tool(&["check"])?;
-            self.lang().diagnostics(&output, &files)
-        };
-        self.db.execute("DELETE FROM broken", [])?;
-        for d in diags.iter().filter(|d| d.error) {
-            if let Some(sym) = &d.symbol {
-                self.db.execute(
-                    "INSERT INTO broken VALUES (?1, ?2) ON CONFLICT(symbol) DO UPDATE SET diagnostic = \
-                     diagnostic || char(10, 10) || excluded.diagnostic",
-                    params![sym, d.text],
-                )?;
-            }
-        }
-        self.record_warnings(&diags)?;
+        let diags = self.diagnose(ix)?;
+        self.record_diagnostics(&diags)?;
         Ok(diags)
     }
     /// The broken symbols as last checked, each with its errors.
@@ -488,10 +452,187 @@ impl Store {
         self.history(id, "edit", name)
     }
 
+    /// The module whose path is exactly `input`: creating a module must not
+    /// land on one that only matches by suffix.
+    pub(crate) fn resolve_module_exact<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a crate::ModuleRow> {
+        crate::store::module_exact(ix, input)
+    }
+
+    /// Type-checks without recording the result: a save reads a dependent
+    /// project it must not change, and compares against that project's stored
+    /// broken set.
+    pub(crate) fn diagnose(&self, ix: &Index) -> Result<Vec<crate::diagnostics::Diag>, Failure> {
+        if let Some(id) = crate::language::id(&self.root)
+            && let Some(why) = crate::language::reason(id)?
+        {
+            return Err(Failure(format!("E6013 {why}"), 1));
+        }
+        let files = self.materialize(ix)?;
+        self.refuse_drift(ix)?;
+        let diags = if crate::language::is_rust(&self.root) {
+            let args = crate::language::cargo::check_args(&self.root);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (passed, output) = self.cargo(&argv, 120)?;
+            let mut diags = crate::language::cargo::diagnostics_for(&self.root, &output, &files);
+            // A build script that fails this way (no network, a refused
+            // write) is cargo's exit with no located diagnostic, so the
+            // check must add it or it would report a pass (D-158 point 4).
+            if !passed && !diags.iter().any(|d| d.error) {
+                diags.push(crate::diagnostics::Diag {
+                    error: true,
+                    module: None,
+                    symbol: None,
+                    text: crate::language::cargo::failure_text(&output),
+                    suggestions: vec![],
+                });
+            }
+            diags
+        } else {
+            let (_, output) = self.tool(&["check"])?;
+            self.lang().diagnostics(&output, &files)
+        };
+        Ok(diags)
+    }
+
+    fn record_diagnostics(&self, diags: &[crate::diagnostics::Diag]) -> Result<(), Failure> {
+        self.db.execute("DELETE FROM broken", [])?;
+        for d in diags.iter().filter(|d| d.error) {
+            if let Some(sym) = &d.symbol {
+                self.db.execute(
+                    "INSERT INTO broken VALUES (?1, ?2) ON CONFLICT(symbol) DO UPDATE SET diagnostic = \
+                     diagnostic || char(10, 10) || excluded.diagnostic",
+                    params![sym, d.text],
+                )?;
+            }
+        }
+        self.record_warnings(diags)?;
+        Ok(())
+    }
+
+    /// A save checks the projects that depend on this one. A dependent the task
+    /// cannot change refuses the save; one it covers is named in the reply, so
+    /// `task done` waits until a later save fixes it. The caller remembers the
+    /// baseline only after the save commits.
+    pub(crate) fn check_dependents(&self) -> Result<DependentCheck, Failure> {
+        let top = crate::scope::top(&self.root);
+        let allowed = crate::scope::of_run(&self.root).unwrap_or_default();
+        let (mut refused, mut covered, mut baseline) = (vec![], vec![], vec![]);
+        for (dir, new, all) in self.dependent_errors_since()? {
+            if new.is_empty() {
+                continue;
+            }
+            let in_task = crate::scope::covers(&top, &allowed, &dir);
+            let shown: Vec<&str> = new.iter().take(5).map(|e| e.text.as_str()).collect();
+            let more = if new.len() > 5 { format!("\n… {} more", new.len() - 5) } else { String::new() };
+            let listed = format!("{}{more}", shown.join("\n\n"));
+            if in_task {
+                let plural = if new.len() == 1 { "" } else { "s" };
+                covered
+                    .push(format!("{dir} has {} new error{plural} from this change; fix them before `task done`:\n\n{listed}", new.len()));
+                let existing: Vec<(String, String)> = all
+                    .into_iter()
+                    .filter(|old| !new.iter().any(|new| new.symbol == old.symbol && new.kind == old.kind))
+                    .map(|e| (e.symbol, e.kind))
+                    .collect();
+                baseline.push((dir, existing));
+            } else {
+                refused.push(format!(
+                    "{dir} is not in the task: ask the human to add {dir} to the task, or change the code that broke it.\n\n{listed}"
+                ));
+            }
+        }
+        if !refused.is_empty() {
+            return Err(Failure(
+                format!(
+                    "E5003 a project that depends on this one has new errors, and a save checks another project only when \
+                     the task covers it; nothing was saved.\n\n{}",
+                    refused.join("\n\n")
+                ),
+                1,
+            ));
+        }
+        let message = if covered.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}\nThe task cannot finish until these errors are fixed.\n", covered.join("\n\n"))
+        };
+        Ok(DependentCheck { message, baseline })
+    }
+
+    /// The new and current errors in the workspace projects that depend on this
+    /// one by path. New errors are those outside the dependent's stored broken
+    /// set, by symbol and kind, so another error on an already broken symbol is
+    /// new. A project that cannot be read names itself in the failure.
+    pub(crate) fn dependent_errors_since(&self) -> Result<Vec<(String, Vec<DependentError>, Vec<DependentError>)>, Failure> {
+        let top = crate::scope::top(&self.root);
+        let members = crate::workspace::members(&top).unwrap_or_default();
+        let mut out = vec![];
+        for root in crate::extract::deps::dependents(&top, &self.root, &members) {
+            let dir = crate::scope::dir(&top, &root);
+            let check = (|| -> Result<Option<(Vec<DependentError>, Vec<DependentError>)>, Failure> {
+                let dep = crate::Store::at(&root)?;
+                let before = dep.broken()?;
+                let diags = dep.diagnose(&dep.index()?)?;
+                let error = |d: &crate::diagnostics::Diag| DependentError {
+                    symbol: d.symbol.clone().unwrap_or_else(|| d.text.clone()),
+                    kind: crate::diagnostics::error_kind(&d.text),
+                    text: match &d.symbol {
+                        Some(s) => format!("{s}: {}", d.text),
+                        None => d.text.clone(),
+                    },
+                };
+                let new: Vec<DependentError> = crate::diagnostics::new_errors(&before, &diags).into_iter().map(error).collect();
+                let all: Vec<DependentError> = diags.iter().filter(|d| d.error).map(error).collect();
+                Ok((!new.is_empty() || !all.is_empty()).then_some((new, all)))
+            })();
+            match check {
+                Ok(Some((new, all))) => out.push((dir, new, all)),
+                Ok(None) => {}
+                Err(Failure(message, code)) => return Err(Failure(format!("{dir}: {message}"), code)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keeps the errors a covered dependent had before this task first reported
+    /// it, so a later fixing save cannot make them look like this task's errors.
+    pub(crate) fn remember_dependent_errors(&self, baseline: &[(String, Vec<(String, String)>)]) -> Result<(), Failure> {
+        if baseline.is_empty() {
+            return Ok(());
+        }
+        let Some((tid, _)) = crate::board::runs::context() else { return Ok(()) };
+        let baseline = baseline.to_vec();
+        let root = self.root.clone();
+        crate::tasks::update(&root, &tid, move |t| {
+            if !t["dependent_errors"].is_object() {
+                t["dependent_errors"] = serde_json::json!({});
+            }
+            let saved = t["dependent_errors"].as_object_mut().unwrap();
+            for (dir, errors) in baseline {
+                saved.entry(dir).or_insert_with(|| serde_json::json!(errors));
+            }
+            Ok(())
+        })
+    }
+
 }
 
 /// Whether `table` has the column `col`.
 fn has_column(db: &Connection, table: &str, col: &str) -> Result<bool, Failure> {
     Ok(db.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?1"), params![col], |r| r.get(0))?)
+}
+
+/// An error in a dependent project, as the save and `task done` compare it.
+pub(crate) struct DependentError {
+    pub(crate) symbol: String,
+    pub(crate) kind: String,
+    pub(crate) text: String,
+}
+
+/// A save's dependent check: what to tell the agent, and the errors to remember
+/// on the task once the save commits.
+pub(crate) struct DependentCheck {
+    pub(crate) message: String,
+    pub(crate) baseline: Vec<(String, Vec<(String, String)>)>,
 }
 

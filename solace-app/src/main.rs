@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod workspaces;
+mod supervisor;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -52,11 +53,7 @@ fn running_port(root: &Path) -> Option<u16> {
 
 /// Whether a Solace server answers on `port`.
 fn answers(port: u16) -> bool {
-    let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2)) else { return false };
-    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-    let req = format!("GET /projects HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-    let mut head = [0u8; 12];
-    s.write_all(req.as_bytes()).is_ok() && s.read_exact(&mut head).is_ok() && head.ends_with(b"200")
+    http_ok(port, "/projects")
 }
 
 /// Variables an AppImage's runtime sets for its bundled GTK, WebKit and
@@ -108,8 +105,9 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
         cmd.env("PATH", path);
     }
     // The server ends with the app, even when the app is killed or crashes.
-    // The signal follows the spawning thread, Tauri's main thread for a
-    // sync command, and survives the server's `exec` restart.
+    // The signal follows the thread that spawns it, and survives the server's
+    // `exec` restart, so it must be spawned from a thread that lives as long
+    // as the app (`open_project`'s command thread or `supervisor`'s own).
     #[cfg(target_os = "linux")]
     // SAFETY: `pre_exec` runs in the forked child; the calls below are
     // async-signal-safe and only set the parent-death signal.
@@ -163,6 +161,9 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
 /// agents are in their own groups; the next `serve` recovers them.
 fn stop(child: Option<Child>) {
     if let Some(mut child) = child {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
         // SAFETY: `child` is a process this app spawned and has not reaped,
         // so its id is live and SIGTERM is valid for it.
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
@@ -210,47 +211,22 @@ fn show(
 fn open_project(app: AppHandle, root: String, mode: String) -> Result<u16, String> {
     let root = normalize_root(PathBuf::from(root));
     let server = app.state::<workspaces::Server>();
-    let mut switching = false;
-    let mut fresh = false;
-    let port = if let Some(port) = running_port(&root) {
-        match workspaces::workspace_port(&server, &root) {
-            Some(existing) => {
-                switching = existing != port;
-                if switching {
-                    workspaces::set_workspace_port(&server, &root, port);
+    open(
+        &server,
+        &root,
+        &mode,
+        open_steps(
+            running_port,
+            start_server,
+            stop,
+            |root, port, mode, switching| show(&app, root, port, mode, switching),
+            || {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
                 }
-            }
-            None => {
-                workspaces::set_workspace_server(&server, &root, None, port);
-            }
-        }
-        port
-    } else {
-        let (child, port) = match spawn(&root, PREFERRED_PORT) {
-            Err(e) if e.contains("in use") || e.contains("Address") => spawn(&root, 0)?,
-            other => other?,
-        };
-        stop(workspaces::set_workspace_server(
-            &server,
-            &root,
-            Some(child),
-            port,
-        ));
-        switching = true;
-        fresh = true;
-        port
-    };
-    let shown = show(&app, &root, port, &mode, switching);
-    let (shown, child) = workspaces::finish_open(&server, &root, fresh, shown);
-    stop(child);
-    shown?;
-    if mode == "browser" {
-        workspaces::mark_browser(&server, &root);
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
-    Ok(port)
+            },
+        ),
+    )
 }
 
 fn main() {
@@ -293,6 +269,7 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            supervisor::start(app.handle().clone());
             Ok(())
         })
         // A board window really closes, stopping its server unless a browser
@@ -499,5 +476,405 @@ fn root_normalization_test() {
 fn stop_workspaces(server: &workspaces::Server) {
     for child in workspaces::stop_all(server) {
         stop(child);
+    }
+}
+
+fn health(port: u16) -> Health {
+    match http_status(port, "/health") {
+        Some(200) => Health::Healthy,
+        Some(503) => Health::Busy,
+        // A server built before the health route still answers `/projects`.
+        Some(404) if answers(port) => Health::Healthy,
+        _ => Health::Unanswered,
+    }
+}
+
+fn http_ok(port: u16, path: &str) -> bool {
+    http_status(port, path) == Some(200)
+}
+
+/// Starts a server on `port`, falling back to any free port when it is taken.
+fn start_server(root: &Path, port: u16) -> Result<(Child, u16), String> {
+    match spawn(root, port) {
+        Err(e) if e.contains("in use") || e.contains("Address") => spawn(root, 0),
+        other => other,
+    }
+}
+
+#[test]
+fn http_ok_reads_the_reply_status() {
+    assert!(http_ok(serve_routes(|_| "200 OK", 1), "/health"));
+    assert!(!http_ok(
+        serve_routes(|_| "503 Service Unavailable", 1),
+        "/health"
+    ));
+    assert!(!http_ok(serve_routes(|_| "404 Not Found", 1), "/health"));
+    assert!(answers(serve_routes(|_| "200 OK", 1)));
+}
+
+/// What a Solace server on a port says about its task server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Health {
+    Healthy,
+    /// The task server is still working on an operation; leave it alone.
+    Busy,
+    /// No reply, or the task server has stopped.
+    Unanswered,
+}
+
+fn http_status(port: u16, path: &str) -> Option<u16> {
+    let timeout = Duration::from_secs(2);
+    let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), timeout).ok()?;
+    s.set_read_timeout(Some(timeout)).ok()?;
+    let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let mut head = [0u8; 12];
+    s.write_all(req.as_bytes()).ok()?;
+    s.read_exact(&mut head).ok()?;
+    std::str::from_utf8(&head[9..12]).ok()?.parse().ok()
+}
+
+#[test]
+fn health_tells_a_busy_server_from_a_stopped_one() {
+    assert_eq!(health(serve_routes(|_| "200 OK", 1)), Health::Healthy);
+    assert_eq!(
+        health(serve_routes(|_| "503 Service Unavailable", 1)),
+        Health::Busy
+    );
+    assert_eq!(
+        health(serve_routes(|_| "500 Internal Server Error", 1)),
+        Health::Unanswered
+    );
+}
+
+#[test]
+fn health_falls_back_when_the_server_has_no_health_route() {
+    assert_eq!(
+        health(serve_routes(
+            |path| if path == "/health" {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            },
+            2
+        )),
+        Health::Healthy
+    );
+    assert_eq!(
+        health(serve_routes(|_| "404 Not Found", 2)),
+        Health::Unanswered
+    );
+}
+
+#[cfg(test)]
+fn serve_routes(status_for: fn(&str) -> &'static str, count: usize) -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 256];
+            let n = stream.read(&mut request).unwrap_or(0);
+            let text = String::from_utf8_lossy(&request[..n]).to_string();
+            let path = text.split(' ').nth(1).unwrap_or("");
+            let status = status_for(path);
+            let _ = stream
+                .write_all(format!("HTTP/1.0 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn stopping_every_workspace_stops_its_server() {
+    let server = workspaces::Server::default();
+    let root = Path::new("/work/stop");
+    let child = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = child.id() as i32;
+    workspaces::set_workspace_server(&server, root, Some(child), 3030);
+    stop_workspaces(&server);
+    assert_eq!(workspaces::workspace_port(&server, root), None);
+    // SAFETY: `pid` was this test's own child, now reaped by `stop`.
+    assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+}
+
+/// Opens `root`: attaches to a server already holding it, else starts one.
+/// The port check, process and window come from the caller, so the flow runs
+/// without the app.
+fn open(
+    server: &workspaces::Server,
+    root: &Path,
+    mode: &str,
+    steps: Steps<'_>,
+) -> Result<u16, String> {
+    let Steps {
+        running,
+        start,
+        mut stop,
+        show,
+        hide,
+    } = steps;
+    let mut switching = false;
+    let mut fresh = false;
+    let port = if let Some(port) = running(root) {
+        match workspaces::workspace_port(server, root) {
+            Some(existing) => {
+                switching = existing != port;
+                if switching {
+                    workspaces::set_workspace_port(server, root, port);
+                }
+            }
+            None => {
+                workspaces::set_workspace_server(server, root, None, port);
+            }
+        }
+        port
+    } else {
+        match workspaces::take_workspace_child(server, root) {
+            Ok(child) => stop(child),
+            Err(_) => {
+                return Err("This project is starting up again; try again in a moment.".to_string());
+            }
+        }
+        let (child, port) = match start(root, PREFERRED_PORT) {
+            Ok(started) => started,
+            Err(e) => {
+                workspaces::cancel_restart(server, root);
+                return Err(e);
+            }
+        };
+        stop(workspaces::set_workspace_server(
+            server,
+            root,
+            Some(child),
+            port,
+        ));
+        switching = true;
+        fresh = true;
+        port
+    };
+    let shown = show(root, port, mode, switching);
+    let (shown, child) = workspaces::finish_open(server, root, fresh, shown);
+    stop(child);
+    shown?;
+    if mode == "browser" {
+        workspaces::mark_browser(server, root);
+    }
+    hide();
+    Ok(port)
+}
+
+#[test]
+fn opening_a_running_server_attaches_to_it() {
+    let server = workspaces::Server::default();
+    let root = Path::new("/work/open-running");
+    let mut shown = None;
+    let mut hidden = false;
+    let port = open(
+        &server,
+        root,
+        "browser",
+        open_steps(
+            |_| Some(4040),
+            |_, _| panic!("started a server for a running workspace"),
+            stop,
+            |root, port, mode, switching| {
+                shown = Some((root.to_path_buf(), port, mode.to_string(), switching));
+                Ok(())
+            },
+            || hidden = true,
+        ),
+    )
+    .unwrap();
+    assert_eq!(port, 4040);
+    assert_eq!(workspaces::workspace_port(&server, root), Some(4040));
+    assert_eq!(
+        shown,
+        Some((root.to_path_buf(), 4040, "browser".to_string(), false))
+    );
+    assert!(workspaces::browser_open(&server));
+    assert!(hidden);
+}
+
+#[test]
+fn opening_a_running_server_keeps_or_changes_its_port() {
+    let server = workspaces::Server::default();
+    let same = Path::new("/work/open-same");
+    workspaces::set_workspace_server(&server, same, None, 4040);
+    let mut switching = None;
+    open(
+        &server,
+        same,
+        "window",
+        open_steps(
+            |_| Some(4040),
+            |_, _| panic!("started a server"),
+            stop,
+            |_, _, _, moved| {
+                switching = Some(moved);
+                Ok(())
+            },
+            || {},
+        ),
+    )
+    .unwrap();
+    assert_eq!(switching, Some(false));
+
+    let changed = Path::new("/work/open-changed");
+    workspaces::set_workspace_server(&server, changed, None, 3030);
+    let mut switching = None;
+    open(
+        &server,
+        changed,
+        "window",
+        open_steps(
+            |_| Some(4040),
+            |_, _| panic!("started a server"),
+            stop,
+            |_, _, _, moved| {
+                switching = Some(moved);
+                Ok(())
+            },
+            || {},
+        ),
+    )
+    .unwrap();
+    assert_eq!(switching, Some(true));
+    assert_eq!(workspaces::workspace_port(&server, changed), Some(4040));
+}
+
+#[test]
+fn opening_without_a_server_starts_one() {
+    let server = workspaces::Server::default();
+    let root = Path::new("/work/open-fresh");
+    let mut shown = None;
+    let mut hidden = false;
+    let port = open(
+        &server,
+        root,
+        "window",
+        open_steps(
+            |_| None,
+            |_, _| {
+                let child = Command::new("sleep").arg("30").spawn().unwrap();
+                Ok((child, 4041))
+            },
+            stop,
+            |_, port, _, switching| {
+                shown = Some((port, switching));
+                Ok(())
+            },
+            || hidden = true,
+        ),
+    )
+    .unwrap();
+    assert_eq!(port, 4041);
+    assert_eq!(workspaces::workspace_port(&server, root), Some(4041));
+    assert_eq!(shown, Some((4041, true)));
+    assert!(hidden);
+    let mut child = workspaces::take_workspace_child(&server, root)
+        .unwrap()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn a_refused_or_failed_open_leaves_the_workspace_ready_to_try_again() {
+    let server = workspaces::Server::default();
+    let busy = Path::new("/work/open-busy");
+    workspaces::set_workspace_server(&server, busy, None, 3030);
+    workspaces::take_workspace_child(&server, busy).unwrap();
+    let err = open(
+        &server,
+        busy,
+        "window",
+        open_steps(
+            |_| None,
+            |_, _| panic!("started a server during a restart"),
+            stop,
+            |_, _, _, _| panic!("showed a refused open"),
+            || {},
+        ),
+    )
+    .unwrap_err();
+    assert!(err.contains("starting up again"), "{err}");
+
+    let failed = Path::new("/work/open-failed");
+    workspaces::set_workspace_server(&server, failed, None, 3030);
+    let mut shown = false;
+    let err = open(
+        &server,
+        failed,
+        "window",
+        open_steps(
+            |_| None,
+            |_, _| Err("no solace".into()),
+            stop,
+            |_, _, _, _| {
+                shown = true;
+                Ok(())
+            },
+            || {},
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(err, "no solace");
+    assert!(!shown);
+    assert_eq!(workspaces::workspace_port(&server, failed), Some(3030));
+    assert!(workspaces::take_workspace_child(&server, failed).is_ok());
+}
+
+#[test]
+fn a_failed_show_after_a_fresh_start_stops_its_server() {
+    let server = workspaces::Server::default();
+    let root = Path::new("/work/open-unshown");
+    let mut stopped = false;
+    let err = open(
+        &server,
+        root,
+        "window",
+        open_steps(
+            |_| None,
+            |_, _| {
+                let child = Command::new("sleep").arg("30").spawn().unwrap();
+                Ok((child, 4042))
+            },
+            |child| {
+                stopped |= child.is_some();
+                stop(child)
+            },
+            |_, _, _, _| Err("no window".into()),
+            || {},
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(err, "no window");
+    assert!(stopped);
+    assert_eq!(workspaces::workspace_port(&server, root), None);
+}
+
+/// What `open` does to a workspace: find or start its server, then show it.
+struct Steps<'a> {
+    running: Box<dyn FnOnce(&Path) -> Option<u16> + 'a>,
+    start: Box<dyn FnOnce(&Path, u16) -> Result<(Child, u16), String> + 'a>,
+    stop: Box<dyn FnMut(Option<Child>) + 'a>,
+    show: Box<dyn FnOnce(&Path, u16, &str, bool) -> Result<(), String> + 'a>,
+    hide: Box<dyn FnOnce() + 'a>,
+}
+
+/// Boxes the steps `open` runs into a `Steps`.
+fn open_steps<'a>(
+    running: impl FnOnce(&Path) -> Option<u16> + 'a,
+    start: impl FnOnce(&Path, u16) -> Result<(Child, u16), String> + 'a,
+    stop: impl FnMut(Option<Child>) + 'a,
+    show: impl FnOnce(&Path, u16, &str, bool) -> Result<(), String> + 'a,
+    hide: impl FnOnce() + 'a,
+) -> Steps<'a> {
+    Steps {
+        running: Box::new(running),
+        start: Box::new(start),
+        stop: Box::new(stop),
+        show: Box::new(show),
+        hide: Box::new(hide),
     }
 }

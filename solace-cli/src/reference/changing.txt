@@ -45,7 +45,8 @@ Changing (the new code is in `text`)
                                 name ends in `_test`)
   submit <module>               replace a whole module; it must keep every symbol
   submit --imports <module>     replace a module's whole header: module comment
-                                and imports; its `mod` lines are kept
+                                and imports; its `mod` lines are kept, though a
+                                declaration's visibility may change
                                 (`view <module> --header` shows it). The header
                                 keeps the submitted text's trailing newlines,
                                 or one when it has none.

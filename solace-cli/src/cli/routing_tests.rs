@@ -41,3 +41,55 @@ fn a_pass_names_the_next_step() {
     assert_eq!(next_step(Some("app.two"), false), "");
 }
 
+/// A check whose task stays missing is refused after the lookup retries.
+#[test]
+fn a_check_still_reaches_its_project_when_the_task_lookup_misses() {
+    let root = crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"settings\"]\n"),
+        ("settings/gleam.toml", "name = \"settings\"\nversion = \"1.0.0\"\ntarget = \"javascript\"\n"),
+    ]);
+    let found = super::with_root(&root, || {
+        crate::board::runs::with_context("gone", "r1", || crate::cli::projects::scoped("settings", &["test".to_string()]))
+    });
+    assert_eq!(found.unwrap_err().0, "E7001 unknown task");
+}
+
+/// A check reaches its project when the task appears while the lookup retries.
+#[test]
+fn a_task_that_appears_during_the_lookup_retry_reaches_its_project() {
+    let root = crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"settings\"]\n"),
+        ("settings/gleam.toml", "name = \"settings\"\nversion = \"1.0.0\"\ntarget = \"javascript\"\n"),
+    ]);
+    let dir = crate::board::store_dir(&root);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","scope":[".","settings"],"runs":[]}"#).unwrap();
+    });
+    let found = super::with_root(&root, || {
+        crate::board::runs::with_context("t1", "r1", || crate::cli::projects::scoped("settings", &["test".to_string()]))
+    });
+    writer.join().unwrap();
+    assert_eq!(found.unwrap(), Some(root.join("settings")));
+}
+
+#[test]
+fn a_project_outside_a_tasks_scope_names_it_once() {
+    let root = crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+        ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+    ]);
+    let dir = crate::board::store_dir(&root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","scope":[".","a"],"runs":[]}"#).unwrap();
+    let found = super::with_root(&root, || {
+        crate::board::runs::with_context("t1", "r1", || crate::cli::projects::scoped("b", &["test".to_string()]))
+    });
+    let e = found.unwrap_err().0;
+    assert!(e.contains("not one of this task's projects (., a). To change a project"), "{e}");
+    assert_eq!(e.matches("add it").count(), 1, "{e}");
+    assert!(!e.contains("if the task needs it"), "{e}");
+}
+

@@ -136,8 +136,16 @@ pub(crate) fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
 pub(crate) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
     let mut out: Vec<Value> = configured.as_array().cloned().unwrap_or_default();
     for k in KINDS {
+        let mut found_order = 0;
         for m in all[k.name]["models"].as_array().unwrap_or(&vec![]).iter() {
-            let m = &plain_label(m);
+            let mut m = plain_label(m);
+            if family(&m).is_some() && !names_family(&m) {
+                // The endpoint lists newest first; keep that order for `served`.
+                m["discovered"] = json!(true);
+                m["found_order"] = json!(found_order);
+                found_order += 1;
+            }
+            let m = &m;
             match out.iter().position(|x| x["id"] == m["id"]) {
                 Some(i) if out[i]["configured"] == true => {}
                 Some(i) => out[i] = m.clone(),
@@ -373,8 +381,8 @@ pub(super) fn claude_aliases() -> Vec<Value> {
 /// The family a model entry belongs to: Claude's families only — Codex answers exact ids.
 /// A discovered model names its family in `family` (the endpoint's `line`); a preset and an
 /// alias name it in their ids, and so does a configured model: `claude-opus-local` is an Opus
-/// and can stand behind the family's live model (D-150). A configured id with no family word
-/// is its own entry.
+/// and, when configured, is the family's pick (D-150). A configured id with no family word is
+/// its own entry.
 pub(super) fn family(m: &Value) -> Option<&'static str> {
     if m["agent"] != "claude" {
         return None;

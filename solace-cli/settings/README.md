@@ -38,6 +38,28 @@ as if its toolchain were missing: its projects stay readable, but `submit`,
 `check` and `test` are refused and the Workspace page says the language is
 turned off (D-22).
 
+## Agent behavior
+
+The Agent behavior section reads the machine-wide choices from
+`GET /agent-settings`: `involvement` (`director`, `collaborator`, `engineer`),
+`detail` (`concise`, `standard`, `thorough`) and `asking` (`often`, `balanced`,
+`rarely`). A choice sends `POST /agent-settings` with
+`{"key": ..., "value": ...}`; the reply is the new choices, or a refusal that
+keeps the current ones. Each choice explains itself in plain words on hover or
+keyboard focus. These choices belong to the server, so they are not kept in
+browser storage (D-215).
+
+## Role models
+
+The Role models section lists every agent role from `GET /role-models`, each with
+the model it starts with. The reply is an array of `{role, default}`; every role
+is always listed, and an empty value is shown as "None (choose on each task)".
+The picker lists the same models as the task page, including built-in ones. A
+choice sends `POST /role-models` with one role's `{role, default}`; the reply is
+the full list, and an unknown role is refused with E7001. Choices are kept in
+the machine settings under `[role_models.<role>]`. A model that is not set up
+here is kept, so it can return.
+
 ## Models
 
 The Models section lists the models set up in `~/.config/solace/config.toml`

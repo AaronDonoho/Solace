@@ -210,11 +210,7 @@ pub(crate) fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     // A path out of the project, or into a project nested in it, is another project's.
     if internal(root, name) || name.split('/').any(|c| c == "..") {
         // A strategy run changes nothing and has no task to ask about (D-93).
-        let ask = if strategy_context().is_some() {
-            ""
-        } else {
-            "; to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere"
-        };
+        let ask = if strategy_context().is_some() { String::new() } else { format!(". {}", crate::scope::ASK_FOR_PROJECT) };
         let form = match elsewhere(root, name, false) {
             Some((dir, _, rest)) => format!("; it is {rest} in {dir}: add --project {dir}"),
             None => String::new(),

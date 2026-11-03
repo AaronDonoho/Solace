@@ -20,7 +20,7 @@ impl Store {
         let tid = context().map(|(t, _)| t);
         let rust = crate::language::is_rust(&self.root);
         if self.lang.is_none() && !rust {
-            return self.plain_session("", tid.as_deref());
+            return self.plain_session("", tid.as_deref(), true);
         }
         let ix = self.index()?;
         let in_scope = |m: &crate::ModuleRow| {
@@ -47,33 +47,29 @@ impl Store {
         if rust {
             out += &format!("\n{}", crate::store::rust_brief(&ix));
         }
-        out += &self.session_end(&ix, crate::cli::EXAMPLE_CALL, tid.as_deref())?;
+        out += &self.session_end(&ix, crate::cli::EXAMPLE_CALL, tid.as_deref(), true)?;
         Ok(out)
     }
     /// Session start in a project of plain files (D-60): no symbols to list.
     /// `deps` is the task's unfinished dependencies, for `--task` in a board
     /// run of task `tid`.
-    fn plain_session(&self, deps: &str, tid: Option<&str>) -> Out {
+    fn plain_session(&self, deps: &str, tid: Option<&str>, reference: bool) -> Out {
         let mut out = self.project_instructions();
         out += deps;
         out += "This project has plain files and no code held as symbols of its own: `files` lists them, `read` and `write` change them, \
                 and `run` runs the commands its solace.toml declares.\n";
-        out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`", tid)?;
+        out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`", tid, reference)?;
         Ok(out)
     }
     /// The end of every session start: status, open work and its context,
-    /// the other projects, the command reference, and last `call`, a first
+    /// the other projects, the command reference when `reference`, and last `call`, a first
     /// call to send, where the agent plans its reads (D-145). `tid` is the
     /// board run's task; the open work records are capped (D-151).
-    fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>) -> Out {
+    fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>, reference: bool) -> Out {
         let next = crate::reference::next_call(call, strategy_context().is_some());
         let (status, work) = self.status_within(crate::cli::WORK_CAP)?;
-        Ok(format!(
-            "{status}{}{}\n{}{next}",
-            self.work_context(ix, &work)?,
-            self.other_projects(tid),
-            crate::reference::agent_reference(tid.is_some())
-        ))
+        let reference = if reference { format!("\n{}", crate::reference::agent_reference(tid.is_some())) } else { String::new() };
+        Ok(format!("{status}{}{}{reference}{next}", self.work_context(ix, &work)?, self.other_projects(tid)))
     }
     /// The symbols `text` names as `module.name`, in order, each once.
     pub(crate) fn named(&self, ix: &Index, text: &str) -> Vec<usize> {
@@ -131,8 +127,8 @@ impl Store {
             if task.is_some() { "; other commands, only this task's" } else { "" }
         );
         if task.is_some() {
-            out += "If the task needs a change in a read-only project (or the root, `.`), ask the human with `task ask` \
-                    to add that project, then make the change yourself; never put the change somewhere else instead.\n";
+            out +=
+                &format!("{} Then make the change yourself; never put the change somewhere else instead.\n", crate::scope::ASK_FOR_PROJECT);
         }
         out
     }
@@ -188,228 +184,7 @@ impl Store {
     /// symbols; the board builds a fresh run's brief with it (D-151), outside
     /// the run's environment.
     pub(crate) fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
-        const BUDGET: usize = 6500; // bytes, about 1.6k tokens
-        let rust = crate::language::is_rust(&self.root);
-        // The task's other projects with code, by folder: the list of symbols
-        // draws on them too (D-123).
-        let top = crate::scope::top(&self.root);
-        let mine = crate::scope::dir(&top, &self.root);
-        let others: Vec<(String, Store, Index)> = tid
-            .and_then(|t| crate::scope::of_task(&self.root, t))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|d| {
-                let path = crate::scope::path(&top, d);
-                *d != mine && (crate::language::detect(&path).is_some() || crate::language::is_rust(&path))
-            })
-            .filter_map(|d| {
-                let s = Store::peek(&crate::scope::path(&top, &d)).ok()?;
-                let ix = s.index().ok()?;
-                Some((d, s, ix))
-            })
-            .collect();
-        if self.lang.is_none() && !rust && others.is_empty() {
-            return self.plain_session(deps, tid);
-        }
-        let ix = self.index()?;
-        let projects: Vec<(Option<&str>, &Store, &Index)> =
-            std::iter::once((None, self, &ix)).chain(others.iter().map(|(d, s, x)| (Some(d.as_str()), s, x))).collect();
-        let mut modules = String::from("Modules (`view <module>` for an outline):\n");
-        let grouped = !others.is_empty();
-        for (p, (folder, _, pix)) in projects.iter().enumerate() {
-            if grouped && pix.modules.is_empty() {
-                continue;
-            }
-            if grouped {
-                modules += &format!("{}:\n", if p == 0 { mine.as_str() } else { folder.unwrap_or(mine.as_str()) });
-            }
-            let mut tests = vec![];
-            for m in &pix.modules {
-                if crate::store::is_test(m) {
-                    tests.push(m.path.as_str());
-                } else {
-                    modules += &format!("  {} — {}\n", m.path, crate::store::module_doc(m));
-                }
-            }
-            modules += &format!("Test modules: {}\n", tests.join(", "));
-        }
-        let rust_ix = if rust { Some(&ix) } else { others.iter().find(|(_, s, _)| crate::language::is_rust(&s.root)).map(|(_, _, x)| x) };
-        if let Some(rust_ix) = rust_ix {
-            modules += &format!("\n{}", crate::store::rust_brief(rust_ix));
-        }
-
-        // Direct matches: rare task words weigh more; a word in the name
-        // counts 3, in the doc line 2, anywhere else in the code 1. Words are
-        // counted over all the task's projects.
-        let fields: Vec<Vec<[HashSet<String>; 3]>> = projects
-            .iter()
-            .map(|(_, _, ix)| {
-                ix.syms
-                    .iter()
-                    .map(|s| {
-                        let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
-                        [
-                            crate::words(&s.name).into_iter().collect(),
-                            crate::words(&doc).into_iter().collect(),
-                            crate::words(&s.text).into_iter().collect(),
-                        ]
-                    })
-                    .collect()
-            })
-            .collect();
-        let n: usize = fields.iter().map(Vec::len).sum();
-        let mut terms = crate::words(task);
-        terms.sort();
-        terms.dedup();
-        let mut scores: Vec<Vec<f64>> = fields.iter().map(|f| vec![0.0f64; f.len()]).collect();
-        let mut rare: Vec<(f64, String)> = vec![];
-        for t in &terms {
-            let df = fields.iter().flatten().filter(|f| f.iter().any(|w| w.contains(t))).count();
-            if df == 0 {
-                continue;
-            }
-            // squared, so one rare word (a code, a name) outweighs several common ones
-            let idf = (1.0 + n as f64 / df as f64).ln().powi(2);
-            rare.push((idf, t.clone()));
-            for (score, fields) in scores.iter_mut().zip(&fields) {
-                for (i, f) in fields.iter().enumerate() {
-                    if let Some(k) = f.iter().position(|w| w.contains(t)) {
-                        score[i] += idf * [3.0, 2.0, 1.0][k];
-                    }
-                }
-            }
-        }
-
-        // One hop from each project's best matches: callers, callees and
-        // covering tests; then the non-test symbols (fixtures) the top
-        // covering tests use. Symbols the task names (`module.name`) come first.
-        for (&(_, store, ix), score) in projects.iter().zip(scores.iter_mut()) {
-            let direct = score.clone();
-            let mut seeds: Vec<usize> = (0..direct.len()).filter(|&i| direct[i] > 0.0).collect();
-            seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
-            seeds.truncate(10);
-            let boost = |j: usize, s: f64, score: &mut Vec<f64>| {
-                if direct[j] + s > score[j] {
-                    score[j] = direct[j] + s;
-                }
-            };
-            for &s in &seeds {
-                for &j in &ix.uses[s] {
-                    boost(j, direct[s] / 4.0, &mut *score);
-                }
-                let mut covering = vec![];
-                for &j in &ix.used_by[s] {
-                    if crate::is_test(ix, j) {
-                        covering.push(j);
-                    }
-                    boost(j, direct[s] / 4.0, &mut *score);
-                }
-                covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
-                for &t in covering.iter().take(2) {
-                    for &j in ix.uses[t].iter().filter(|&&j| !crate::is_test(ix, j)) {
-                        boost(j, direct[s] / 8.0, &mut *score);
-                    }
-                }
-            }
-            for i in store.named(ix, task) {
-                score[i] = f64::MAX;
-            }
-        }
-        // Each entry is (project, symbol), the current project's first.
-        let mut ranked: Vec<(usize, usize)> =
-            scores.iter().enumerate().flat_map(|(p, s)| (0..s.len()).filter(move |&i| s[i] > 0.0).map(move |i| (p, i))).collect();
-        let size = |(p, i): (usize, usize)| projects[p].2.syms[i].text.len();
-        ranked.sort_by(|&a, &b| scores[b.0][b.1].total_cmp(&scores[a.0][a.1]).then(size(a).cmp(&size(b))));
-        let score = &scores[0];
-
-        // The task's own terms in string literals are evidence (D-44): its rarest
-        // words, quoted phrases and capitalized names such as "Desk Lamp".
-        rare.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let mut evidence_terms: Vec<String> = rare.into_iter().take(5).map(|r| r.1).collect();
-        evidence_terms.extend(task.split('"').skip(1).step_by(2).filter(|p| (3..=40).contains(&p.len())).map(str::to_lowercase));
-        evidence_terms.extend(capitalized_runs(task));
-        // A test that reaches the top code symbols reproduces the task's case.
-        let code: Vec<usize> = ranked
-            .iter()
-            .filter(|&&(p, _)| p == 0)
-            .map(|&(_, i)| i)
-            .filter(|&i| !crate::is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external"))
-            .take(2)
-            .collect();
-        let name = |p: usize, i: usize| {
-            let (_, store, pix) = projects[p];
-            let short = crate::reach::short(pix, i);
-            if store.resolve(pix, &short).ok() == Some(i) { short } else { pix.syms[i].qname() }
-        };
-        let repro = if rust {
-            String::new()
-        } else {
-            code.first()
-                .and_then(|_| {
-                    crate::reach::test_symbols(&ix)
-                        .into_iter()
-                        .map(|t| (t, crate::reach::closure(&ix, t)))
-                        .filter(|(_, r)| r.contains(&code[0]))
-                        .max_by(|a, b| {
-                            let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
-                            reached(&a.1)
-                                .cmp(&reached(&b.1))
-                                .then(score[a.0].total_cmp(&score[b.0]))
-                                .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
-                        })
-                })
-                .map(|(t, r)| {
-                    let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(0, c)).collect();
-                    format!(
-                        "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
-                        name(0, t),
-                        traced.join(" ")
-                    )
-                })
-                .unwrap_or_default()
-        };
-        let mut packet = String::new();
-        let mut room = BUDGET.saturating_sub(modules.len() + repro.len());
-        for &(p, i) in &ranked {
-            // whole entries only: skip one that doesn't fit, try smaller ones
-            let (folder, _, pix) = projects[p];
-            let s = &pix.syms[i];
-            let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
-            let entry = format!("-- {}{at}\n{}\n", s.qname(), crate::index::signature(pix, s));
-            let mut quoted = String::new();
-            for e in evidence(&s.text, &evidence_terms) {
-                let line = format!("  > {e}\n");
-                if quoted.len() + line.len() <= 300 {
-                    quoted += &line;
-                }
-            }
-            for entry in [entry.clone() + &quoted, entry] {
-                if entry.len() <= room {
-                    room -= entry.len();
-                    packet += &entry;
-                    break;
-                }
-            }
-        }
-        let mut out = self.project_instructions();
-        out += deps;
-        let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
-        out += &format!(
-            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; \
-             `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
-        );
-        let start: Vec<usize> = ranked.iter().filter(|&&(p, _)| p == 0).map(|&(_, i)| i).take(3).collect();
-        let call = if !start.is_empty() {
-            let names: Vec<String> = start.iter().map(|&i| name(0, i)).collect();
-            format!("`inspect {} --context`", names.join(" "))
-        } else if let Some(&(p, _)) = ranked.first() {
-            let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| name(p, i)).take(3).collect();
-            format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine.as_str()))
-        } else {
-            crate::cli::EXAMPLE_CALL.to_string()
-        };
-        out += &self.session_end(&ix, &call, tid)?;
-        Ok(out)
+        self.task_session_with(task, tid, deps, true)
     }
     /// Open work records and broken symbols.
     pub(crate) fn status(&self) -> Result<String, Failure> {
@@ -638,7 +413,11 @@ impl Store {
         let i = self.resolve(&ix, name)?;
         let users = ix.used_by[i].clone();
         if users.is_empty() {
-            return Ok(format!("Nothing uses {}.\n", ix.syms[i].qname()));
+            let dependents = self.dependent_refs(&ix, i);
+            if dependents.is_empty() {
+                return Ok(format!("Nothing uses {}.\n", ix.syms[i].qname()));
+            }
+            return Ok(format!("Nothing uses {} in this project.\n{dependents}", ix.syms[i].qname()));
         }
         let mut out = format!("{} is used by {}:\n", ix.syms[i].qname(), users.len());
         let (exact, possible) = crate::index::users_split(&ix, i);
@@ -646,12 +425,14 @@ impl Store {
             let (tests, users): (Vec<usize>, Vec<usize>) = exact.into_iter().partition(|&j| crate::is_test(&ix, j));
             out += &type_users(&ix, i, &users, &tests, usize::MAX);
             out += &possible_users(&ix, i, &possible);
+            out += &self.dependent_refs(&ix, i);
             return Ok(out);
         }
         for u in exact {
             out += &ref_entry(&ix, u, i);
         }
         out += &possible_users(&ix, i, &possible);
+        out += &self.dependent_refs(&ix, i);
         Ok(out)
     }
     /// `impact [name...]`: what changed code reaches (D-44). With no names, the
@@ -783,6 +564,89 @@ impl Store {
             out += &format!("… {} more symbols match; narrow the search.\n", total - 40);
         }
         Ok(out)
+    }
+
+    /// A fresh run's brief carries the reference above this reply, so the
+    /// reply leaves it out.
+    pub(crate) fn brief_task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
+        self.task_session_with(task, tid, deps, false)
+    }
+
+    fn task_session_with(&self, task: &str, tid: Option<&str>, deps: &str, reference: bool) -> Out {
+        const BUDGET: usize = 6500; // bytes, about 1.6k tokens
+        let rust = crate::language::is_rust(&self.root);
+        // The task's other projects with code, by folder: the list of symbols
+        // draws on them too (D-123).
+        let top = crate::scope::top(&self.root);
+        let mine = crate::scope::dir(&top, &self.root);
+        let others: Vec<(String, Store, Index)> = tid
+            .and_then(|t| crate::scope::of_task(&self.root, t))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| {
+                let path = crate::scope::path(&top, d);
+                *d != mine && (crate::language::detect(&path).is_some() || crate::language::is_rust(&path))
+            })
+            .filter_map(|d| {
+                let s = Store::peek(&crate::scope::path(&top, &d)).ok()?;
+                let ix = s.index().ok()?;
+                Some((d, s, ix))
+            })
+            .collect();
+        if self.lang.is_none() && !rust && others.is_empty() {
+            return self.plain_session(deps, tid, reference);
+        }
+        let ix = self.index()?;
+        let projects: Vec<(Option<&str>, &Store, &Index)> =
+            std::iter::once((None, self, &ix)).chain(others.iter().map(|(d, s, x)| (Some(d.as_str()), s, x))).collect();
+        let modules = session_modules(&mine, &projects, rust);
+        let (scores, rare) = score_symbols(task, &projects);
+        let ranked = ranked_symbols(&scores, &projects);
+        let terms = evidence_terms(task, rare);
+        let repro = reproduction(rust, &ranked, &projects, &scores[0]);
+        let packet = symbol_packet(&ranked, &projects, &terms, BUDGET.saturating_sub(modules.len() + repro.len()));
+        let mut out = self.project_instructions();
+        out += deps;
+        let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
+        out += &format!(
+            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; \
+             `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
+        );
+        out += &self.session_end(&ix, &first_call(&ranked, &projects, &mine), tid, reference)?;
+        Ok(out)
+    }
+
+    /// Uses in the workspace projects that depend on this one by path: a
+    /// change here can break their calls, so `refs` names them with the project.
+    fn dependent_refs(&self, ix: &Index, i: usize) -> String {
+        let top = crate::scope::top(&self.root);
+        let members = crate::workspace::members(&top).unwrap_or_default();
+        let mut out = String::new();
+        for root in crate::extract::deps::dependents(&top, &self.root, &members) {
+            let dir = crate::scope::dir(&top, &root);
+            let Ok(dep) = crate::Store::at(&root) else { continue };
+            let Ok(dix) = dep.index() else { continue };
+            let k = dix.syms.len();
+            let joint = crate::extract::deps::merged(&dix, ix);
+            let target = k + i;
+            let (exact, possible) = crate::index::users_split(&joint, target);
+            let exact: Vec<usize> = exact.into_iter().filter(|&j| j < k).collect();
+            let possible: Vec<usize> = possible.into_iter().filter(|&j| j < k).collect();
+            if exact.is_empty() && possible.is_empty() {
+                continue;
+            }
+            out += &format!("\n== In {dir} ==\n");
+            if ix.syms[i].kind == Kind::Type {
+                let (tests, users): (Vec<usize>, Vec<usize>) = exact.into_iter().partition(|&j| crate::is_test(&joint, j));
+                out += &type_users(&joint, target, &users, &tests, usize::MAX);
+            } else {
+                for u in exact {
+                    out += &ref_entry(&joint, u, target);
+                }
+            }
+            out += &possible_users(&joint, target, &possible);
+        }
+        out
     }
 }
 
@@ -990,4 +854,229 @@ fn numbered_lines(text: &str, ranges: &[(usize, usize)]) -> String {
         shown = n;
     }
     out
+}
+
+fn session_modules(mine: &str, projects: &[(Option<&str>, &Store, &Index)], rust: bool) -> String {
+    let mut modules = String::from("Modules (`view <module>` for an outline):\n");
+    let grouped = projects.len() > 1;
+    for (p, (folder, _, pix)) in projects.iter().enumerate() {
+        if grouped && pix.modules.is_empty() {
+            continue;
+        }
+        if grouped {
+            modules += &format!("{}:\n", if p == 0 { mine } else { folder.unwrap_or(mine) });
+        }
+        let mut tests = vec![];
+        for m in &pix.modules {
+            if crate::store::is_test(m) {
+                tests.push(m.path.as_str());
+            } else {
+                modules += &format!("  {} — {}\n", m.path, crate::store::module_doc(m));
+            }
+        }
+        modules += &format!("Test modules: {}\n", tests.join(", "));
+    }
+    let rust_ix = if rust {
+        projects.first().map(|(_, _, ix)| *ix)
+    } else {
+        projects.iter().find(|(_, store, _)| crate::language::is_rust(&store.root)).map(|(_, _, ix)| *ix)
+    };
+    if let Some(rust_ix) = rust_ix {
+        modules += &format!("\n{}", crate::store::rust_brief(rust_ix));
+    }
+    modules
+}
+
+fn score_symbols(task: &str, projects: &[(Option<&str>, &Store, &Index)]) -> (Vec<Vec<f64>>, Vec<(f64, String)>) {
+    // Direct matches: rare task words weigh more; a word in the name
+    // counts 3, in the doc line 2, anywhere else in the code 1. Words are
+    // counted over all the task's projects.
+    let fields = symbol_fields(projects);
+    let n: usize = fields.iter().map(Vec::len).sum();
+    let mut terms = crate::words(task);
+    terms.sort();
+    terms.dedup();
+    let mut scores: Vec<Vec<f64>> = fields.iter().map(|f| vec![0.0f64; f.len()]).collect();
+    let mut rare: Vec<(f64, String)> = vec![];
+    for t in &terms {
+        let df = fields.iter().flatten().filter(|f| f.iter().any(|w| w.contains(t))).count();
+        if df == 0 {
+            continue;
+        }
+        // squared, so one rare word (a code, a name) outweighs several common ones
+        let idf = (1.0 + n as f64 / df as f64).ln().powi(2);
+        rare.push((idf, t.clone()));
+        for (score, fields) in scores.iter_mut().zip(&fields) {
+            for (i, f) in fields.iter().enumerate() {
+                if let Some(k) = f.iter().position(|w| w.contains(t)) {
+                    score[i] += idf * [3.0, 2.0, 1.0][k];
+                }
+            }
+        }
+    }
+    boost_neighbours(task, projects, &mut scores);
+    (scores, rare)
+}
+
+fn ranked_symbols(scores: &[Vec<f64>], projects: &[(Option<&str>, &Store, &Index)]) -> Vec<(usize, usize)> {
+    let mut ranked: Vec<(usize, usize)> =
+        scores.iter().enumerate().flat_map(|(p, s)| (0..s.len()).filter(move |&i| s[i] > 0.0).map(move |i| (p, i))).collect();
+    let size = |(p, i): (usize, usize)| projects[p].2.syms[i].text.len();
+    ranked.sort_by(|&a, &b| scores[b.0][b.1].total_cmp(&scores[a.0][a.1]).then(size(a).cmp(&size(b))));
+    ranked
+}
+
+/// The task's own terms in string literals are evidence (D-44): its rarest
+/// words, quoted phrases and capitalized names such as "Desk Lamp".
+fn evidence_terms(task: &str, mut rare: Vec<(f64, String)>) -> Vec<String> {
+    rare.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut terms: Vec<String> = rare.into_iter().take(5).map(|r| r.1).collect();
+    terms.extend(task.split('"').skip(1).step_by(2).filter(|p| (3..=40).contains(&p.len())).map(str::to_lowercase));
+    terms.extend(capitalized_runs(task));
+    terms
+}
+
+fn symbol_name(projects: &[(Option<&str>, &Store, &Index)], p: usize, i: usize) -> String {
+    let (_, store, pix) = projects[p];
+    let short = crate::reach::short(pix, i);
+    if store.resolve(pix, &short).ok() == Some(i) { short } else { pix.syms[i].qname() }
+}
+
+fn reproduction(rust: bool, ranked: &[(usize, usize)], projects: &[(Option<&str>, &Store, &Index)], score: &[f64]) -> String {
+    if rust {
+        return String::new();
+    }
+    let ix = projects[0].2;
+    // A test that reaches the top code symbols reproduces the task's case.
+    let code: Vec<usize> = ranked
+        .iter()
+        .filter(|&&(p, _)| p == 0)
+        .map(|&(_, i)| i)
+        .filter(|&i| !crate::is_test(ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external"))
+        .take(2)
+        .collect();
+    code.first()
+        .and_then(|_| {
+            crate::reach::test_symbols(ix)
+                .into_iter()
+                .map(|t| (t, crate::reach::closure(ix, t)))
+                .filter(|(_, r)| r.contains(&code[0]))
+                .max_by(|a, b| {
+                    let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
+                    reached(&a.1)
+                        .cmp(&reached(&b.1))
+                        .then(score[a.0].total_cmp(&score[b.0]))
+                        .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
+                })
+        })
+        .map(|(t, r)| {
+            let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| symbol_name(projects, 0, c)).collect();
+            format!(
+                "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
+                symbol_name(projects, 0, t),
+                traced.join(" ")
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn symbol_packet(
+    ranked: &[(usize, usize)],
+    projects: &[(Option<&str>, &Store, &Index)],
+    evidence_terms: &[String],
+    mut room: usize,
+) -> String {
+    let mut packet = String::new();
+    for &(p, i) in ranked {
+        // whole entries only: skip one that doesn't fit, try smaller ones
+        let (folder, _, pix) = projects[p];
+        let s = &pix.syms[i];
+        let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
+        let entry = format!("-- {}{at}\n{}\n", s.qname(), crate::index::signature(pix, s));
+        let mut quoted = String::new();
+        for e in evidence(&s.text, evidence_terms) {
+            let line = format!("  > {e}\n");
+            if quoted.len() + line.len() <= 300 {
+                quoted += &line;
+            }
+        }
+        for entry in [entry.clone() + &quoted, entry] {
+            if entry.len() <= room {
+                room -= entry.len();
+                packet += &entry;
+                break;
+            }
+        }
+    }
+    packet
+}
+
+fn first_call(ranked: &[(usize, usize)], projects: &[(Option<&str>, &Store, &Index)], mine: &str) -> String {
+    let start: Vec<usize> = ranked.iter().filter(|&&(p, _)| p == 0).map(|&(_, i)| i).take(3).collect();
+    if !start.is_empty() {
+        let names: Vec<String> = start.iter().map(|&i| symbol_name(projects, 0, i)).collect();
+        format!("`inspect {} --context`", names.join(" "))
+    } else if let Some(&(p, _)) = ranked.first() {
+        let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| symbol_name(projects, p, i)).take(3).collect();
+        format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine))
+    } else {
+        crate::cli::EXAMPLE_CALL.to_string()
+    }
+}
+
+fn symbol_fields(projects: &[(Option<&str>, &Store, &Index)]) -> Vec<Vec<[HashSet<String>; 3]>> {
+    projects
+        .iter()
+        .map(|(_, _, ix)| {
+            ix.syms
+                .iter()
+                .map(|s| {
+                    let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
+                    [
+                        crate::words(&s.name).into_iter().collect(),
+                        crate::words(&doc).into_iter().collect(),
+                        crate::words(&s.text).into_iter().collect(),
+                    ]
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn boost_neighbours(task: &str, projects: &[(Option<&str>, &Store, &Index)], scores: &mut [Vec<f64>]) {
+    // One hop from each project's best matches: callers, callees and
+    // covering tests; then the non-test symbols (fixtures) the top
+    // covering tests use. Symbols the task names (`module.name`) come first.
+    for (&(_, store, ix), score) in projects.iter().zip(scores.iter_mut()) {
+        let direct = score.clone();
+        let mut seeds: Vec<usize> = (0..direct.len()).filter(|&i| direct[i] > 0.0).collect();
+        seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
+        seeds.truncate(10);
+        let boost = |j: usize, s: f64, score: &mut Vec<f64>| {
+            if direct[j] + s > score[j] {
+                score[j] = direct[j] + s;
+            }
+        };
+        for &s in &seeds {
+            for &j in &ix.uses[s] {
+                boost(j, direct[s] / 4.0, &mut *score);
+            }
+            let mut covering = vec![];
+            for &j in &ix.used_by[s] {
+                if crate::is_test(ix, j) {
+                    covering.push(j);
+                }
+                boost(j, direct[s] / 4.0, &mut *score);
+            }
+            covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+            for &t in covering.iter().take(2) {
+                for &j in ix.uses[t].iter().filter(|&&j| !crate::is_test(ix, j)) {
+                    boost(j, direct[s] / 8.0, &mut *score);
+                }
+            }
+        }
+        for i in store.named(ix, task) {
+            score[i] = f64::MAX;
+        }
+    }
 }

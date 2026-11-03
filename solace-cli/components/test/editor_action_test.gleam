@@ -16,6 +16,7 @@ fn action_clicked(action: task.EditorAction(Int)) {
           task: "t1",
           base: "/p/a",
           label: "Description",
+          placeholder: "",
           text: "",
           on_input: fn(_) { 0 },
           on_format: fn(_, _) { 0 },

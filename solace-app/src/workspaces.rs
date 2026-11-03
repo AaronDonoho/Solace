@@ -16,7 +16,11 @@ pub(crate) struct Server {
 struct Workspace {
     /// None when the app attached to a server started elsewhere.
     child: Option<Child>,
+    /// Whether the app started this server and may replace it.
+    owned: bool,
     port: u16,
+    /// Whether a caller took the child to replace the server.
+    restarting: bool,
     /// The label of the board window while it is open.
     window: Option<String>,
     /// The port the board window shows, which decides reload or navigate.
@@ -68,12 +72,16 @@ pub(crate) fn set_workspace_server(
     let mut roots = server.roots.lock().unwrap();
     let workspace = roots.entry(root.to_path_buf()).or_insert(Workspace {
         child: None,
+        owned: false,
         port,
+        restarting: false,
         window: None,
         shown_port: None,
         browser: false,
     });
     workspace.port = port;
+    workspace.owned = child.is_some();
+    workspace.restarting = false;
     std::mem::replace(&mut workspace.child, child)
 }
 
@@ -312,4 +320,119 @@ fn finish_open_test() {
     assert_eq!(workspace_port(&server, a), Some(5050));
     assert_eq!(workspace_window(&server, a), Some("board-1".to_string()));
     assert_eq!(workspace_shown_port(&server, a), None);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChildState {
+    /// Owned, but with no child while a restart is being arranged.
+    Missing,
+    Running,
+    Exited(std::process::ExitStatus),
+}
+
+pub(crate) struct WorkspaceSnapshot {
+    pub(crate) root: PathBuf,
+    pub(crate) port: u16,
+    pub(crate) owned: bool,
+    /// Whether another caller is already replacing this server.
+    pub(crate) restarting: bool,
+    pub(crate) child: ChildState,
+}
+
+/// Every workspace with the state its server is in now. An exited child is
+/// reaped here; stopping it later sees the exit and signals no process.
+pub(crate) fn workspace_snapshots(server: &Server) -> Vec<WorkspaceSnapshot> {
+    let mut roots = server.roots.lock().unwrap();
+    roots
+        .iter_mut()
+        .map(|(root, workspace)| WorkspaceSnapshot {
+            root: root.clone(),
+            port: workspace.port,
+            owned: workspace.owned,
+            restarting: workspace.restarting,
+            child: match workspace.child.as_mut() {
+                None => ChildState::Missing,
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => ChildState::Exited(status),
+                    _ => ChildState::Running,
+                },
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn take_workspace_child(
+    server: &Server,
+    root: &Path,
+) -> Result<Option<Child>, &'static str> {
+    let mut roots = server.roots.lock().unwrap();
+    let Some(workspace) = roots.get_mut(root) else {
+        return Ok(None);
+    };
+    if workspace.restarting {
+        return Err("a restart is already in progress");
+    }
+    workspace.restarting = true;
+    Ok(workspace.child.take())
+}
+
+#[test]
+fn attached_servers_are_not_owned() {
+    let server = Server::default();
+    let a = Path::new("/work/a");
+    set_workspace_server(&server, a, None, 3030);
+    let snapshot = workspace_snapshots(&server).pop().unwrap();
+    assert_eq!(snapshot.port, 3030);
+    assert!(!snapshot.owned);
+    assert_eq!(snapshot.child, ChildState::Missing);
+}
+
+#[test]
+fn taking_a_child_keeps_the_server_owned() {
+    let server = Server::default();
+    let a = Path::new("/work/a");
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    set_workspace_server(&server, a, Some(child), 3030);
+    let snapshot = workspace_snapshots(&server).pop().unwrap();
+    assert!(snapshot.owned);
+    assert!(!snapshot.restarting);
+    assert_eq!(snapshot.child, ChildState::Running);
+    let mut child = take_workspace_child(&server, a).unwrap().unwrap();
+    let snapshot = workspace_snapshots(&server).pop().unwrap();
+    assert!(snapshot.owned);
+    assert!(snapshot.restarting);
+    assert_eq!(snapshot.child, ChildState::Missing);
+    set_workspace_server(&server, a, None, 3031);
+    let snapshot = workspace_snapshots(&server).pop().unwrap();
+    assert!(!snapshot.restarting);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Clears a failed replacement's marker, so the supervisor can try again.
+pub(crate) fn cancel_restart(server: &Server, root: &Path) {
+    if let Some(workspace) = server.roots.lock().unwrap().get_mut(root) {
+        workspace.restarting = false;
+    }
+}
+
+#[test]
+fn a_second_take_reports_a_restart_already_in_progress() {
+    let server = Server::default();
+    let a = Path::new("/work/restarting");
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    set_workspace_server(&server, a, Some(child), 3030);
+    let mut taken = take_workspace_child(&server, a).unwrap().unwrap();
+    assert!(take_workspace_child(&server, a).is_err());
+    let snapshot = workspace_snapshots(&server).pop().unwrap();
+    assert!(snapshot.restarting);
+    assert_eq!(snapshot.child, ChildState::Missing);
+    let _ = taken.kill();
+    let _ = taken.wait();
 }

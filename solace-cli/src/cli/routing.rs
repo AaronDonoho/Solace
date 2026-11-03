@@ -269,7 +269,16 @@ pub(crate) fn run_inner(
         }
     }
     match a.as_slice() {
-        ["session", "start", "--task"] => store.session_task(&input()?),
+        ["session", "start", "--task"] => {
+            let task = match input() {
+                Ok(text) if !text.trim().is_empty() => text,
+                result => match context() {
+                    Some((tid, _)) => crate::board::briefs::task_text(&crate::scope::task_in(&store.root, &tid)?.1),
+                    None => result?,
+                },
+            };
+            store.session_task(task.trim_end())
+        }
         ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
         ["submit", ..] => crate::drafts::submit(&store, &a, input, old),
         ["drafts", "drop", id] => crate::drafts::drop_one(&store, id),
@@ -600,11 +609,24 @@ fn run_command(
     if before {
         crate::command_tx::crash_after("command");
     }
+    let mut result = result;
     if let Some((tid, _)) = &session.context
         && a.first().is_some_and(|c| VERIFIES.contains(c))
         && !crate::command_tx::reads_only(a)
     {
-        record_verification(&session.home, tid, a[0], &result)?;
+        if let Err(e) = record_verification(&session.home, tid, a[0], &result) {
+            let note = format!("\nnote: could not record the verification ({})\n", e.0.trim());
+            result = match result {
+                Ok(mut out) => {
+                    out.push_str(&note);
+                    Ok(out)
+                }
+                Err(Failure(mut msg, code)) => {
+                    msg.push_str(&note);
+                    Err(Failure(msg, code))
+                }
+            };
+        }
     }
     Ok(result)
 }

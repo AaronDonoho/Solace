@@ -158,3 +158,59 @@ pub(crate) fn dependents(top: &Path, source: &Path, projects: &[String]) -> Vec<
     let Ok(me) = source.canonicalize() else { return vec![] };
     projects.iter().filter_map(|d| scope::path(top, d).canonicalize().ok()).filter(|p| *p != me && path_deps(p).contains(&me)).collect()
 }
+
+/// Every workspace project that depends on the project in `source` by path,
+/// directly or through another project.
+pub(crate) fn all_dependents(top: &Path, source: &Path, projects: &[String]) -> Vec<PathBuf> {
+    let Ok(me) = source.canonicalize() else { return vec![] };
+    projects.iter().filter_map(|d| scope::path(top, d).canonicalize().ok()).filter(|p| *p != me && depends_on(p, &me)).collect()
+}
+
+/// An index with the project's path dependencies first and its own symbols
+/// last, so a test can reach code in every project it depends on.
+pub(crate) struct ProjectReach {
+    pub(crate) index: Index,
+    pub(crate) own_start: usize,
+    pub(crate) roots: Vec<PathBuf>,
+}
+
+pub(crate) fn project_reach(root: &Path, own: &Index) -> Result<Option<ProjectReach>, Failure> {
+    if own.rust {
+        return Ok(None);
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (mut seen, mut stack) = (HashSet::from([root.clone()]), path_deps(&root));
+    let mut deps = vec![];
+    while let Some(dep) = stack.pop() {
+        if seen.insert(dep.clone()) {
+            stack.extend(path_deps(&dep));
+            deps.push(dep);
+        }
+    }
+    if deps.is_empty() {
+        return Ok(None);
+    }
+    deps.sort();
+    let (mut syms, mut modules, mut roots) = (vec![], vec![], vec![]);
+    for dep in &deps {
+        let Ok(ix) = crate::Store::peek(dep).and_then(|store| store.index()) else { continue };
+        syms.extend(ix.syms);
+        modules.extend(ix.modules);
+        roots.push(dep.clone());
+    }
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    let own_start = syms.len();
+    syms.extend(own.syms.iter().cloned());
+    modules.extend(own.modules.iter().map(|m| ModuleRow {
+        path: m.path.clone(),
+        dir: m.dir.clone(),
+        header: m.header.clone(),
+        file: m.file.clone(),
+        owns_dir: m.owns_dir,
+    }));
+    let index = crate::index::build(own.lang, syms, modules, false);
+    roots.push(root);
+    Ok(Some(ProjectReach { index, own_start, roots }))
+}

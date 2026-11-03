@@ -90,7 +90,7 @@ Unwatched files can be read and written through Solace (unwatched means not sear
 ## D-27 Agent memory and skills
 Memories are files in a directory named in `solace.toml`, read and written with the ordinary file commands. The brief lists them (name and first line), not their contents, and agents write one when a human asks. Skills work the same way from a human-owned directory. Any run may write memory, even a read-only one, and memory edits aren't task changes. Review and investigation reports are written by Solace to `.solace/board/`, not to memory. Later: extra MCP servers through a logged passthrough.
 
-Built: skills. The `skills` key in solace.toml names the skills folder, `skills/` by default. Each skill is a subfolder with a `SKILL.md`, or a single `<name>.md` file at the folder's top, with `name` and `description` in front matter; a skill with no description is listed by its first line. Every run's brief lists the project's skills (name, description, path to `read`) and carries no skill contents. The folder is protected like AGENTS.md: agents read skills and change none, and Solace never runs a skill's scripts — a skill that needs a tool names a `[commands]` entry the human adds. Memory is not built.
+Built: skills. The `skills` key in solace.toml names the skills folder, `skills/` by default. Each skill is a subfolder with a `SKILL.md`, or a single `<name>.md` file at the folder's top, with `name`, `description` and optional `roles` in front matter; a skill with no description is listed by its first line. `roles` holds comma-separated role ids; a skill with `roles` reaches only those runs and its whole text goes in their brief, while a skill with no `roles` key reaches every role listed by name, description and path to `read`. The workspace's skills folder is also read, so a skill saved on Settings applies to every project in the workspace. Settings manages single-file role skills with a name, one-line description, body and at least one role; the body is at most 1000 characters, and an empty name or body is refused before a file is written. Hand-written skills keep their behavior: no `roles` key means every role, and folder skills are not edited or deleted by Settings. The folder is protected like AGENTS.md: agents read skills and change none, and Solace never runs a skill's scripts — a skill that needs a tool names a `[commands]` entry the human adds. Memory is not built.
 
 ## D-28 Unlisted text files are watched
 A file no rule names is watched when it's text within the size limit, and unwatched when it's binary or too large. Humans see each file's category and what it allows.
@@ -1106,7 +1106,7 @@ Why: overlapping declared suites made an agent run the same tests several times,
 ## D-183 A review's final assessment is its note
 Part of the Agent Tooling Efficiency feature (Aaron, board task "review: recover a lost note", 2026-10-21). Amends D-76 and Spec 15 §6.
 1. A review that exits cleanly, with no transcript error and no feedback recorded, records its last message as its feedback and ends `reviewed` only when the message's first line is exactly `**Assessment: Looks good**` or `**Assessment: Needs work**`.
-2. A refused or failed `task note` is recovered this way; a call that replied `Recorded.` is already on its way and is not repeated.
+2. A refused or failed `task note` is recovered this way; a call that replied `Recorded.` has been applied by the board and is not repeated.
 3. The recovered message takes the `task note` path: the review checkpoint, any changed-during-review note and the `reviewed` transition. It adds no attention and leaves an existing mark in place.
 4. A final message is not a note in general. Work and investigate runs still fail when they exit without finishing.
 Why: a clean review with a complete assessment was marked failed only because its final message was not a `task note` call; the assessment was already the feedback the human needed.
@@ -1327,3 +1327,66 @@ Amends D-44 point 1 and Spec 3 §2 (Aaron, board task "test: stop running tests 
 1. `test` without `--all` runs a test when it has no passing result, or the hash of its reach changed since that pass. A test that reaches another process, the network or foreign code is not run for that reason alone.
 2. A test's reach hash covers the revision and module of every symbol it can run, and the project and dependency manifests; a module header alone is not part of it.
 Why: moving `lockdown.limit` ran 1,338 of 1,407 tests because every test reaching `lockdown.command` was treated as a process test and every test touching `lockdown` saw its header change. A move does not change behavior. A header change that leaves the reach graph the same is not a test change; reach stays a derived fact, not a guarantee.
+
+## D-215 Agent behavior settings are machine-wide
+(Aaron, board task "settings: agent behaviour in machine config", 2026-10-31). Part of the Agent behavior settings feature.
+1. The system settings file (`~/.config/solace/config.toml` or `$SOLACE_CONFIG`) has three top-level keys beside `task_timeout` and `[[models]]`: `involvement` (`director`, `collaborator`, `engineer`; default `collaborator`), `detail` (`concise`, `standard`, `thorough`; default `standard`) and `asking` (`often`, `balanced`, `rarely`; default `balanced`). A missing, unknown or wrongly typed value is its default and never an error; it does not stop models, languages or runs from loading.
+2. The board serves and saves them at `GET /agent-settings` and `POST /agent-settings` `{key, value}`; a save keeps every other setting, takes the settings lock, and refuses a key or value outside the three with `E7001`. The Settings page's Agent behavior section loads them on connect and saves each choice; its explanation shows on hover or keyboard focus. These three are not kept in browser storage.
+3. Briefs read them through `board::setup.system`, beside `task_timeout`.
+Why: briefs are built on the server, so browser-only settings cannot reach an agent; and a bad behavior value must never break the whole system configuration.
+
+## D-216 Personas are internal root records kept by the task server
+Amends Spec 15 §1 and §4 (Aaron, board task "personas: stored and served by the board", 2026-10-31). Part of the Personas feature.
+1. The root keeps personas: `{id, name, objectives, tools, concerns, other, revision}` in creation order, in one JSON file at `<root>/.solace/strategy/personas.json`. The text fields are plain strings and may be empty except `name`, which is trimmed and must not be empty. All the text fields together hold at most 1000 characters, counted as Unicode code points. `revision` is `sha256:` and the hex SHA-256 of the text fields, so an editor saves only over the revision it began from. The server assigns each id and never reuses one, including after a delete. The task server is the only writer and writes atomically; personas are internal, so agents can't reach them (Spec 14 §1). A missing file reads as none; a damaged one refuses every write and is left as it is (`E7030`, 409).
+2. `GET /personas` lists them; `POST /personas` creates one; `PUT /personas/{id} {..., base}` replaces one only over its current `revision` (another is `E7028`, 409), and `DELETE /personas/{id}` removes one. A missing name or a field that isn't a string is `E7001` (400), text over the limit is `E7029` (400), and an unknown id is `E7023` (404). A refusal writes nothing. All answer at the root only.
+3. The root's `/events` sends `{personas: [...]}` (the whole list) after every create, replace or delete, and a new connection's replay sends it after `{vision}`. `/p/{dir}/events` leaves it out.
+Why: agents should know who the software is for and who works on it, and the human should edit that once in the same internal, server-owned way as the vision.
+
+## D-217 A review's note is recorded only once the board applies it
+Amends D-183 point 2 and Spec 15 §6 (Aaron, board task "review: note waits for the server", 2026-10-31). Part of the Review Feedback Reliability feature.
+1. A review's `task note` sends the note and, while a board server runs, waits until the server has applied it before replying `Recorded.`. With no server, the reply is the queued reply, as for any other note.
+2. A note the server sets aside is refused with an error naming the set-aside and the failed inbox file, so the agent resends it. The refusal is not a recording: recovery may send the note again. A batched `task note` behaves the same, and no line of its failed entry begins with `Recorded`.
+3. Work, investigate and discussion notes, and the replies of `done` and `ask`, keep their current behavior.
+Why: a review that exited after `Recorded.` could leave the board with no feedback, and recovery would then skip the note because it looked recorded.
+
+## D-218 Briefs carry every persona
+Amends D-216 and Spec 15 §1 (Aaron, board task "personas: agent briefs carry them", 2026-10-31). Part of the Personas feature.
+1. Investigate, work, discuss and review briefs carry every persona whole, in creation order, showing its name and only its non-empty objectives, tools, concerns and other. Review briefs carry them although D-91 point 4 keeps the vision out of a review. No personas means no personas section.
+2. The section has no size cap and no cut marker: every persona is shown in full, so the section grows by up to 1000 characters per persona. A later change may cap the section, naming any persona past the cap and marking it as cut.
+3. Strategy runs carry every persona whole, as task runs do, alongside the whole vision.
+Why: a review also judges whether a change serves the people the software is for, and agents should know them wherever they act or plan.
+
+## D-219 A queued review note is not recorded, and the first feedback note wins
+Amends D-183 point 2 and Spec 15 §6 (Aaron, board task "review: a queued note finishes", 2026-10-31). Part of the Review Feedback Reliability feature.
+1. A review's `task note` counts as recorded only when its reply is a plain `Recorded.`, and in a batched reply only in that command's section. The queued reply, a refusal and a failed call are not recorded, so recovery sends the final message again.
+2. When an agent note arrives for a review run that has ended failed with no feedback, it is recorded through the review path and the run ends `reviewed`. A review ended by a server restart counts as failed here; one stopped, canceled or replaced does not. A late note on a review that already has feedback is dropped. A stopped or canceled review, and a work or investigate run, keeps the note and changes nothing else.
+3. The failure attention is cleared only when it names the agent's unfinished exit; any other mark stays (D-183 point 3).
+Why: a queued note looked recorded while no server ran, so the review failed and the note later landed on an ended run instead of finishing it.
+
+## D-220 Agent roles have one definition
+(Aaron, board task "Agent roles: define roles", 2026-10-31). Part of the Agent Roles feature.
+1. Solace has five roles: `strategist`, `investigator`, `worker`, `reviewer` and `coordinator`. Each has a display name and a plain-language purpose. A role says what an agent does, never which model runs it; the model is a separate setting.
+2. Each run kind belongs to one role: `strategy` to the strategist, `investigate` and `discuss` to the investigator, `work` and `new_work` to the worker, and `review` to the reviewer. The coordinator starts no run yet; a later task gives it one.
+3. `board::roles` in the `solace-cli` crate is the one definition, with its identifiers, names, purposes and run kinds. `GET /roles` serves it as an array of `{id, name, purpose, runs}`, and Settings and the board read that rather than keeping their own list. An unknown identifier or run kind is none, and each role round-trips through the served JSON. Spec 15 §4 records the route.
+Why: role names and the run kinds each covers were spread across brief, settings and board code, so model and skill assignment had no stable list to build on; a discussion uses the investigator's role, and the coordinator waits for a later task.
+
+## D-221 Test reach crosses project boundaries
+Amends D-214 (Aaron, board task "test: reach crosses into dependent projects", 2026-11-01).
+1. A test in a project that depends on the changed project by path counts as changed when the hash of anything it can run in that project changed, directly or through another path dependency. Its reach hash covers the symbols and manifests on that path, so the hash is the same whether the project's own `test` or the changed project's `test` selects it.
+2. `test` without `--all` also runs the due tests in every workspace project that depends on it, directly or transitively, including a project the task does not cover, and reports each run under its project. A failing dependent test fails the reply and names its project.
+3. `test --all` runs every test in the named project only. Tests whose reach did not change still do not run.
+Why: a change to a shared project never ran the tests of the projects that use it, so a caller could break while every check passed.
+
+## D-222 A review's final reply is read whole for its assessment
+Amends D-183 point 1 and Spec 15 §6 (Aaron, board task "review: read split final messages", 2026-11-02). Part of the Review Feedback Reliability feature.
+1. A review's final reply is every `message` entry after its last `tool` entry, in order, joined with a blank line; with no tool call, every message counts. `usage`, `thinking`, `output` and server-end `error` entries are skipped and do not end the reply. An agent `error` still blocks recovery.
+2. The reply is an assessment when a line, once surrounding Markdown heading (`#`) and emphasis (`*`, `_`) markers are removed and spaces are trimmed, is exactly `Assessment: Looks good` or `Assessment: Needs work`. The first such line labels the reply; a line with other text is not a label. No label rejects the reply, and two labels that disagree reject it; two that agree are accepted.
+3. The whole joined reply, trimmed, is recorded as the feedback. The rest of D-183 is unchanged: a recorded note still wins, the check is only for reviews, and a final message is not a note in general.
+Why: a review split into several text blocks, with a preamble, a Markdown variant of the label or a trailing `Done.`, was marked failed even though it held a valid assessment.
+
+## D-223 A review's clean exit outlives an earlier agent error
+Amends D-183 point 1 and D-222 point 1, and Spec 15 §6 (Aaron, board task "Investigate: transient review log errors", 2026-11-02). Part of the Review Feedback Reliability feature.
+1. A review that exits cleanly and ends with a valid assessment records its feedback even when the transcript holds an agent error before the reply's last message. An agent error after the last message still blocks recovery.
+2. A Codex `turn.failed`, a Claude `result` with `is_error`, and a nonzero exit always block recovery. Server-end lines are not the agent's error and are already ignored.
+3. Timeout, kill, quota, and a missing or unreadable log still fail, as D-183 and D-219 say.
+Why: Codex logs retrying stream drops ("Reconnecting... n/5") and warnings as `error` entries and continues, so a clean review with a valid assessment was failing for them.

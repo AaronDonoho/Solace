@@ -56,12 +56,6 @@ fn confirm(question: String) -> Bool
 @external(javascript, "./task_api.mjs", "markdown")
 fn markdown(text: String, base: String) -> String
 
-@external(javascript, "./task_api.mjs", "load")
-fn load(key: String) -> String
-
-@external(javascript, "./task_api.mjs", "store")
-fn store(key: String, value: String) -> Nil
-
 /// The markdown editor `id`'s text with its selection wrapped in `before` and
 /// `after`; `root` is the shadow root that holds the editor.
 @external(javascript, "./task_api.mjs", "wrap")
@@ -99,7 +93,14 @@ fn no_root() -> dynamic.Dynamic
 pub type Source
 
 pub type Column {
-  Column(id: String, label: String, actions: List(String), final: Bool)
+  Column(
+    id: String,
+    label: String,
+    actions: List(String),
+    final: Bool,
+    /// The role whose default the model pick follows in this column.
+    role: String,
+  )
 }
 
 pub type Workflow {
@@ -148,6 +149,8 @@ pub type Run {
     /// The model the agent's start event named, when it named one: an alias
     /// shows the model the run used.
     used: String,
+    /// Whether the run ended in failure, as the server records it.
+    failed: Bool,
   )
 }
 
@@ -256,8 +259,14 @@ pub type Model {
     workflow: Workflow,
     projects: List(Project),
     models: List(Agent),
+    /// The model assigned to each role.
+    role_models: List(RoleModel),
+    /// The role each action's run step belongs to, from the workflow.
+    action_roles: Dict(String, String),
     model: String,
     effort: String,
+    /// Where the current model pick came from.
+    model_source: ModelSource,
     text: String,
     /// Whether the Notes tab shows its editor (Add note was pressed).
     writing: Bool,
@@ -332,8 +341,10 @@ pub type Msg {
   Refetched(Int, String)
   WorkflowLoaded(Int, String)
   ModelsLoaded(String)
+  /// The server's model for each role.
+  RoleModelsLoaded(String)
   /// The models fetched again with the task (see `refresh`): a failed reply
-  /// changes nothing, and a pick the list still has stays.
+  /// changes nothing, and a pick that can start stays.
   ModelsRefreshed(String)
   /// Try again: every model's availability is checked again and the holds
   /// a run left are cleared.
@@ -401,11 +412,6 @@ pub type Msg {
 
 /// While a watched run is going, its transcript is fetched again this often.
 const refresh_ms = 1500
-
-/// Browser storage keys for the last agent and effort chosen.
-const agent_key = "solace-board-agent"
-
-const effort_key = "solace-board-effort"
 
 /// The Changes tab heading for files, listed after the code.
 pub const files_heading = "Files"
@@ -475,8 +481,11 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       workflow: Workflow([], dict.new()),
       projects: [],
       models: [],
-      model: load(agent_key),
-      effort: load(effort_key),
+      role_models: [],
+      action_roles: dict.new(),
+      model: "",
+      effort: "",
+      model_source: RoleDefault,
       text: "",
       writing: False,
       noting: False,
@@ -568,6 +577,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         staged: Some(#(None, None)),
         copy: #(model.copy.0 + 1, model.copy.1),
         error: "",
+        model_source: RoleDefault,
         acting: "",
         writing: False,
         noting: False,
@@ -577,6 +587,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         ..cleared(stop(model)),
         generation: model.generation + 1,
         workflow: Workflow([], dict.new()),
+        action_roles: dict.new(),
         copy: #(model.copy.0 + 1, ""),
       )
   }
@@ -781,14 +792,14 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
     True, False, True, _ ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
         // The task being loaded: its newer state waits with it.
-        Ok(task) if task.id == model.id && model.staged != None ->
+        Ok(fresh) if fresh.id == model.id && model.staged != None ->
           case model.staged {
             Some(#(Some(t), w)) -> {
-              let task = Task(..task, changes: t.changes)
+              let fresh = Task(..fresh, changes: t.changes)
               let #(model, fx) =
-                settle(Model(..model, staged: Some(#(Some(task), w))))
+                settle(Model(..model, staged: Some(#(Some(fresh), w))))
               let news = case model.hosted {
-                False -> list.map(notices(t, task), notice)
+                False -> list.map(notices(t, fresh), notice)
                 True -> []
               }
               #(model, effect.batch([fx, ..news]))
@@ -797,30 +808,44 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
             Some(#(None, _)) -> #(model, reload(model))
             None -> #(model, effect.none())
           }
-        Ok(task) if task.id == model.id -> {
+        Ok(fresh) if fresh.id == model.id -> {
           // Events carry no `changes` (D-77): keep the list until it is fetched again.
           let old = model.task
-          let task = case old {
-            Some(t) -> Task(..task, changes: t.changes)
-            None -> task
+          let fresh = case old {
+            Some(t) -> Task(..fresh, changes: t.changes)
+            None -> fresh
           }
-          let model = Model(..model, task: Some(task))
+          let model = Model(..model, task: Some(fresh))
           let #(model, deps) = want_deps(model)
           // A host raises its own notices.
           let news = case old, model.hosted {
-            Some(t), False -> list.map(notices(t, task), notice)
+            Some(t), False -> list.map(notices(t, fresh), notice)
             _, _ -> []
           }
           #(model, effect.batch([refresh(model), deps, ..news]))
         }
         Ok(_) -> #(model, effect.none())
         Error(_) ->
-          case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
-            Ok(w) ->
+          case
+            json.parse(
+              text,
+              decode.at(["workflow"], workflow_with_roles_decoder()),
+            )
+          {
+            Ok(#(w, roles)) ->
               case model.staged {
                 Some(#(t, _)) ->
-                  settle(Model(..model, staged: Some(#(t, Some(w)))))
-                None -> #(Model(..model, workflow: w), effect.none())
+                  settle(
+                    Model(
+                      ..model,
+                      action_roles: roles,
+                      staged: Some(#(t, Some(w))),
+                    ),
+                  )
+                None -> #(
+                  Model(..model, workflow: w, action_roles: roles),
+                  effect.none(),
+                )
               }
             Error(_) ->
               case json.parse(text, decode.at(["removed"], decode.string)) {
@@ -1090,6 +1115,7 @@ fn run_decoder() -> decode.Decoder(Run) {
     "",
     decode.one_of(decode.string, [decode.success("")]),
   )
+  use failed <- decode.optional_field("failed", False, decode.bool)
   decode.success(Run(
     id,
     kind,
@@ -1101,6 +1127,7 @@ fn run_decoder() -> decode.Decoder(Run) {
     started,
     ended,
     used,
+    failed,
   ))
 }
 
@@ -1156,14 +1183,8 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
 }
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
-  use columns <- decode.field("columns", decode.list(column_decoder()))
-  let label = decode.optional_field("label", "", decode.string, decode.success)
-  use labels <- decode.optional_field(
-    "actions",
-    dict.new(),
-    decode.dict(decode.string, label),
-  )
-  decode.success(Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })))
+  workflow_with_roles_decoder()
+  |> decode.map(fn(pair) { pair.0 })
 }
 
 fn column_decoder() -> decode.Decoder(Column) {
@@ -1175,7 +1196,8 @@ fn column_decoder() -> decode.Decoder(Column) {
     decode.list(decode.string),
   )
   use final <- decode.optional_field("final", False, decode.bool)
-  decode.success(Column(id, label, actions, final))
+  use role <- decode.optional_field("role", "", decode.string)
+  decode.success(Column(id, label, actions, final, role))
 }
 
 /// The projects in `GET /projects`, in the order the server lists them.
@@ -1403,11 +1425,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
       h.div(
         [a.class("actions")],
         list.map(actions(model.workflow, t, model.strategy), fn(name) {
-          action_button(
-            name,
-            action_label(model.workflow, name),
-            model.acting != "",
-          )
+          action_view(model, name, action_label(model.workflow, name))
         }),
       ),
     ]),
@@ -1489,8 +1507,8 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
 /// can start are offered; with none that can, a line says why each can't
 /// and what to set up.
 fn agent_choice(model: Model) -> Element(Msg) {
-  let chosen = list.find(model.models, fn(m) { m.id == model.model })
   let ready = list.filter(model.models, fn(m) { m.available })
+  let chosen = list.find(ready, fn(m) { m.id == model.model })
   case model.models, ready {
     [_, ..], [] ->
       h.div([a.class("agent")], [
@@ -1529,6 +1547,7 @@ fn task_editor(
     task: model.id,
     base: model.base,
     label: label,
+    placeholder: "",
     text: text,
     on_input: msg,
     on_format: fn(before, after) { Format(id, before, after) },
@@ -1551,12 +1570,17 @@ pub fn editor(config: EditorConfig(msg)) -> Element(msg) {
     task,
     base,
     label,
+    placeholder,
     text,
     on_input,
     on_format,
     on_block,
     actions,
   ) = config
+  let hint = case placeholder {
+    "" -> label <> " (markdown)."
+    hint -> hint
+  }
   let tool = fn(label, title, before, after) {
     h.button(
       [a.type_("button"), a.title(title), e.on_click(on_format(before, after))],
@@ -1616,8 +1640,7 @@ pub fn editor(config: EditorConfig(msg)) -> Element(msg) {
           a.attribute("label", label),
           a.attribute(
             "placeholder",
-            label
-              <> " (markdown)."
+            hint
               <> case task {
               "" -> ""
               _ -> " Paste or drop images here."
@@ -2234,6 +2257,7 @@ fn refresh(model: Model) -> Effect(Msg) {
       effect.batch([
         get(model.base, "/tasks/" <> t.id, Refetched(model.generation, _)),
         get("", "/models", ModelsRefreshed),
+        get("", "/role-models", RoleModelsLoaded),
       ])
     None -> effect.none()
   }
@@ -2472,6 +2496,7 @@ pub const ui_labels: List(#(String, String)) = [
   #("cancel", "Cancel"),
   #("new_feature", "New feature"),
   #("new_milestone", "New milestone"),
+  #("new_persona", "New persona"),
   #("hide_activity", "Hide activity"),
   #("open_run", "Open run"),
   #("show", "Show"),
@@ -2563,21 +2588,22 @@ fn agent_pick(
   ready: List(Agent),
   chosen: Result(Agent, Nil),
 ) -> Element(Msg) {
+  let picked = case list.find(ready, fn(m) { m.id == model.model }) {
+    Ok(_) -> model.model
+    Error(_) -> ""
+  }
   h.div([a.class("agent")], [
     refresh_button(TryAgain, model.refreshing),
     h.select(
       [
-        a.value(model.model),
+        a.value(picked),
         a.attribute("aria-label", ui_label("model")),
         e.on_input(AgentSelected),
       ],
       list.append(
-        placeholder_option(ui_label("pick_model"), model.model),
+        placeholder_option(ui_label("pick_model"), picked),
         list.map(ready, fn(m) {
-          h.option(
-            [a.value(m.id), a.selected(m.id == model.model)],
-            agent_option(m),
-          )
+          h.option([a.value(m.id), a.selected(m.id == picked)], agent_option(m))
         }),
       ),
     ),
@@ -2773,27 +2799,15 @@ pub fn modal(body: List(Element(msg))) -> Element(msg) {
 pub const modal_styles =
   ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--ink) 15%,transparent);padding:16px}.modal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}\n"
 
-/// The available model a remembered pick names: the model itself, or for a Claude alias the
-/// pick no longer lists (`claude-opus`), its family's listed model, so the pick stays an Opus.
-pub fn remembered(models: List(Agent), id: String) -> Result(Agent, Nil) {
-  case list.find(models, fn(a) { a.available && a.id == id }), id {
-    Ok(a), _ -> Ok(a)
-    Error(_), "claude-" <> family ->
-      list.find(models, fn(a) {
-        a.available
-        && a.agent == "claude"
-        && list.contains(string.split(a.id, "-"), family)
-      })
-    Error(_), _ -> Error(Nil)
-  }
-}
-
 /// Drops what belonged to the task shown before.
 fn cleared(model: Model) -> Model {
   Model(
     ..model,
     task: None,
     staged: None,
+    model: "",
+    effort: "",
+    model_source: RoleDefault,
     text: "",
     writing: False,
     noting: False,
@@ -2825,7 +2839,12 @@ fn settle(model: Model) -> #(Model, Effect(Msg)) {
 /// the new task.
 fn unstage(model: Model) -> Model {
   case model.staged {
-    Some(_) -> Model(..cleared(model), workflow: Workflow([], dict.new()))
+    Some(_) ->
+      Model(
+        ..cleared(model),
+        workflow: Workflow([], dict.new()),
+        action_roles: dict.new(),
+      )
     None -> model
   }
 }
@@ -2835,7 +2854,7 @@ fn show(model: Model, task: Task) -> #(Model, Effect(Msg)) {
   let shown = model.revealing != "" && model.revealing == task.id
   let keep_tab = shown && model.tab != "details"
   let model =
-    resume(
+    choose_role_model(resume(
       Model(
         ..model,
         task: Some(task),
@@ -2850,7 +2869,7 @@ fn show(model: Model, task: Task) -> #(Model, Effect(Msg)) {
       ),
       task,
       keep_tab,
-    )
+    ))
   let #(model, deps) = want_deps(model)
   #(
     model,
@@ -2954,48 +2973,6 @@ pub const small_control =
 fn connection_lost(text: String) -> Bool {
   json.parse(text, decode.at(["connectionLost"], decode.bool))
   |> result.unwrap(False)
-}
-
-/// The model and effort a fresh list chooses: the remembered model when it can
-/// start, a Claude alias's family when the pick is gone, else the first model
-/// that can start. The effort stays only while the chosen model offers it.
-pub fn models_chosen(
-  models: List(Agent),
-  id: String,
-  effort: String,
-) -> #(String, String) {
-  let kept = remembered(models, id)
-  let chosen = case kept {
-    Ok(a) -> Ok(a)
-    Error(_) -> list.find(models, fn(a) { a.available })
-  }
-  let model = result.map(chosen, fn(a) { a.id }) |> result.unwrap("")
-  let chosen_effort = case kept {
-    Ok(a) ->
-      case list.contains(a.efforts, effort) {
-        True -> effort
-        False -> ""
-      }
-    Error(_) -> ""
-  }
-  #(model, chosen_effort)
-}
-
-/// The model and effort a refreshed list keeps: an id the list still names
-/// stays picked even when it can't start now, and its effort stays only while
-/// offered; an id the list dropped falls back as a fresh list would.
-pub fn models_refreshed(
-  models: List(Agent),
-  id: String,
-  effort: String,
-) -> #(String, String) {
-  case list.find(models, fn(a) { a.id == id }) {
-    Ok(a) -> #(id, case list.contains(a.efforts, effort) {
-      True -> effort
-      False -> ""
-    })
-    Error(_) -> models_chosen(models, id, effort)
-  }
 }
 
 /// What the UI says while it checks a task after a lost reply.
@@ -3301,12 +3278,13 @@ fn note_actions(model: Model, t: Task) -> List(EditorAction(Msg)) {
 /// The fields of an action's request: its name, the chosen model and effort,
 /// and the editor's text when it isn't empty.
 pub fn action_body(model: Model, name: String) -> String {
+  let #(chosen, effort) = action_choice(model, name)
   let fields = [#("action", json.string(name))]
-  let fields = case model.model {
+  let fields = case chosen {
     "" -> fields
     id -> [#("model", json.string(id)), ..fields]
   }
-  let fields = case model.effort {
+  let fields = case effort {
     "" -> fields
     effort -> [#("effort", json.string(effort)), ..fields]
   }
@@ -3374,6 +3352,8 @@ pub type EditorConfig(msg) {
     task: String,
     base: String,
     label: String,
+    /// The hint shown while the editor is empty; "" shows the label.
+    placeholder: String,
     text: String,
     on_input: fn(String) -> msg,
     on_format: fn(String, String) -> msg,
@@ -3621,6 +3601,7 @@ fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         model,
         effect.batch([
           get("", "/models", ModelsLoaded),
+          get("", "/role-models", RoleModelsLoaded),
           get("", "/projects", ProjectsLoaded),
           fetch(model),
           case model.watching {
@@ -3735,8 +3716,12 @@ fn opening_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         Some(t), Ok(fresh)
           if generation == model.generation && t.id == fresh.id
         -> {
-          let #(model, deps) =
-            want_deps(Model(..model, task: Some(fresh), error: ""))
+          let model = case fresh.column != t.column {
+            True ->
+              choose_role_model(Model(..model, task: Some(fresh), error: ""))
+            False -> Model(..model, task: Some(fresh), error: "")
+          }
+          let #(model, deps) = want_deps(model)
           #(model, effect.batch([review(model, fresh), deps]))
         }
         _, _ ->
@@ -3746,16 +3731,30 @@ fn opening_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
           }
       })
     WorkflowLoaded(generation, text) if generation == model.generation ->
-      Some(case json.parse(text, workflow_decoder()) {
-        Ok(w) ->
-          case model.staged {
-            Some(#(t, _)) -> settle(Model(..model, staged: Some(#(t, Some(w)))))
-            None -> #(Model(..model, workflow: w), effect.none())
-          }
-        Error(_) -> #(
-          Model(..unstage(model), error: error(text)),
-          effect.none(),
-        )
+      Some({
+        case json.parse(text, workflow_with_roles_decoder()) {
+          Ok(#(w, roles)) ->
+            case model.staged {
+              Some(#(t, _)) ->
+                settle(
+                  Model(
+                    ..model,
+                    action_roles: roles,
+                    staged: Some(#(t, Some(w))),
+                  ),
+                )
+              None -> #(
+                choose_role_model(
+                  Model(..model, workflow: w, action_roles: roles),
+                ),
+                effect.none(),
+              )
+            }
+          Error(_) -> #(
+            Model(..unstage(model), error: error(text)),
+            effect.none(),
+          )
+        }
       })
     WorkflowLoaded(_, _) -> Some(#(model, effect.none()))
     _ -> None
@@ -3781,36 +3780,61 @@ fn model_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     ModelsLoaded(text) ->
       Some(case json.parse(text, decode.list(agent_decoder())) {
         Ok(models) -> {
-          let #(id, effort) = models_chosen(models, model.model, model.effort)
-          #(
-            Model(
-              ..model,
-              models: models,
-              model: id,
-              effort: effort,
-              error: "",
-              refreshing: False,
-            ),
-            effect.none(),
-          )
+          let model =
+            Model(..model, models: models, error: "", refreshing: False)
+          let model = case model.model_source {
+            Human ->
+              case
+                list.find(models, fn(a) { a.id == model.model && a.available })
+              {
+                Ok(a) -> Model(..model, effort: kept_effort(a, model.effort))
+                Error(_) ->
+                  choose_role_model(Model(..model, model_source: RoleDefault))
+              }
+            RoleDefault -> choose_role_model(model)
+          }
+          #(model, effect.none())
         }
         Error(_) -> #(
           Model(..model, error: error(text), refreshing: False),
           effect.none(),
         )
       })
-    // A pick held by a usage limit stays chosen, so a limit doesn't swap the model unasked;
-    // its effort stays only while the model still offers it.
+    // A pick that can start stays chosen; its effort stays while the model
+    // still offers it. One that can't start goes back to the role's model.
     ModelsRefreshed(text) ->
       Some(case json.parse(text, decode.list(agent_decoder())) {
         Ok(models) -> {
-          let #(id, effort) =
-            models_refreshed(models, model.model, model.effort)
-          #(
-            Model(..model, models: models, model: id, effort: effort, error: ""),
-            effect.none(),
-          )
+          let model = case
+            list.find(models, fn(a) { a.id == model.model && a.available })
+          {
+            Ok(a) ->
+              Model(
+                ..model,
+                models: models,
+                effort: kept_effort(a, model.effort),
+                error: "",
+              )
+            Error(_) ->
+              choose_role_model(
+                Model(
+                  ..model,
+                  models: models,
+                  model_source: RoleDefault,
+                  error: "",
+                ),
+              )
+          }
+          #(model, effect.none())
         }
+        Error(_) -> #(model, effect.none())
+      })
+    RoleModelsLoaded(text) ->
+      Some(case json.parse(text, role_models_decoder()) {
+        Ok(role_models) -> #(
+          choose_role_model(Model(..model, role_models: role_models)),
+          effect.none(),
+        )
         Error(_) -> #(model, effect.none())
       })
     // The Scope tab's projects; without them it lists none.
@@ -3910,15 +3934,13 @@ fn transcript_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
 fn editor_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
   case msg {
     // Efforts differ between models, so a new model starts at its default.
-    AgentSelected(id) -> {
-      store(agent_key, id)
-      store(effort_key, "")
-      Some(#(Model(..model, model: id, effort: ""), effect.none()))
-    }
-    EffortSelected(effort) -> {
-      store(effort_key, effort)
+    AgentSelected(id) ->
+      Some(#(
+        Model(..model, model: id, effort: "", model_source: Human),
+        effect.none(),
+      ))
+    EffortSelected(effort) ->
       Some(#(Model(..model, effort: effort), effect.none()))
-    }
     Text(text) -> {
       case model.task {
         None -> Nil
@@ -4509,3 +4531,124 @@ fn collapse_middle(lines: List(String)) -> List(DiffLine) {
 /// inside its panel.
 pub const table_styles =
   ".md table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:var(--space-2) 0}.md th,.md td{border:1px solid var(--line);padding:var(--space-1) var(--space-2);vertical-align:top}.md th{background:var(--well);font-weight:600;text-align:left}\n"
+
+/// The model a role starts with, as `GET /role-models` lists it.
+pub type RoleModel {
+  RoleModel(role: String, name: String, default: String)
+}
+
+/// Where the model pick came from.
+pub type ModelSource {
+  RoleDefault
+  Human
+}
+
+/// The roles' model assignments, as `GET /role-models` lists them.
+pub fn role_models_decoder() -> decode.Decoder(List(RoleModel)) {
+  decode.list(role_model_decoder())
+}
+
+fn role_model_decoder() -> decode.Decoder(RoleModel) {
+  use role <- decode.field("role", decode.string)
+  use name <- decode.optional_field("name", role, decode.string)
+  use default <- decode.optional_field("default", "", decode.string)
+  decode.success(RoleModel(role, name, default))
+}
+
+fn choose_role_model(model: Model) -> Model {
+  case model.model_source {
+    Human -> model
+    RoleDefault -> {
+      let id =
+        role_model_chosen(model.models, model.role_models, main_role(model))
+      Model(..model, model: id, effort: "", model_source: RoleDefault)
+    }
+  }
+}
+
+fn main_role(model: Model) -> String {
+  case model.task {
+    Some(t) ->
+      case list.find(model.workflow.columns, fn(c) { c.id == t.column }) {
+        Ok(c) -> c.role
+        Error(_) -> ""
+      }
+    None -> ""
+  }
+}
+
+/// `effort` while `agent` offers it, else the agent's default effort.
+pub fn kept_effort(agent: Agent, effort: String) -> String {
+  case list.contains(agent.efforts, effort) {
+    True -> effort
+    False -> ""
+  }
+}
+
+/// The role an action's run step gives its model pick, "" when it runs no
+/// agent.
+fn action_role(model: Model, name: String) -> String {
+  case dict.get(model.action_roles, name) {
+    Ok(role) -> role
+    Error(_) -> ""
+  }
+}
+
+/// The model and effort an action uses: a human's pick for every action, else
+/// its own role's default.
+fn action_choice(model: Model, name: String) -> #(String, String) {
+  case model.model_source {
+    Human -> #(model.model, model.effort)
+    RoleDefault ->
+      case action_role(model, name) {
+        "" -> #(model.model, model.effort)
+        role -> {
+          let id = role_model_chosen(model.models, model.role_models, role)
+          #(id, "")
+        }
+      }
+  }
+}
+
+fn action_view(model: Model, name: String, label: String) -> Element(Msg) {
+  action_button(name, label, model.acting != "")
+}
+
+/// The model a fresh role-aware list chooses: the role's model when it can
+/// start, else no choice.
+pub fn role_model_chosen(
+  models: List(Agent),
+  assignments: List(RoleModel),
+  role: String,
+) -> String {
+  let assignment = list.find(assignments, fn(a) { a.role == role })
+  case assignment {
+    Ok(a) ->
+      case list.find(models, fn(m) { m.id == a.default && m.available }) {
+        Ok(m) -> m.id
+        Error(_) -> ""
+      }
+    Error(_) -> ""
+  }
+}
+
+fn workflow_with_roles_decoder() -> decode.Decoder(
+  #(Workflow, Dict(String, String)),
+) {
+  use columns <- decode.field("columns", decode.list(column_decoder()))
+  let label = decode.optional_field("label", "", decode.string, decode.success)
+  use labels <- decode.optional_field(
+    "actions",
+    dict.new(),
+    decode.dict(decode.string, label),
+  )
+  use roles <- decode.optional_field(
+    "roles",
+    dict.new(),
+    decode.dict(decode.string, decode.string),
+  )
+  decode.success(#(
+    Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })),
+    roles,
+  ))
+}

@@ -19,10 +19,9 @@ use crate::board::runs::step_line;
 use crate::board::runs::transcript;
 use crate::board::setup::system;
 use crate::board::setup::chosen_model;
-use crate::board::runs::STRATEGY;
 use crate::board::runs::REJECTED;
 use crate::board::runs::failed_step_line;
-
+use crate::board::roles::STRATEGY_RUN;
 /// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
 /// conversation, in a folder beside the run's log, removed after.
 pub(crate) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
@@ -36,8 +35,11 @@ pub(crate) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let log = PathBuf::from(run["log"].as_str().unwrap_or(""));
     let dir = log.with_extension("");
     fs::create_dir_all(&dir)?;
-    let prompt = strategy_brief(top, &run);
-    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
+    let involvement = super::setup::involvement(&config);
+    let detail = super::setup::detail(&config);
+    let asking = super::setup::asking(&config);
+    let prompt = strategy_brief(top, &run, involvement, detail, asking);
+    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY_RUN, rid], timeout);
     let supervised = launched.and_then(|mut child| {
         supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
     });
@@ -65,6 +67,8 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "the choice changes what will be built or risks real loss. ",
     "Keep what the human asked for separate from what you recommend; if you propose a specific solution, ",
     "say plainly that it is merely a cursory suggestion, not a prescription, and the human decides. ",
+    "Write a task, feature or milestone body so it names only the user-interface behavior the human asked for, ",
+    "and ask the human for any other user-interface detail instead. ",
     "Don't make measurement, investigation, benchmarking or another step a precondition unless the human asked ",
     "for it, or a decision or spec requires it; if one isn't feasible here, say so briefly and still propose the next useful action. ",
     "Keep notes conversational: use plain language, and explain any term a non-specialist may not know. ",
@@ -115,7 +119,7 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
 /// How many decision titles a strategy run's brief lists, the latest.
 const RECENT_DECISIONS: usize = 10;
 /// A strategy run's prompt: its role, the record it started on, the vision, decision titles and notes.
-pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
+pub(super) fn strategy_brief(top: &Path, run: &Value, involvement: &str, detail: &str, asking: &str) -> String {
     let mut out = format!(
         concat!(
             "You are planning with the human on this project's Strategy page. ",
@@ -123,6 +127,7 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
         ),
         STRATEGY_ROLE
     );
+    out += &super::briefs::behavior_sections(involvement, detail, asking, "strategy note", "strategy");
     let c = &run["context"];
     match (c["kind"].as_str(), c["id"].as_str()) {
         (Some(kind @ ("task" | "feature" | "milestone")), Some(id)) => match strategy_show(top, kind, id) {
@@ -135,6 +140,7 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
     if !vision.is_empty() {
         out += &format!("\nVision:\n{vision}\n");
     }
+    out += &super::briefs::personas_section(top);
     // Reads without `--project` go to the root's own project; a folder of projects has none.
     let projects = workspace::members(top).unwrap_or_default();
     let own = projects.iter().any(|p| p == ".");
@@ -144,10 +150,8 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
             projects.join(", ")
         );
     }
-    // The root's own skills (D-27); a folder of projects has no project the run can read them from.
-    if own {
-        out += &skills::section(top);
-    }
+    // The workspace's skills (D-27): role skills in full, the rest listed.
+    out += &skills::section_for(&[top], own.then_some(top), "strategy");
     out += &format!("A proposed task's `scope` takes only these project folders: {}.\n", projects.join(", "));
     let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
     let titles: Vec<String> =

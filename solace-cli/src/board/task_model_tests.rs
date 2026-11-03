@@ -228,3 +228,31 @@ fn a_change_on_a_homeless_task_saves_no_mark() {
     assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
 }
 
+/// The model pick follows the role of the action a column starts with:
+/// Investigate in Planning, the work run in Assigned and the review in Review.
+#[test]
+fn workflow_names_each_columns_main_role() {
+    let w = super::workflow(&toml::Value::Table(Default::default())).unwrap();
+    let role = |id: &str| w["columns"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["role"].as_str().unwrap().to_string();
+    assert_eq!(role("planning"), "investigator");
+    assert_eq!(role("assigned"), "worker");
+    assert_eq!(role("needs_review"), "reviewer");
+    assert_eq!(role("backlog"), "");
+    assert_eq!(role("complete"), "");
+}
+
+/// Each action names the role of its run step, so Planning's Investigate and
+/// Assign pick different defaults.
+#[test]
+fn workflow_names_each_actions_role() {
+    let w = super::workflow(&toml::Value::Table(Default::default())).unwrap();
+    let role = |action: &str| w["roles"][action].as_str().unwrap().to_string();
+    assert_eq!(role("investigate"), "investigator");
+    assert_eq!(role("assign"), "worker");
+    assert_eq!(role("reassign"), "worker");
+    assert_eq!(role("review"), "reviewer");
+    assert_eq!(role("new_agent"), "worker");
+    assert!(w["roles"].get("plan").is_none());
+    assert!(w["roles"].get("approve").is_none());
+}
+

@@ -56,12 +56,7 @@ pub fn tasks_in(top: &Path, dir: &str) -> Result<Vec<(PathBuf, Value)>, Failure>
 
 /// A task's home, found from any project in its scope.
 pub fn home(project: &Path, tid: &str) -> Result<PathBuf, Failure> {
-    let top = top(project);
-    tasks_in(&top, &dir(&top, project))?
-        .into_iter()
-        .find(|(_, t)| t["id"] == tid)
-        .map(|(home, _)| home)
-        .ok_or_else(|| Failure("E7001 unknown task".into(), 1))
+    task_in(project, tid).map(|(home, _)| home)
 }
 
 /// The projects the board run's task may change, found from `project`, any
@@ -172,4 +167,49 @@ mod tests {
         assert!(home(&sub, "t3").unwrap_err().0.starts_with("E7001"), "out of sub's scope");
         assert!(home(&root, "nope").unwrap_err().0.starts_with("E7001"));
     }
+
+    #[test]
+    fn covers_names_a_project_by_path() {
+        let top = Path::new("/r");
+        let allowed = vec!["a".to_string(), "b/c".to_string()];
+        assert!(covers(top, &allowed, "a"));
+        assert!(covers(top, &allowed, "b/c"));
+        assert!(!covers(top, &allowed, "b"));
+        assert!(!covers(top, &[], "a"));
+    }
 }
+
+/// A task found from any project in its scope, with its stored value.
+pub fn task_in(project: &Path, tid: &str) -> Result<(PathBuf, Value), Failure> {
+    let top = top(project);
+    tasks_in(&top, &dir(&top, project))?.into_iter().find(|(_, t)| t["id"] == tid).ok_or_else(|| Failure("E7001 unknown task".into(), 1))
+}
+
+/// Runs a task lookup again for a moment while the task server replaces a task
+/// file, so a check that arrives in that moment waits instead of failing.
+pub(crate) fn retry_task<T>(mut f: impl FnMut() -> Result<T, Failure>) -> Result<T, Failure> {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+    const STEP: std::time::Duration = std::time::Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    loop {
+        match f() {
+            Err(e) if e.0 == "E7001 unknown task" && started.elapsed() < LIMIT => std::thread::sleep(STEP),
+            other => return other,
+        }
+    }
+}
+
+/// Whether project `dir` is one of the task's `allowed` projects.
+pub fn covers(top: &Path, allowed: &[String], dir: &str) -> bool {
+    let mine = path(top, dir);
+    allowed.iter().any(|d| crate::project_paths::same_project(&path(top, d), &mine))
+}
+
+/// How an agent asks the human to widen a task's scope: the folder is named
+/// exactly, and the human adds it in the Scope tab before answering.
+pub(crate) const ASK_FOR_PROJECT: &str = concat!(
+    "To change a project this task doesn't cover, ask the human with `task ask` to add it: name each project's ",
+    "folder exactly as the task's scope lists it (for example `solace-cli/components`), say in a few words what ",
+    "you would change there, and tell the human to first add the project in the task's Scope tab and then answer; no option's ",
+    "wording says that pressing it adds the project."
+);

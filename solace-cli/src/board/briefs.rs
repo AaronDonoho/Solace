@@ -98,7 +98,17 @@ fn review_context(s: &Store, t: &Value) -> Out {
 
 /// The brief, plus the images its notes reference, which are attached to the prompt.
 /// `here` is the project the run's agent works in (D-123).
-pub(crate) fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: &Path, custom: bool) -> (String, Vec<PathBuf>) {
+pub(crate) fn continuation_brief(
+    t: &Value,
+    run: &Value,
+    resumed: bool,
+    root: &Path,
+    here: &Path,
+    custom: bool,
+    involvement: &str,
+    detail: &str,
+    asking: &str,
+) -> (String, Vec<PathBuf>) {
     let kind = run["kind"].as_str().unwrap_or("");
     let mut packet = t.clone();
     if resumed {
@@ -126,7 +136,7 @@ pub(crate) fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &P
             packet["test_commands_error"] = json!(errors.join("; "));
         }
     }
-    let mut out = brief(&packet, kind);
+    let mut out = brief(&packet, kind, involvement, detail, asking);
     out += &plan_sections(&scope::top(root), t);
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
@@ -136,6 +146,10 @@ pub(crate) fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &P
     let reply = if resumed || !out.contains(START) { None } else { session_reply(t, here) };
     if reply.is_some() {
         out = out.replace(START, HELD_START);
+    }
+    if !resumed {
+        // Fresh briefs start with the reference.
+        out = format!("{}\n\n{out}", crate::reference::agent_reference(true));
     }
     if !matches!(kind, "review" | "discuss") && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
@@ -189,8 +203,14 @@ pub(crate) fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &P
             }
         }
     }
-    out += &vision_section(&scope::top(root), kind);
-    out += &skills::section(here);
+    let workspace = scope::top(root);
+    out += &vision_section(&workspace, kind);
+    out += &personas_section(&workspace);
+    let mut roots: Vec<&Path> = vec![&workspace];
+    if here != workspace.as_path() {
+        roots.push(here);
+    }
+    out += &skills::section_for(&roots, Some(here), kind);
     if !images.is_empty() {
         out += "\nImages in the notes are attached to this message as [image 1], [image 2], ... in order.\n";
         if custom {
@@ -212,15 +232,15 @@ pub(crate) fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &P
 /// The reply `session start --task` gives task `t`'s agent, with the task's
 /// title and description, in `here`, the project its run works in (D-151);
 /// none when that folder has no store, or when building it fails, which is
-/// logged so the brief's plain start line can be traced.
+/// logged so the brief's plain start line can be traced. The brief carries
+/// the reference above this reply.
 fn session_reply(t: &Value, here: &Path) -> Option<String> {
     if !here.join(".solace/store.db").exists() {
         return None;
     }
-    let text = |k: &str| t[k].as_str().unwrap_or("").trim().to_string();
-    let task = format!("{}\n{}", text("title"), text("body"));
+    let task = task_text(t);
     let tid = t["id"].as_str()?;
-    match Store::at(here).and_then(|s| s.task_session(task.trim_end(), Some(tid), "")) {
+    match Store::at(here).and_then(|s| s.brief_task_session(task.trim_end(), Some(tid), "")) {
         Ok(reply) => Some(reply),
         Err(e) => {
             eprintln!("session start for the brief of task {tid}: {}", e.0);
@@ -229,9 +249,17 @@ fn session_reply(t: &Value, here: &Path) -> Option<String> {
     }
 }
 
-pub(crate) fn brief(t: &Value, kind: &str) -> String {
+pub(crate) fn brief(t: &Value, kind: &str, involvement: &str, detail: &str, asking: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it.";
+    let example = if involvement == "director" {
+        "give each option a short example of what the human will see happen, not how the code would change"
+    } else {
+        "give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change"
+    };
+    let ask = format!(
+        "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, {example}; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. {} ",
+        crate::scope::ASK_FOR_PROJECT
+    );
     let settings = "To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`.";
@@ -265,16 +293,20 @@ pub(crate) fn brief(t: &Value, kind: &str) -> String {
     };
     // Every review asks for detailed findings and files its minor ones as tech debt (D-112, D-198, D-199).
     let debt = format!(" {} {}", FINDINGS_ASK, TECH_DEBT_ASK);
+    // A discussion shares the investigator's role but has its own brief.
     let role = match kind {
-        "review" => review_role(read_only, verify, &debt),
         "discuss" => discussion_role(read_only, verify),
-        "work" => work_role(start, ask, settings, &tests),
-        _ => investigation_role(read_only, define, start, ask),
+        _ => match crate::board::roles::for_run(kind).map(|role| role.id) {
+            Some("reviewer") => review_role(read_only, verify, &debt),
+            Some("worker") => work_role(start, &ask, settings, &tests),
+            _ => investigation_role(read_only, define, start, &ask),
+        },
     };
     let mut out = format!(
-        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{common}\n{responses}\n\n{}",
-        task_sections(t)
+        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n"
     );
+    out += &behavior_sections(involvement, detail, asking, "task note", kind);
+    out += &format!("{common}\n{responses}\n\n{}", task_sections(t));
     let mut section = |title: &str, lines: Vec<String>| {
         if !lines.is_empty() {
             out += &format!("\n{title}:\n{}\n", lines.join("\n"));
@@ -285,8 +317,8 @@ pub(crate) fn brief(t: &Value, kind: &str) -> String {
         section(
             "Projects",
             vec![format!(
-                "This task covers the projects {}. You work in {home}; for another of them, add `--project <folder>` (its folder as listed, from the Solace root) to any command (`inspect`, `submit`, `test`, `write`...). A project not listed is out of this task's reach: if you need it, ask the human with `task ask`.",
-                projects.join(", ")
+                "This task covers the projects {}. You work in {home}; for another of them, add `--project <folder>` (its folder as listed, from the Solace root) to any command (`inspect`, `submit`, `test`, `write`...). A project not listed is out of this task's reach.",
+                projects.join(", "),
             )],
         );
     }
@@ -328,7 +360,7 @@ fn marked_tests(top: &Path, t: &Value) -> (Vec<Value>, Vec<String>) {
 /// The review role's direction in a task brief.
 fn review_role(read_only: &str, verify: &str, debt: &str) -> String {
     format!(
-        "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+        "Review the changes this task made and give feedback. Red-team the changes: assume they don't work until you prove they fully meet the need and break nothing they reach. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Flag user-interface details the task didn't ask for, including labels, wording, indicators, colors, new buttons or screens, and layout. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
     )
 }
 
@@ -342,7 +374,7 @@ fn discussion_role(read_only: &str, verify: &str) -> String {
 /// The work role's direction in a task brief.
 fn work_role(start: &str, ask: &str, settings: &str, tests: &str) -> String {
     format!(
-        "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know. {WORK_TECH_DEBT_ASK}"
+        "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Prove each acceptance criterion through the entry point - for example: a request through the server's routing, not the function behind it; a save confirmed by a fresh read. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know. {WORK_TECH_DEBT_ASK}"
     )
 }
 
@@ -856,3 +888,140 @@ pub(crate) fn remember(top: &Path, tid: &str, rid: &str, budget: usize) -> Out {
     let reads = reads::window_reads().unwrap_or_else(|| run_reads(top, tid, rid));
     Ok(reads::remember_reply(&context, &reads, top, &|b| run_outline(top, tid, rid, b), budget))
 }
+
+/// The guidance for the chosen involvement level; an engineer keeps the detailed brief.
+pub(super) fn involvement_section(involvement: &str, note: &str, kind: &str) -> Option<String> {
+    match involvement {
+        "director" => Some(director_section(note, kind)),
+        "collaborator" => Some(collaborator_section(kind)),
+        _ => None,
+    }
+}
+
+/// How every run at the Director level addresses the human.
+fn director_section(note: &str, kind: &str) -> String {
+    format!(
+        concat!(
+            "How to talk to the human (Director): use plain words in questions and in the `### Summary` part of a note. ",
+            "Detail meant for later agents, review findings and `### Tech debt` items may name code, symbols and files. ",
+            "Don't use code, symbol names, file paths or error codes in those human-facing parts unless the human asks for them; project folder names in a scope request are the exception. ",
+            "Ask about what the software should do, never how. ",
+            "{}",
+            "When a choice can't be put that way, make the call yourself and {}. ",
+            "A note keeps the human's explanation under a `### Summary` heading near its top, with detail meant for later agents below it. ",
+            "{}",
+            "The technical references below are for you, not for the human."
+        ),
+        if kind == "strategy" {
+            ""
+        } else {
+            "Each question option says what the human will see happen, and one option is marked as recommended in its label (`Recommended: …`). "
+        },
+        calls_made_sentence(note),
+        review_order(kind)
+    )
+}
+
+/// How every run at the Collaborator level addresses the human.
+fn collaborator_section(kind: &str) -> String {
+    format!(
+        concat!(
+            "How to talk to the human (Collaborator): explain each technical term the first time it appears in questions and in the `### Summary` part of a note. ",
+            "Detail meant for later agents, review findings and `### Tech debt` items may use technical terms. ",
+            "Summarize each trade-off in one sentence. ",
+            "{}",
+            "A note keeps the human's explanation under a `### Summary` heading near its top, with detail meant for later agents below it. ",
+            "{}"
+        ),
+        if kind == "strategy" { "" } else { "Mark one question option as recommended in its label (`Recommended: …`). " },
+        review_order(kind)
+    )
+}
+
+/// A review's assessment label comes first, so its summary follows it.
+fn review_order(kind: &str) -> &'static str {
+    if kind == "review" { "In a review, the assessment label is the first line and the `### Summary` heading comes after it. " } else { "" }
+}
+
+/// The agent behavior guidance shared by task and strategy briefs.
+pub(super) fn behavior_sections(involvement: &str, detail: &str, asking: &str, note: &str, kind: &str) -> String {
+    let mut out = String::new();
+    for section in [involvement_section(involvement, note, kind), detail_section(detail), Some(asking_section(asking, note, involvement))]
+        .into_iter()
+        .flatten()
+    {
+        out += &section;
+        out += "\n";
+    }
+    out += UI_DETAILS_ASK;
+    out += "\n";
+    out
+}
+
+/// How much a note says at the chosen detail level; standard is the usual brief.
+fn detail_section(detail: &str) -> Option<String> {
+    let text = match detail {
+        "concise" => "How much to write (Concise): keep notes and summaries to a few lines, with the outcome first.",
+        "thorough" => {
+            "How much to write (Thorough): notes and summaries also cover the alternatives considered and how the result was checked."
+        }
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+/// How readily the agent asks instead of deciding.
+fn asking_section(asking: &str, note: &str, involvement: &str) -> String {
+    let (title, guidance) = match asking {
+        "often" => ("Often", "ask whenever the task allows more than one reasonable reading".to_string()),
+        "rarely" => {
+            let record = if involvement == "director" { String::new() } else { format!(" and {}", calls_made_sentence(note)) };
+            (
+                "Rarely",
+                format!("decide whatever can be undone{record}. Ask only about things that can't be undone or that contradict the task"),
+            )
+        }
+        _ => ("Balanced", "ask when a wrong guess would mean redoing work or would change what the human sees".to_string()),
+    };
+    format!("When to ask ({title}): {guidance}. This never stops you from asking when something conflicts with a decision or the vision.")
+}
+
+/// How a choice the agent made instead of asking is recorded.
+fn calls_made_sentence(note: &str) -> String {
+    format!("record it with `{note}` under a `### Calls made` heading, giving a plain reason; a call made never goes in `DECISIONS.md`")
+}
+
+/// The root's personas for a brief (D-218), in creation order: each name, then
+/// only its non-empty fields. None when there are no personas.
+pub(crate) fn personas_section(top: &Path) -> String {
+    let personas = tasks::personas(top);
+    if personas.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(concat!(
+        "\nPersonas (who the software is for, or who works on it, kept on the Strategy page; ",
+        "let them guide your choices):\n"
+    ));
+    for (i, p) in personas.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out += &format!("{}\n", p["name"].as_str().unwrap_or("").trim());
+        for (key, label) in tasks::strategy::PERSONA_FIELDS {
+            let text = p[key].as_str().unwrap_or("").trim();
+            if !text.is_empty() {
+                out += &format!("  {label}: {}\n", text.replace('\n', "\n    "));
+            }
+        }
+    }
+    out
+}
+
+/// The task's title and description, as `session start --task` reads them.
+pub(crate) fn task_text(t: &Value) -> String {
+    let text = |k: &str| t[k].as_str().unwrap_or("").trim().to_string();
+    format!("{}\n{}", text("title"), text("body"))
+}
+
+/// What every brief asks about user-interface details.
+pub(crate) const UI_DETAILS_ASK: &str = "Don't add user-interface details (labels, wording, indicators, colors, new buttons or screens, layout) the task or human didn't ask for; ask the human when one matters, and report user-interface behavior that is broken.";

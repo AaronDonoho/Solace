@@ -320,6 +320,6 @@ fn body_html(body: String, columns: List(Column)) -> String {
 pub fn known_columns() -> List(Column) {
   list.map(column_notes, fn(note) {
     let #(id, label, _) = note
-    solace_task.Column(id, label, [], False)
+    solace_task.Column(id, label, [], False, "")
   })
 }

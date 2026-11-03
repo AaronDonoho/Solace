@@ -122,9 +122,9 @@ fn endpoint_context_is_read_from_the_server() {
     assert_eq!(crate::board::setup::endpoint_context("https://example.com", "m"), None);
 }
 
-/// The pick lists one entry per Claude family: the family's live exact model,
-/// its alias only when the family has none; a dropped exact model gives way to
-/// the alias, so the family shows one reason. Codex's entries keep their places.
+/// The pick lists one entry per Claude family: the human's configured entry comes
+/// first; a dropped exact model gives way to the alias, so the family shows one
+/// reason. Codex's entries keep their places.
 #[test]
 fn the_pick_lists_one_entry_per_claude_family() {
     let models = json!([
@@ -139,7 +139,7 @@ fn the_pick_lists_one_entry_per_claude_family() {
     ]);
     let picked = crate::board::setup::served(models.as_array().unwrap());
     let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["codex-gpt-6-astra", "claude-opus-5-5", "claude-fable", "claude-haiku", "mine"]);
+    assert_eq!(ids, ["codex-gpt-6-astra", "claude-opus-local", "claude-fable", "claude-haiku", "mine"]);
     let dropped = json!([
         {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5","gone":true},
         {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
@@ -151,5 +151,121 @@ fn the_pick_lists_one_entry_per_claude_family() {
     let picked = crate::board::setup::served(exact_only.as_array().unwrap());
     let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["claude-opus-5-5"], "a family with only a dropped model shows its reason");
+}
+
+#[test]
+fn agent_settings_fall_back_to_defaults() {
+    let v = parse_system("").unwrap();
+    assert_eq!(v["involvement"], "collaborator");
+    assert_eq!(v["detail"], "standard");
+    assert_eq!(v["asking"], "balanced");
+    let v = parse_system("involvement = \"boss\"\ndetail = 5\nasking = []\n").unwrap();
+    assert_eq!(v["involvement"], "collaborator");
+    assert_eq!(v["detail"], "standard");
+    assert_eq!(v["asking"], "balanced");
+    assert_eq!(v["task_timeout"], 3600);
+    assert_eq!(v["languages"], json!({"gleam": true, "rust": true}));
+    assert!(!v["models"].as_array().unwrap().is_empty());
+    let v = parse_system("involvement = \"engineer\"\ndetail = \"concise\"\nasking = \"rarely\"\n").unwrap();
+    assert_eq!(v["involvement"], "engineer");
+    assert_eq!(v["detail"], "concise");
+    assert_eq!(v["asking"], "rarely");
+}
+
+#[test]
+fn agent_settings_are_saved_with_the_rest() {
+    let root = testing::Scratch::new().with(&[("system.toml", "task_timeout = 42\n[languages]\nrust = false\n")]);
+    let config = root.join("system.toml");
+    setup::save_agent_setting(&config, &json!({"key": "involvement", "value": "engineer"})).unwrap();
+    setup::save_agent_setting(&config, &json!({"key": "detail", "value": "thorough"})).unwrap();
+    setup::save_agent_setting(&config, &json!({"key": "asking", "value": "often"})).unwrap();
+    let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+    assert_eq!(v["involvement"].as_str(), Some("engineer"));
+    assert_eq!(v["detail"].as_str(), Some("thorough"));
+    assert_eq!(v["asking"].as_str(), Some("often"));
+    assert_eq!(v["task_timeout"].as_integer(), Some(42));
+    assert_eq!(v["languages"]["rust"].as_bool(), Some(false));
+    let e = setup::save_agent_setting(&config, &json!({"key": "involvement", "value": "boss"})).unwrap_err().0;
+    assert_eq!(e, "E7001 involvement must be director, collaborator or engineer");
+    assert!(setup::save_agent_setting(&config, &json!({"key": "detail", "value": 3})).is_err());
+    assert!(setup::save_agent_setting(&config, &json!({"key": "timing", "value": "often"})).is_err());
+}
+
+/// The level helper keeps the one fallback in setup.
+#[test]
+fn involvement_uses_a_known_level_or_the_default() {
+    assert_eq!(involvement(&json!({})), "collaborator");
+    assert_eq!(involvement(&json!({"involvement": "director"})), "director");
+}
+
+/// The detail and asking helpers keep the same one fallback in setup.
+#[test]
+fn detail_and_asking_use_a_known_value_or_the_default() {
+    assert_eq!(detail(&json!({})), "standard");
+    assert_eq!(detail(&json!({"detail": "thorough"})), "thorough");
+    assert_eq!(asking(&json!({})), "balanced");
+    assert_eq!(asking(&json!({"asking": "rarely"})), "rarely");
+}
+
+/// A discovered exact model outranks a shipped preset, and the provider's
+/// newest-first order chooses between two discovered models of one family.
+#[test]
+fn a_discovered_claude_model_outranks_a_shipped_preset() {
+    let preset = json!([{"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"}]);
+    let all = json!({"claude":{"models":[
+        {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
+        {"id":"claude-opus-5-6","label":"Opus 5.6","agent":"claude","model":"claude-opus-5-6","family":"opus"},
+        {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5","family":"opus"},
+    ]}});
+    let models = crate::board::agents::merge_from(&preset, &all);
+    let picked = crate::board::setup::served(&models);
+    let ids: Vec<&str> =
+        picked.iter().filter(|m| crate::board::agents::family(m) == Some("opus")).map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus-5-6"]);
+}
+
+/// Without a discovery, the alias names the family's latest model, so a shipped
+/// exact preset gives way to it.
+#[test]
+fn a_shipped_claude_preset_gives_way_to_the_alias() {
+    let preset = json!([{"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"}]);
+    let all = json!({"claude":{"models":[
+        {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
+    ]}});
+    let models = crate::board::agents::merge_from(&preset, &all);
+    let picked = crate::board::setup::served(&models);
+    let ids: Vec<&str> =
+        picked.iter().filter(|m| crate::board::agents::family(m) == Some("opus")).map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus"]);
+}
+
+/// The human's configured entry is the family's pick, ahead of discovery and the alias.
+#[test]
+fn a_configured_claude_model_stands_in_front() {
+    let configured = json!([
+        {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"},
+        {"id":"claude-opus-local","label":"Local Opus","agent":"claude","model":"opus","configured":true},
+    ]);
+    let all = json!({"claude":{"models":[
+        {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
+        {"id":"claude-opus-5-6","label":"Opus 5.6","agent":"claude","model":"claude-opus-5-6","family":"opus"},
+    ]}});
+    let models = crate::board::agents::merge_from(&configured, &all);
+    let picked = crate::board::setup::served(&models);
+    let ids: Vec<&str> =
+        picked.iter().filter(|m| crate::board::agents::family(m) == Some("opus")).map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus-local"]);
+}
+
+/// A discovered model with no discovery order falls behind one the provider ordered.
+#[test]
+fn a_discovered_model_without_an_order_ranks_last() {
+    let models = json!([
+        {"id":"claude-opus-5-5","agent":"claude","model":"claude-opus-5-5","family":"opus","discovered":true},
+        {"id":"claude-opus-5-6","agent":"claude","model":"claude-opus-5-6","family":"opus","discovered":true,"found_order":0},
+    ]);
+    let picked = crate::board::setup::served(models.as_array().unwrap());
+    let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus-5-6"]);
 }
 

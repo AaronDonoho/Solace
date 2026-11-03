@@ -1,18 +1,15 @@
 //! The MCP tool `solace mcp` serves over stdio: one call's commands, their
 //! replies, and the D-145/D-157 hints. It keeps the agent-facing layer apart
 //! from the CLI (main.rs holds the rest).
-use crate::{
-    REASON, SHOWN, agent_reference,
-};
+use crate::{REASON, SHOWN};
 use crate::cli::{batch, is_question, looks_like_code, panic_reply, read_hint, reset_after_panic, run_options};
 use crate::failure::usage;
 use crate::reads;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{BufRead, Write};
 
 #[cfg(test)] use crate::cli::with_root;
-use crate::board::runs::context;
 use crate::board::runs::strategy_context;
 /// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
 /// and plans (D-93), so it is told only those commands.
@@ -107,17 +104,24 @@ pub(crate) fn tool_schema() -> Value {
 /// One `tools/call`: the commands, their replies, and the D-145/D-157 hints.
 fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &mut Option<reads::Run>) -> Value {
     let args = &msg["params"]["arguments"];
-    let text = args["text"].as_str().map(String::from);
-    let mut input = || match &text {
+    let parsed = parse_call(args);
+    let call = parsed.as_ref().ok();
+    let refusal = parsed.as_ref().err();
+    let mut input = || match call.and_then(|c| c.text.as_ref()) {
         Some(t) => Ok(t.clone()),
         _ => usage("This command needs the new code in the `text` argument."),
     };
     // Several commands, one per line, run in order in one call.
-    let commands: Vec<&str> = args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+    let command = call.map_or("", |c| c.command.as_str());
+    let commands: Vec<&str> = command.lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
     let (mut out, mut is_error) = (String::new(), false);
     SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
     if let Some(run) = run_reads.as_mut() {
         run.start_call();
+    }
+    REASON.with(|r| *r.borrow_mut() = call.and_then(|c| c.reason.as_deref()).filter(|r| !r.trim().is_empty()).map(str::to_owned));
+    if let Some(why) = refusal {
+        (out, is_error) = (format!("E7031 {why}; nothing in this call ran.\n"), true);
     }
     // A patch belongs in `text`; `command` holds the command that takes it.
     if patch_in_command(&commands) {
@@ -161,13 +165,11 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
         );
         is_error = true;
     }
-    REASON.with(|r| *r.borrow_mut() = args["reason"].as_str().map(String::from).filter(|r| !r.trim().is_empty()));
     if !is_error {
-        let options: Vec<String> =
-            args["options"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         {
             let mut command = |words: &[String], left: usize| {
-                let result = run_options(words, &mut input, args["old"].as_str(), left, &options);
+                let result =
+                    run_options(words, &mut input, call.and_then(|c| c.old.as_deref()), left, call.map_or(&[], |c| c.options.as_slice()));
                 if let Some(run) = run_reads.as_mut() {
                     run.end_command(words);
                 }
@@ -176,8 +178,12 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
             (out, is_error) = batch(&commands, budget, &mut command);
         }
     }
-    if commands.is_empty() {
-        (out, is_error) = (format!("No command given.\n\n{}", agent_reference(context().is_some())), true);
+    if !is_error && commands.is_empty() {
+        (out, is_error) = ("No command given. Send one command per line; `help` lists them.\n".to_string(), true);
+    }
+    let repairs: &[String] = call.map_or(&[], |c| c.repairs.as_slice());
+    if !repairs.is_empty() {
+        out = if out.is_empty() { repairs.join("\n") } else { format!("{}\n{out}", repairs.join("\n")) };
     }
     // D-157: each command updated the window; the run's reads are saved once.
     if let Some(run) = run_reads {
@@ -188,6 +194,7 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
         out.push('\n');
     }
     out += hint;
+    out = with_stale_note(out, crate::store_write::stale_binary_notice());
     json!({"content": [{"type": "text", "text": out}], "isError": is_error})
 }
 
@@ -210,21 +217,9 @@ fn guarded(call: impl FnOnce() -> Value) -> Value {
 pub(crate) fn mcp(budget: usize) {
     crate::store_write::capture_running_binary();
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut single_reads = 0;
-    // A harness takes its tool list once at startup. Answer the handshake
-    // before touching the store: `tools/call` is the first thing that needs
-    // the run's reads.
-    let mut run_reads: Option<Option<reads::Run>> = None;
-    for line in stdin.lines() {
-        let Ok(line) = line else { break };
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if let Some(reply) = dispatch(&msg, budget, &mut single_reads, &mut run_reads) {
-            let _ = writeln!(stdout, "{reply}");
-            let _ = stdout.flush();
-        }
+    if let Some(line) = serve(stdin.lock(), std::io::stdout(), budget) {
+        crate::board::runs::record_server_end(&line);
+        let _ = writeln!(std::io::stderr(), "{line}");
     }
 }
 
@@ -250,11 +245,13 @@ mod tests {
 
     #[test]
     fn no_command_is_an_error_reply() {
-        let msg = json!({"params": {"arguments": {"command": ""}}});
-        let (mut reads, mut run) = (0, None);
-        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
-        assert_eq!(out["isError"], json!(true));
-        assert!(out["content"][0]["text"].as_str().unwrap().starts_with("No command given."));
+        for command in [json!(""), json!([]), json!([""]), json!(["  ", ""])] {
+            let msg = json!({"params": {"arguments": {"command": command}}});
+            let (mut reads, mut run) = (0, None);
+            let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+            assert_eq!(out["isError"], json!(true));
+            assert_eq!(out["content"][0]["text"], json!("No command given. Send one command per line; `help` lists them.\n"));
+        }
     }
 
     #[test]
@@ -411,6 +408,161 @@ mod tests {
         assert_eq!(ok["isError"], json!(false));
         assert_eq!(crate::testing::rust_span_start(), "bytes(1..2)");
     }
+
+    /// A lost stdout ends the server with the reason and the call's command.
+    #[test]
+    fn a_lost_stdout_names_the_reason_and_command() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct ClosedOnFlush;
+        impl std::io::Write for ClosedOnFlush {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        let input = || std::io::Cursor::new(format!("{init}\n"));
+        assert_eq!(serve(input(), Closed, 10_000), Some("solace mcp: stdout closed".to_string()));
+        assert_eq!(serve(input(), ClosedOnFlush, 10_000), Some("solace mcp: stdout closed".to_string()));
+        let call = json!({"method":"tools/call","params":{"arguments":{"command":"drafts drop 1\nsubmit --imports lockdown::paths"}}});
+        assert_eq!(call_command(&call).as_deref(), Some("drafts drop 1; submit --imports lockdown::paths"));
+        let end = server_end("stdout closed", call_command(&call).as_deref());
+        assert_eq!(end, "solace mcp: stdout closed while running drafts drop 1; submit --imports lockdown::paths");
+        assert_eq!(call_command(&init), None);
+    }
+
+    /// A stdin read error is logged; closing stdin is the normal end.
+    #[test]
+    fn a_stdin_read_error_is_logged_and_eof_is_silent() {
+        let bad = std::io::Cursor::new(vec![0xff, b'\n']);
+        assert_eq!(serve(bad, Vec::new(), 10_000), Some("solace mcp: stdin read failed: stream did not contain valid UTF-8".to_string()));
+        assert_eq!(serve(std::io::Cursor::new(""), Vec::new(), 10_000), None);
+    }
+
+    /// A malformed line gets the JSON-RPC parse error, not a silent drop.
+    #[test]
+    fn a_malformed_line_gets_a_parse_error_reply() {
+        let mut out = Vec::new();
+        assert_eq!(serve(std::io::Cursor::new("{not json\n"), &mut out, 10_000), None);
+        let reply: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(reply["jsonrpc"], json!("2.0"));
+        assert_eq!(reply["id"], Value::Null);
+        assert_eq!(reply["error"]["code"], json!(-32700));
+    }
+
+    /// The next reply after a rebuild says the running copy is old.
+    #[test]
+    fn a_stale_binary_note_follows_the_reply() {
+        assert_eq!(with_stale_note("Saved.".into(), Some("old copy\n")), "Saved.\nold copy\n");
+        assert_eq!(with_stale_note("Saved.\n".into(), None), "Saved.\n");
+    }
+
+    #[test]
+    fn options_sent_as_a_json_string_are_repaired() {
+        let project = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("notes.md", "a\n")]);
+        let msg = json!({"params": {"arguments": {"command": "read notes.md", "options": "[\"A\",\"B\"]"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = with_root(&project.root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        assert_eq!(out["isError"], json!(false));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repaired: options was a JSON string; send an array (R7001)"), "{text}");
+    }
+
+    #[test]
+    fn text_sent_as_an_object_is_serialized_for_a_json_command() {
+        let args = json!({"command": "strategy task", "text": {"title": "T"}});
+        let call = parse_call(&args).unwrap();
+        assert_eq!(call.text.as_deref(), Some(r#"{"title":"T"}"#));
+        assert_eq!(call.repairs, vec!["repaired: text was an object; send JSON text (R7001)".to_string()]);
+        let project = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let msg = json!({"params": {"arguments": args}});
+        let (mut reads, mut run) = (0, None);
+        let out = with_root(&project.root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repaired: text was an object; send JSON text (R7001)"), "{text}");
+        assert!(!text.contains("This command needs the new code in the `text` argument."), "{text}");
+        assert!(!text.contains("needs the proposal in `text`"), "{text}");
+    }
+
+    #[test]
+    fn a_one_item_list_where_a_string_belongs_is_unwrapped() {
+        for (name, value, expected) in
+            [("text", json!(["view app"]), "view app"), ("old", json!(["old text"]), "old text"), ("reason", json!(["why"]), "why")]
+        {
+            let mut args = json!({"command": "view app"});
+            args[name] = value;
+            let call = parse_call(&args).unwrap();
+            let got = match name {
+                "text" => call.text.as_deref(),
+                "old" => call.old.as_deref(),
+                _ => call.reason.as_deref(),
+            };
+            assert_eq!(got, Some(expected));
+            assert_eq!(call.repairs, vec![format!("repaired: {name} was a one-item list; send a string (R7001)")]);
+        }
+    }
+
+    #[test]
+    fn a_command_list_is_joined_into_lines() {
+        let args = json!({"command": ["read notes.md", "read notes.md"]});
+        let call = parse_call(&args).unwrap();
+        assert_eq!(call.command, "read notes.md\nread notes.md");
+        assert_eq!(call.repairs, vec!["repaired: command was a list; send one string of lines (R7001)".to_string()]);
+        let msg = json!({"method": "tools/call", "params": {"arguments": args}});
+        assert_eq!(call_command(&msg).as_deref(), Some("read notes.md; read notes.md"));
+        let project = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("notes.md", "a\n")]);
+        let msg = json!({"params": {"arguments": {"command": ["read notes.md"]}}});
+        let (mut reads, mut run) = (0, None);
+        let out = with_root(&project.root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        assert_eq!(out["isError"], json!(false));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repaired: command was a list; send one string of lines (R7001)"), "{text}");
+    }
+
+    #[test]
+    fn a_wrong_type_argument_is_refused_by_name_and_expected_type() {
+        for (name, value, expected) in [
+            ("command", json!(42), "a string"),
+            ("text", json!(42), "a string"),
+            ("text", json!({"title": "T"}), "a string"),
+            ("old", json!(42), "a string"),
+            ("reason", json!(42), "a string"),
+            ("options", json!(42), "an array of strings"),
+            ("options", json!("[1,2]"), "an array of strings"),
+            ("options", json!("{}"), "an array of strings"),
+        ] {
+            let mut args = if name == "command" { json!({}) } else { json!({"command": "read notes.md"}) };
+            args[name] = value;
+            let msg = json!({"params": {"arguments": args}});
+            let (mut reads, mut run) = (0, None);
+            let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+            assert_eq!(out["isError"], json!(true));
+            let text = out["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("E7031") && text.contains(&format!("`{name}`")) && text.contains(expected), "{name}: {text}");
+            assert!(text.contains("nothing in this call ran"), "{name}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_correct_call_is_unchanged() {
+        let project = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("notes.md", "a\n")]);
+        let msg = json!({"params": {"arguments": {"command": "read notes.md"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = with_root(&project.root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        assert_eq!(out["isError"], json!(false));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("repaired:") && !text.contains("E7031"), "{text}");
+    }
 }
 
 /// Whether the command lines hold a patch, which belongs in `text`.
@@ -482,4 +634,183 @@ fn dispatch(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &mu
         _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}),
     };
     Some(reply)
+}
+
+/// Serves MCP messages until stdin closes; any other ending gives the line to
+/// log, naming the call whose reply could not be delivered.
+fn serve(input: impl BufRead, mut output: impl Write, budget: usize) -> Option<String> {
+    let mut single_reads = 0;
+    // A harness takes its tool list once at startup. Answer the handshake
+    // before touching the store: `tools/call` is the first thing that needs
+    // the run's reads.
+    let mut run_reads: Option<Option<reads::Run>> = None;
+    for line in input.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => return Some(server_end(&format!("stdin read failed: {e}"), None)),
+        };
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            let error = json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}});
+            if send_reply(&mut output, &error).is_err() {
+                return Some(server_end("stdout closed", None));
+            }
+            continue;
+        };
+        let command = call_command(&msg);
+        if let Some(reply) = dispatch(&msg, budget, &mut single_reads, &mut run_reads) {
+            if send_reply(&mut output, &reply).is_err() {
+                return Some(server_end("stdout closed", command.as_deref()));
+            }
+        }
+    }
+    None
+}
+
+/// The command lines of a `tools/call`, flattened to one line for the run log.
+fn call_command(msg: &Value) -> Option<String> {
+    if msg["method"].as_str() != Some("tools/call") {
+        return None;
+    }
+    let command = match &msg["params"]["arguments"]["command"] {
+        Value::String(command) => command.clone(),
+        Value::Array(items) => items.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?.join("\n"),
+        _ => return None,
+    };
+    let lines: Vec<&str> = command.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    (!lines.is_empty()).then(|| lines.join("; "))
+}
+
+/// The run log's line for a server that did not end because stdin closed.
+fn server_end(reason: &str, command: Option<&str>) -> String {
+    match command {
+        Some(command) => format!("solace mcp: {reason} while running {command}"),
+        None => format!("solace mcp: {reason}"),
+    }
+}
+
+/// Writes one reply, failing when stdout can no longer take it.
+fn send_reply(output: &mut impl Write, reply: &Value) -> std::io::Result<()> {
+    writeln!(output, "{reply}")?;
+    output.flush()
+}
+
+/// Appends the one-time note that the running program predates a rebuild.
+fn with_stale_note(mut out: String, note: Option<&str>) -> String {
+    if let Some(note) = note {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(note);
+    }
+    out
+}
+
+/// One `tools/call`'s arguments after the wrong-type repairs with one meaning.
+struct Call {
+    command: String,
+    text: Option<String>,
+    old: Option<String>,
+    reason: Option<String>,
+    options: Vec<String>,
+    repairs: Vec<String>,
+}
+
+/// Reads a call's arguments, repairing only a wrong type with one meaning.
+/// Every other wrong type is refused with its name and the type expected.
+fn parse_call(args: &Value) -> Result<Call, String> {
+    let mut repairs = Vec::new();
+    let command = command_arg(args, &mut repairs)?;
+    let text = text_arg(args, command_expects_json(&command), &mut repairs)?;
+    let old = string_arg(args, "old", &mut repairs)?;
+    let reason = string_arg(args, "reason", &mut repairs)?;
+    let options = options_arg(args, &mut repairs)?;
+    Ok(Call { command, text, old, reason, options, repairs })
+}
+
+/// Whether a command takes a JSON object as its `text`.
+fn command_expects_json(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    words.windows(2).any(|pair| pair[0] == "strategy" && matches!(pair[1], "task" | "feature" | "milestone"))
+}
+
+fn command_arg(args: &Value, repairs: &mut Vec<String>) -> Result<String, String> {
+    let value = &args["command"];
+    if value.is_null() {
+        return Ok(String::new());
+    }
+    if let Some(command) = value.as_str() {
+        return Ok(command.to_string());
+    }
+    if let Some(items) = value.as_array() {
+        let Some(lines) = strings(items) else {
+            return Err("`command` must be a string or a list of strings".to_string());
+        };
+        let joined = lines.join("\n");
+        if joined.lines().any(|line| !line.trim().is_empty()) {
+            repairs.push("repaired: command was a list; send one string of lines (R7001)".to_string());
+        }
+        return Ok(joined);
+    }
+    Err("`command` must be a string".to_string())
+}
+
+fn string_arg(args: &Value, name: &str, repairs: &mut Vec<String>) -> Result<Option<String>, String> {
+    let value = &args[name];
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_str() {
+        return Ok(Some(text.to_string()));
+    }
+    if let Some(items) = value.as_array()
+        && let [only] = items.as_slice()
+        && let Some(text) = only.as_str()
+    {
+        repairs.push(format!("repaired: {name} was a one-item list; send a string (R7001)"));
+        return Ok(Some(text.to_string()));
+    }
+    Err(format!("`{name}` must be a string"))
+}
+
+fn text_arg(args: &Value, json: bool, repairs: &mut Vec<String>) -> Result<Option<String>, String> {
+    let value = &args["text"];
+    if value.is_null() || value.as_str().is_some() {
+        return Ok(value.as_str().map(String::from));
+    }
+    if let Some(items) = value.as_array()
+        && let [only] = items.as_slice()
+        && let Some(text) = only.as_str()
+    {
+        repairs.push("repaired: text was a one-item list; send a string (R7001)".to_string());
+        return Ok(Some(text.to_string()));
+    }
+    if json && value.is_object() {
+        repairs.push("repaired: text was an object; send JSON text (R7001)".to_string());
+        return Ok(Some(value.to_string()));
+    }
+    Err("`text` must be a string".to_string())
+}
+
+fn options_arg(args: &Value, repairs: &mut Vec<String>) -> Result<Vec<String>, String> {
+    let value = &args["options"];
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(items) = value.as_array() {
+        return strings(items).ok_or_else(|| "`options` must be an array of strings".to_string());
+    }
+    if let Some(text) = value.as_str() {
+        let parsed: Value = serde_json::from_str(text).map_err(|_| "`options` must be an array of strings".to_string())?;
+        let Some(items) = parsed.as_array() else {
+            return Err("`options` must be an array of strings".to_string());
+        };
+        let options = strings(items).ok_or_else(|| "`options` must be an array of strings".to_string())?;
+        repairs.push("repaired: options was a JSON string; send an array (R7001)".to_string());
+        return Ok(options);
+    }
+    Err("`options` must be an array of strings".to_string())
+}
+
+fn strings(items: &[Value]) -> Option<Vec<String>> {
+    items.iter().map(|item| item.as_str().map(String::from)).collect()
 }

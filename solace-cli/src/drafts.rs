@@ -781,6 +781,14 @@ mod tests {
         // Units are joined by a NUL line; only a hunk naming that line can remove it.
         let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
         assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");
+        // A hunk that copies the blank line `view` shows between symbols crosses them without the NUL.
+        let cross = concat!("*** Begin Patch\n*** Update: app\n-}\n-\n-pub fn other() {\n", "+  y\n*** End Patch\n",);
+        let e = patch_blocks(&s, cross).unwrap_err().0;
+        assert!(e.contains("a hunk spans two symbols") && !e.contains("aren't adjacent"), "{e}");
+        // A hunk with different indentation that crosses two symbols gets the same refusal.
+        let loose = concat!("*** Begin Patch\n*** Update: app\n-  }\n-\n-pub fn other() {\n", "+  y\n*** End Patch\n",);
+        let e = patch_blocks(&s, loose).unwrap_err().0;
+        assert!(e.contains("a hunk spans two symbols"), "{e}");
         let imports = "*** Begin Patch\n*** Update: app\n-import gleam/int\n+import gleam/list\n*** End Patch\n";
         let e = patch_blocks(&s, imports).unwrap_err().0;
         assert!(
@@ -788,6 +796,17 @@ mod tests {
                 && e.contains("submit --imports app")
                 && !e.contains("imports are added automatically"),
             "imports: {e}"
+        );
+        let mixed = concat!(
+            "*** Begin Patch\n*** Update: app\n@@\n-import gleam/int\n+import gleam/list\n",
+            "@@\n-  let x = 1\n+  let x = 2\n*** End Patch\n",
+        );
+        let e = patch_blocks(&s, mixed).unwrap_err().0;
+        assert!(
+            e.contains("changes app's imports and symbols")
+                && e.contains("submit --imports app")
+                && e.contains("send the symbol changes in a second patch"),
+            "mixed imports and symbols: {e}"
         );
         assert_eq!(board::snapshot(&s).unwrap(), original);
     }
@@ -1074,7 +1093,10 @@ mod tests {
         let new = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.nope\n*** End Patch\n").unwrap_err().0;
         assert!(new.contains("*** Add: crate.nope") && !new.contains("Similar names:"), "{new}");
         let unknown = patch_blocks(&s, "*** Begin Patch\n*** Update: nope.one\n*** End Patch\n").unwrap_err().0;
-        assert!(unknown.contains("Similar names:") && unknown.contains("crate.one"), "{unknown}");
+        assert!(
+            unknown.contains("E1001 unknown name: nope.one") && unknown.contains("Similar names:") && unknown.contains("crate.one"),
+            "{unknown}"
+        );
     }
 
     /// A type added with its impl and a later method's Add make one impl block
@@ -1620,7 +1642,13 @@ fn bad_target(s: &Store, ix: &Index, target: &str, at_line: usize) -> Failure {
             1,
         );
     }
-    Failure(format!("E0108 `*** Update: {target}` (line {at_line}) is no symbol. {RESEND}{}", store::similar_hint(ix, target)), 1)
+    Failure(
+        format!(
+            "E0108 `*** Update: {target}` (line {at_line}) is no symbol.\nE1001 unknown name: {target}{}\n{RESEND}",
+            store::similar_hint(ix, target),
+        ),
+        1,
+    )
 }
 
 /// The refusal for an update that leaves none of `qname`.
@@ -1672,6 +1700,11 @@ fn rust_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
 
 fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bool, Failure> {
     let blocks = &mut *c.blocks;
+    let bad = c.bad;
+    let target = c.target;
+    let at_line = c.at_line;
+    let spans_two_symbols =
+        || bad(format!("in {target} (section at line {at_line}), a hunk spans two symbols; give each symbol its own hunk."));
     // The target's text, a unit per symbol (and a module's header first).
     let (module, mut units): (String, Vec<(Option<usize>, String)>) = match c.s.resolve_module(c.ix, c.target) {
         Some(m) => (
@@ -1689,27 +1722,29 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
     const SEP: &str = "\u{0}";
     let mut lines: Vec<String> =
         units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
+    if spans_units(&units, &hunks) {
+        return Err(spans_two_symbols());
+    }
     let indented = apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
     let joined = lines.join("\n");
     let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
     if texts.len() != units.len() {
-        return Err((c.bad)(format!(
-            "in {} (section at line {}), a hunk spans two symbols; give each symbol its own hunk.",
-            c.target, c.at_line
-        )));
+        return Err(spans_two_symbols());
     }
     for (u, t) in units.iter_mut().zip(&texts) {
         u.1 = t.trim_end().to_string();
     }
     // A changed header's imports go with the module's first changed symbol.
-    let mut header = match &units[0] {
-        (None, h) if h.trim() != c.s.resolve_module(c.ix, &module).map_or("", |m| m.header.trim()) => h.clone(),
-        _ => String::new(),
+    let (header_changed, mut header) = match &units[0] {
+        (None, h) if h.trim() != c.s.resolve_module(c.ix, &module).map_or("", |m| m.header.trim()) => (true, h.clone()),
+        _ => (false, String::new()),
     };
+    let mut changed = false;
     for (i, text) in units.iter().filter_map(|(i, t)| Some((i.as_ref()?, t))) {
         if *text == c.ix.syms[*i].text {
             continue;
         }
+        changed = true;
         let split = c.s.lang().split(text);
         if split.items.is_empty() {
             return Err((c.bad)(nothing_left(&c.ix.syms[*i].qname(), c.at_line)));
@@ -1723,14 +1758,28 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
             push_block(blocks, &mut head, &module, &item.name, &item.text);
         }
     }
-    if !header.is_empty() {
-        return Err((c.bad)(format!(
-            concat!(
-                "the patch changes only {}'s imports (section at line {}); ",
-                "to replace them, use `submit --imports {}` with the module's imports and comment.",
-            ),
-            module, c.at_line, module
-        )));
+    if header_changed {
+        let message = if changed {
+            format!(
+                concat!(
+                    "the patch changes {module}'s imports and symbols (section at line {at_line}); ",
+                    "a patch can't change both: send `submit --imports {module}` with its imports and comment, ",
+                    "then send the symbol changes in a second patch.",
+                ),
+                module = module,
+                at_line = c.at_line,
+            )
+        } else {
+            format!(
+                concat!(
+                    "the patch changes only {module}'s imports (section at line {at_line}); ",
+                    "to replace them, use `submit --imports {module}` with the module's imports and comment.",
+                ),
+                module = module,
+                at_line = c.at_line,
+            )
+        };
+        return Err((c.bad)(message));
     }
     Ok(indented)
 }
@@ -1766,9 +1815,10 @@ fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: V
         return Err((c.bad)(format!(
             concat!(
                 "the patch changes {}'s header (section at line {}); a patch can't change it: ",
-                "view {} --header, then submit --imports {} with the whole header, mod lines included.",
+                "view {} --header, then submit --imports {} with the whole header, mod lines included; ",
+                "send item changes separately with `submit {}`.",
             ),
-            module, c.at_line, module, module
+            module, c.at_line, module, module, module
         )));
     }
     let mut items = crate::rust_submit::rust_module_items(c.ix, &module, &file.items)?;
@@ -1878,7 +1928,11 @@ fn add_rust_blocks(c: &mut SectionContext<'_>, text: &str) -> Result<(), Failure
             }
         } else {
             let item = c.s.rust_block_text(c.ix, &module, &p.name, &p.text);
-            push_block(c.blocks, &mut header, &module, &p.name, &item);
+            if !target.contains('.') && c.s.resolve(c.ix, target).is_err() {
+                push_named(c.blocks, &mut header, &module, &item);
+            } else {
+                push_block(c.blocks, &mut header, &module, &p.name, &item);
+            }
             if p.kind == "struct" {
                 add_pending_struct(c, &module, &p.whole())?;
             }
@@ -2341,7 +2395,7 @@ fn item_in_its_own_module(
     if s.resolve(ix, target).is_ok() || s.resolve_module(ix, target).is_some() {
         return None;
     }
-    let created = s.rust_created(ix, target).and_then(|created| created.line);
+    let created = s.rust_created(ix, target).ok().and_then(|created| created.line);
     let (parent, name) = match &created {
         Some((parent, name)) => (parent.as_str(), name.as_str()),
         None => target.rsplit_once("::")?,
@@ -2358,4 +2412,48 @@ fn has_known_parent(s: &Store, ix: &Index, name: &str) -> bool {
         return false;
     };
     s.resolve_module(ix, parent).is_some() || s.rust_container_in(ix, parent).is_ok_and(|c| c.is_some())
+}
+
+/// Whether a hunk's lines run from one unit into the next: a module patch
+/// changes one symbol per hunk, and the units are joined by a separator no
+/// hunk can see. Matches the way `apply_hunks` matches, exactly or loosely.
+fn spans_units(units: &[(Option<usize>, String)], hunks: &[Hunk]) -> bool {
+    let mut lines: Vec<String> = vec![];
+    let mut owner: Vec<usize> = vec![];
+    for (i, (_, text)) in units.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+            owner.push(i - 1);
+        }
+        for line in text.lines() {
+            lines.push(line.to_string());
+            owner.push(i);
+        }
+    }
+    hunks.iter().any(|(_, hunk, _)| {
+        let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
+        if old.is_empty() || old.len() > lines.len() {
+            return false;
+        }
+        let crosses = |k: usize| owner[k] != owner[k + old.len() - 1];
+        let mut same = false;
+        let mut cross = false;
+        for k in 0..=lines.len() - old.len() {
+            if old.iter().zip(&lines[k..]).all(|(o, l)| o.trim_end() == l.trim_end()) {
+                if crosses(k) {
+                    cross = true;
+                } else {
+                    same = true;
+                }
+            }
+        }
+        if let Some((k, _)) = loose_match(&old, &lines) {
+            if crosses(k) {
+                cross = true;
+            } else {
+                same = true;
+            }
+        }
+        cross && !same
+    })
 }

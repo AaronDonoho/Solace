@@ -90,8 +90,8 @@ pub fn covered(ix: &Index, t: usize) -> HashSet<usize> {
 }
 
 /// A test's reach, as a hash: the revision and module of everything it can
-/// run, and the project and dependency manifests.
-pub fn hash(ix: &Index, reach: &HashSet<usize>, revisions: &[String], root: &Path) -> String {
+/// run, and the manifests of every project it can reach across.
+pub fn hash(ix: &Index, reach: &HashSet<usize>, revisions: &[String], roots: &[&Path]) -> String {
     let mut parts: Vec<String> = reach.iter().map(|&j| format!("{} {} {}\n", ix.syms[j].id, ix.syms[j].module, revisions[j])).collect();
     parts.sort();
     let mut h = Sha256::new();
@@ -101,8 +101,10 @@ pub fn hash(ix: &Index, reach: &HashSet<usize>, revisions: &[String], root: &Pat
     // A Rust project's tests also depend on its manifest, lockfile and build
     // script; a Gleam project's on its manifest and lockfile (D-170).
     let manifests: &[&str] = if ix.rust { &["Cargo.toml", "Cargo.lock", "build.rs"] } else { &["gleam.toml", "manifest.toml"] };
-    for f in manifests {
-        h.update(fs::read(root.join(f)).unwrap_or_default());
+    for root in roots {
+        for f in manifests {
+            h.update(fs::read(root.join(f)).unwrap_or_default());
+        }
     }
     hex(&h.finalize())
 }
@@ -191,16 +193,17 @@ mod tests {
         let source = "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n";
         let ix = crate::index::test_index(&[("src", "calc", source)]);
         let reach: HashSet<usize> = [0].into();
-        let base = hash(&ix, &reach, &["r1".to_string()], &store.root);
-        assert_eq!(base, hash(&ix, &reach, &["r1".to_string()], &store.root), "the same inputs give the same hash");
-        assert_ne!(base, hash(&ix, &reach, &["r2".to_string()], &store.root), "a revision is part of it");
+        let roots = [store.root.as_path()];
+        let base = hash(&ix, &reach, &["r1".to_string()], &roots);
+        assert_eq!(base, hash(&ix, &reach, &["r1".to_string()], &roots), "the same inputs give the same hash");
+        assert_ne!(base, hash(&ix, &reach, &["r2".to_string()], &roots), "a revision is part of it");
         let mut moved = crate::index::test_index(&[("src", "calc", source)]);
         moved.syms[0].module = "other".to_string();
-        assert_ne!(base, hash(&moved, &reach, &["r1".to_string()], &store.root), "a module is part of it");
+        assert_ne!(base, hash(&moved, &reach, &["r1".to_string()], &roots), "a module is part of it");
         let headed = crate::index::test_index(&[("src", "calc", "import gleam/int\n\npub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n")]);
-        assert_eq!(base, hash(&headed, &reach, &["r1".to_string()], &store.root), "a header alone is not part of it");
+        assert_eq!(base, hash(&headed, &reach, &["r1".to_string()], &roots), "a header alone is not part of it");
         fs::write(store.root.join("gleam.toml"), "name = \"other\"\n").unwrap();
-        assert_ne!(base, hash(&ix, &reach, &["r1".to_string()], &store.root), "the manifest is part of it");
+        assert_ne!(base, hash(&ix, &reach, &["r1".to_string()], &roots), "the manifest is part of it");
     }
 
     #[test]

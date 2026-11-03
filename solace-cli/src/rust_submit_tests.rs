@@ -129,3 +129,18 @@ fn stored_mods_after_the_last_import_drop_their_blank_after() {
     let mods = [language::rust::FileMod { name: "m".into(), file: None, text: "mod m;".into() }];
     assert_eq!(with_stored_mods(new, old, &mods), "use a::a;\nmod m;");
 }
+
+/// A `mod` declaration keeps its identity through a visibility change, but not
+/// through a name, path or attribute change.
+#[test]
+fn a_mod_visibility_keeps_its_identity() {
+    let decl = |text: &str| language::rust::FileMod { name: "a".into(), file: None, text: text.into() };
+    for text in ["mod a;", "pub mod a;", "pub(crate) mod a;", "pub(super) mod a;", "pub(in crate::a) mod a;"] {
+        assert_eq!(super::mod_identity(text), "mod a;", "{text}");
+        assert!(super::same_mods(&[decl("mod a;")], &[decl(text)]), "{text}");
+    }
+    assert!(super::same_mods(&[decl("#[cfg(test)]\nmod a;")], &[decl("#[cfg(test)]\npub(crate) mod a;")]));
+    assert!(!super::same_mods(&[decl("mod a;")], &[decl("mod b;")]));
+    assert!(!super::same_mods(&[decl("#[path = \"a.rs\"] mod a;")], &[decl("#[path = \"b.rs\"] mod a;")]));
+    assert!(!super::same_mods(&[decl("#[cfg(test)]\nmod a;")], &[decl("mod a;")]));
+}

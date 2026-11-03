@@ -24,6 +24,7 @@ pub fn routes_test() {
     #("/contracts?task=t1", Contracts("", "t1")),
     #("/p/web/contracts?task=t1", Contracts("/p/web", "t1")),
     #("/strategy", frontend.Strategy("vision")),
+    #("/strategy?tab=personas", frontend.Strategy("personas")),
     #("/strategy?tab=tasks", frontend.Strategy("tasks")),
     #("/strategy?tab=nope", frontend.Strategy("vision")),
     #("/settings", frontend.Settings),
@@ -802,10 +803,10 @@ pub fn old_addresses_are_renamed_test() {
 /// the ones it knows and a general pair for a project's own.
 pub fn the_guide_follows_the_workflow_test() {
   let columns = [
-    solace_task.Column("backlog", "Backlog", [], False),
-    solace_task.Column("planning", "Planning", [], False),
-    solace_task.Column("needs_review", "Review", [], False),
-    solace_task.Column("ship_it", "Ship It", [], True),
+    solace_task.Column("backlog", "Backlog", [], False, ""),
+    solace_task.Column("planning", "Planning", [], False, ""),
+    solace_task.Column("needs_review", "Review", [], False, ""),
+    solace_task.Column("ship_it", "Ship It", [], True, ""),
   ]
   let page =
     element.to_string(frontend.page(
@@ -850,7 +851,7 @@ pub fn the_guide_follows_the_workflow_test() {
       ),
     )
   assert loaded.columns
-    == [solace_task.Column("planning", "Planning", [], False)]
+    == [solace_task.Column("planning", "Planning", [], False, "")]
   let #(still, _) =
     frontend.update(loaded, frontend.WorkflowLoaded("{\"message\":\"down\"}"))
   assert still.columns == loaded.columns

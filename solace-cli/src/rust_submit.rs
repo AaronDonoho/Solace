@@ -384,7 +384,8 @@ impl Store {
     /// unchanged items keep their bytes (D-158 point 5), unless `format
     /// <module>` has already formatted the whole module (D-180); `ord`, `sep`
     /// and a container's `tail` follow the text. The `mod x;` list can't
-    /// change, and a module the store doesn't have is created by `--new`.
+    /// change, though a declaration's visibility may; a module the store
+    /// doesn't have is created by `--new`.
     fn submit_module_rust(&self, m: &str, raw: &str, formatted: bool) -> Out {
         let ix = self.index()?;
         self.refuse_drift(&ix)?;
@@ -400,8 +401,11 @@ impl Store {
         }
         let old = self.header(&module)?;
         let before = store::module_text(&ix, row);
-        if language::rust::split(&before, &module)?.mods != file.mods {
-            return fail(format!("Not saved: the module's `mod` list can't change; {}.", store::MODULE_NOTE));
+        if !same_mods(&language::rust::split(&before, &module)?.mods, &file.mods) {
+            return fail(format!(
+                "Not saved: the module's `mod` list can't change, though a declaration's visibility may; {}.",
+                store::MODULE_NOTE
+            ));
         }
         let mut items = rust_module_items(&ix, &module, &file.items)?;
         if !formatted {
@@ -414,6 +418,7 @@ impl Store {
             format!("{}{}", file.header.trim_end(), if end.is_empty() { "\n\n" } else { end })
         };
         let max_width = cargo::max_width(&self.root);
+        let mut baseline = Vec::new();
         let out = self.transaction(&[], || {
             self.set_header(&module, &header)?;
             let (mut changed, mut added): (Vec<(String, String)>, Vec<(String, String)>) = (vec![], vec![]);
@@ -446,6 +451,8 @@ impl Store {
                     cargo::ROUND_NOTE
                 ));
             }
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
             let list = |v: &[(String, String)]| {
                 if v.is_empty() { "none".to_string() } else { v.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>().join(", ") }
             };
@@ -462,8 +469,10 @@ impl Store {
             );
             out += &diagnostics::broken_report(&before_broken, &diags);
             out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, formatted));
+            out += &dependents.message;
             Ok(out)
         })?;
+        self.remember_dependent_errors(&baseline)?;
         Ok(out)
     }
 
@@ -673,6 +682,7 @@ impl Store {
             return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
         }
         let max_width = cargo::max_width(&self.root);
+        let mut baseline = Vec::new();
         let out = self.transaction(&files, || {
             for c in &created {
                 let owns = language::rust::owns_dir(&c.module, &c.file);
@@ -781,6 +791,8 @@ impl Store {
                     cargo::ROUND_NOTE
                 ));
             }
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
             let mut reported = saved.clone();
             unique(&mut reported);
             let mut out = String::new();
@@ -807,8 +819,10 @@ impl Store {
                 }
             }
             out += &note_lines(&long);
+            out += &dependents.message;
             Ok(out)
         })?;
+        self.remember_dependent_errors(&baseline)?;
         Ok(note_lines(&notes) + &out)
     }
 
@@ -836,32 +850,51 @@ impl Store {
 
     /// Where a named block lands (D-168): the symbol it replaces (containers are
     /// left out of the lookup), a container it adds to, or a module it adds
-    /// items to. A name that is none of those is a module the store doesn't have.
+    /// items to, creating a module the store doesn't have.
     pub(crate) fn rust_target(&self, ix: &Index, n: &str) -> Result<RustTarget, Failure> {
         if let Some(i) = rust_symbol(ix, n)? {
             let parent = ix.syms[i].parent.as_ref().and_then(|p| ix.syms.iter().position(|s| &s.id == p));
             return Ok(RustTarget { module: ix.syms[i].module.clone(), existing: Some(i), parent, create: None });
         }
-        if let Some(m) = self.resolve_module(ix, n) {
+        if let Some(m) = self.resolve_module_exact(ix, n) {
             return Ok(RustTarget { module: m.path.clone(), existing: None, parent: None, create: None });
         }
         if let Some(i) = self.rust_container_in(ix, n)? {
             return Ok(RustTarget { module: ix.syms[i].module.clone(), existing: None, parent: Some(i), create: None });
         }
-        if let Some(m) = n.rsplit_once('.').and_then(|(m, _)| self.resolve_module(ix, m)) {
-            return Ok(RustTarget { module: m.path.clone(), existing: None, parent: None, create: None });
-        }
-        if let Some(create) = n.rsplit_once('.').and_then(|(m, _)| self.rust_created(ix, m)) {
-            return Ok(RustTarget { module: create.module.clone(), existing: None, parent: None, create: Some(create) });
-        }
         let m = n.rsplit_once('.').map_or(n, |(m, _)| m);
+        let mut refusal = None;
+        if let Some((module, rest)) = n.rsplit_once('.') {
+            if let Some(module) = self.resolve_module_exact(ix, module) {
+                return Ok(RustTarget { module: module.path.clone(), existing: None, parent: None, create: None });
+            }
+            if let Some(found) = self.resolve_module(ix, module) {
+                return fail(format!(
+                    "E1003 `{n}` names no module `{module}`, but `{}` matches it; use `{}.{rest}` to add there.",
+                    found.path, found.path
+                ));
+            }
+            match self.rust_created(ix, module) {
+                Ok(create) => return Ok(created_target(create)),
+                Err(e) if !module.contains('.') => refusal = Some(e),
+                Err(_) => {}
+            }
+        } else {
+            match self.rust_created(ix, n) {
+                Ok(create) => return Ok(created_target(create)),
+                Err(e) => refusal = Some(e),
+            }
+        }
         match type_without_impl(ix, n) {
             Some(ty) => fail(format!(
-                "E1003 {ty} has no `impl`: add one with `*** Add: {module}` and a whole `impl {name} {{ … }}` block",
+                "E1003 {ty} has no `impl`: add a whole `impl {name} {{ … }}` block to `{module}`",
                 module = ty.rsplit_once('.').map_or("", |(m, _)| m),
                 name = ty.rsplit_once('.').map_or(ty.as_str(), |(_, t)| t),
             )),
-            None => fail(format!("E1003 unknown module: {m}")),
+            None => match refusal {
+                Some(e) => Err(e),
+                None => fail(format!("E1003 unknown module: {m}")),
+            },
         }
     }
 
@@ -875,29 +908,35 @@ impl Store {
         if let Some(i) = self.rust_container_in(ix, m)? {
             return Ok(RustTarget { module: ix.syms[i].module.clone(), existing: None, parent: Some(i), create: None });
         }
-        match self.rust_created(ix, m) {
-            Some(create) => Ok(RustTarget { module: create.module.clone(), existing: None, parent: None, create: Some(create) }),
-            None => fail(format!("E1003 unknown module: {m}")),
-        }
+        self.rust_created(ix, m).map(created_target)
     }
 
     /// The module a name the store doesn't have creates (D-168): `cache` beside
     /// the crate root, `a::b::c` beside `a::b`, and `integration::x` a new test
     /// crate root (`tests/x.rs`, D-169). A child named `tests` is a file test
     /// module beside its parent (`a_tests.rs`, D-206), also named `a.tests`.
-    /// `None` when a part is no identifier or
-    /// names a keyword, when the parent module isn't there, or when the name it
-    /// would land under is a module the store already has.
-    pub(crate) fn rust_created(&self, ix: &Index, name: &str) -> Option<RustNew> {
+    /// `E1003` when a part is no identifier or names a keyword, when the parent
+    /// module isn't there, or when the name it would land under is a module the
+    /// store already has.
+    pub(crate) fn rust_created(&self, ix: &Index, name: &str) -> Result<RustNew, Failure> {
         let dotted = name.strip_suffix(".tests").map(|module| format!("{module}::tests"));
         let name = dotted.as_deref().unwrap_or(name);
         let parts: Vec<&str> = name.split("::").collect();
-        if !parts.iter().all(|p| identifier(p)) {
-            return None;
+        if let Some(part) = parts.iter().find(|p| !identifier(p)) {
+            let why = if part.is_empty() {
+                "a module needs a name".to_string()
+            } else if reserved(part) {
+                format!("`{part}` is a Rust keyword or reserved word, so it can't name a module")
+            } else {
+                format!("`{part}` is not a Rust identifier, so it can't name a module")
+            };
+            return fail(format!("E1003 {name}: {why}."));
         }
-        let (own, parents) = parts.split_last()?;
+        let Some((own, parents)) = parts.split_last() else {
+            return fail("E1003 a module needs a name.");
+        };
         let parent = parents.join("::");
-        let created = if parent == "integration" && self.resolve_module(ix, &parent).is_none() {
+        let created = if parent == "integration" && self.resolve_module_exact(ix, &parent).is_none() {
             RustNew {
                 module: name.to_string(),
                 file: format!("tests/{own}.rs"),
@@ -907,8 +946,13 @@ impl Store {
                 test: false,
             }
         } else {
-            let p = self.resolve_module(ix, if parent.is_empty() { "crate" } else { &parent })?;
-            let above = p.file.clone()?;
+            let parent_name = if parent.is_empty() { "crate" } else { &parent };
+            let Some(p) = self.resolve_module_exact(ix, parent_name) else {
+                return fail(format!("E1003 no module `{parent_name}`; `{name}` needs it as its parent."));
+            };
+            let Some(above) = p.file.clone() else {
+                return fail(format!("E1003 `{}` has no file of its own, so `{name}` can't go beside it.", p.path));
+            };
             let owns = p.owns_dir.unwrap_or_else(|| language::rust::owns_dir(&p.path, &above));
             let test = *own == "tests";
             let (module, file) = if test {
@@ -923,10 +967,10 @@ impl Store {
         // `tests/*.rs` file has (D-169), so the name it lands under can differ
         // from the one asked for; a module the store already has under it isn't
         // this submit's to make.
-        if self.resolve_module(ix, &created.module).is_some() {
-            return None;
+        if self.resolve_module_exact(ix, &created.module).is_some() {
+            return fail(format!("E1003 {name} would land on {}, which is already a module.", created.module));
         }
-        Some(created)
+        Ok(created)
     }
 
     /// Adds a Rust item (D-168): after every row of its module, `ord`-wise, and
@@ -985,6 +1029,7 @@ impl Store {
     /// only when the text is imports and the module comment alone — no refusals,
     /// no items — and keeps the module's `mod x;` list, taking the stored lines
     /// when the text leaves them out, since changing it adds or removes a module.
+    /// A declaration's visibility may change; its name, file and attributes may not.
     /// An inline `mod` takes the same imports inside its braces, keeping its
     /// opening, items and closing brace. Then cargo checks the module.
     fn submit_imports_rust(&self, m: &str, raw: &str) -> Out {
@@ -1035,6 +1080,7 @@ impl Store {
             targets.push(i);
         }
         let before = self.broken()?;
+        let mut baseline = Vec::new();
         let out = self.transaction(&[], || {
             let ix = self.index()?;
             let named: Vec<(String, String)> = targets.iter().map(|&i| (ix.syms[i].qname(), ix.syms[i].module.clone())).collect();
@@ -1091,8 +1137,11 @@ impl Store {
                 text += &format!("Deleted {qname}{retired}.\n");
             }
             text += &dropped_impls_note(&dropped);
-            Ok(lockdown::trim_output(&text, budget) + &diagnostics::broken_report(&before, &diags))
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
+            Ok(lockdown::trim_output(&text, budget) + &diagnostics::broken_report(&before, &diags) + &dependents.message)
         })?;
+        self.remember_dependent_errors(&baseline)?;
         Ok(out)
     }
 
@@ -1256,7 +1305,8 @@ impl Store {
     }
 
     fn save_imports(&self, module: &str, saved: &str, save: impl FnOnce() -> Result<(), Failure>) -> Out {
-        self.transaction(&[], || {
+        let mut baseline = Vec::new();
+        let out = self.transaction(&[], || {
             save()?;
             let ix = self.index()?;
             let before_broken = self.broken()?;
@@ -1273,6 +1323,8 @@ impl Store {
                 let text: Vec<&str> = errors.iter().map(|d| d.text.as_str()).collect();
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
             }
+            let dependents = self.check_dependents()?;
+            baseline = dependents.baseline;
             let mut out = format!("Saved {saved}.\n");
             out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
@@ -1280,8 +1332,11 @@ impl Store {
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
             out += &diagnostics::broken_report(&before_broken, &diags);
+            out += &dependents.message;
             Ok(out)
-        })
+        })?;
+        self.remember_dependent_errors(&baseline)?;
+        Ok(out)
     }
 
     fn submit_file_imports(&self, module: &str, raw: &str) -> Out {
@@ -1292,7 +1347,8 @@ impl Store {
             return fail(format!(
                 concat!(
                     "Not saved: `--imports` replaces the module's whole header, so it must ",
-                    "leave out the module's `mod` lines or keep the same declarations, in any order; ",
+                    "leave out the module's `mod` lines or keep the same declarations, in any order, ",
+                    "though a declaration's visibility may change; ",
                     "`view {module} --header` shows them; {note}.",
                 ),
                 module = module,
@@ -1667,10 +1723,11 @@ fn line_of(source: &str, at: usize) -> usize {
     source[..at].bytes().filter(|b| *b == b'\n').count()
 }
 
-/// Whether two headers declare the same modules, whatever their order.
+/// Whether two headers declare the same modules, whatever their order: a
+/// declaration's visibility may differ, but its name, file and attributes may not.
 fn same_mods(old: &[language::rust::FileMod], new: &[language::rust::FileMod]) -> bool {
-    let mut old: Vec<&str> = old.iter().map(|decl| decl.text.as_str()).collect();
-    let mut new: Vec<&str> = new.iter().map(|decl| decl.text.as_str()).collect();
+    let mut old: Vec<String> = old.iter().map(|decl| mod_identity(&decl.text)).collect();
+    let mut new: Vec<String> = new.iter().map(|decl| mod_identity(&decl.text)).collect();
     old.sort_unstable();
     new.sort_unstable();
     old == new
@@ -1705,4 +1762,29 @@ fn inline_mod_text(opening: &str, body: &str, closing: &str) -> String {
         return if closing.is_empty() { format!("{opening}\n") } else { format!("{opening}{closing}") };
     }
     if closing.is_empty() { format!("{opening}\n{body}\n\n") } else { format!("{opening}\n{body}\n{closing}") }
+}
+
+/// The target a name that creates a module lands in.
+fn created_target(create: RustNew) -> RustTarget {
+    RustTarget { module: create.module.clone(), existing: None, parent: None, create: Some(create) }
+}
+
+/// A `mod` declaration's text without its visibility.
+fn mod_identity(text: &str) -> String {
+    let start = text.rfind('\n').map_or(0, |i| i + 1);
+    let line = &text[start..];
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    let Some(rest) = trimmed.strip_prefix("pub") else { return text.to_string() };
+    let rest = if let Some(rest) = rest.strip_prefix('(') {
+        match rest.find(')') {
+            Some(i) => &rest[i + 1..],
+            None => return text.to_string(),
+        }
+    } else if let Some(rest) = rest.strip_prefix(' ') {
+        rest
+    } else {
+        return text.to_string();
+    };
+    format!("{}{}{}", &text[..start], indent, rest.trim_start())
 }

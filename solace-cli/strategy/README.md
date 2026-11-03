@@ -3,8 +3,8 @@
 The Strategy page (D-90): a Lustre web component, `<solace-strategy>`, compiled to JavaScript. The shell
 (`solace-cli/frontend`) registers it and shows it at `/strategy`.
 
-It draws a tablist with four panels, one per tab: Vision, Features, Roadmap, Tasks. The tab shown is kept in the
-URL (`/strategy?tab=tasks`), so a reload returns to it; an unknown or missing value shows Vision.
+It draws a tablist with five panels, one per tab: Vision, Personas, Features, Roadmap, Tasks. The tab shown is kept
+in the URL (`/strategy?tab=tasks`), so a reload returns to it; an unknown or missing value shows Vision.
 
 ## Record state labels
 
@@ -23,6 +23,23 @@ project (and its `editor_styles`).
 - **Saving.** `PUT /vision {text, base}`, where `base` is the revision the edit began from. The server refuses
   another (`E7026`): the draft stays, and once the stream shows a newer vision the page says so and offers
   **Reload**, which takes the saved text.
+
+## Personas tab
+
+The root's personas (D-216): who the software is for, or who works on it, drawn by `src/personas.gleam`.
+
+- **Data.** The root's `/events` replays `{personas: [...]}` and sends the whole list after every create, replace
+  or delete. A persona is `{id, name, objectives, tools, concerns, other, revision}`; every field but `id` is
+  optional, and an absent text field reads as empty.
+- **List.** Each persona shows its name and the non-empty parts as Markdown under Objectives, Tools, Concerns and
+  Other, with **Edit** and **Delete**. **New persona** opens the form above the list.
+- **Form.** Name, then the four fields in `solace_task.editor` (`persona-objectives`, `persona-tools`,
+  `persona-concerns`, `persona-other`). Each field has its own hint. The name must not be blank, and all fields
+  together hold at most 1000 characters (D-216); past that, or with a blank name, **Save** waits.
+- **Saving.** `POST /personas {name, objectives, tools, concerns, other}` for a new one, or `PUT /personas/{id}`
+  with every field and `base`, the revision the edit began from. The server refuses another (`E7028`): the draft
+  stays, and once the stream shows a newer persona the page says so and offers **Reload**, which takes the saved
+  persona. **Delete** asks first, then sends `DELETE /personas/{id}`.
 
 ## Features tab
 

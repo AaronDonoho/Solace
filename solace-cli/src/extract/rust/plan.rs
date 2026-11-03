@@ -112,8 +112,8 @@ pub(crate) fn destination(s: &Store, ix: &Index, to: &str) -> Result<(String, Op
     match s.resolve_module(ix, to) {
         Some(row) => Ok((row.path.clone(), None)),
         None => match s.rust_created(ix, to) {
-            Some(new) => Ok((new.module.clone(), Some(new))),
-            None => fail(format!("E1003 {to} is not a module name; use --to <module>, e.g. --to helpers")),
+            Ok(new) => Ok((new.module.clone(), Some(new))),
+            Err(_) => fail(format!("E1003 {to} is not a module name; use --to <module>, e.g. --to helpers")),
         },
     }
 }

@@ -116,3 +116,19 @@ fn color_and_charset_escapes_are_dropped() {
 fn two_byte_escapes_are_dropped() {
     assert_eq!(strip_ansi("\u{1b}7saved\u{1b}8"), "saved");
 }
+
+#[test]
+fn an_errors_kind_is_its_title_and_caret_note() {
+    let text = "error: Incorrect arity\n  --> a.gleam\n   | ^ Expected 6 arguments, got 5";
+    assert_eq!(error_kind(text), "Incorrect arity: Expected 6 arguments, got 5");
+    assert_eq!(error_kind("error: Missing value"), "Missing value");
+}
+
+#[test]
+fn a_stored_error_matches_its_title_and_caret_note() {
+    let stored = "error: Incorrect arity\n   | ^ Expected 6 arguments, got 5";
+    let d = |text: &str| Diag { error: true, module: None, symbol: Some("a.f".into()), text: text.into(), suggestions: vec![] };
+    assert!(stored_has_kind(stored, &d(stored)));
+    assert!(!stored_has_kind(stored, &d("error: Incorrect arity\n   | ^ Expected 6 arguments, got 4")));
+    assert!(!stored_has_kind(stored, &d("error: Unknown variable\n   | ^ x")));
+}

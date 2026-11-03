@@ -154,15 +154,13 @@ pub(crate) fn save_language(config: &Path, body: &Value) -> Result<(), Failure> 
         .filter(|id| matches!(*id, "gleam" | "rust"))
         .ok_or_else(|| Failure("E7001 language must be gleam or rust".into(), 1))?;
     let enabled = body["enabled"].as_bool().ok_or_else(|| Failure("E7001 enabled must be true or false".into(), 1))?;
-    let _lock = settings_lock(config)?;
-    let mut doc = settings(config)?;
-    let languages = doc.entry("languages").or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    let languages =
-        languages.as_table_mut().ok_or_else(|| Failure("E6020 invalid system settings: languages must be a table".into(), 1))?;
-    languages.insert(id.to_string(), toml::Value::Boolean(enabled));
-    let text = toml::to_string(&doc).map_err(|e| Failure(e.to_string(), 1))?;
-    parse_system(&text)?;
-    replace(config, text.as_bytes())
+    edit_settings(config, |doc| {
+        let languages = doc.entry("languages").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let languages =
+            languages.as_table_mut().ok_or_else(|| Failure("E6020 invalid system settings: languages must be a table".into(), 1))?;
+        languages.insert(id.to_string(), toml::Value::Boolean(enabled));
+        Ok(())
+    })
 }
 
 /// The lock on `config`'s changes, so a read-modify-write can't lose another
@@ -207,15 +205,17 @@ pub(crate) fn endpoint_context(base_url: &str, model: &str) -> Option<u64> {
     m["meta"]["n_ctx"].as_u64()
 }
 
-/// One entry per Claude family: the family's live exact model (preset, discovered or
-/// configured); its alias only when the family has no live exact one. Codex answers exact
-/// ids, so its entries, and a configured model whose id names no family, keep their places.
-/// The alias stays in the settings, so a task naming it still starts (`model`).
+/// One entry per Claude family: the family's configured entry, then an exact model the
+/// provider discovered, then its alias, then a shipped exact preset. Among discovered
+/// models the provider's newest-first order decides. A gone entry stays below every live
+/// one. Codex answers exact ids, so its entries, and a configured model whose id names no
+/// family, keep their places. The alias stays in the settings, so a task naming it still
+/// starts (`model`).
 pub(crate) fn served(models: &[Value]) -> Vec<Value> {
     let mut best: HashMap<&str, usize> = HashMap::new();
     for (i, m) in models.iter().enumerate() {
         let Some(f) = agents::family(m) else { continue };
-        if best.get(f).is_none_or(|&j| rank(&models[j], f) < rank(m, f)) {
+        if best.get(f).is_none_or(|&j| outranks(m, &models[j], f)) {
             best.insert(f, i);
         }
     }
@@ -230,13 +230,21 @@ pub(crate) fn served(models: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// How well an entry stands for its family: a live exact model, then an alias
-/// (live, or dropped with the family's exact model gone), then a dropped exact model.
-pub(crate) fn rank(m: &Value, f: &str) -> u8 {
-    match (m["gone"] != true, agents::is_alias(m, f)) {
-        (true, false) => 2,
-        (true, true) | (false, true) => 1,
-        _ => 0,
+/// How well a live entry stands for its family: the human's configured entry, then an
+/// exact model the provider discovered, then the alias, then a shipped exact preset.
+/// A gone entry sits below every live one; a gone alias above a gone exact model.
+pub(crate) fn rank(m: &Value, f: &str) -> Rank {
+    if m["gone"] == true {
+        return if agents::is_alias(m, f) { Rank::GoneAlias } else { Rank::GoneExact };
+    }
+    if m["configured"] == true {
+        Rank::LiveConfigured
+    } else if m["discovered"] == true {
+        Rank::LiveDiscovered
+    } else if agents::is_alias(m, f) {
+        Rank::LiveAlias
+    } else {
+        Rank::LivePreset
     }
 }
 
@@ -307,6 +315,12 @@ pub(crate) fn parse_system(text: &str) -> Result<Value, Failure> {
         "rust": v.get("languages").and_then(|l| l.get("rust")).cloned().unwrap_or(json!(true)),
     });
     v["languages"] = languages;
+    let involvement = agent_choice(&v, "involvement", &INVOLVEMENT_VALUES, DEFAULT_INVOLVEMENT);
+    let detail = agent_choice(&v, "detail", &DETAIL_VALUES, "standard");
+    let asking = agent_choice(&v, "asking", &ASKING_VALUES, "balanced");
+    v["involvement"] = involvement;
+    v["detail"] = detail;
+    v["asking"] = asking;
     if let Some(models) = v.get("models") {
         let mut ids = HashSet::new();
         for m in models.as_array().ok_or_else(invalid)? {
@@ -518,5 +532,130 @@ pub(crate) fn languages() -> Result<Value, Failure> {
         }));
     }
     Ok(json!(out))
+}
+
+const INVOLVEMENT_VALUES: [&str; 3] = ["director", DEFAULT_INVOLVEMENT, "engineer"];
+
+const DETAIL_VALUES: [&str; 3] = ["concise", "standard", "thorough"];
+
+const ASKING_VALUES: [&str; 3] = ["often", "balanced", "rarely"];
+
+/// Saves one agent behavior choice, preserving the rest of the settings.
+pub(crate) fn save_agent_setting(config: &Path, body: &Value) -> Result<(), Failure> {
+    let key = body["key"].as_str().unwrap_or("");
+    let (allowed, message) = match key {
+        "involvement" => (&INVOLVEMENT_VALUES[..], "involvement must be director, collaborator or engineer"),
+        "detail" => (&DETAIL_VALUES[..], "detail must be concise, standard or thorough"),
+        "asking" => (&ASKING_VALUES[..], "asking must be often, balanced or rarely"),
+        _ => return err("E7001", "key must be involvement, detail or asking"),
+    };
+    let value = body["value"].as_str().filter(|value| allowed.contains(value)).ok_or_else(|| Failure(format!("E7001 {message}"), 1))?;
+    edit_settings(config, |doc| {
+        doc.insert(key.to_string(), toml::Value::String(value.to_string()));
+        Ok(())
+    })
+}
+
+/// The machine-wide agent behavior settings: how agents address the human,
+/// how much they write, and how readily they ask. A value that is missing or
+/// unknown is its default.
+pub(crate) fn agent_settings() -> Result<Value, Failure> {
+    let p = config_path();
+    let v = parse_system(&if p.exists() { fs::read_to_string(p)? } else { String::new() })?;
+    Ok(json!({
+        "involvement": v["involvement"],
+        "detail": v["detail"],
+        "asking": v["asking"],
+    }))
+}
+
+fn agent_choice(v: &Value, key: &str, allowed: &[&str], default: &str) -> Value {
+    json!(v.get(key).and_then(Value::as_str).filter(|value| allowed.contains(value)).unwrap_or(default))
+}
+
+fn edit_settings(config: &Path, edit: impl FnOnce(&mut toml::Table) -> Result<(), Failure>) -> Result<(), Failure> {
+    let _lock = settings_lock(config)?;
+    let mut doc = settings(config)?;
+    edit(&mut doc)?;
+    let text = toml::to_string(&doc).map_err(|e| Failure(e.to_string(), 1))?;
+    parse_system(&text)?;
+    replace(config, text.as_bytes())
+}
+
+/// The involvement level a brief uses; `parse_system` has already supplied its default.
+pub(crate) fn involvement(settings: &Value) -> &str {
+    settings["involvement"].as_str().unwrap_or(DEFAULT_INVOLVEMENT)
+}
+
+/// The detail level a brief uses; `parse_system` has already supplied its default.
+pub(crate) fn detail(settings: &Value) -> &str {
+    settings["detail"].as_str().unwrap_or("standard")
+}
+
+/// How readily a brief asks; `parse_system` has already supplied its default.
+pub(crate) fn asking(settings: &Value) -> &str {
+    settings["asking"].as_str().unwrap_or("balanced")
+}
+
+/// The involvement level agents use when the settings name none.
+const DEFAULT_INVOLVEMENT: &str = "collaborator";
+
+/// Whether `m` outranks `current` as family `f`'s pick: a higher rank, or the earlier
+/// discovery when both are exact models the provider listed.
+fn outranks(m: &Value, current: &Value, f: &str) -> bool {
+    let (new, old) = (rank(m, f), rank(current, f));
+    new > old
+        || (new == old
+            && new == Rank::LiveDiscovered
+            && m["found_order"].as_u64().unwrap_or(u64::MAX) < current["found_order"].as_u64().unwrap_or(u64::MAX))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Rank {
+    GoneExact,
+    GoneAlias,
+    LivePreset,
+    LiveAlias,
+    LiveDiscovered,
+    LiveConfigured,
+}
+
+/// The role models a system settings document holds: every role, with an
+/// empty choice when it has none or its stored value is not text.
+fn role_models_json(v: &Value) -> Value {
+    let roles = crate::board::roles::ROLES.iter().map(|role| {
+        let default =
+            v.get("role_models").and_then(|r| r.get(role.id)).and_then(|s| s.get("default")).and_then(Value::as_str).unwrap_or("");
+        json!({"role": role.id, "name": role.name, "default": default})
+    });
+    Value::Array(roles.collect())
+}
+
+/// Every role's model, as Settings reads it. A missing role or a value that
+/// isn't text is empty.
+pub(crate) fn role_models() -> Result<Value, Failure> {
+    let p = config_path();
+    let v = parse_system(&if p.exists() { fs::read_to_string(p)? } else { String::new() })?;
+    Ok(role_models_json(&v))
+}
+
+/// Saves one role's model, preserving the rest of the settings. Unknown model
+/// ids are kept: a model may return. An old backup is removed.
+pub(crate) fn save_role_model(config: &Path, body: &Value) -> Result<(), Failure> {
+    let role = body["role"]
+        .as_str()
+        .filter(|id| crate::board::roles::from_id(id).is_some())
+        .ok_or_else(|| Failure("E7001 role must be a known role".into(), 1))?;
+    let default = body["default"].as_str().ok_or_else(|| Failure("E7001 default must be a model id".into(), 1))?;
+    edit_settings(config, |doc| {
+        let roles = doc.entry("role_models").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let roles = roles.as_table_mut().ok_or_else(|| Failure("E6020 invalid system settings: role_models must be a table".into(), 1))?;
+        let slots = roles.entry(role).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let slots =
+            slots.as_table_mut().ok_or_else(|| Failure(format!("E6020 invalid system settings: role_models.{role} must be a table"), 1))?;
+        slots.remove("backup");
+        slots.insert("default".into(), toml::Value::String(default.into()));
+        Ok(())
+    })
 }
 

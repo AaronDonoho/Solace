@@ -729,3 +729,12 @@ fn a_process_test_skips_when_nothing_it_reaches_changed() {
     let out = store.test(&[]).unwrap();
     assert!(out.starts_with("Ran all 1 tests."), "{out}");
 }
+
+/// The CLI reply keeps the reference, while the brief's copy carries it above the reply.
+#[test]
+fn a_cli_session_start_keeps_the_reference() {
+    let (_root, store) = sample();
+    let reference = crate::reference::agent_reference(true);
+    assert!(store.task_session("change helper", Some("t1"), "").unwrap().contains(&reference));
+    assert!(!store.brief_task_session("change helper", Some("t1"), "").unwrap().contains(&reference));
+}

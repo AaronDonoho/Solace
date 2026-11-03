@@ -631,11 +631,10 @@ pub(crate) fn rust_brief(ix: &Index) -> String {
 /// The module a name or path names: exact, or a unique suffix, with `.`, `::`
 /// or `/` between its parts (D-158).
 pub(crate) fn module_named<'a>(ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
-    let flat = input.replace("::", "/").replace('.', "/");
-    let forms = [flat.clone(), flat.replace('/', "::"), input.to_string()];
-    if let Some(m) = ix.modules.iter().find(|m| forms.contains(&m.path)) {
+    if let Some(m) = module_exact(ix, input) {
         return Some(m);
     }
+    let forms = module_forms(input);
     let suffix: Vec<&ModuleRow> = ix
         .modules
         .iter()
@@ -790,4 +789,16 @@ pub fn store_rust_package(db: &Connection, files: &[(String, String, language::r
         store_rust_file(db, module, dir, file, split)?;
     }
     Ok(())
+}
+
+/// The module whose path is exactly `input`, a name's parts separated by `.`,
+/// `::` or `/`: `roles` is not `board::roles`.
+pub(crate) fn module_exact<'a>(ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
+    let forms = module_forms(input);
+    ix.modules.iter().find(|m| forms.contains(&m.path))
+}
+
+fn module_forms(input: &str) -> [String; 3] {
+    let flat = input.replace("::", "/").replace('.', "/");
+    [flat.clone(), flat.replace('/', "::"), input.to_string()]
 }

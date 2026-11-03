@@ -1,7 +1,9 @@
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
+import lustre/dev/query
+import lustre/dev/simulate
 import lustre/element
 import settings
 import solace_task
@@ -89,6 +91,17 @@ pub fn models_list_only_configured_ones_with_their_reasons_test() {
         base_url: "https://h/v1",
         has_key: False,
         reason: "No key yet; add one in Settings",
+        configured: True,
+      ),
+      settings.Entry(
+        id: "opus",
+        label: "Opus",
+        agent: "claude",
+        model: "opus",
+        base_url: "",
+        has_key: False,
+        reason: "",
+        configured: False,
       ),
     ]
   let page = element.to_string(settings.view(loaded))
@@ -121,6 +134,7 @@ pub fn the_form_edits_a_model_and_never_shows_its_key_test() {
       base_url: "https://h/v1",
       has_key: True,
       reason: "",
+      configured: True,
     )
   let editing =
     settings.update(settings.initial(False), settings.EditModel(entry)).0
@@ -201,4 +215,343 @@ pub fn languages_show_and_toggle_test() {
   )
   assert settings.update(loaded, settings.LanguagesLoaded("oops")).0.error
     == "Solace could not be reached"
+}
+
+/// The Agent behavior section loads from the server, saves a choice, and
+/// explains each choice on hover or keyboard focus.
+pub fn behavior_choices_load_save_and_explain_test() {
+  let initial = settings.initial(False)
+  assert initial.behavior
+    == settings.Behavior("collaborator", "standard", "balanced")
+  let loaded =
+    settings.update(
+      initial,
+      settings.BehaviorLoaded(
+        "{\"involvement\":\"engineer\",\"detail\":\"thorough\",\"asking\":\"rarely\"}",
+      ),
+    ).0
+  assert loaded.behavior == settings.Behavior("engineer", "thorough", "rarely")
+  let page = element.to_string(settings.view(loaded))
+  assert string.contains(page, "Agent behavior</h2>")
+  list.each(
+    [
+      "Director", "Collaborator", "Engineer", "Concise", "Standard", "Thorough",
+      "Often", "Balanced", "Rarely", "Plain words, no code",
+      "Full technical detail, code included.",
+      "Ask when a choice changes what you get",
+    ],
+    fn(text) {
+      assert string.contains(page, text)
+    },
+  )
+  assert string.contains(page, ".choice-stop:hover .choice-help")
+  assert string.contains(page, ".choice-stop:focus-within .choice-help")
+  assert string.contains(page, "min-height:var(--control-h)")
+  assert !string.contains(page, "as today")
+  // A choice shows at once, so a refusal can put the old one back.
+  let chosen =
+    settings.update(loaded, settings.ChooseBehavior(settings.Detail, "concise")).0
+  assert chosen.behavior == settings.Behavior("engineer", "concise", "rarely")
+  assert chosen.behavior_before == Some(loaded.behavior)
+  let saved =
+    settings.update(
+      chosen,
+      settings.BehaviorLoaded(
+        "{\"involvement\":\"engineer\",\"detail\":\"concise\",\"asking\":\"rarely\"}",
+      ),
+    ).0
+  assert saved.behavior == settings.Behavior("engineer", "concise", "rarely")
+  assert saved.behavior_before == None
+  let refused =
+    settings.update(
+      chosen,
+      settings.BehaviorLoaded(
+        "{\"message\":\"E7001 detail must be concise, standard or thorough\"}",
+      ),
+    ).0
+  assert refused.behavior == loaded.behavior
+  assert refused.behavior_before == None
+  assert refused.error == "E7001 detail must be concise, standard or thorough"
+  assert string.contains(
+    element.to_string(settings.view(refused)),
+    "E7001 detail must be concise, standard or thorough",
+  )
+  assert settings.update(loaded, settings.BehaviorLoaded("oops")).0.error
+    == "Solace could not be reached"
+}
+
+/// Two saves in flight: the first reply must not undo the second choice.
+pub fn a_reply_for_one_behavior_choice_keeps_the_other_in_flight_test() {
+  let loaded =
+    settings.update(
+      settings.initial(False),
+      settings.BehaviorLoaded(
+        "{\"involvement\":\"engineer\",\"detail\":\"thorough\",\"asking\":\"rarely\"}",
+      ),
+    ).0
+  let detail =
+    settings.update(loaded, settings.ChooseBehavior(settings.Detail, "concise")).0
+  let both =
+    settings.update(detail, settings.ChooseBehavior(settings.Asking, "often")).0
+  let first =
+    settings.update(
+      both,
+      settings.BehaviorLoaded(
+        "{\"involvement\":\"engineer\",\"detail\":\"concise\",\"asking\":\"rarely\"}",
+      ),
+    ).0
+  assert first.behavior == settings.Behavior("engineer", "concise", "often")
+  let second =
+    settings.update(
+      first,
+      settings.BehaviorLoaded(
+        "{\"involvement\":\"engineer\",\"detail\":\"concise\",\"asking\":\"often\"}",
+      ),
+    ).0
+  assert second.behavior == settings.Behavior("engineer", "concise", "often")
+  assert second.behavior_before == None
+}
+
+/// Skills load by role, the form adds, edits and cancels one, and a refusal
+/// keeps the list while saying why.
+pub fn skills_load_edit_and_refuse_from_the_server_test() {
+  let roles =
+    settings.update(
+      settings.initial(False),
+      settings.RolesLoaded(
+        "[{\"id\":\"worker\",\"name\":\"Worker\",\"purpose\":\"Makes changes.\"},{\"id\":\"reviewer\",\"name\":\"Reviewer\",\"purpose\":\"Checks changes.\"}]",
+      ),
+    ).0
+  let loaded =
+    settings.update(
+      roles,
+      settings.SkillsLoaded(
+        "[{\"name\":\"house-review\",\"description\":\"Review UI changes.\",\"body\":\"Check contrast.\",\"roles\":[\"reviewer\"]}]",
+      ),
+    ).0
+  assert loaded.roles
+    == [
+      settings.Role("worker", "Worker", "Makes changes."),
+      settings.Role("reviewer", "Reviewer", "Checks changes."),
+    ]
+  assert loaded.skills
+    == [
+      settings.Skill("house-review", "Review UI changes.", "Check contrast.", [
+        "reviewer",
+      ]),
+    ]
+  let page = element.to_string(settings.view(loaded))
+  assert string.contains(page, "Skills</h2>")
+  assert string.contains(page, "Reviewer")
+  assert string.contains(page, "Checks changes.")
+  assert string.contains(page, "house-review")
+  assert string.contains(page, "Review UI changes.")
+  assert string.contains(page, "Add a skill")
+  let fresh = settings.update(loaded, settings.NewSkill("reviewer")).0
+  assert fresh.skill_form == settings.SkillForm("", "", "", "", ["reviewer"])
+  let typed =
+    [
+      #("name", "commit-style"),
+      #("description", "Write small commits."),
+      #("body", "Keep every commit small."),
+    ]
+    |> list.fold(fresh, fn(model, field) {
+      settings.update(model, settings.SkillField(field.0, field.1)).0
+    })
+  assert typed.skill_form
+    == settings.SkillForm(
+      "",
+      "commit-style",
+      "Write small commits.",
+      "Keep every commit small.",
+      ["reviewer"],
+    )
+  let both = settings.update(typed, settings.ChooseSkillRole("worker", True)).0
+  assert both.skill_form.roles == ["worker", "reviewer"]
+  let one = settings.update(both, settings.ChooseSkillRole("reviewer", False)).0
+  assert one.skill_form.roles == ["worker"]
+  // A save leaves the page as it is until the server replies.
+  assert settings.update(typed, settings.SaveSkill).0 == typed
+  let editing =
+    settings.update(
+      loaded,
+      settings.EditSkill(
+        settings.Skill("house-review", "Review UI changes.", "Check contrast.", [
+          "reviewer",
+        ]),
+      ),
+    ).0
+  assert editing.skill_form
+    == settings.SkillForm(
+      "house-review",
+      "house-review",
+      "Review UI changes.",
+      "Check contrast.",
+      ["reviewer"],
+    )
+  let form =
+    element.to_string(settings.skill_form(editing.skill_form, editing.roles))
+  assert string.contains(form, "Edit house-review")
+  assert string.contains(form, "Delete skill")
+  assert string.contains(form, "Cancel")
+  assert string.contains(form, "type=\"checkbox\"")
+  assert settings.update(editing, settings.CancelSkill).0.skill_form
+    == settings.blank_skill_form
+  // Removing a role leaves the page as it is until the server replies.
+  assert settings.update(
+      loaded,
+      settings.RemoveSkill("house-review", "reviewer"),
+    ).0
+    == loaded
+  let refused =
+    settings.update(
+      loaded,
+      settings.SkillsLoaded("{\"message\":\"Give the skill a body.\"}"),
+    ).0
+  assert refused.skills == loaded.skills
+  assert refused.error == "Give the skill a body."
+  assert string.contains(
+    element.to_string(settings.view(refused)),
+    "Give the skill a body.",
+  )
+  assert !string.contains(element.to_string(settings.view(refused)), "E7001")
+  assert settings.update(loaded, settings.SkillsLoaded("oops")).0.error
+    == "Solace could not be reached"
+}
+
+/// Typing in the rendered Name and Description boxes fills the skill form.
+pub fn the_skill_form_accepts_typing_in_name_and_description_test() {
+  let app =
+    simulate.simple(
+      init: settings.initial,
+      update: fn(model, msg) { settings.update(model, msg).0 },
+      view: settings.view,
+    )
+  let typed =
+    simulate.start(app, False)
+    |> simulate.message(settings.RolesLoaded(
+      "[{\"id\":\"worker\",\"name\":\"Worker\",\"purpose\":\"Makes changes.\"}]",
+    ))
+    |> simulate.message(settings.NewSkill("worker"))
+    |> simulate.input(
+      on: query.element(matching: query.attribute("name", "skill-name")),
+      value: "commit-style",
+    )
+    |> simulate.input(
+      on: query.element(matching: query.attribute("name", "skill-description")),
+      value: "Write small commits.",
+    )
+    |> simulate.input(
+      on: query.element(matching: query.attribute("name", "skill-body")),
+      value: "Keep every commit small.",
+    )
+  assert simulate.model(typed).skill_form
+    == settings.SkillForm(
+      "",
+      "commit-style",
+      "Write small commits.",
+      "Keep every commit small.",
+      ["worker"],
+    )
+  let page = element.to_string(simulate.view(typed))
+  assert string.contains(page, "value=\"commit-style\"")
+  assert string.contains(page, "value=\"Write small commits.\"")
+  assert string.contains(page, "Keep every commit small.")
+  assert simulate.model(simulate.message(typed, settings.SaveSkill)).skill_form
+    == simulate.model(typed).skill_form
+}
+
+/// Role models load from the server, save one role's choice, and ignore an
+/// old backup. The role picker lists every model the task page can offer.
+pub fn role_models_load_save_test() {
+  let roles =
+    settings.update(
+      settings.initial(False),
+      settings.RolesLoaded(
+        "[{\"id\":\"worker\",\"name\":\"Worker\",\"purpose\":\"Makes the change.\"},{\"id\":\"reviewer\",\"name\":\"Reviewer\",\"purpose\":\"Checks the change.\"}]",
+      ),
+    ).0
+  let models =
+    settings.update(
+      roles,
+      settings.ModelsLoaded(
+        "[{\"id\":\"cc\",\"label\":\"Command Code\",\"agent\":\"codex\",\"model\":\"deepseek\",\"base_url\":\"https://h/v1\",\"has_key\":true,\"configured\":true},{\"id\":\"local\",\"label\":\"Local\",\"agent\":\"codex\",\"model\":\"qwen\",\"base_url\":\"https://l/v1\",\"has_key\":true,\"configured\":true},{\"id\":\"opus\",\"label\":\"Opus\",\"agent\":\"claude\",\"model\":\"opus\",\"base_url\":null,\"reason\":\"Start Ollama first\",\"configured\":false}]",
+      ),
+    ).0
+  let loaded =
+    settings.update(
+      models,
+      settings.RoleModelsLoaded(
+        "[{\"role\":\"worker\",\"default\":\"cc\",\"backup\":\"local\"},{\"role\":\"reviewer\",\"default\":\"gone\",\"backup\":\"\"}]",
+      ),
+    ).0
+  assert loaded.assignments
+    == [
+      settings.Assignment("worker", "cc"),
+      settings.Assignment("reviewer", "gone"),
+    ]
+  let page = element.to_string(settings.view(loaded))
+  assert string.contains(page, "Role models</h2>")
+  assert string.contains(page, "Choose the model each role starts with")
+  assert string.contains(page, "Worker")
+  assert string.contains(page, "Reviewer")
+  assert string.contains(page, "Model")
+  assert string.contains(page, "Command Code")
+  assert string.contains(page, "Opus")
+  assert !string.contains(page, "Command Code (deepseek)")
+  assert !string.contains(page, "Opus (opus) — Start Ollama first")
+  assert string.contains(page, "gone (not set up here)")
+  assert string.contains(page, "None (choose on each task)")
+  assert !string.contains(page, "Backup")
+  assert !string.contains(page, "Use fallback")
+  assert settings.role_model_body(loaded.assignments, "worker", "local")
+    == "{\"role\":\"worker\",\"default\":\"local\"}"
+  let saved =
+    settings.update(
+      loaded,
+      settings.RoleModelsLoaded(
+        "[{\"role\":\"worker\",\"default\":\"local\"},{\"role\":\"reviewer\",\"default\":\"gone\"}]",
+      ),
+    ).0
+  assert saved.assignments
+    == [
+      settings.Assignment("worker", "local"),
+      settings.Assignment("reviewer", "gone"),
+    ]
+  // A missing assignment is empty, and every role still shows.
+  let missing =
+    settings.update(
+      roles,
+      settings.RoleModelsLoaded("[{\"role\":\"worker\",\"default\":\"\"}]"),
+    ).0
+  assert missing.assignments == [settings.Assignment("worker", "")]
+  assert string.contains(element.to_string(settings.view(missing)), "Reviewer")
+  // A choice saves even when the role list failed to load.
+  let none = settings.update(roles, settings.RoleModelsLoaded("[]")).0
+  assert settings.role_model_body(none.assignments, "worker", "cc")
+    == "{\"role\":\"worker\",\"default\":\"cc\"}"
+  assert settings.role_model_body(none.assignments, "worker", "")
+    == "{\"role\":\"worker\",\"default\":\"\"}"
+  // A refusal keeps the choices while saying why.
+  let refused =
+    settings.update(
+      loaded,
+      settings.RoleModelsLoaded(
+        "{\"message\":\"E7001 role must be a known role\"}",
+      ),
+    ).0
+  assert refused.assignments == loaded.assignments
+  assert refused.error == "E7001 role must be a known role"
+  assert string.contains(
+    element.to_string(settings.view(refused)),
+    "E7001 role must be a known role",
+  )
+  assert settings.update(loaded, settings.RoleModelsLoaded("oops")).0.error
+    == "Solace could not be reached"
+  // With no models, the page says where to find one.
+  let bare = settings.update(roles, settings.ModelsLoaded("[]")).0
+  assert string.contains(
+    element.to_string(settings.view(bare)),
+    "No models are available yet",
+  )
 }

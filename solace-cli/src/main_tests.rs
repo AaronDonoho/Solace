@@ -49,6 +49,9 @@ fn the_reference_never_hands_a_file_change_to_the_human() {
     // D-153: a question shows each option's outcome.
     assert!(REFERENCE.contains("The question's `text` gives each option a"));
     assert!(REFERENCE.contains("short example of its outcome"));
+    assert!(REFERENCE.contains("project's folder exactly as the task's scope lists it"));
+    assert!(agent_reference(true).contains("first add it in the task's Scope tab"));
+    assert!(!agent_reference(false).contains("Scope tab"));
     assert!(!agent_reference(false).contains("task ask"), "outside a board run");
 }
 /// D-148: the reference tells agents to write a record's reference bare, so it
@@ -310,6 +313,12 @@ fn a_name_in_another_project_says_where_it_is() {
     assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
     let e = hinted(a.view(&["plan.nope"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
     assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
+    let patch = concat!(
+        "*** Begin Patch\n*** Update: plan.answer\n@@\n",
+        "-pub fn answer() -> Int {\n-  42\n-}\n+pub fn answer() -> Int {\n+  43\n+}\n*** End Patch\n",
+    );
+    let e = hinted(Err(crate::drafts::patch_blocks(&a, patch).unwrap_err()), &a.root).unwrap_err().0;
+    assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
     let s = a.other_projects(None);
     for part in [
         "You are in a (alpha).\n",
@@ -320,6 +329,15 @@ fn a_name_in_another_project_says_where_it_is() {
     ] {
         assert!(s.contains(part), "{part} missing from:\n{s}");
     }
+    let dir = crate::board::store_dir(&root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("t1.json"), r#"{"id":"t1","column":"backlog","home":"a","scope":["a"],"runs":[]}"#).unwrap();
+    let s = a.other_projects(Some("t1"));
+    assert!(s.contains("This task can change: a (alpha)."), "{s}");
+    assert!(s.contains("Read only: b (beta)."), "{s}");
+    assert_eq!(s.matches("add it").count(), 1, "{s}");
+    assert!(!s.contains("ask for it"), "{s}");
+    assert!(s.contains("Then make the change yourself"), "{s}");
 }
 
 #[test]
@@ -1927,7 +1945,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "87e079c43580f9d819a8cc2ffaa541f196f89050ce36afc2f6bff9d7189e0fc8");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "f5220b2c024f1f03435c5997f8a264556d6e4f8e4c246391f7abb014939d45a9");
 }
 
 #[test]
@@ -2112,4 +2130,480 @@ fn a_rust_probe_from_a_generic_function_with_arguments_says_it_takes_arguments()
     let (_root, store) = testing::rust_project("fn helper<T>(x: T) -> T {\n    x\n}\n");
     let e = store.probe("dbg!(1);", Some("crate.helper"), &[], None).unwrap_err().0;
     assert_eq!(e, "E1005 crate.helper takes arguments; --from takes a test or another function without arguments.");
+}
+
+/// `components`' `solace_task.Column`, and a `frontend` that constructs it.
+fn column_workspace() -> Scratch {
+    let root = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"components\", \"frontend\"]\n"),
+        ("components/gleam.toml", "name = \"components\"\nversion = \"1.0.0\"\n"),
+        (
+            "components/src/solace_task.gleam",
+            "pub type Column {\n  Column(name: String)\n}\n\npub fn columns() -> List(Column) {\n  [Column(\"a\")]\n}\n",
+        ),
+        ("frontend/gleam.toml", "name = \"frontend\"\nversion = \"1.0.0\"\n\n[dependencies]\ncomponents = { path = \"../components\" }\n"),
+        (
+            "frontend/src/knowledgebase.gleam",
+            "import solace_task\n\npub fn known_columns() -> List(solace_task.Column) {\n  [solace_task.Column(\"a\")]\n}\n",
+        ),
+    ]);
+    for d in ["components", "frontend"] {
+        import(&root.join(d)).unwrap();
+    }
+    root
+}
+
+fn column_task(root: &Scratch, scope: &[&str]) -> (std::path::PathBuf, String) {
+    task_at(root, "components", scope)
+}
+
+/// `Column` gains a field, and `components` updates its own constructor.
+fn column_patch() -> String {
+    concat!(
+        "// ── solace_task.Column ──\n",
+        "pub type Column {\n  Column(name: String, role: String)\n}\n",
+        "// ── solace_task.columns ──\n",
+        "pub fn columns() -> List(Column) {\n  [Column(\"a\", \"b\")]\n}\n",
+    )
+    .to_string()
+}
+
+/// A save in a shared project refuses when a project outside its task breaks,
+/// and names that project and its first error.
+#[test]
+fn an_uncovered_dependent_refuses_a_save() {
+    let root = column_workspace();
+    let (components, tid) = column_task(&root, &["components"]);
+    let text = column_patch();
+    let err = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap_err()
+    .0;
+    assert!(err.contains("E5003") && err.contains("frontend") && err.contains("knowledgebase"), "{err}");
+    let written = std::fs::read_to_string(components.join("src/solace_task.gleam")).unwrap();
+    assert!(!written.contains("role"), "{written}");
+}
+
+/// A save whose task covers the broken project is kept, named in the reply, and
+/// `task done` waits until the dependent is fixed.
+#[test]
+fn a_covered_dependent_saves_and_waits_for_done() {
+    let root = column_workspace();
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    let text = column_patch();
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved") && out.contains("frontend") && out.contains("knowledgebase"), "{out}");
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let done = ["task".to_string(), "done".to_string(), "Done.".to_string()];
+    let err = with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[])))
+        .unwrap_err()
+        .0;
+    assert!(err.contains("task done is refused") && err.contains("frontend") && err.contains("knowledgebase"), "{err}");
+    let fixed = fix_frontend_columns(&components, &tid);
+    assert!(fixed.contains("Saved knowledgebase.known_columns"), "{fixed}");
+    let out =
+        with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[]))).unwrap();
+    assert!(out.contains("Recorded"), "{out}");
+}
+
+/// A change that leaves its dependents clean saves as before.
+#[test]
+fn a_clean_dependent_still_saves() {
+    let root = column_workspace();
+    let (components, tid) = column_task(&root, &["components"]);
+    let text = "// ── solace_task.columns ──\npub fn columns() -> List(Column) {\n  [Column(\"b\")]\n}\n";
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.to_string()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved solace_task.columns") && !out.contains("frontend"), "{out}");
+}
+
+/// `refs` lists uses in the workspace projects that depend on this one.
+#[test]
+fn refs_name_dependent_projects() {
+    let root = column_workspace();
+    let s = Store::at(&root.join("components")).unwrap();
+    let out = s.refs("solace_task.Column").unwrap();
+    assert!(out.contains("In frontend") && out.contains("knowledgebase.known_columns"), "{out}");
+}
+
+fn column_workspace_with(extra: &[(&str, &str)]) -> Scratch {
+    let mut files = vec![
+        ("solace.toml", "projects = [\"components\", \"frontend\"]\n"),
+        ("components/gleam.toml", "name = \"components\"\nversion = \"1.0.0\"\n"),
+        (
+            "components/src/solace_task.gleam",
+            "pub type Column {\n  Column(name: String)\n}\n\npub fn columns() -> List(Column) {\n  [Column(\"a\")]\n}\n",
+        ),
+        ("frontend/gleam.toml", "name = \"frontend\"\nversion = \"1.0.0\"\n\n[dependencies]\ncomponents = { path = \"../components\" }\n"),
+        (
+            "frontend/src/knowledgebase.gleam",
+            "import solace_task\n\npub fn known_columns() -> List(solace_task.Column) {\n  [solace_task.Column(\"a\")]\n}\n",
+        ),
+    ];
+    files.extend_from_slice(extra);
+    let root = Scratch::new().with(&files);
+    for d in ["components", "frontend"] {
+        import(&root.join(d)).unwrap();
+    }
+    root
+}
+
+fn column_workspace_with_a_broken_frontend() -> Scratch {
+    column_workspace_with(&[("frontend/src/legacy.gleam", "pub fn legacy() -> Int {\n  \"old\"\n}\n")])
+}
+
+fn fix_frontend_columns(components: &std::path::Path, tid: &str) -> String {
+    let text = "import solace_task\n\npub fn known_columns() -> List(solace_task.Column) {\n  [solace_task.Column(\"a\", \"b\")]\n}\n";
+    let args = ["submit", "knowledgebase.known_columns", "--project", "frontend"].map(String::from);
+    with_root(components, || with_context(tid, "run", || run_options(&args, &mut || Ok(text.to_string()), None, 100_000, &[]))).unwrap()
+}
+
+#[test]
+fn a_covered_dependent_keeps_an_earlier_error() {
+    let root = column_workspace_with_a_broken_frontend();
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let text = column_patch();
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved") && out.contains("frontend") && out.contains("knowledgebase"), "{out}");
+    let done = ["task".to_string(), "done".to_string(), "Done.".to_string()];
+    let err = with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[])))
+        .unwrap_err()
+        .0;
+    assert!(err.contains("frontend") && err.contains("knowledgebase"), "{err}");
+    let fixed = fix_frontend_columns(&components, &tid);
+    assert!(fixed.contains("Saved knowledgebase.known_columns"), "{fixed}");
+    let out =
+        with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[]))).unwrap();
+    assert!(out.contains("Recorded"), "{out}");
+    let frontend = Store::at(&root.join("frontend")).unwrap();
+    assert!(frontend.check().unwrap_err().0.contains("legacy"), "the earlier error remains");
+}
+
+#[test]
+fn a_dependent_that_cannot_be_checked_names_itself() {
+    let root = column_workspace();
+    std::fs::remove_dir_all(root.join("frontend/.solace")).unwrap();
+    let (components, tid) = column_task(&root, &["components"]);
+    let text = column_patch();
+    let err = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap_err()
+    .0;
+    assert!(err.contains("frontend:"), "{err}");
+    let written = std::fs::read_to_string(components.join("src/solace_task.gleam")).unwrap();
+    assert!(!written.contains("role"), "{written}");
+}
+
+/// An earlier error in the dependent's same module stays old when the fix moves
+/// its line, so finishing is not refused for it.
+#[test]
+fn a_covered_dependent_keeps_a_moved_earlier_error() {
+    let root = column_workspace_with(&[(
+        "frontend/src/knowledgebase.gleam",
+        concat!(
+            "import solace_task\n\n",
+            "pub fn known_columns() -> List(solace_task.Column) {\n",
+            "  [solace_task.Column(\"a\")]\n}\n\n",
+            "pub fn legacy() -> Int {\n  \"old\"\n}\n",
+        ),
+    )]);
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let text = column_patch();
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved") && out.contains("knowledgebase"), "{out}");
+    let fix = concat!(
+        "import solace_task\n\n",
+        "pub fn known_columns() -> List(solace_task.Column) {\n",
+        "  let role = \"b\"\n",
+        "  [solace_task.Column(\"a\", role)]\n}\n",
+    );
+    let args = ["submit", "knowledgebase.known_columns", "--project", "frontend"].map(String::from);
+    let fixed =
+        with_root(&components, || with_context(&tid, "run", || run_options(&args, &mut || Ok(fix.to_string()), None, 100_000, &[])))
+            .unwrap();
+    assert!(fixed.contains("Saved knowledgebase.known_columns"), "{fixed}");
+    let done = ["task".to_string(), "done".to_string(), "Done.".to_string()];
+    let out =
+        with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[]))).unwrap();
+    assert!(out.contains("Recorded"), "{out}");
+    let frontend = Store::at(&root.join("frontend")).unwrap();
+    assert!(frontend.check().unwrap_err().0.contains("legacy"), "the earlier error remains");
+}
+
+#[test]
+fn test_runs_a_dependent_projects_tests_that_reach_a_change() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"components\", \"board\", \"frontend\"]\n"),
+        ("components/gleam.toml", "name = \"components\"\nversion = \"1.0.0\"\n"),
+        (
+            "components/src/solace_task.gleam",
+            concat!(
+                "pub type Column {\n  Column(name: String)\n}\n\n",
+                "pub fn columns() -> List(Column) {\n  [Column(\"a\")]\n}\n\n",
+                "pub fn unrelated() -> Int {\n  1\n}\n",
+            ),
+        ),
+        ("board/gleam.toml", "name = \"board\"\nversion = \"1.0.0\"\n\n[dependencies]\ncomponents = { path = \"../components\" }\n"),
+        (
+            "board/src/board.gleam",
+            concat!(
+                "import solace_task\n\n",
+                "pub fn count() -> Int {\n",
+                "  case solace_task.columns() {\n",
+                "    [] -> 0\n",
+                "    [_, ..] -> 1\n",
+                "  }\n",
+                "}\n",
+            ),
+        ),
+        (
+            "frontend/gleam.toml",
+            concat!(
+                "name = \"frontend\"\nversion = \"1.0.0\"\n\n[dependencies]\n",
+                "board = { path = \"../board\" }\ncomponents = { path = \"../components\" }\n",
+            ),
+        ),
+        ("frontend/src/view.gleam", "import board\n\npub fn count() -> Int {\n  board.count()\n}\n"),
+        (
+            "frontend/test/frontend_test.gleam",
+            concat!(
+                "import board\n\n",
+                "pub fn counts_columns_test() {\n  assert board.count() > 0\n}\n\n",
+                "pub fn arithmetic_test() {\n  assert 1 + 1 == 2\n}\n",
+            ),
+        ),
+    ]);
+    fake_gleam(&root);
+    for d in ["components", "board", "frontend"] {
+        import(&root.join(d)).unwrap();
+    }
+    let components = Store::at(&root.join("components")).unwrap();
+    let frontend = Store::at(&root.join("frontend")).unwrap();
+    crate::language::with_tool_path(&[root.join("bin")], || {
+        assert!(frontend.test(&["--all"]).unwrap().starts_with("Ran all 2 tests."));
+        components.submit_symbols(Some("solace_task.columns"), None, "pub fn columns() -> List(Column) {\n  [Column(\"b\")]\n}").unwrap();
+        let out = components.test(&[]).unwrap();
+        assert!(out.contains("== In frontend ==") && out.contains("Ran 1 of 2 tests") && out.contains("counts_columns_test"), "{out}");
+        assert!(!out.contains("arithmetic_test"), "{out}");
+        components.submit_symbols(Some("solace_task.unrelated"), None, "pub fn unrelated() -> Int {\n  2\n}").unwrap();
+        let out = components.test(&[]).unwrap();
+        assert!(out.contains("== In frontend ==") && out.contains("Ran 0 of 2 tests"), "{out}");
+        assert!(!out.contains("counts_columns_test"), "{out}");
+    });
+}
+
+#[test]
+fn a_failing_dependent_test_fails_the_test_reply_and_names_its_project() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = column_workspace_with(&[(
+        "frontend/test/frontend_test.gleam",
+        concat!("import solace_task\n\n", "pub fn columns_test() {\n  let _ = solace_task.columns()\n  assert [1] == []\n}\n",),
+    )]);
+    fake_gleam(&root);
+    fs::write(root.join("frontend/.fail_columns"), "").unwrap();
+    let components = Store::at(&root.join("components")).unwrap();
+    let frontend = Store::at(&root.join("frontend")).unwrap();
+    crate::language::with_tool_path(&[root.join("bin")], || {
+        let err = frontend.test(&["--all"]).unwrap_err().0;
+        assert!(err.contains("columns_test"), "{err}");
+        let err = components.test(&[]).unwrap_err().0;
+        assert!(err.contains("== In frontend ==") && err.contains("columns_test"), "{err}");
+    });
+}
+
+fn fake_gleam(root: &Scratch) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("bin/gleam");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ "$1" != "test" ]; then
+  exit 0
+fi
+file=$(find test -name '*_test.gleam' | head -n 1)
+if [ -z "$file" ]; then
+  exit 0
+fi
+module=$(basename "$file" .gleam)
+names=$(grep -E '^pub fn [a-z_0-9]+_test' "$file" | sed 's/^pub fn //' | sed 's/(.*//')
+passed=0
+failed=0
+for name in $names; do
+  if [ "$name" = "columns_test" ] && [ -f .fail_columns ]; then
+    echo "assert $file:1"
+    echo " test: $module.$name"
+    echo " info: Assertion failed."
+    echo
+    failed=$((failed+1))
+  else
+    echo "test $name ... ok"
+    passed=$((passed+1))
+  fi
+done
+if [ "$failed" -eq 0 ]; then
+  echo "$passed passed, 0 failures"
+else
+  echo "$passed passed, $failed failure"
+  exit 1
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+    }
+}
+
+/// A running work task at `home`, covering `scope`.
+fn task_at(root: &Scratch, home: &str, scope: &[&str]) -> (std::path::PathBuf, String) {
+    let home = root.join(home);
+    let s = open(&home).unwrap();
+    let mut t = api(&home, "POST", "/tasks", json!({"title":"Task"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["scope"] = json!(scope);
+    t["runs"] = json!([{"id":"run","kind":"work","state":"running"}]);
+    put(&s, &t).unwrap();
+    (home, tid)
+}
+
+/// A dependent's run must not replace the changed project's "No test reaches"
+/// warning or add a second next step to the reply.
+#[test]
+fn a_dependent_keeps_the_primary_projects_untested_warning() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = column_workspace_with(&[
+        ("components/src/misc.gleam", "pub fn unrelated() -> Int {\n  1\n}\n"),
+        ("frontend/test/frontend_test.gleam", "import solace_task\n\npub fn columns_test() {\n  let _ = solace_task.columns()\n}\n"),
+    ]);
+    fake_gleam(&root);
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    let store = Store::at(&components).unwrap();
+    crate::language::with_tool_path(&[root.join("bin")], || {
+        with_root(&components, || {
+            with_context(&tid, "run", || {
+                let text = "pub fn unrelated() -> Int {\n  2\n}\n";
+                let args = ["submit".to_string(), "misc.unrelated".to_string()];
+                run_options(&args, &mut || Ok(text.to_string()), None, 100_000, &[]).unwrap();
+                let out = store.test(&[]).unwrap();
+                assert!(out.contains("No test reaches misc.unrelated."), "{out}");
+                assert_eq!(out.matches("Next: ").count(), 1, "{out}");
+                assert_eq!(crate::UNTESTED.with(|u| u.borrow().clone()).as_deref(), Some("misc.unrelated"));
+            })
+        })
+    });
+}
+
+/// A board run already holds its home project; testing a project it depends on
+/// must not wait on that lock again.
+#[test]
+fn a_dependent_locked_by_the_session_is_not_locked_again() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = column_workspace_with(&[(
+        "frontend/test/frontend_test.gleam",
+        "import solace_task\n\npub fn columns_test() {\n  let _ = solace_task.columns()\n}\n",
+    )]);
+    fake_gleam(&root);
+    let (frontend, tid) = task_at(&root, "frontend", &["components", "frontend"]);
+    let components = Store::at(&root.join("components")).unwrap();
+    let _held = crate::board::lock(&frontend).unwrap();
+    crate::language::with_tool_path(&[root.join("bin")], || {
+        let out = with_context(&tid, "run", || components.test(&[])).unwrap();
+        assert!(out.contains("== In frontend =="), "{out}");
+        assert!(out.contains("columns_test"), "{out}");
+    });
+}
+
+/// A save that fails after its dependent check leaves no baseline on the task.
+#[test]
+fn a_rolled_back_save_keeps_no_dependent_baseline() {
+    let root = column_workspace_with_a_broken_frontend();
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    std::fs::write(components.join("solace.toml"), "not = [valid").unwrap();
+    let text = column_patch();
+    let err = with_context(&tid, "run", || Store::at(&components).unwrap().submit_symbols_blocks(None, None, &text, false)).unwrap_err().0;
+    assert!(err.contains("E6020"), "{err}");
+    let t = task(&components, &tid).unwrap();
+    assert!(t.get("dependent_errors").is_none(), "{t}");
+}
+
+/// A new error on a dependent symbol already broken another way still blocks
+/// `task done`, even when an earlier save recorded that symbol as old.
+#[test]
+fn a_new_error_on_an_already_broken_dependent_symbol_blocks_done() {
+    let root = column_workspace_with(&[(
+        "frontend/src/legacy.gleam",
+        "import solace_task\n\npub fn legacy() -> Int {\n  let _ = solace_task.columns()\n  \"old\"\n}\n",
+    )]);
+    let (components, tid) = column_task(&root, &["components", "frontend"]);
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let text = column_patch();
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(text.clone()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved") && out.contains("frontend") && out.contains("knowledgebase"), "{out}");
+    let fixed = fix_frontend_columns(&components, &tid);
+    assert!(fixed.contains("Saved knowledgebase.known_columns"), "{fixed}");
+    let takes_a_name =
+        concat!("// ── solace_task.columns ──\n", "pub fn columns(extra: Int) -> List(Column) {\n", "  [Column(\"a\", \"b\")]\n", "}\n",);
+    let out = with_root(&components, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(takes_a_name.to_string()), None, 100_000, &[]))
+    })
+    .unwrap();
+    assert!(out.contains("Saved") && out.contains("legacy") && out.contains("Incorrect arity"), "{out}");
+    let done = ["task".to_string(), "done".to_string(), "Done.".to_string()];
+    let err = with_root(&components, || with_context(&tid, "run", || run_options(&done, &mut || Ok(String::new()), None, 10_000, &[])))
+        .unwrap_err()
+        .0;
+    assert!(err.contains("task done is refused") && err.contains("legacy"), "{err}");
+}
+
+#[test]
+fn a_guarded_local_name_is_not_imported() {
+    let store = project(&[
+        (
+            "src/solace_task.gleam",
+            "pub type Task {\n  Task(inner: Inner)\n  Unknown\n}\n\npub type Inner {\n  Inner(id: Int, total: Int)\n}\n",
+        ),
+        ("src/caller.gleam", "import solace_task as task\n\npub fn call() -> Int {\n  task.Inner(1, 2).total\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let out = store
+        .submit_symbols(
+            None,
+            Some("solace_task"),
+            "pub fn value(x: Task) -> Int {\n  case x {\n    Task(task) if task.id != 0 -> task.total\n    _ -> 0\n  }\n}",
+        )
+        .unwrap();
+    assert!(!out.contains("import solace_task as task"), "{out}");
+    let file = fs::read_to_string(store.root.join("src/solace_task.gleam")).unwrap();
+    assert!(!file.contains("import solace_task"), "{file}");
 }

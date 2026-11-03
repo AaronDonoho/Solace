@@ -369,7 +369,7 @@ fn scan(code: &str) -> (Vec<(Ref, usize, (usize, usize))>, Vec<(String, usize)>)
         let pattern = if let Some(rest) = t.strip_prefix("let ").or_else(|| t.strip_prefix("use ")) {
             rest.split(['=', '<']).next().unwrap_or("")
         } else if is_arm(t) {
-            &t[..t.find(" ->").unwrap()]
+            arm_pattern(t).unwrap_or("")
         } else {
             continue;
         };
@@ -393,8 +393,13 @@ fn scan(code: &str) -> (Vec<(Ref, usize, (usize, usize))>, Vec<(String, usize)>)
 
 /// A case arm's line: `Pattern(a, b) ->` (the pattern before the arrow).
 fn is_arm(t: &str) -> bool {
-    t.find(" ->").is_some_and(|arrow| {
-        !t.starts_with("fn") && !t.starts_with("let ") && !t.starts_with("use ") && !t[..arrow].contains('=') && !t[..arrow].contains("fn(")
+    arm_pattern(t).is_some_and(|pattern| {
+        !t.starts_with("fn")
+            && !t.starts_with("pub fn")
+            && !t.starts_with("let ")
+            && !t.starts_with("use ")
+            && !pattern.contains('=')
+            && !pattern.contains("fn(")
     })
 }
 
@@ -541,7 +546,7 @@ fn local_bindings(chars: &[char], line_end: &dyn Fn(usize) -> usize) -> Vec<(Str
     for line in text.split('\n') {
         let t = line.trim_start();
         if is_arm(t) {
-            let pattern = t[..t.find(" ->").unwrap()].split(" if ").next().unwrap_or("");
+            let pattern = arm_pattern(t).unwrap_or("");
             let level = line.len() - t.len();
             let to = dedent(pos, level, true);
             for w in pattern_names(pattern) {
@@ -748,3 +753,9 @@ fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
 #[cfg(test)]
 #[path = "gleam_tests.rs"]
 mod tests;
+
+/// A case arm's pattern, without the guard after `if`.
+fn arm_pattern(t: &str) -> Option<&str> {
+    let arrow = t.find(" ->")?;
+    Some(t[..arrow].split(" if ").next().unwrap_or(""))
+}

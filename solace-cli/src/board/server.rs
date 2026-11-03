@@ -115,6 +115,9 @@ impl Board {
     /// The project a request is for, and the path within it; `None` for the
     /// root's own routes.
     pub(crate) fn route(&self, url: &str) -> Result<Option<(PathBuf, String)>, Failure> {
+        if root_route(url.split('?').next().unwrap_or(""), self.explicit()) {
+            return Ok(None);
+        }
         let projects = self.projects()?;
         let Some(after) = url.strip_prefix("/p/") else {
             return Ok(projects.into_iter().find(|(d, _)| d == ".").map(|(_, r)| (r, url.to_string())));
@@ -232,11 +235,30 @@ impl Board {
         match (method, path) {
             ("GET", "/projects") => return self.listing(),
             ("GET", "/languages") => return languages(),
+            ("GET", "/roles") => return Ok(crate::board::roles::api()),
+            ("GET", "/agent-settings") => return crate::board::setup::agent_settings(),
+            ("GET", "/role-models") => return crate::board::setup::role_models(),
+            ("GET", "/skills") => return Ok(crate::skills::api(&self.top)),
+            ("POST", "/skills") => {
+                return crate::skills::save(&self.top, body).and_then(|_| Ok(crate::skills::api(&self.top)));
+            }
+            ("DELETE", p) if p.starts_with("/skills/") => {
+                let name = view::percent_decode(&p["/skills/".len()..]);
+                return crate::skills::remove(&self.top, &name).and_then(|_| Ok(crate::skills::api(&self.top)));
+            }
             ("GET", "/setup") => return Ok(check()),
             ("POST", "/languages") => return crate::board::setup::save_language(&config_path(), body).and_then(|_| languages()),
+            ("POST", "/agent-settings") => {
+                return crate::board::setup::save_agent_setting(&config_path(), body).and_then(|_| crate::board::setup::agent_settings());
+            }
+            ("POST", "/role-models") => {
+                return crate::board::setup::save_role_model(&config_path(), body).and_then(|_| crate::board::setup::role_models());
+            }
             ("GET", "/models") => return models(),
             ("POST", "/models/try-again") => return crate::board::agents::try_again(body).and_then(|_| models()),
-            ("POST", "/models") => return crate::board::setup::save(&config_path(), &crate::board::setup::keys_path(), body).and_then(|_| models()),
+            ("POST", "/models") => {
+                return crate::board::setup::save(&config_path(), &crate::board::setup::keys_path(), body).and_then(|_| models());
+            }
             ("DELETE", p) if p.starts_with("/models/") => {
                 let id = view::percent_decode(&p["/models/".len()..]);
                 return crate::board::setup::remove(&config_path(), &crate::board::setup::keys_path(), &id).and_then(|_| models());
@@ -258,9 +280,7 @@ impl Board {
                 let dir = body["dir"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(name);
                 let project = match &body["language"] {
                     Value::Null => NewProject::Gleam { javascript: body["target"] == "javascript" },
-                    Value::String(language) if language == "gleam" => {
-                        NewProject::Gleam { javascript: body["target"] == "javascript" }
-                    }
+                    Value::String(language) if language == "gleam" => NewProject::Gleam { javascript: body["target"] == "javascript" },
                     Value::String(language) if language == "rust" => NewProject::Rust,
                     other => return err("E7001", format!("language must be \"gleam\" or \"rust\", not {other}")),
                 };
@@ -276,7 +296,9 @@ impl Board {
                     return err("E7003", format!("an agent is working in {dir}; let it finish or stop it first"));
                 }
                 let w = flow(&self.top)?;
-                if let Some((home, t)) = covering.iter().find(|(home, t)| *home != root && crate::board::task_model::column(&w, t)["final"] != true) {
+                if let Some((home, t)) =
+                    covering.iter().find(|(home, t)| *home != root && crate::board::task_model::column(&w, t)["final"] != true)
+                {
                     return err(
                         "E7013",
                         format!(
@@ -366,7 +388,12 @@ pub(crate) fn body_json(bytes: &[u8]) -> Result<Value, Failure> {
 
 /// An API error as the board reads it: its code and message.
 pub(crate) fn error_json(e: &Failure) -> Value {
-    json!({"code":e.0.split_whitespace().next().unwrap_or("E7001"),"message":e.0})
+    let first = e.0.split_whitespace().next().unwrap_or("");
+    let code = match first.strip_prefix('E') {
+        Some(digits) if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) => first,
+        _ => "E7001",
+    };
+    json!({"code":code,"message":e.0})
 }
 
 pub(crate) fn respond_json(req: tiny_http::Request, result: Result<Value, Failure>) {
@@ -454,12 +481,13 @@ impl Events {
         let (milestones, features) =
             (json!({"milestones":crate::tasks::records(top, "milestones")}), json!({"features":crate::tasks::records(top, "features")}));
         let vision = json!({"vision": crate::tasks::vision(top)});
+        let personas = json!({"personas": crate::tasks::personas(top)});
         let runs = json!({"strategyRuns": crate::tasks::strategy_runs(top)});
         // Tasks with no project (D-129) ride on the root's streams, marked so
         // the Strategy page can list them whatever their home.
         let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -795,20 +823,22 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if !own_address(&req, board.port) {
                 return respond(req, 403, error_json(&Failure("E7016 request is not from this server's own address".into(), 1)));
             }
-            // The root's own routes; `/events` merges every project's when it has several.
-            let own = path == "/projects"
-                || path == "/languages"
-                || path == "/setup"
-                || path == "/models"
-                || path.starts_with("/projects/")
-                || path == "/migration"
-                || path.starts_with("/migration/")
-                || (path == "/events" && board.explicit());
+            // The app's watchdog asks this: a task server busy with a slow
+            // operation answers `503`, one that has stopped answers `500`.
+            if req.method().as_str() == "GET" && path == "/health" {
+                use crate::tasks::server::Answering;
+                let answer = crate::tasks::server::responding(&board.top, Duration::from_millis(800));
+                return match answer {
+                    Answering::Yes => respond(req, 200, json!({"ok": true})),
+                    Answering::Busy => respond(req, 503, json!({"ok": false, "busy": true})),
+                    Answering::No => respond(req, 500, json!({"ok": false})),
+                };
+            }
             if req.method().as_str() != "GET" && !path.starts_with("/migration") && board.step.lock().unwrap().is_some() {
                 return respond_json(req, err("E7003", "a migration step is running"));
             }
-            // Milestones, features (D-87), the vision (D-91) and strategy runs (D-93)
-            // are the root's: never under `/p/{dir}`.
+            // Milestones, features (D-87), the vision (D-91), personas (D-216) and
+            // strategy runs (D-93) are the root's: never under `/p/{dir}`.
             let strategy: Vec<&str> = path.trim_matches('/').split('/').collect();
             // A task by id, whichever project stores it (D-98): a task link asks where to open it.
             if let ("GET", ["tasks", "find", tid]) = (req.method().as_str(), strategy.as_slice()) {
@@ -832,10 +862,11 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 };
             }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
-            if matches!(strategy[0], "milestones" | "features") || strategy == ["vision"] || runs {
+            if matches!(strategy[0], "milestones" | "features" | "personas") || strategy == ["vision"] || runs {
                 let result = match read_body(&mut req, BODY_LIMIT) {
                     Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| match strategy[0] {
                         "vision" => tasks::vision_api(&board.top, req.method().as_str(), v),
+                        "personas" => tasks::personas_api(&board.top, req.method().as_str(), &strategy[1..], v),
                         "strategy" => {
                             let started = req.method().as_str() == "POST" && strategy.len() == 2;
                             tasks::strategy_runs_api(&board.top, req.method().as_str(), &strategy[2..], v).inspect(|run| {
@@ -854,7 +885,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     Err((status, e)) => respond(req, status, error_json(&e)),
                 };
             }
-            let routed = if own { Ok(None) } else { board.route(&full) };
+            let routed = board.route(&full);
             let (root, url) = match routed {
                 Err(e) => return respond_json(req, Err(e)),
                 Ok(Some((root, url))) => (Some(root), url),
@@ -970,4 +1001,24 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
         });
     }
     Ok(String::new())
+}
+
+/// Whether the root answers `path` itself rather than sending it to the root
+/// project when the root is one. Every route `projects_api` serves belongs
+/// here, and `/events` when the board has several projects.
+fn root_route(path: &str, explicit: bool) -> bool {
+    path == "/projects"
+        || path == "/languages"
+        || path == "/roles"
+        || path == "/agent-settings"
+        || path == "/role-models"
+        || path == "/skills"
+        || path.starts_with("/skills/")
+        || path == "/setup"
+        || path == "/models"
+        || path.starts_with("/models/")
+        || path.starts_with("/projects/")
+        || path == "/migration"
+        || path.starts_with("/migration/")
+        || (path == "/events" && explicit)
 }

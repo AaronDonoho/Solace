@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test';
 import * as strategy from '../build/dev/javascript/strategy/strategy.mjs';
 import * as features from '../build/dev/javascript/strategy/features.mjs';
+import * as personas from '../build/dev/javascript/strategy/personas.mjs';
 import { None } from '../build/dev/javascript/gleam_stdlib/gleam/option.mjs';
 import { toList } from '../build/dev/javascript/strategy/gleam.mjs';
 import { perform } from '../build/dev/javascript/lustre/lustre/effect.mjs';
@@ -126,11 +127,19 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
   const execute = effect => perform(effect, dispatch, noop, noop, noop, noop, noop, noop);
   const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); execute(effect); };
   const html = () => to_string(strategy.view(model));
-  const until = async predicate => {
+  const until = async (predicate, detail = html) => {
     for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
-    throw new Error('UI did not reach expected state: ' + html());
+    throw new Error('UI did not reach expected state: ' + detail());
   };
   const row = id => strategy.visible(model).toArray().find(pair => pair[1].id === id)[1];
+  // A row's HTML, so a failed check prints the row instead of the whole page.
+  const row_html = id => {
+    const page = html();
+    const title = row(id)?.title ?? id;
+    const at = page.indexOf(title);
+    const end = page.indexOf('</tr>', at);
+    return at < 0 || end < 0 ? page.slice(0, 600) : page.slice(at, end + 5);
+  };
   try {
     // `new` is a JavaScript keyword: Gleam exports it as `new$`.
     model = strategy.new$(new strategy.Tasks());
@@ -180,14 +189,14 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     await until(() => Array.from(model.live).some(m => m[1].includes('renamed')));
     expect(html()).toContain('Newer, renamed');
     // A task with no milestone shows a dash; the Feature link is one PATCH to the task's project.
-    expect(html()).toContain('<td>—</td>');
-    expect(html()).not.toContain('aria-label="Milestone of Newer, renamed:');
+    expect(row_html('t2')).toContain('<td>—</td>');
+    expect(row_html('t2')).not.toContain('aria-label="Launch, milestone of Newer, renamed"');
     dispatch(new strategy.Link('web', 't2', 'feature', 'f1'));
     await until(() => row('t2').feature[0] === 'f1');
     expect(patch).toEqual({ feature: 'f1' });
     // D-188: the feature brings its milestone; the cell is a read-only record link.
-    await until(() => html().includes('aria-label="Milestone of Newer, renamed: Launch"'));
-    expect(html()).toContain('<a aria-label="Milestone of Newer, renamed: Launch" href="/milestone/m1">Launch</a>');
+    await until(() => row_html('t2').includes('aria-label="Launch, milestone of Newer, renamed"'), () => row_html('t2'));
+    expect(row_html('t2')).toContain('<a aria-label="Launch, milestone of Newer, renamed" href="/milestone/m1">Launch</a>');
     expect(html()).toContain('aria-label="Feature of Newer, renamed"');
     // The Features tab groups by milestone in rank order, then "No milestone"; a feature lists its tasks from every project.
     dispatch(new strategy.Select(new strategy.Features()));
@@ -212,7 +221,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     dispatch(new strategy.Link('web', 't2', 'feature', ''));
     await until(() => patch.feature === null);
     await until(() => row('t2').feature instanceof None);
-    expect(html()).toContain('<a aria-label="Milestone of Newer, renamed: Launch" href="/milestone/m1">Launch</a>');
+    expect(row_html('t2')).toContain('<a aria-label="Launch, milestone of Newer, renamed" href="/milestone/m1">Launch</a>');
     for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/p/web/workflow'], ['GET', '/events'], ['PATCH', '/p/web/tasks/t2']]) expect(requests).toContainEqual(pair);
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
@@ -655,6 +664,7 @@ test('Features tab adds a task to a feature, then links it; a refused link says 
     refuse = true;
     dispatch(new strategy.TaskTitle('f1', 'Ranking'));
     dispatch(new strategy.AddTask('f1'));
+    await until(() => calls.filter(c => c[0] === 'PATCH').length === 2);
     await until(() => html().includes('created without the link'));
     expect(calls.filter(c => c[0] === 'POST').length).toBe(2);
     expect(calls.at(-1)).toEqual(['PATCH', '/p/web/tasks/t2', { feature: 'f1' }]);
@@ -819,6 +829,12 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
   const html = () => to_string(strategy.view(model));
   // The panel alone: from the aside to the first tab panel.
   const panel = () => { const all = html(); return all.slice(all.indexOf('<aside'), all.indexOf('</aside>')); };
+  // The plan bar's context line, so a failed context check prints it instead of the whole panel.
+  const context = () => {
+    const p = panel();
+    const at = p.indexOf('class="plan-context"');
+    return at < 0 ? p.slice(0, 300) : p.slice(at, p.indexOf('</p>', at) + 4);
+  };
   const models = () => requests.filter(([method, path]) => method === 'GET' && path === '/models').length;
   const until = async predicate => {
     for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
@@ -832,21 +848,21 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     // Unavailable models aren't offered; the line under the pick says why.
     expect(panel()).not.toContain('value="big"');
     expect(panel()).toContain('<summary>1 more model unavailable</summary><ul><li>Big: no key</li></ul>');
-    // Nothing selected: the whole project. Selecting a task plans it, and lists its past run.
-    expect(panel()).toContain('Plan context: Whole Project');
+    // Nothing selected: the whole project. Selecting a task leaves it there (D-202), and lists its past run.
+    expect(context()).toContain('Plan context: Whole Project');
     dispatch(new strategy.Open('.', 't1'));
-    expect(panel()).toContain('Plan context: task <em>Index</em>');
+    expect(context()).toContain('Plan context: Whole Project');
     expect(panel()).toContain('aria-label="Earlier runs"');
     expect(panel()).not.toContain('Runs on this');
     expect(panel()).toContain('Ended: planned · Fake');
     dispatch(new strategy.PlanText('Plan the index'));
     dispatch(new strategy.StartPlan());
     await until(() => panel().includes('Looking at Index'));
-    expect(calls[0]).toEqual(['/strategy/runs', { model: 'fake', text: 'Plan the index', context: onTask }]);
+    expect(calls[0]).toEqual(['/strategy/runs', { model: 'fake', text: 'Plan the index', context: { kind: 'page' } }]);
     expect(panel()).toContain('Working · Fake');
     expect(panel()).toContain('strategy list');
-    // The task's row shows the open run's marker.
-    expect(html()).toMatch(/class="open">Index<\/button><span class="planning"/);
+    // A page-context run does not mark the task row (D-202).
+    expect(html()).not.toMatch(/class="open">Index<\/button><span class="planning"/);
     // The agent replies and proposes, live.
     r1 = { ...r1, state: 'waiting', notes: [...r1.notes, { author: 'agent', text: 'Shall I add a ranking task?' }], questions: [proposal] };
     requests.length = 0;
@@ -862,7 +878,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     // Another tab: the panel and its run stay.
     dispatch(new strategy.Select(new strategy.Features()));
     expect(panel()).toContain('Shall I add a ranking task?');
-    expect(panel()).toContain('Plan context: task <em>Index</em>');
+    expect(context()).toContain('Plan context: Whole Project');
     dispatch(new strategy.AnswerPlan('q1', 'Approve'));
     await until(() => panel().includes('Answer: Created task t2'));
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/questions/q1', { option: 'Approve' }]);
@@ -958,6 +974,101 @@ test('transport uses the base it is given; project paths stay absolute', async (
     expect(source.closed).toBe(true);
   } finally {
     globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+  }
+});
+
+test('Personas tab lists, creates, edits over a revision and deletes', async () => {
+  let persona = { id: 'p1', name: 'Ada', objectives: 'Ship it', tools: 'Code', concerns: 'Risk', other: 'More', revision: 'r1' };
+  const calls = [];
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    const body = ['POST', 'PUT'].includes(req.method) ? await req.json() : null;
+    if (body) calls.push([req.method, path, body]);
+    if (path === '/events') return new Response(encode(
+      frame({ personas: [persona] }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
+    if (path === '/workflow') return Response.json({ columns: [] });
+    if (path === '/personas' && req.method === 'POST') {
+      persona = { id: 'p2', ...body, revision: 'r1' };
+      return Response.json(persona);
+    }
+    if (path === '/personas/p1' && req.method === 'PUT') {
+      if (body.base !== persona.revision) return Response.json({ code: 'E7028', message: 'E7028 the persona changed since this edit began' }, { status: 409 });
+      persona = { id: 'p1', ...body, revision: 'r2' };
+      return Response.json(persona);
+    }
+    if (path === '/personas/p1' && req.method === 'DELETE') { calls.push(['DELETE', path]); return Response.json(persona); }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  try {
+    model = strategy.new$(new strategy.Personas());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('Ada'));
+    // A new persona form has the five hints, and its save sends every field.
+    dispatch(new strategy.NewPersona());
+    expect(html()).toContain('placeholder="Name"');
+    expect(html()).toContain('placeholder="What does this persona want to accomplish?"');
+    dispatch(new strategy.PersonaName('Grace'));
+    dispatch(new strategy.PersonaText(new personas.ObjectivesField(), 'Lead the team'));
+    dispatch(new strategy.SavePersona());
+    await until(() => !html().includes('id="persona-form"'));
+    expect(calls.at(-1)).toEqual(['POST', '/personas', { name: 'Grace', objectives: 'Lead the team', tools: '', concerns: '', other: '' }]);
+    expect(html()).toContain('Grace');
+    // An edit names the revision it began from; a refusal keeps the draft.
+    dispatch(new strategy.EditPersona('p1'));
+    dispatch(new strategy.PersonaName('Ada Lovelace'));
+    dispatch(new strategy.SavePersona());
+    await until(() => !html().includes('id="persona-form"'));
+    expect(calls.at(-1)).toEqual(['PUT', '/personas/p1', { name: 'Ada Lovelace', objectives: 'Ship it', tools: 'Code', concerns: 'Risk', other: 'More', base: 'r1' }]);
+    // A live change while the form is open makes the draft stale, and Reload takes the saved one.
+    persona = { ...persona, name: 'Someone else', revision: 'r3' };
+    dispatch(new strategy.Live(JSON.stringify({ personas: [persona] })));
+    await until(() => model.persona_state.personas.toArray()[0].revision === 'r3');
+    dispatch(new strategy.EditPersona('p1'));
+    persona = { ...persona, name: 'Theirs', revision: 'r4' };
+    dispatch(new strategy.Live(JSON.stringify({ personas: [persona] })));
+    await until(() => model.persona_state.personas.toArray()[0].revision === 'r4');
+    expect(html()).toContain('changed since you began editing');
+    dispatch(new strategy.SavePersona());
+    await until(() => html().includes('E7028') && calls.at(-1)[0] === 'PUT');
+    expect(calls.at(-1)[2].base).toBe('r3');
+    expect(html()).toContain('id="persona-form"');
+    dispatch(new strategy.ReloadPersona());
+    expect(model.persona_state.draft[0].name).toBe('Theirs');
+    // Delete asks first, then one DELETE; the reply removes it.
+    dispatch(new strategy.CancelPersona());
+    dispatch(new strategy.DeletePersona('p1'));
+    expect(html()).toContain('Delete <em>Theirs</em>?');
+    dispatch(new strategy.ConfirmDeletePersona());
+    await until(() => calls.some(call => call[0] === 'DELETE'));
+    await until(() => !html().includes('Theirs'));
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }
 });
 

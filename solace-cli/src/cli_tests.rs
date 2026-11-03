@@ -325,3 +325,20 @@ fn a_command_after_a_caught_parser_panic_still_works() {
     .unwrap();
 }
 
+/// A work run's `session start --task` reads the task, so it needs no text.
+#[test]
+fn a_work_run_session_start_needs_no_text() {
+    let p = testing::project(&[("src/app.gleam", "/// Totals an order.\npub fn total() -> Int {\n  1\n}\n")]);
+    let t = api(&p.root, "POST", "/tasks", json!({"title": "Fix the order total", "body": "app.total is off by one"})).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let args = ["session".to_string(), "start".to_string(), "--task".to_string()];
+    let out = with_root(&p.root, || {
+        with_context(tid, "r", || {
+            run_inner(&p.root, &p.root, &args, &mut || Err(crate::failure::Failure("text was read".into(), 2)), None, 10_000)
+        })
+    })
+    .unwrap();
+    assert!(out.contains("Symbols most likely relevant to the task"), "{out}");
+    assert!(out.contains("app.total"), "{out}");
+}
+

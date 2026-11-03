@@ -218,3 +218,24 @@ fn a_binding_ends_at_its_indent_and_keywords_are_no_names() {
     assert_eq!(pattern_names("mod.Ctor(x)"), ["x"]);
     assert_eq!(pattern_names("_"), ["_"]);
 }
+
+#[test]
+fn a_guarded_case_arm_binds_its_pattern() {
+    let code =
+        concat!("pub fn f(x: Option(Task)) -> Int {\n  case x {\n", "    Some(task) if task.id != 0 -> task.total\n    _ -> 0\n  }\n}",);
+    assert!(qualified(code).is_empty(), "{:?}", qualified(code));
+    assert!(!bare_names(code).iter().any(|b| b == "task"), "{:?}", bare_names(code));
+}
+
+#[test]
+fn a_guarded_arm_reads_no_label_from_its_guard() {
+    let code = concat!("pub fn f(x: Option(Int)) {\n  case x {\n", "    Some(value) if g(value: 1) -> value\n    _ -> 0\n  }\n}",);
+    assert!(field_reads(code).is_empty(), "{:?}", field_reads(code));
+}
+
+#[test]
+fn a_public_function_with_a_return_type_is_not_a_case_arm() {
+    let code = "pub fn go(n: Int) -> Int {\n  case n {\n    0 -> 0\n    _ -> go(n - 1)\n  }\n}";
+    assert_eq!(bare_names(code).iter().filter(|b| b.as_str() == "go").count(), 2, "{:?}", bare_names(code));
+    assert!(field_reads(code).is_empty(), "{:?}", field_reads(code));
+}

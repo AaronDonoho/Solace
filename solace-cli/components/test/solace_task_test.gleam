@@ -135,8 +135,8 @@ pub fn attention_and_unavailable_models_test() {
         "[{\"id\":\"gone\",\"label\":\"Gone\",\"available\":false,\"reason\":\"codex is not installed\"},{\"id\":\"ok\",\"label\":\"Ok\",\"available\":true,\"reason\":null}]",
       ),
     )
-  // The first available model is chosen by default.
-  model.model |> should.equal("ok")
+  // Nothing is chosen without a role model.
+  model.model |> should.equal("")
   let #(model, _) =
     task.update(
       model,
@@ -146,6 +146,7 @@ pub fn attention_and_unavailable_models_test() {
       ),
     )
   let rendered = html(model)
+  rendered |> string.contains("Select a model") |> should.be_true
   rendered |> string.contains("Needs attention</strong>") |> should.be_true
   rendered |> string.contains("<p>task timeout</p>") |> should.be_true
   // Only the model that can start is offered; the others aren't listed
@@ -245,6 +246,7 @@ pub fn effort_choice_test() {
         "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
       ),
     )
+  let #(model, _) = task.update(model, task.AgentSelected("c"))
   let rendered = body(model)
   rendered |> string.contains("class=\"effort-pick\"") |> should.be_true
   rendered |> string.contains("role=\"group\"") |> should.be_true
@@ -325,6 +327,7 @@ pub fn effort_choice_test() {
         "{\"id\":\"2\",\"title\":\"T2\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
       ),
     )
+  let #(no_default, _) = task.update(no_default, task.AgentSelected("d"))
   let single = body(no_default)
   single |> string.contains(">Minimal</span>") |> should.be_true
   single |> string.contains("title=\"minimal\"") |> should.be_true
@@ -352,6 +355,7 @@ pub fn effort_choice_test() {
         "{\"id\":\"4\",\"title\":\"T4\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
       ),
     )
+  let #(one, _) = task.update(one, task.AgentSelected("f"))
   let only = body(one)
   only |> string.contains(">Low</span>") |> should.be_true
   only
@@ -383,34 +387,36 @@ pub fn models_loaded_keeps_choice_test() {
     let #(m, _) = task.update(model, task.ModelsLoaded(text))
     m
   }
-  // No choice yet: the first available agent.
+  // No role model: nothing is picked until the human picks one.
   let first = loaded(task.Model(..base, model: "", effort: ""), list_json)
-  assert first.model == "a"
-  // A remembered available agent and its effort are kept.
-  let kept = loaded(task.Model(..base, model: "b", effort: "high"), list_json)
+  assert first.model == ""
+  // A manual pick that can start and its effort are kept.
+  let kept =
+    loaded(
+      task.Model(..base, model: "b", effort: "high", model_source: task.Human),
+      list_json,
+    )
   assert kept.model == "b"
   assert kept.effort == "high"
   // An effort the agent doesn't offer is dropped.
   let dropped = loaded(task.Model(..base, model: "b", effort: "max"), list_json)
   assert dropped.effort == ""
-  // An unavailable or unknown agent falls back to the first available one.
+  // An unavailable or unknown agent with no role model leaves no pick.
   let unavailable =
-    loaded(task.Model(..base, model: "c", effort: "high"), list_json)
-  assert unavailable.model == "a"
+    loaded(
+      task.Model(..base, model: "c", effort: "high", model_source: task.Human),
+      list_json,
+    )
+  assert unavailable.model == ""
   assert unavailable.effort == ""
-  let unknown = loaded(task.Model(..base, model: "zzz", effort: ""), list_json)
-  assert unknown.model == "a"
-  // A remembered alias the list no longer shows: its family's model, not the first one.
-  let families =
-    "[{\"id\":\"a\",\"label\":\"A\",\"model\":\"a-model\"},{\"id\":\"claude-sonnet-5-5\",\"label\":\"Sonnet 5.5\",\"agent\":\"claude\"},{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\",\"agent\":\"claude\"}]"
-  let alias =
-    loaded(task.Model(..base, model: "claude-opus", effort: ""), families)
-  assert alias.model == "claude-opus-5-5"
-  let gone =
-    loaded(task.Model(..base, model: "claude-fable", effort: ""), families)
-  assert gone.model == "a"
+  let unknown =
+    loaded(
+      task.Model(..base, model: "zzz", effort: "", model_source: task.Human),
+      list_json,
+    )
+  assert unknown.model == ""
   // Fetched again with the task: a failed reply changes nothing, and an
-  // unavailable pick the list still has stays chosen.
+  // available pick the list still has stays chosen.
   let refreshed = fn(model, text) {
     let #(m, _) = task.update(model, task.ModelsRefreshed(text))
     m
@@ -424,8 +430,8 @@ pub fn models_loaded_keeps_choice_test() {
       held,
       "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"available\":false,\"efforts\":[\"low\",\"high\"]}]",
     )
-  assert limited.model == "b"
-  assert limited.effort == "high"
+  assert limited.model == ""
+  assert limited.effort == ""
   // A refresh that drops the chosen effort leaves the pick at its default.
   let narrowed =
     refreshed(
@@ -435,7 +441,7 @@ pub fn models_loaded_keeps_choice_test() {
   assert narrowed.model == "b"
   assert narrowed.effort == ""
   let dropped_pick = refreshed(held, "[{\"id\":\"a\",\"label\":\"A\"}]")
-  assert dropped_pick.model == "a"
+  assert dropped_pick.model == ""
 }
 
 pub fn settings_question_shows_diff_and_approve_test() {
@@ -488,7 +494,7 @@ pub fn file_changes_list_under_files_test() {
 pub fn stop_and_discussion_actions_test() {
   let workflow =
     task.Workflow(
-      [task.Column("triage", "Triage", ["assign"], False)],
+      [task.Column("triage", "Triage", ["assign"], False, "")],
       dict.new(),
     )
   let one = fn(kind, state) {
@@ -519,7 +525,7 @@ pub fn an_action_waits_for_its_reply_test() {
     task.Model(
       ..loaded(text),
       workflow: task.Workflow(
-        [task.Column("triage", "Triage", ["assign"], False)],
+        [task.Column("triage", "Triage", ["assign"], False, "")],
         dict.new(),
       ),
     )
@@ -1163,9 +1169,9 @@ pub fn a_final_column_shows_no_live_agent_test() {
   let workflow =
     task.Workflow(
       [
-        task.Column("assigned", "Assigned", ["complete"], False),
-        task.Column("complete", "Complete", [], True),
-        task.Column("cancelled", "Canceled", ["to_backlog"], True),
+        task.Column("assigned", "Assigned", ["complete"], False, ""),
+        task.Column("complete", "Complete", [], True, ""),
+        task.Column("cancelled", "Canceled", ["to_backlog"], True, ""),
       ],
       dict.new(),
     )
@@ -1209,8 +1215,8 @@ pub fn a_hosted_detail_takes_the_completed_task_test() {
   let workflow =
     task.Workflow(
       [
-        task.Column("assigned", "Assigned", ["complete"], False),
-        task.Column("complete", "Complete", [], True),
+        task.Column("assigned", "Assigned", ["complete"], False, ""),
+        task.Column("complete", "Complete", [], True, ""),
       ],
       dict.new(),
     )
@@ -1810,7 +1816,7 @@ pub fn shared_labels_on_the_task_test() {
       dir: "a",
       workspace: True,
       workflow: task.Workflow(
-        [task.Column("planning", "Review", [], False)],
+        [task.Column("planning", "Review", [], False, "")],
         dict.new(),
       ),
     )
@@ -1952,6 +1958,7 @@ pub fn editor_styles_markdown_as_it_is_written_test() {
         task: "t1",
         base: "/p/a",
         label: "Description",
+        placeholder: "",
         text: "**hi**",
         on_input: fn(_) { Nil },
         on_format: fn(_, _) { Nil },
@@ -1976,6 +1983,7 @@ pub fn editor_styles_markdown_as_it_is_written_test() {
         task: "",
         base: "",
         label: "Vision",
+        placeholder: "",
         text: "",
         on_input: fn(_) { Nil },
         on_format: fn(_, _) { Nil },
@@ -1988,6 +1996,28 @@ pub fn editor_styles_markdown_as_it_is_written_test() {
   |> string.contains("placeholder=\"Vision (markdown).\"")
   |> should.be_true
   draft |> string.contains("title=\"Add an image\"") |> should.be_false
+  // An editor given a hint shows it exactly, without the label's suffix.
+  let hint =
+    task.editor(
+      task.EditorConfig(
+        id: "body",
+        task: "",
+        base: "",
+        label: "Objectives",
+        placeholder: "What does this persona want to accomplish?",
+        text: "",
+        on_input: fn(_) { Nil },
+        on_format: fn(_, _) { Nil },
+        on_block: fn(_) { Nil },
+        actions: [],
+      ),
+    )
+    |> element.to_string
+  hint
+  |> string.contains(
+    "placeholder=\"What does this persona want to accomplish?\"",
+  )
+  |> should.be_true
 }
 
 /// D-129: a task with no project is not followed to a project of its scope,
@@ -2023,9 +2053,9 @@ pub fn back_to_backlog_needs_the_strategy_page_and_no_feature_test() {
   let workflow =
     task.Workflow(
       [
-        task.Column("backlog", "Backlog", ["plan", "cancel"], False),
-        task.Column("planning", "Planning", ["assign", "to_backlog"], False),
-        task.Column("cancelled", "Canceled", ["to_backlog"], True),
+        task.Column("backlog", "Backlog", ["plan", "cancel"], False, ""),
+        task.Column("planning", "Planning", ["assign", "to_backlog"], False, ""),
+        task.Column("cancelled", "Canceled", ["to_backlog"], True, ""),
       ],
       dict.new(),
     )
@@ -2126,8 +2156,11 @@ pub fn usage_limits_can_be_tried_again_test() {
       ),
     )
   model.refreshing |> should.be_false
-  model.model |> should.equal("sol")
+  // The cleared model is offered, but the pick stays empty until chosen.
+  model.model |> should.equal("")
   let rendered = html(model)
+  rendered |> string.contains("Select a model") |> should.be_true
+  rendered |> string.contains(">Sol</option>") |> should.be_true
   rendered |> string.contains("unavailable</summary>") |> should.be_false
   // The icon stays left of the pick when a model can start.
   rendered |> string.contains("⟳</button><select") |> should.be_true
@@ -4089,4 +4122,229 @@ pub fn proposal_offers_approve_to_planning_test() {
   |> string.contains(">Approve to Planning</button>")
   |> should.be_true
   shown |> string.contains(">Reject</button>") |> should.be_true
+}
+
+/// A run's `failed` flag decodes; a task saved before it reads as not failed.
+pub fn failed_run_decodes_test() {
+  let base =
+    "\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\""
+  let failed = fn(extra) {
+    let assert Ok(t) =
+      json.parse("{" <> base <> extra <> "}]}", task.task_decoder())
+    let assert [r] = t.runs
+    r.failed
+  }
+  failed(",\"failed\":true") |> should.be_true
+  failed("") |> should.be_false
+}
+
+/// A manual model choice is sent with the action and resets when another task
+/// opens.
+pub fn manual_model_choice_resets_on_the_next_task_test() {
+  let first =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let second =
+    "{\"id\":\"2\",\"title\":\"U\",\"body\":\"\",\"column\":\"planning\",\"rank\":2}"
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\"],\"final\":false,\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\",\"assign\":\"worker\"}}"
+  let roles =
+    "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\"}]"
+  let models =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]"
+  let model = loaded(first)
+  let #(model, _) =
+    task.update(model, task.WorkflowLoaded(model.generation, workflow))
+  let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
+  let #(model, _) = task.update(model, task.ModelsLoaded(models))
+  assert model.model == "b"
+  let #(picked, _) = task.update(model, task.AgentSelected("a"))
+  assert picked.model == "a"
+  assert picked.model_source == task.Human
+  assert !string.contains(html(picked), "Your choice")
+  assert string.contains(task.action_body(picked, "assign"), "\"model\":\"a\"")
+  let changed =
+    task.update(
+      picked,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"c\"}]",
+      ),
+    ).0
+  assert changed.model == "a"
+  assert changed.model_source == task.Human
+  let #(next, _) = task.update(picked, task.TaskChanged("2"))
+  let #(next, _) = task.update(next, task.TaskLoaded(next.generation, second))
+  let #(next, _) =
+    task.update(next, task.WorkflowLoaded(next.generation, workflow))
+  assert next.model == "b"
+  assert next.model_source == task.RoleDefault
+  assert !string.contains(html(next), "Your choice")
+}
+
+/// A task that moves to another column while open takes the new column's role
+/// default, unless the human picked a model.
+pub fn refetched_column_change_follows_the_new_roles_default_test() {
+  let first =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let moved =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1}"
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\"],\"final\":false,\"role\":\"investigator\"},{\"id\":\"needs_review\",\"label\":\"Review\",\"actions\":[\"review\"],\"final\":false,\"role\":\"reviewer\"}],\"roles\":{\"investigate\":\"investigator\",\"assign\":\"worker\",\"review\":\"reviewer\"}}"
+  let roles =
+    "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"a\"},{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\"},{\"role\":\"reviewer\",\"name\":\"Reviewer\",\"default\":\"c\"}]"
+  let models =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]"
+  let start = fn() {
+    let model = loaded(first)
+    let #(model, _) =
+      task.update(model, task.WorkflowLoaded(model.generation, workflow))
+    let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
+    task.update(model, task.ModelsLoaded(models)).0
+  }
+  let automatic = start()
+  assert automatic.model == "b"
+  let #(automatic, _) =
+    task.update(automatic, task.Refetched(automatic.generation, moved))
+  assert automatic.model == "c"
+  assert automatic.model_source == task.RoleDefault
+  assert !string.contains(html(automatic), "Reviewer default")
+  let manual = start()
+  let #(manual, _) = task.update(manual, task.AgentSelected("a"))
+  let #(manual, _) =
+    task.update(manual, task.Refetched(manual.generation, moved))
+  assert manual.model == "a"
+  assert manual.model_source == task.Human
+  assert !string.contains(html(manual), "Your choice")
+}
+
+/// Planning's Investigate and Assign each send their own role's model. A
+/// human's pick overrides both.
+pub fn planning_actions_use_their_roles_model_test() {
+  let task_json =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\"],\"final\":false,\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\",\"assign\":\"worker\"}}"
+  let roles =
+    "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"a\"},{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\"}]"
+  let models =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]"
+  let model = loaded(task_json)
+  let #(model, _) =
+    task.update(model, task.WorkflowLoaded(model.generation, workflow))
+  let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
+  let model = task.update(model, task.ModelsLoaded(models)).0
+  assert !string.contains(html(model), "Model: ")
+  assert model.model == "b"
+  assert string.contains(
+    task.action_body(model, "investigate"),
+    "\"model\":\"b\"",
+  )
+  assert string.contains(task.action_body(model, "assign"), "\"model\":\"a\"")
+  let #(picked, _) = task.update(model, task.AgentSelected("c"))
+  assert string.contains(
+    task.action_body(picked, "investigate"),
+    "\"model\":\"c\"",
+  )
+  assert string.contains(task.action_body(picked, "assign"), "\"model\":\"c\"")
+}
+
+/// A role-aware pick starts on its role's model when it can start, and stays
+/// unpicked otherwise. A stored backup is ignored.
+pub fn role_model_or_placeholder_test() {
+  let task_json =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\"],\"final\":false,\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\",\"assign\":\"worker\"}}"
+  let roles =
+    "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"a\"},{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\",\"backup\":\"c\"}]"
+  let ready =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]"
+  let held =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"available\":false},{\"id\":\"c\",\"label\":\"C\"}]"
+  let start = fn(roles, models) {
+    let model = loaded(task_json)
+    let #(model, _) =
+      task.update(model, task.WorkflowLoaded(model.generation, workflow))
+    let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
+    task.update(model, task.ModelsLoaded(models)).0
+  }
+  let default = start(roles, ready)
+  assert default.model == "b"
+  assert default.model_source == task.RoleDefault
+  assert !string.contains(html(default), "Worker default")
+  let unavailable = start(roles, held)
+  assert unavailable.model == ""
+  assert unavailable.model_source == task.RoleDefault
+  assert string.contains(html(unavailable), "Select a model")
+  assert !string.contains(html(unavailable), "Worker default")
+  let none =
+    start(
+      "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"\",\"backup\":\"\"}]",
+      ready,
+    )
+  assert none.model == ""
+  assert none.model_source == task.RoleDefault
+  assert string.contains(html(none), "Select a model")
+  assert !string.contains(html(none), "Fallback")
+  let changed =
+    task.update(
+      default,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"c\"}]",
+      ),
+    ).0
+  assert changed.model == "c"
+  assert changed.model_source == task.RoleDefault
+}
+
+/// A live workflow change refreshes the role each action follows, so its
+/// button and request take the new role's model.
+pub fn live_workflow_refreshes_action_roles_test() {
+  let task_json =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let first =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\"],\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\",\"assign\":\"worker\"}}"
+  let second =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\"],\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"worker\",\"assign\":\"investigator\"}}"
+  let roles =
+    "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"a\"},{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\"}]"
+  let models = "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]"
+  let model = task.Model(..loaded(task_json), dir: "a")
+  let #(model, _) =
+    task.update(model, task.WorkflowLoaded(model.generation, first))
+  let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
+  let model = task.update(model, task.ModelsLoaded(models)).0
+  let #(model, _) = task.update(model, task.CaughtUp)
+  assert string.contains(task.action_body(model, "assign"), "\"model\":\"a\"")
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live("{\"project\":\"a\",\"workflow\":" <> second <> "}"),
+    )
+  assert string.contains(task.action_body(model, "assign"), "\"model\":\"b\"")
+  assert string.contains(
+    task.action_body(model, "investigate"),
+    "\"model\":\"a\"",
+  )
+}
+
+/// The workflow decoder accepts a reply with no roles, as an older one has it,
+/// and one with roles.
+pub fn workflow_decoder_accepts_roles_test() {
+  let decode = fn(text) {
+    let assert Ok(workflow) = json.parse(text, task.workflow_decoder())
+    workflow
+  }
+  let plain =
+    decode(
+      "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"assign\"]}],\"actions\":{\"assign\":{\"label\":\"Assign\"}}}",
+    )
+  assert plain.columns
+    == [task.Column("planning", "Planning", ["assign"], False, "")]
+  assert dict.get(plain.labels, "assign") == Ok("Assign")
+  let with_roles =
+    decode(
+      "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}],\"roles\":{\"assign\":\"worker\"}}",
+    )
+  assert with_roles.columns
+    == [task.Column("planning", "Planning", [], False, "")]
 }

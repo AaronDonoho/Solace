@@ -279,7 +279,7 @@ pub(crate) fn failed_dir(top: &Path) -> PathBuf {
 
 /// Whether the server set the message at `path` aside because it could not apply it.
 pub fn rejected(top: &Path, path: &Path) -> bool {
-    path.file_name().is_some_and(|n| failed_dir(top).join(n).exists())
+    path.file_name().is_some() && failed_path(top, path).exists()
 }
 
 /// Settles task `tid`, which a change just moved into a final column, after the
@@ -432,4 +432,54 @@ pub(crate) const SETTLE_FAILED_NOTE: &str = "Settling this task failed:";
 /// Whether task `tid` still carries the marker of a failed deferred settle.
 fn settle_failed(top: &Path, tid: &str) -> bool {
     task_at_home(top, tid).is_ok_and(|t| t["settleFailed"] == true)
+}
+
+/// The file a message the server could not apply is kept in.
+pub(crate) fn failed_path(top: &Path, path: &Path) -> PathBuf {
+    match path.file_name() {
+        Some(name) => failed_dir(top).join(name),
+        None => failed_dir(top),
+    }
+}
+
+/// Asks this process's task server for `top` how it is doing: `Yes` when it
+/// takes a no-op within `wait`, `Busy` while an operation still holds its
+/// thread, and `No` when there is no server or its thread has ended.
+pub fn responding(top: &Path, wait: Duration) -> Answering {
+    answering(server_for(top), std::thread::current().id(), wait)
+}
+
+fn answering(server: Option<&Server>, current: std::thread::ThreadId, wait: Duration) -> Answering {
+    let Some(server) = server else {
+        return Answering::No;
+    };
+    if server.thread == current {
+        return Answering::Yes;
+    }
+    let (reply, answer) = mpsc::channel();
+    if server
+        .jobs
+        .send(Box::new(move || {
+            let _ = reply.send(());
+        }))
+        .is_err()
+    {
+        return Answering::No;
+    }
+    match answer.recv_timeout(wait) {
+        Ok(()) => Answering::Yes,
+        Err(mpsc::RecvTimeoutError::Timeout) => Answering::Busy,
+        Err(mpsc::RecvTimeoutError::Disconnected) => Answering::No,
+    }
+}
+
+/// How this process's task server answers a health check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answering {
+    /// It took a no-op within the wait.
+    Yes,
+    /// Its queue is live but an operation still holds its thread.
+    Busy,
+    /// No task server runs for the root, or its thread has gone.
+    No,
 }

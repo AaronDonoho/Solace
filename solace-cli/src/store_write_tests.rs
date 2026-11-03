@@ -146,7 +146,7 @@ fn a_rebuilt_binary_does_not_hide_the_servers_stale_code() {
 /// `--all`.
 #[test]
 fn the_stale_reason_is_shown_only_when_selection_forced_every_test() {
-    let reason = "Ran all 2 tests: Solace's own code changed since this server started; restart it to select tests again.\n";
+    let reason = "Ran all 2 tests: Solace's own code changed since this server started, so test selection is out of date.\n";
     assert_eq!(test_head(2, 2, &[], false, true), reason);
     assert_eq!(test_head(2, 2, &[], true, true), "Ran all 2 tests.\n");
     assert_eq!(test_head(2, 2, &[], false, false), "Ran all 2 tests.\n");
@@ -171,5 +171,46 @@ fn every_selection_symbol_resolves_in_this_crate() {
     for name in SELECTION_SYMBOLS {
         assert!(ix.syms.iter().any(|s| s.qname() == *name), "{name} names no symbol in this crate");
     }
+}
+
+/// A newer executable means the running copy is older than the saved code.
+#[test]
+fn a_newer_binary_means_the_running_copy_is_stale() {
+    let earlier = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(20));
+    let later = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(40));
+    assert!(binary_is_newer(earlier, later));
+    assert!(!binary_is_newer(later, earlier));
+    assert!(!binary_is_newer(earlier, earlier), "the same binary is not a rebuild");
+    assert!(!binary_is_newer(None, later), "with no captured time there is nothing to compare");
+    assert!(!binary_is_newer(earlier, None), "a missing executable is not a rebuild");
+}
+
+#[test]
+fn the_stale_binary_note_is_sent_once() {
+    let earlier = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(20));
+    let later = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(40));
+    let sent = std::sync::atomic::AtomicBool::new(false);
+    let looked = std::cell::Cell::new(false);
+    assert!(
+        stale_binary_notice_from(&sent, earlier, || {
+            looked.set(true);
+            later
+        })
+        .is_some()
+    );
+    assert!(looked.get());
+    assert!(sent.load(std::sync::atomic::Ordering::Relaxed));
+    looked.set(false);
+    assert!(
+        stale_binary_notice_from(&sent, earlier, || {
+            looked.set(true);
+            later
+        })
+        .is_none()
+    );
+    assert!(!looked.get(), "a sent note does not look at the binary again");
+    let fresh = std::sync::atomic::AtomicBool::new(false);
+    assert!(stale_binary_notice_from(&fresh, later, || earlier).is_none());
+    assert!(!fresh.load(std::sync::atomic::Ordering::Relaxed), "an unchanged binary leaves the note unsent");
 }
 

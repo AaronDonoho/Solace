@@ -9,8 +9,6 @@ use std::fs;
 use crate::board::task_model::open;
 use crate::board::task_model::store_dir;
 use crate::board::server::api;
-use crate::board::briefs::continuation_brief;
-use crate::board::briefs::brief;
 use crate::board::briefs::WAITING;
 use crate::board::briefs::waiting_on;
 use crate::board::briefs::START;
@@ -26,7 +24,6 @@ use crate::scope;
 use crate::cli::with_root;
 use crate::cli::run_options;
 use crate::board::runs::with_context;
-
 /// D-186: an investigation states outcomes and constraints, not a plan that
 /// assigns edits, submission calls or checks.
 #[test]
@@ -51,7 +48,7 @@ fn investigate_briefs_report_requirements_not_edits() {
         "changes": [{"entity": "file:solace.toml", "name": "solace.toml", "run": "r2"}],
     });
     for (label, task, named) in [("code change", &code, "calc.add"), ("settings change", &settings, "solace.toml")] {
-        let prompt = brief(task, "investigate");
+        let prompt = brief(task, "investigate", "engineer");
         for required in [
             "Investigate this task",
             "Report the required behavior, constraints, acceptance criteria and risks",
@@ -78,10 +75,10 @@ fn investigate_briefs_report_requirements_not_edits() {
         );
         assert!(!prompt.contains("Use those to verify (for example test suites)"), "{label}\n{prompt}");
     }
-    let review = brief(&code, "review");
+    let review = brief(&code, "review", "engineer");
     assert!(review.contains("Use those to verify (for example test suites)"), "{review}");
     assert!(!review.contains("Probe or run tests only when needed"), "{review}");
-    let work = brief(&code, "work");
+    let work = brief(&code, "work", "engineer");
     for owned in [
         "`submit` then `test`",
         "`write` then `run <name>`",
@@ -182,7 +179,7 @@ fn a_brief_lists_the_skills_of_its_project() {
     let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
     for kind in ["work", "investigate", "discuss", "review"] {
         let run = json!({"id":"r1","kind":kind});
-        let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false).0;
+        let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false, "engineer").0;
         assert!(brief.contains("- design: Layout and color. (`read skills/design/SKILL.md`)"), "{kind}: {brief}");
         assert!(brief.contains("- voice: Speak plainly (`read skills/voice.md`)"), "{kind}: {brief}");
         assert!(brief.contains("when the task matches a skill's description"), "{kind}: {brief}");
@@ -193,7 +190,7 @@ fn a_brief_lists_the_skills_of_its_project() {
     let q = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let u = open(&q.root).unwrap();
     let t2 = api(&u.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
-    let brief = continuation_brief(&t2, &json!({"id":"r1","kind":"work"}), false, &q.root, &q.root, false).0;
+    let brief = continuation_brief(&t2, &json!({"id":"r1","kind":"work"}), false, &q.root, &q.root, false, "engineer").0;
     assert!(!brief.contains("Skills ("), "{brief}");
 }
 
@@ -205,14 +202,17 @@ fn a_fresh_brief_holds_the_session_start_reply() {
     let p = testing::project(&[("src/app.gleam", "/// Totals an order.\npub fn total() -> Int {\n  1\n}\n")]);
     let s = open(&p.root).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title":"Fix the order total","body":"app.total is off by one"})).unwrap();
-    let brief = |kind: &str, resumed: bool| continuation_brief(&t, &json!({"id":"r1","kind":kind}), resumed, &p.root, &p.root, false).0;
+    let brief =
+        |kind: &str, resumed: bool| continuation_brief(&t, &json!({"id":"r1","kind":kind}), resumed, &p.root, &p.root, false, "engineer").0;
     let (reply, next) = (
         "\nSession start (the reply to `session start --task`):\n",
         "\nNext: read what the change needs in one call, one command per line: `inspect app.total",
     );
+    let reference = crate::reference::agent_reference(true);
     for kind in ["work", "investigate"] {
         let b = brief(kind, false);
         assert!(b.contains(reply) && b.contains("Symbols most likely relevant to the task") && b.contains("-- app.total"), "{kind}: {b}");
+        assert!(b.starts_with(reference.as_str()) && b.matches(reference.as_str()).count() == 1, "{kind}: {b}");
         assert!(!b.contains(START) && b.contains(HELD_START), "{kind}: {b}");
         let (at, stop) = (b.find(next).expect(&b), b.find("After the call that ends the run returns, stop").unwrap());
         assert!(b.find(reply).unwrap() < at && at < stop, "{kind}: the reply's first call comes just before the stop line: {b}");
@@ -221,37 +221,45 @@ fn a_fresh_brief_holds_the_session_start_reply() {
     }
     for kind in ["review", "discuss"] {
         let b = brief(kind, false);
+        assert!(b.starts_with(reference.as_str()) && b.matches(reference.as_str()).count() == 1, "{kind}: {b}");
         assert!(!b.contains(reply) && !b.contains(HELD_START), "{kind}: {b}");
     }
     let dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency"})).unwrap();
     let mut needs = api(&s.root, "POST", "/tasks", json!({"title":"Needs one"})).unwrap();
     needs["dependsOn"] = json!([dep["id"]]);
     tasks::put(&s, &needs).unwrap();
-    let b = continuation_brief(&needs, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    let b = continuation_brief(&needs, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false, "engineer").0;
     assert!(b.lines().any(|line| line == "`task peek <id>` reads a listed task."), "{b}");
     assert!(!b.contains("`task peek feature` reads the feature"), "{b}");
     let f = tasks::strategy_api(&scope::top(&p.root), "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
     let mut featured = api(&s.root, "POST", "/tasks", json!({"title":"Featured"})).unwrap();
     featured["feature"] = json!(f["id"]);
     tasks::put(&s, &featured).unwrap();
-    let b = continuation_brief(&featured, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    let b = continuation_brief(&featured, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false, "engineer").0;
     assert!(b.lines().any(|line| line == "`task peek feature` reads the feature."), "{b}");
     assert!(!b.lines().any(|line| line.starts_with("`task peek <id>`")), "{b}");
     let resumed = brief("work", true);
     assert!(
-        resumed.contains("Use the continuation context below.") && !resumed.contains(reply) && !resumed.contains(HELD_START),
+        resumed.contains("Use the continuation context below.")
+            && !resumed.contains(reply)
+            && !resumed.contains(HELD_START)
+            && !resumed.starts_with(reference.as_str()),
         "{resumed}"
     );
     fs::remove_file(p.root.join("gleam.toml")).unwrap();
     let plain = brief("work", false);
     assert!(
-        plain.contains(reply) && plain.contains("This project has plain files") && plain.contains("`grep <text> --in <path>`"),
+        plain.contains(reply)
+            && plain.contains("This project has plain files")
+            && plain.contains("`grep <text> --in <path>`")
+            && plain.starts_with(reference.as_str())
+            && plain.matches(reference.as_str()).count() == 1,
         "{plain}"
     );
     // A folder with no store keeps the line asking for the call.
     let bare = testing::Scratch::new();
-    let b = continuation_brief(&t, &json!({"id":"r1","kind":"work"}), false, &p.root, &bare, false).0;
-    assert!(b.contains(START) && !b.contains(reply), "{b}");
+    let b = continuation_brief(&t, &json!({"id":"r1","kind":"work"}), false, &p.root, &bare, false, "engineer").0;
+    assert!(b.contains(START) && !b.contains(reply) && b.starts_with(reference.as_str()), "{b}");
 }
 
 /// `session remember` is for a task run: a discussion's brief holds its
@@ -283,7 +291,7 @@ fn session_remember_keeps_notes_a_resumed_brief_filters_out() {
     tasks::put(&s, &t).unwrap();
     let tid = t["id"].as_str().unwrap();
     let run = json!({"id":"r1","kind":"work","state":"running"});
-    let brief = continuation_brief(&t, &run, true, &p.root, &p.root, false).0;
+    let brief = continuation_brief(&t, &run, true, &p.root, &p.root, false, "engineer").0;
     assert!(!brief.contains("The investigator's plan."), "{brief}");
     let out = remember(&p.root, tid, "r1", 10_000).unwrap();
     assert!(out.contains("The investigator's plan."), "{out}");
@@ -332,8 +340,8 @@ fn briefs_name_unfinished_dependencies() {
     // The run prompt carries it; one with only finished dependencies still lists them.
     let task = |id: &str| all_tasks(&top).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
     let run = json!({"id":"r1","kind":"work"});
-    assert!(continuation_brief(&task("t"), &run, false, &p.root, &p.root, false).0.contains(&w));
-    let finished = continuation_brief(&task("f"), &run, false, &p.root, &p.root, false).0;
+    assert!(continuation_brief(&task("t"), &run, false, &p.root, &p.root, false, "engineer").0.contains(&w));
+    let finished = continuation_brief(&task("f"), &run, false, &p.root, &p.root, false, "engineer").0;
     assert!(finished.contains("Depends on:") && finished.contains("task:b") && !finished.contains(WAITING), "{finished}");
     // A task brought back to the backlog counts as unfinished again.
     put("b", &home, "backlog", &[]);
@@ -355,7 +363,8 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         "changes": [{"entity": "symbol:x", "name": "calc.add", "run": "r1"}],
         "test_commands": [{"project": "a", "commands": ["rust-acceptance", "spacing_parity"]}],
     });
-    let b = brief(&t, "work");
+    let b = brief(&t, "work", "engineer");
+    assert!(!b.contains("How to talk to the human"), "{b}");
     for part in [
         "Make the change",
         "`task done`, a summary in `text`",
@@ -372,7 +381,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     // Symbol-held source is named without tying it to Gleam.
     assert!(b.contains("symbol-held source") && !b.contains("with Gleam code"), "{b}");
     for kind in ["work", "investigate", "review", "discuss"] {
-        let prompt = brief(&t, kind);
+        let prompt = brief(&t, kind, "engineer");
         for guidance in [
             "Write human-facing task messages in Markdown",
             "including the text sent to task tools",
@@ -387,17 +396,21 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         assert_eq!(prompt.contains("**Assessment: Looks good**"), kind == "review");
         assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
     }
+    for kind in ["work", "investigate", "review", "discuss"] {
+        let prompt = brief(&t, kind, "engineer");
+        assert!(prompt.contains(UI_DETAILS_ASK), "{kind}: missing {UI_DETAILS_ASK}");
+    }
     // D-181: source files are projections; only a module, symbol or other file is named.
     for kind in ["work", "investigate", "review", "discuss"] {
         assert!(
-            brief(&t, kind).contains(concat!(
+            brief(&t, kind, "engineer").contains(concat!(
                 "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), ",
                 "not by source path: source files are projections written by Solace.",
             )),
             "{kind}: missing the projection rule"
         );
     }
-    let plan = brief(&t, "investigate");
+    let plan = brief(&t, "investigate", "engineer");
     assert!(
         plan.contains("Report the required behavior, constraints, acceptance criteria and risks")
             && !plan.contains("names every module or symbol it changes"),
@@ -405,41 +418,81 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     );
     // D-119 point 6: check what is already answered before asking.
     for kind in ["work", "investigate"] {
-        assert!(brief(&t, kind).contains("check the Notes so far and Questions below, if any"), "{kind}");
+        assert!(brief(&t, kind, "engineer").contains("check the Notes so far and Questions below, if any"), "{kind}");
         // D-153: each option shows an example of its outcome.
-        assert!(brief(&t, kind).contains("give each option a short example of the outcome the human would see"), "{kind}");
+        assert!(brief(&t, kind, "engineer").contains("give each option a short example of the outcome the human would see"), "{kind}");
     }
-    assert!(brief(&t, "investigate").contains("Investigate this task"));
+    // A scope request names the folder and puts the human's steps in order,
+    // even in Director mode.
+    for kind in ["work", "investigate"] {
+        for involvement in ["engineer", "director"] {
+            let prompt = brief(&t, kind, involvement);
+            assert!(prompt.contains(crate::scope::ASK_FOR_PROJECT), "{kind}/{involvement}: missing the scope rule");
+        }
+    }
+    assert!(
+        brief(&t, "work", "director").contains("project folder names in a scope request are the exception"),
+        "director mode must allow a project folder in a scope request"
+    );
+    for kind in ["review", "discuss"] {
+        assert!(!brief(&t, kind, "engineer").contains(crate::scope::ASK_FOR_PROJECT), "{kind}: unexpected scope rule");
+    }
+    assert!(brief(&t, "investigate", "engineer").contains("Investigate this task"));
     // D-147: a report never hands a file change to the human.
     assert!(
-        brief(&t, "investigate")
+        brief(&t, "investigate", "engineer")
             .contains("The human never edits files or runs commands; any needed change, a settings change included, is the worker's")
     );
     // D-156/D-186: an investigation reports requirements, not a plan for edits.
     assert!(
-        brief(&t, "investigate").contains("anything you didn't check")
-            && !brief(&t, "investigate").contains("A plan is the smallest complete change")
+        brief(&t, "investigate", "engineer").contains("anything you didn't check")
+            && !brief(&t, "investigate", "engineer").contains("A plan is the smallest complete change")
     );
-    assert!(brief(&t, "work").contains("what you skipped and risks the human must know"));
-    assert!(brief(&t, "review").contains("Flag code the task didn't need, places it missed"));
+    assert!(brief(&t, "work", "engineer").contains("what you skipped and risks the human must know"));
+    assert!(brief(&t, "review", "engineer").contains("Flag code the task didn't need, places it missed"));
     for kind in ["work", "investigate", "discuss"] {
-        assert!(!brief(&t, kind).contains("smallest complete change"), "{kind}");
+        assert!(!brief(&t, kind, "engineer").contains("smallest complete change"), "{kind}");
     }
     for kind in ["work", "discuss"] {
-        assert!(!brief(&t, kind).contains("Flag code the task didn't need"), "{kind}");
+        assert!(!brief(&t, kind, "engineer").contains("Flag code the task didn't need"), "{kind}");
     }
     // Maintainability: each role gets the direction it acts on, and both share
     // the comment and UI rules.
-    let work = brief(&t, "work");
-    let review = brief(&t, "review");
+    let work = brief(&t, "work", "engineer");
+    let review = brief(&t, "review", "engineer");
+    assert!(
+        work.contains(concat!(
+            "Prove each acceptance criterion through the entry point - for example: a request through the ",
+            "server's routing, not the function behind it; a save confirmed by a fresh read."
+        )),
+        "work: missing the proof rule"
+    );
+    assert!(
+        review.contains(concat!(
+            "Red-team the changes: assume they don't work until you prove they fully meet the need and ",
+            "break nothing they reach."
+        )),
+        "review: missing the proof rule"
+    );
+    assert!(
+        !work.contains("Red-team the changes") && !review.contains("Prove each acceptance criterion"),
+        "proof rules must stay with their roles"
+    );
     for kind in ["work", "review"] {
         assert!(
-            brief(&t, kind).contains(
+            brief(&t, kind, "engineer").contains(
                 "Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI."
             ),
             "{kind}: missing the comment and UI rules"
         );
     }
+    assert!(
+        review.contains(
+            "Flag user-interface details the task didn't ask for, including labels, wording, indicators, colors, new buttons or screens, and layout."
+        ),
+        "review: missing the unasked UI flag"
+    );
+    assert!(!work.contains("Flag user-interface details"), "work: unexpected reviewer UI flag");
     for rule in [
         "Reuse existing code before adding new code, extracting common patterns",
         "small, stateless, self-documenting functions",
@@ -462,7 +515,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     }
     // D-182: only a work run is told to run every test, once, after its last change.
     for kind in ["work", "investigate", "review", "discuss"] {
-        let prompt = brief(&t, kind);
+        let prompt = brief(&t, kind, "engineer");
         assert_eq!(
             prompt.contains("Before `task done`, after your last change, run `test --all` in each project with symbol-held source"),
             kind == "work",
@@ -478,9 +531,9 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         {"author":"human","text":"### Mine\n\nKeep.\n\n### All\n\nOf it.","run":null},
         {"author":"agent","text":"### Summary\n\nPlan B.\n\n### Details\n\nLong B.","run":null}
     ]);
-    let d = brief(&talk, "discuss");
+    let d = brief(&talk, "discuss", "engineer");
     assert!(d.contains("Long A.") && d.contains("Keep.\n\n### All\n\nOf it.") && d.contains("Long B."), "{d}");
-    let r = brief(&t, "review");
+    let r = brief(&t, "review", "engineer");
     assert!(
         r.contains(
             "For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed"
@@ -495,7 +548,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         "{r}"
     );
     for kind in ["work", "investigate", "discuss"] {
-        assert!(!brief(&t, kind).contains("Only a `task note` call records the feedback"), "{kind}");
+        assert!(!brief(&t, kind, "engineer").contains("Only a `task note` call records the feedback"), "{kind}");
     }
     assert!(
         r.contains("Task changes:\n- calc.add")
@@ -525,14 +578,14 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         "a work run is told what is not tech debt"
     );
     for kind in ["work", "investigate", "discuss"] {
-        let prompt = brief(&t, kind);
+        let prompt = brief(&t, kind, "engineer");
         assert!(!prompt.contains(FINDINGS_ASK), "{kind}: unexpected findings detail");
         assert!(!prompt.contains(TECH_DEBT_ASK), "{kind}: unexpected tech debt ask");
     }
     // D-198: a review of a task with a feature is asked the same.
     let mut featured = t.clone();
     featured["feature"] = json!("f1");
-    assert!(brief(&featured, "review").contains(TECH_DEBT_ASK), "a featured review is asked for tech debt");
+    assert!(brief(&featured, "review", "engineer").contains(TECH_DEBT_ASK), "a featured review is asked for tech debt");
     // A task across projects (D-61) says where the agent works and how it reaches the rest.
     let mut wide = t.clone();
     wide["scope"] = json!(["a", "web"]);
@@ -542,10 +595,20 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         {"project":"a","commands":["rust-acceptance"]},
         {"project":"web","commands":["spacing_parity"]}
     ]);
-    let w = brief(&wide, "work");
+    let w = brief(&wide, "work", "engineer");
     assert!(w.contains("covers the projects a, web. You work in a; for another of them, add `--project <folder>`"), "{w}");
     assert!(w.contains("Task changes:\n- web: calc.add"), "{w}");
     assert!(w.contains("and `run <name>` for: a: rust-acceptance; web: spacing_parity."), "{w}");
+    for kind in ["work", "investigate"] {
+        assert_eq!(
+            brief(&wide, kind, "engineer").matches(crate::scope::ASK_FOR_PROJECT).count(),
+            1,
+            "{kind}: the scope rule should appear exactly once"
+        );
+    }
+    for kind in ["review", "discuss"] {
+        assert_eq!(brief(&wide, kind, "engineer").matches(crate::scope::ASK_FOR_PROJECT).count(), 0, "{kind}: unexpected scope rule");
+    }
 }
 
 /// D-182: a work brief names the commands each project marks `test = true`,
@@ -567,14 +630,14 @@ fn briefs_name_the_test_commands_each_project_marks() {
     let s = open(&p.root).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
     let run = json!({"id":"r1","kind":"work"});
-    let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false).0;
+    let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false, "engineer").0;
     assert!(brief.contains("and `run <name>` for: rust-acceptance, spacing_parity."), "{brief}");
     assert!(!brief.contains("for: unit") && !brief.contains("for: rust-acceptance, spacing_parity, review"), "{brief}");
     // A project with no marked command gets only `test --all`.
     let q = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let u = open(&q.root).unwrap();
     let t = api(&u.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
-    let brief = continuation_brief(&t, &run, false, &q.root, &q.root, false).0;
+    let brief = continuation_brief(&t, &run, false, &q.root, &q.root, false, "engineer").0;
     assert!(brief.contains("run `test --all` in each project with symbol-held source."), "{brief}");
     assert!(!brief.contains("`run <name>` for:"), "{brief}");
     // Two projects in scope, one marked: name the project so `run` lands there.
@@ -589,14 +652,14 @@ fn briefs_name_the_test_commands_each_project_marks() {
     let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
     t["scope"] = json!([".", "web"]);
     t["home"] = json!(".");
-    let brief = continuation_brief(&t, &run, false, &w.root, &w.root, false).0;
+    let brief = continuation_brief(&t, &run, false, &w.root, &w.root, false, "engineer").0;
     assert!(brief.contains("and `run <name>` for: web: spacing_parity."), "{brief}");
     // A malformed settings file is surfaced, not treated as no marked commands.
     let bad = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let s = open(&bad.root).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
     fs::write(bad.root.join("solace.toml"), "[commands]\nspacing_parity = { run = [\"true\"], test = \"yes\" }\n").unwrap();
-    let brief = continuation_brief(&t, &run, false, &bad.root, &bad.root, false).0;
+    let brief = continuation_brief(&t, &run, false, &bad.root, &bad.root, false, "engineer").0;
     assert!(brief.contains("the marked test commands could not be read: project .: E6020"), "{brief}");
     // A bad project is named without hiding another project's marks in either order.
     let mixed = testing::project(&[
@@ -611,7 +674,7 @@ fn briefs_name_the_test_commands_each_project_marks() {
     t["home"] = json!(".");
     for scope in [json!([".", "web"]), json!(["web", "."])] {
         t["scope"] = scope;
-        let brief = continuation_brief(&t, &run, false, &mixed.root, &mixed.root, false).0;
+        let brief = continuation_brief(&t, &run, false, &mixed.root, &mixed.root, false, "engineer").0;
         assert!(brief.contains("and `run <name>` for: .: rust-acceptance;"), "{brief}");
         assert!(brief.contains("the marked test commands could not be read for: project web: E6020"), "{brief}");
     }
@@ -637,7 +700,7 @@ fn briefs_name_tasks_that_need_it() {
     assert!(needed.contains("Needed by:\n") && needed.contains("task:n Task n (Assigned)\n"), "{needed}");
     assert_eq!(needed_by(&top, "other"), String::new());
     let task = |id: &str| all_tasks(&top).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
-    let brief = continuation_brief(&task("t"), &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    let brief = continuation_brief(&task("t"), &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false, "engineer").0;
     assert!(brief.contains(&needed) && brief.contains("task peek <id>"), "{brief}");
     assert!(!brief.contains("`task peek feature` reads the feature"), "{brief}");
 }
@@ -815,5 +878,276 @@ fn remember_carries_the_plan_around_the_task() {
     ] {
         assert!(remembered.contains(part), "{part} missing from:\n{remembered}");
     }
+}
+
+/// Director: plain words, product questions, calls recorded as calls made.
+#[test]
+fn director_briefs_speak_in_plain_words() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    for kind in ["work", "investigate", "review", "discuss"] {
+        let prompt = brief(&t, kind, "director");
+        for rule in [
+            "How to talk to the human (Director)",
+            "Don't use code, symbol names, file paths or error codes",
+            "Ask about what the software should do, never how",
+            "one option is marked as recommended",
+            "`### Calls made` heading",
+            "never goes in `DECISIONS.md`",
+            "`### Summary` heading",
+            "Detail meant for later agents, review findings and `### Tech debt` items may name code, symbols and files",
+        ] {
+            assert!(prompt.contains(rule), "{kind}: missing {rule}\n{prompt}");
+        }
+        if kind == "review" {
+            assert!(prompt.contains("the assessment label is the first line and the `### Summary` heading comes after it"), "{prompt}");
+        }
+        assert!(!prompt.contains("what a command prints"), "{kind}: {prompt}");
+        assert!(!prompt.contains("How to talk to the human (Collaborator)"), "{kind}: {prompt}");
+    }
+}
+
+/// Collaborator: terms explained, trade-offs in a sentence, one recommendation.
+#[test]
+fn collaborator_briefs_explain_terms_and_trade_offs() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    for kind in ["work", "investigate", "review", "discuss"] {
+        let prompt = brief(&t, kind, "collaborator");
+        for rule in [
+            "How to talk to the human (Collaborator)",
+            "explain each technical term the first time it appears",
+            "Summarize each trade-off in one sentence",
+            "one question option as recommended",
+            "`### Summary` heading",
+            "Detail meant for later agents, review findings and `### Tech debt` items may use technical terms",
+        ] {
+            assert!(prompt.contains(rule), "{kind}: missing {rule}\n{prompt}");
+        }
+        if kind == "review" {
+            assert!(prompt.contains("the assessment label is the first line and the `### Summary` heading comes after it"), "{prompt}");
+        }
+        assert!(!prompt.contains("How to talk to the human (Director)"), "{kind}: {prompt}");
+    }
+}
+
+fn brief(t: &Value, kind: &str, involvement: &str) -> String {
+    super::brief(t, kind, involvement, "standard", "balanced")
+}
+
+fn continuation_brief(
+    t: &Value,
+    run: &Value,
+    resumed: bool,
+    root: &std::path::Path,
+    here: &std::path::Path,
+    custom: bool,
+    involvement: &str,
+) -> (String, Vec<std::path::PathBuf>) {
+    super::continuation_brief(t, run, resumed, root, here, custom, involvement, "standard", "balanced")
+}
+
+/// Detail changes how much a note says; asking changes when the agent asks.
+#[test]
+fn detail_and_asking_briefs_follow_their_settings() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    let concise = super::brief(&t, "work", "engineer", "concise", "balanced");
+    assert!(concise.contains("How much to write (Concise)"), "{concise}");
+    assert!(concise.contains("few lines") && concise.contains("outcome first"), "{concise}");
+    assert!(!concise.contains("How much to write (Thorough)"), "{concise}");
+    let standard = super::brief(&t, "work", "engineer", "standard", "balanced");
+    assert!(!standard.contains("How much to write"), "{standard}");
+    let thorough = super::brief(&t, "work", "engineer", "thorough", "balanced");
+    assert!(thorough.contains("How much to write (Thorough)"), "{thorough}");
+    assert!(thorough.contains("alternatives considered") && thorough.contains("how the result was checked"), "{thorough}");
+    let often = super::brief(&t, "work", "engineer", "standard", "often");
+    assert!(often.contains("When to ask (Often)"), "{often}");
+    assert!(often.contains("more than one reasonable reading"), "{often}");
+    let balanced = super::brief(&t, "work", "engineer", "standard", "balanced");
+    assert!(balanced.contains("When to ask (Balanced)"), "{balanced}");
+    assert!(balanced.contains("redoing work") && balanced.contains("what the human sees"), "{balanced}");
+    let rarely = super::brief(&t, "work", "engineer", "standard", "rarely");
+    assert!(rarely.contains("When to ask (Rarely)"), "{rarely}");
+    assert!(
+        rarely.contains("`### Calls made` heading") && rarely.contains("can't be undone") && rarely.contains("contradict the task"),
+        "{rarely}"
+    );
+    for prompt in [&often, &balanced, &rarely] {
+        assert!(prompt.contains("conflicts with a decision or the vision"), "{prompt}");
+    }
+    for kind in ["work", "investigate", "review", "discuss"] {
+        assert!(super::brief(&t, kind, "engineer", "concise", "rarely").contains("How much to write (Concise)"), "{kind}");
+        assert!(super::brief(&t, kind, "engineer", "thorough", "often").contains("When to ask (Often)"), "{kind}");
+    }
+}
+
+/// Director + Rarely records a call made once, not in both sections.
+#[test]
+fn director_rarely_records_calls_made_once() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    let prompt = super::brief(&t, "work", "director", "standard", "rarely");
+    assert_eq!(prompt.matches("### Calls made").count(), 1, "{prompt}");
+    assert!(!prompt.contains(".."), "{prompt}");
+    assert!(prompt.contains("When to ask (Rarely)"), "{prompt}");
+}
+
+/// Engineer + Rarely records a call made with one full stop, not two.
+#[test]
+fn engineer_rarely_brief_has_no_double_full_stop() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    let prompt = super::brief(&t, "work", "engineer", "standard", "rarely");
+    assert!(prompt.contains("### Calls made") && !prompt.contains(".."), "{prompt}");
+}
+
+/// Fresh briefs of different tasks, kinds and projects share the reference start.
+#[test]
+fn fresh_briefs_of_different_projects_share_the_reference_start() {
+    let reference = crate::reference::agent_reference(true);
+    let mut starts = vec![];
+    for (file, title, kind) in [("src/app.gleam", "First task", "work"), ("src/other.gleam", "Second task", "investigate")] {
+        let p = testing::project(&[(file, "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let t = api(&s.root, "POST", "/tasks", json!({"title": title})).unwrap();
+        let b = continuation_brief(&t, &json!({"id":"r1","kind":kind}), false, &p.root, &p.root, false, "engineer").0;
+        assert!(b.starts_with(reference.as_str()), "{kind}: {b}");
+        assert_eq!(b.matches(reference.as_str()).count(), 1, "{kind}: {b}");
+        starts.push(b);
+    }
+    assert_eq!(&starts[0][..reference.len()], &starts[1][..reference.len()]);
+}
+
+/// D-218: investigate, work, discuss and review briefs carry every persona,
+/// with only its non-empty fields; review still leaves the vision out.
+#[test]
+fn a_brief_carries_every_persona_in_creation_order() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"Personas"})).unwrap();
+    let strategy = p.root.join(".solace/strategy");
+    fs::create_dir_all(&strategy).unwrap();
+    fs::write(strategy.join("vision.md"), "For teams.\n").unwrap();
+    let brief = |kind: &str| continuation_brief(&t, &json!({"id":"r1","kind":kind}), true, &p.root, &p.root, false, "engineer").0;
+    assert!(!brief("work").contains("Personas ("), "no personas, no section");
+    fs::write(
+        strategy.join("personas.json"),
+        concat!(
+            r#"{"personas":[{"name":"Ada","objectives":"Ship the calculator.","tools":"","#,
+            r#""concerns":"Wrong totals.","other":"  "},{"name":"Linus","objectives":"One.\nTwo.","#,
+            r#""tools":"","concerns":"","other":""},{"name":"Grace","objectives":"","#,
+            r#""tools":"A debugger.","concerns":"","other":""}],"retired":[]}"#
+        ),
+    )
+    .unwrap();
+    let work = brief("work");
+    let section =
+        concat!("\nPersonas (who the software is for, or who works on it, kept on the Strategy page; ", "let them guide your choices):\n");
+    assert!(work.contains(section), "{work}");
+    assert!(work.contains("Ada\n  Objectives: Ship the calculator.\n  Concerns: Wrong totals.\n"), "{work}");
+    assert!(work.contains("Linus\n  Objectives: One.\n    Two.\n"), "{work}");
+    assert!(work.contains("Grace\n  Tools: A debugger.\n"), "{work}");
+    assert!(!work[work.find("Ada").unwrap()..work.find("Grace").unwrap()].contains("Tools:"), "{work}");
+    assert!(!work[work.find("Grace").unwrap()..].contains("Objectives:"), "{work}");
+    for kind in ["investigate", "discuss", "review"] {
+        assert!(brief(kind).contains(section), "{kind}");
+    }
+    let review = brief("review");
+    assert!(!review.contains("\nVision ("), "{review}");
+    assert!(review.contains(section), "{review}");
+    assert!(work.contains("\nVision ("), "{work}");
+    // A damaged file reads as none rather than failing the brief.
+    fs::write(strategy.join("personas.json"), "{").unwrap();
+    assert!(!brief("work").contains("Personas ("), "{}", brief("work"));
+}
+
+/// D-27: a reviewer brief carries the reviewer's skill whole, leaves a worker
+/// skill out, and still lists an unscoped skill one line.
+#[test]
+fn a_reviewer_brief_holds_its_skill_in_full_and_leaves_out_a_worker_skill() {
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        (
+            "skills/house-review.md",
+            "---\nname: house-review\ndescription: Review UI changes.\nroles: reviewer\n---\nCheck contrast and focus.\n",
+        ),
+        (
+            "skills/commit-style.md",
+            "---\nname: commit-style\ndescription: Write small commits.\nroles: worker\n---\nKeep every commit small.\n",
+        ),
+        ("skills/general.md", "General rules\n"),
+    ]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"Review"})).unwrap();
+    let review = continuation_brief(&t, &json!({"id":"r1","kind":"review"}), false, &p.root, &p.root, false, "engineer").0;
+    assert!(review.contains("### house-review") && review.contains("Check contrast and focus."), "{review}");
+    assert!(!review.contains("### commit-style") && !review.contains("Keep every commit small."), "{review}");
+    assert!(review.contains("- general: General rules (`read skills/general.md`)"), "{review}");
+    let work = continuation_brief(&t, &json!({"id":"r2","kind":"work"}), false, &p.root, &p.root, false, "engineer").0;
+    assert!(work.contains("### commit-style") && work.contains("Keep every commit small."), "{work}");
+    assert!(!work.contains("### house-review") && !work.contains("Check contrast and focus."), "{work}");
+    assert!(work.contains("- general: General rules"), "{work}");
+}
+
+/// D-27: a run in a nested project carries the workspace's role skills whole,
+/// but not its unscoped skills, whose paths point outside the run's project.
+#[test]
+fn a_nested_project_run_gets_workspace_role_skills_only() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"app\", \"lib\"]\n"),
+        ("app/gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n"),
+        ("app/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("lib/gleam.toml", "name = \"lib\"\nversion = \"1.0.0\"\n"),
+        ("lib/src/lib.gleam", "pub fn main() { 1 }\n"),
+        (
+            "skills/house-review.md",
+            "---\nname: house-review\ndescription: Review UI changes.\nroles: reviewer\n---\nCheck contrast and focus.\n",
+        ),
+        ("skills/general.md", "General rules\n"),
+    ]);
+    let t = json!({
+        "id": "t1", "title": "Review", "body": "A change.", "stamps": {},
+        "links": [], "notes": [], "questions": [], "runs": [], "changes": [],
+    });
+    let here = root.0.join("lib");
+    let (brief, _) = continuation_brief(&t, &json!({"id":"r1","kind":"review"}), false, &root, &here, false, "engineer");
+    assert!(brief.contains("### house-review") && brief.contains("Check contrast and focus."), "{brief}");
+    assert!(!brief.contains("- general:") && !brief.contains("General rules"), "{brief}");
 }
 

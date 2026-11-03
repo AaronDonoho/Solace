@@ -258,3 +258,15 @@ pub fn reason(id: &str) -> Result<Option<String>, Failure> {
 pub fn enabled(id: &str) -> Result<bool, Failure> {
     language_enabled(id)
 }
+
+/// The path a tool name resolves to on `PATH`; a test can put fixed folders in
+/// its place (`language::paths`). `Store::tool` uses it, falling back to the
+/// bare name when it finds nothing.
+pub(crate) fn tool_path(program: &str) -> Option<std::path::PathBuf> {
+    paths::search_path(program)
+}
+
+#[cfg(test)]
+pub(crate) fn with_tool_path<T>(dirs: &[std::path::PathBuf], f: impl FnOnce() -> T) -> T {
+    paths::with_path(dirs, f)
+}

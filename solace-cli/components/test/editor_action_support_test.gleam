@@ -23,6 +23,7 @@ pub fn rendered(actions: List(solace_task.EditorAction(Nil))) -> String {
     task: "t1",
     base: "/p/a",
     label: "Description",
+    placeholder: "",
     text: "",
     on_input: fn(_) { Nil },
     on_format: fn(_, _) { Nil },

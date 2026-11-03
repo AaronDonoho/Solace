@@ -69,6 +69,10 @@ mcp = subprocess.Popen([config['command'], *config['args']], env=mcp_env,
 draft = ''
 for i, step in enumerate(steps):
     step = {k: v.replace('{draft}', draft) if isinstance(v, str) else v for k, v in step.items()}
+    if 'notice' in step:
+        # A transient notice: Codex logs reconnects and warnings as errors, then keeps going.
+        print(json.dumps({'type':'error', 'message':step['notice']}), flush=True)
+        continue
     if 'exit' in step:
         if 'error' in step:
             print(json.dumps({'type':'error', 'message':step['error']}), flush=True)
@@ -76,7 +80,10 @@ for i, step in enumerate(steps):
         mcp.wait(timeout=3)
         sys.exit(step['exit'])
     if 'say' in step:
-        print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text':step['say']}}), flush=True)
+        if claude:
+            print(json.dumps({'type':'assistant', 'message':{'content':[{'type':'text', 'text':step['say']}]}}), flush=True)
+        else:
+            print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text':step['say']}}), flush=True)
         continue
     if 'sleep' in step:
         time.sleep(step['sleep'])

@@ -370,6 +370,18 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
             return Err(invalid("event has no target"));
         }
     }
+    let actions = w["actions"].clone();
+    // The role each action's run step gives its model pick.
+    let roles: serde_json::Map<String, Value> = actions
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter_map(|(name, action)| {
+            let role = run_role(action);
+            (!role.is_empty()).then(|| (name.clone(), json!(role)))
+        })
+        .collect();
+    w["roles"] = Value::Object(roles);
     for c in w["columns"].as_array_mut().unwrap() {
         if c.get("label").is_none() {
             c["label"] = c["id"].clone();
@@ -380,6 +392,8 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         if c.get("final").is_none() {
             c["final"] = json!(false);
         }
+        let role = main_action(c["id"].as_str().unwrap_or("")).and_then(|name| actions.get(name)).map(run_role).unwrap_or("");
+        c["role"] = json!(role);
     }
     Ok(w)
 }
@@ -1389,26 +1403,20 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
             let rid = rid.unwrap_or("");
             let i = run_at(t, rid)?;
             let kind = t["runs"][i]["kind"].as_str().unwrap_or("").to_string();
+            let command = m["command"].as_str().unwrap_or("");
+            // A review's feedback finishes its run, even when it arrives after the
+            // run ended; every other note for an ended run is only kept.
+            if kind == "review" && command == "note" {
+                return crate::board::reviews::record_note(t, rid, text, m["changed_during_review"] == true);
+            }
             note(t, "agent", Some(rid), text);
-            // The run ended (stopped, cancelled, restarted) before this arrived: the
+            // The run ended (stopped, canceled, replaced) before this arrived: the
             // note is kept, but it must not wake the run or move the task.
             if t["runs"][i]["state"] == "ended" {
                 return Ok(());
             }
-            match m["command"].as_str().unwrap_or("") {
+            match command {
                 "note" if kind == "discuss" => t["runs"][i]["state"] = json!("waiting"),
-                "note" if kind == "review" => {
-                    if m["changed_during_review"] == true {
-                        note(
-                            t,
-                            "solace",
-                            Some(rid),
-                            "Project or instructions changed during review. This feedback applies to the review-start checkpoint, not a verified finish-time state; recheck affected changes.",
-                        );
-                    }
-                    end_run(&mut t["runs"][i], "reviewed");
-                    t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
-                }
                 "note" => {}
                 "done" => {
                     if kind == "investigate" {
@@ -1492,6 +1500,11 @@ pub(crate) fn recover_project(root: &Path, announce: bool) -> Result<(), Failure
         if active(&t) {
             let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
             end_runs(&mut t, "server restarted");
+            for r in t["runs"].as_array_mut().unwrap() {
+                if r["outcome"] == "server restarted" {
+                    r["failed"] = json!(true);
+                }
+            }
             if work {
                 hold(&mut t, "the Solace server restarted while an agent was working");
                 on_event(&w, &mut t, "failed")?;
@@ -1502,4 +1515,19 @@ pub(crate) fn recover_project(root: &Path, announce: bool) -> Result<(), Failure
         }
     }
     Ok(())
+}
+
+/// The action whose agent role gives a column's model pick its default.
+fn main_action(column: &str) -> Option<&'static str> {
+    match column {
+        "planning" => Some("investigate"),
+        "assigned" => Some("reassign"),
+        "needs_review" => Some("review"),
+        _ => None,
+    }
+}
+
+/// The role an action's run step belongs to, "" for no run.
+fn run_role(a: &Value) -> &'static str {
+    a["run"].as_str().and_then(crate::board::roles::for_run).map_or("", |role| role.id)
 }
