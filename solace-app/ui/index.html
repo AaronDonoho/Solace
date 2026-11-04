@@ -11,18 +11,27 @@
   li button { width: 100%; text-align: left; margin: .2rem 0; }
   #error { color: #b91c1c; white-space: pre-wrap; }
   fieldset { border: none; padding: 0; margin: 1rem 0; }
+  #terminal { margin-left: .5rem; }
 </style>
 </head>
 <body>
-<h1>Open a Solace project</h1>
-<button id="pick">Choose folder…</button>
-<fieldset>
-  <legend>Open in</legend>
-  <label><input type="radio" name="mode" value="app"> App window</label>
-  <label><input type="radio" name="mode" value="browser"> Browser</label>
-</fieldset>
-<h2>Recent</h2>
-<ul id="recent"></ul>
+<section id="setup" hidden>
+  <h1>Setting up Solace</h1>
+  <p id="setup-text"></p>
+  <button id="setup-action" hidden></button>
+</section>
+<section id="start" hidden>
+  <h1>Open a Solace project</h1>
+  <button id="pick">Choose folder…</button>
+  <button id="terminal" hidden>Open Solace terminal</button>
+  <fieldset>
+    <legend>Open in</legend>
+    <label><input type="radio" name="mode" value="app"> App window</label>
+    <label><input type="radio" name="mode" value="browser"> Browser</label>
+  </fieldset>
+  <h2>Recent</h2>
+  <ul id="recent"></ul>
+</section>
 <p id="error"></p>
 <script>
   const { invoke } = window.__TAURI__.core;
@@ -51,11 +60,66 @@
       error.textContent = String(e);
     }
   }
+  const startInfo = invoke('start_info');
   document.getElementById('pick').onclick = async () => {
-    const dir = await open({ directory: true });
+    const info = await startInfo;
+    const dir = await open({ directory: true, defaultPath: info.windows ? info.projects : undefined });
     if (dir) go(dir);
   };
+  document.getElementById('terminal').onclick = async () => {
+    try {
+      await invoke('open_terminal');
+    } catch (e) {
+      document.getElementById('error').textContent = String(e);
+    }
+  };
+  // First-launch setup on Windows; every other system is ready at once.
+  function showSetup(text, label, action) {
+    document.getElementById('setup').hidden = false;
+    document.getElementById('start').hidden = true;
+    document.getElementById('setup-text').textContent = text;
+    const button = document.getElementById('setup-action');
+    button.hidden = !label;
+    button.textContent = label || '';
+    button.onclick = action || null;
+  }
+  async function step(work, working, retryLabel) {
+    showSetup(working);
+    try {
+      document.getElementById('error').textContent = '';
+      await work();
+      return true;
+    } catch (e) {
+      document.getElementById('error').textContent = String(e);
+      showSetup('That didn’t work.', retryLabel, prepare);
+      return false;
+    }
+  }
+  async function prepare() {
+    showSetup('Checking your computer…');
+    const state = await invoke('setup_state');
+    if (state === 'needs-wsl') {
+      showSetup(
+        'Solace runs inside Windows Subsystem for Linux, which isn’t turned on yet. Windows will ask for administrator permission, and may ask you to restart.',
+        'Turn on WSL',
+        async () => {
+          if (await step(() => invoke('install_wsl'), 'Turning on WSL…', 'Try again')) {
+            showSetup('WSL is on. If Windows asked you to restart, restart now and open Solace again.', 'Continue', prepare);
+          }
+        },
+      );
+    } else if (state === 'needs-distro') {
+      if (await step(() => invoke('import_distro'), 'Setting up Solace’s Linux environment…', 'Try again')) {
+        prepare();
+      }
+    } else {
+      document.getElementById('setup').hidden = true;
+      document.getElementById('start').hidden = false;
+      document.getElementById('terminal').hidden = !(await startInfo).windows;
+    }
+  }
   list();
+  prepare();
 </script>
 </body>
 </html>

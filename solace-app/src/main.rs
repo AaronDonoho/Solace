@@ -5,13 +5,14 @@
 
 mod workspaces;
 mod supervisor;
+mod wsl;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -38,16 +39,14 @@ fn login_path() -> Option<String> {
     (out.status.success() && !path.is_empty()).then_some(path)
 }
 
-/// The port of a server already holding `root`'s serve lock. The port in the
-/// file is trusted only while its lock is held (D-80).
+/// The port of a server already holding `root`, when it answers. On Windows
+/// the project is in the distro, out of the app's reach.
 fn running_port(root: &Path) -> Option<u16> {
-    let path = root.join(".solace/serve.lock");
-    let f = fs::OpenOptions::new().write(true).open(&path).ok()?;
-    if f.try_lock().is_ok() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
-    let port = v["port"].as_u64()? as u16;
+    let port = if cfg!(windows) {
+        wsl::running_port(root)?
+    } else {
+        locked_port(root)?
+    };
     answers(port).then_some(port)
 }
 
@@ -92,81 +91,83 @@ fn without_appimage(cmd: &mut Command) {
 /// Starts `solace serve --port <port>` in `root`; its port, or what it said
 /// when it stopped.
 fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
-    let bin = solace_bin();
-    let mut cmd = Command::new(&bin);
-    cmd.args(["serve", "--port", &port.to_string()])
-        .current_dir(root)
-        .env("SOLACE_BIN", &bin)
-        .stdin(Stdio::null())
+    let mut cmd = if cfg!(windows) {
+        wsl::serve(root, port)
+    } else {
+        local_serve(root, port)
+    };
+    // On Windows the server's life is tied to this input staying open (`stop`).
+    let input = if cfg!(windows) {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    cmd.stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    without_appimage(&mut cmd);
-    if let Some(path) = login_path() {
-        cmd.env("PATH", path);
-    }
-    // The server ends with the app, even when the app is killed or crashes.
-    // The signal follows the thread that spawns it, and survives the server's
-    // `exec` restart, so it must be spawned from a thread that lives as long
-    // as the app (`open_project`'s command thread or `supervisor`'s own).
-    #[cfg(target_os = "linux")]
-    // SAFETY: `pre_exec` runs in the forked child; the calls below are
-    // async-signal-safe and only set the parent-death signal.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        let parent = libc::getpid();
-        cmd.pre_exec(move || {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            if libc::getppid() != parent {
-                libc::_exit(1);
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("couldn't start {}: {e}", bin.display()))?;
+    let started = cmd.spawn();
+    let mut child = started.map_err(|e| {
+        format!(
+            "couldn't start {}: {e}",
+            cmd.get_program().to_string_lossy()
+        )
+    })?;
     let mut out = BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    let _ = out.read_line(&mut line);
-    if let Some(addr) = line.trim().strip_prefix("Solace listening on http://") {
-        // Keep draining stdout so the server never blocks on a full pipe.
-        std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
-        // Its stderr too: the server reports there, and a full pipe would
-        // block the thread writing, maybe while it holds a lock. Write
-        // errors (a launcher may close the app's stderr) don't stop the reading.
-        let mut err = child.stderr.take().unwrap();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            while let Ok(n) = err.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                let _ = std::io::stderr().write_all(&buf[..n]);
+    let addr = match read_banner(&mut out) {
+        Ok(addr) => addr,
+        Err(said) => {
+            let _ = child.wait();
+            let mut err = String::new();
+            let _ = child.stderr.take().unwrap().read_to_string(&mut err);
+            return Err(format!("{said}{err}").trim().to_string());
+        }
+    };
+    // Keep draining stdout so the server never blocks on a full pipe.
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    // Its stderr too: the server reports there, and a full pipe would
+    // block the thread writing, maybe while it holds a lock. Write
+    // errors (a launcher may close the app's stderr) don't stop the reading.
+    let mut err = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = err.read(&mut buf) {
+            if n == 0 {
+                break;
             }
-        });
-        let port = addr
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(port);
-        return Ok((child, port));
+            let _ = std::io::stderr().write_all(&buf[..n]);
+        }
+    });
+    let port = addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(port);
+    if cfg!(windows) && !answers_from_windows(port) {
+        stop(Some(child));
+        return Err(format!(
+            "Solace started, but Windows can't reach it on port {port}. \
+             Try running `wsl --shutdown` in a terminal, then open Solace again."
+        ));
     }
-    let _ = child.wait();
-    let mut err = String::new();
-    let _ = child.stderr.take().unwrap().read_to_string(&mut err);
-    Err(format!("{line}{err}").trim().to_string())
+    Ok((child, port))
 }
 
 /// Ends the sidecar: SIGTERM, a moment to finish, then SIGKILL. Running
-/// agents are in their own groups; the next `serve` recovers them.
+/// agents are in their own groups; the next `serve` recovers them. On Windows
+/// the server is in the distro, so closing its input asks `solace-desktop` to
+/// do the same there, and the last step only ends `wsl.exe`.
 fn stop(child: Option<Child>) {
     if let Some(mut child) = child {
         if matches!(child.try_wait(), Ok(Some(_))) {
             return;
         }
+        drop(child.stdin.take());
+        #[cfg(unix)]
         // SAFETY: `child` is a process this app spawned and has not reaped,
         // so its id is live and SIGTERM is valid for it.
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM)
+        };
         for _ in 0..20 {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 break;
@@ -206,10 +207,18 @@ fn show(
 }
 
 /// Opens `root`: attaches to a server already holding it, else starts one.
-/// Errors go back to the start screen as text, never a crash.
-#[tauri::command]
+/// Errors go back to the start screen as text, never a crash. On Windows this
+/// can't run on the main thread: creating a window there deadlocks in WebView2.
+/// Elsewhere it stays there, because the server's parent-death signal follows
+/// the thread that spawns it (`local_serve`).
+#[cfg_attr(windows, tauri::command(async))]
+#[cfg_attr(not(windows), tauri::command)]
 fn open_project(app: AppHandle, root: String, mode: String) -> Result<u16, String> {
-    let root = normalize_root(PathBuf::from(root));
+    let root = if cfg!(windows) {
+        PathBuf::from(wsl::linux_path(&root)?)
+    } else {
+        normalize_root(PathBuf::from(root))
+    };
     let server = app.state::<workspaces::Server>();
     open(
         &server,
@@ -237,7 +246,14 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(workspaces::Server::default())
-        .invoke_handler(tauri::generate_handler![open_project])
+        .invoke_handler(tauri::generate_handler![
+            open_project,
+            start_info,
+            setup_state,
+            install_wsl,
+            import_distro,
+            open_terminal
+        ])
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "Open board", true, None::<&str>)?;
             let workspace =
@@ -495,8 +511,15 @@ fn http_ok(port: u16, path: &str) -> bool {
 
 /// Starts a server on `port`, falling back to any free port when it is taken.
 fn start_server(root: &Path, port: u16) -> Result<(Child, u16), String> {
-    match spawn(root, port) {
-        Err(e) if e.contains("in use") || e.contains("Address") => spawn(root, 0),
+    let usable = |port| {
+        if cfg!(windows) {
+            wsl::free_port(port)
+        } else {
+            port
+        }
+    };
+    match spawn(root, usable(port)) {
+        Err(e) if e.contains("in use") || e.contains("Address") => spawn(root, usable(0)),
         other => other,
     }
 }
@@ -877,4 +900,141 @@ fn open_steps<'a>(
         show: Box::new(show),
         hide: Box::new(hide),
     }
+}
+
+/// The port in `root`'s serve lock. The port in the file is trusted only
+/// while its lock is held (D-80).
+fn locked_port(root: &Path) -> Option<u16> {
+    let path = root.join(".solace/serve.lock");
+    let f = fs::OpenOptions::new().write(true).open(&path).ok()?;
+    if f.try_lock().is_ok() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+    Some(v["port"].as_u64()? as u16)
+}
+
+/// Whether a server just started in the distro answers from Windows. WSL
+/// carries a new port across a moment after the server says it's listening.
+fn answers_from_windows(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if answers(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// `solace serve --port <port>` run directly, in `root`.
+fn local_serve(root: &Path, port: u16) -> Command {
+    let bin = solace_bin();
+    let mut cmd = Command::new(&bin);
+    cmd.args(["serve", "--port", &port.to_string()])
+        .current_dir(root)
+        .env("SOLACE_BIN", &bin);
+    without_appimage(&mut cmd);
+    if let Some(path) = login_path() {
+        cmd.env("PATH", path);
+    }
+    // The server ends with the app, even when the app is killed or crashes.
+    // The signal follows the thread that spawns it, and survives the server's
+    // `exec` restart, so it must be spawned from a thread that lives as long
+    // as the app (`open_project`'s command thread or `supervisor`'s own).
+    #[cfg(target_os = "linux")]
+    // SAFETY: `pre_exec` runs in the forked child; the calls below are
+    // async-signal-safe and only set the parent-death signal.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        let parent = libc::getpid();
+        cmd.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+    cmd
+}
+
+/// What the start screen needs to know about this system.
+#[tauri::command]
+fn start_info() -> serde_json::Value {
+    serde_json::json!({ "windows": cfg!(windows), "projects": wsl::PROJECTS })
+}
+
+/// How far first-launch setup has come; always done off Windows.
+#[tauri::command(async)]
+fn setup_state() -> String {
+    let setup = if cfg!(windows) {
+        wsl::setup()
+    } else {
+        wsl::Setup::Ready
+    };
+    setup.name().to_string()
+}
+
+/// Turns WSL on.
+#[tauri::command(async)]
+fn install_wsl() -> Result<(), String> {
+    wsl::install()
+}
+
+/// Sets up the distro from the copy the installer brought.
+#[tauri::command(async)]
+fn import_distro(app: AppHandle) -> Result<(), String> {
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA isn't set")?;
+    wsl::import(
+        &resources.join("solace-distro.tar"),
+        Path::new(&local_app_data),
+    )
+}
+
+/// Opens a terminal in the distro.
+#[tauri::command]
+fn open_terminal() -> Result<(), String> {
+    wsl::open_terminal()
+}
+
+/// Reads the server's output up to its "Solace listening on http://" line and
+/// returns the address after it. Anything `wsl.exe` or the launcher prints
+/// first is skipped. When the output ends without the line, everything read
+/// comes back as the error.
+fn read_banner(out: &mut impl BufRead) -> Result<String, String> {
+    let mut seen = String::new();
+    loop {
+        let mut line = String::new();
+        if !matches!(out.read_line(&mut line), Ok(n) if n > 0) {
+            return Err(seen);
+        }
+        if let Some(addr) = line.trim().strip_prefix("Solace listening on http://") {
+            return Ok(addr.to_string());
+        }
+        seen.push_str(&line);
+    }
+}
+
+#[test]
+fn the_banner_is_found_on_the_first_line() {
+    let mut out = std::io::Cursor::new("Solace listening on http://127.0.0.1:4321\nmore\n");
+    assert_eq!(read_banner(&mut out).unwrap(), "127.0.0.1:4321");
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "more\n");
+}
+
+#[test]
+fn the_banner_is_found_after_other_lines() {
+    let mut out = std::io::Cursor::new("welcome\r\n\nSolace listening on http://[::1]:99\r\n");
+    assert_eq!(read_banner(&mut out).unwrap(), "[::1]:99");
+}
+
+#[test]
+fn a_missing_banner_returns_what_was_printed() {
+    let mut out = std::io::Cursor::new("one\ntwo no newline");
+    assert_eq!(read_banner(&mut out).unwrap_err(), "one\ntwo no newline");
+    assert_eq!(read_banner(&mut std::io::Cursor::new("")).unwrap_err(), "");
 }

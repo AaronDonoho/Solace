@@ -1,0 +1,18 @@
+{
+  "build": {
+    "beforeBuildCommand": null
+  },
+  "bundle": {
+    "targets": ["nsis"],
+    "externalBin": [],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "resources": {
+      "distro/solace-distro.tar": "solace-distro.tar"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

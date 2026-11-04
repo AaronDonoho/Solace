@@ -1390,3 +1390,11 @@ Amends D-183 point 1 and D-222 point 1, and Spec 15 §6 (Aaron, board task "Inve
 2. A Codex `turn.failed`, a Claude `result` with `is_error`, and a nonzero exit always block recovery. Server-end lines are not the agent's error and are already ignored.
 3. Timeout, kill, quota, and a missing or unreadable log still fail, as D-183 and D-219 say.
 Why: Codex logs retrying stream drops ("Reconnecting... n/5") and warnings as `error` entries and continues, so a clean review with a valid assessment was failing for them.
+
+## D-224 Windows runs Solace through a bundled WSL distro
+(Aaron, 2026-11-03). Part of the Windows Delivery feature.
+1. Windows is supported through WSL2. The CLI stays a Linux program and isn't ported.
+2. The Windows installer delivers a Windows build of the desktop app and a Solace distro: Debian 13 slim (glibc) with `solace`, Git, bubblewrap, curl and CA certificates. The app imports the distro on first launch and starts the server inside it.
+3. No agent and no language toolchain is shipped, so clients aren't tied to one agent. A later feature installs them through Solace.
+4. The first goal is a working `Solace-Setup.exe`. The security and client-readiness work listed in `WINDOWS.md` follows before any client receives it.
+Why: clients get Solace on Windows with little setup, the distro behaves the same on every machine, and the Rust sandbox keeps working because WSL is real Linux.

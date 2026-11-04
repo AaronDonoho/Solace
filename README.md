@@ -143,7 +143,7 @@ The first build takes a minute or two. The binary is self-contained (web clients
 
 ### 6. Build and install the desktop app
 
-Only the Linux packages have been tested; macOS is untested and Windows isn't supported. Run everything from the repository root.
+Only the Linux packages have been tested; macOS is untested. Windows has its own build and isn't ready for clients yet: see `WINDOWS.md`. Run everything from the repository root.
 
 **1. Install Tauri's system libraries** (one line for your system):
 

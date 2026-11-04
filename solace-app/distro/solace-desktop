@@ -1,0 +1,77 @@
+#!/bin/sh
+# What the Windows desktop app runs inside the distro, through wsl.exe (D-224).
+# The app can't see this filesystem, so what the Linux app does directly happens
+# here: finding the login PATH, reading the serve lock, and tying the server's
+# life to the app's.
+#
+#   solace-desktop running <project>      prints the port of the server holding
+#                                         <project>; exits 1 when there is none
+#   solace-desktop serve <project> <port> runs `solace serve` in <project> until
+#                                         this script's input closes, which
+#                                         happens when the app stops or crashes
+
+set -eu
+
+# A GUI launch has no login shell, and agents and tools installed in the home
+# folder need its PATH. The login files aren't ours: they may print, fail, exit
+# or read this script's input. So they run in a shell of their own, with no input
+# and no error output, and only the PATH it ends with comes back. The marker and
+# the newline before it keep the PATH apart from anything those files printed.
+# If the login shell gives no PATH, the inherited one stays.
+login_path=$(bash -lc 'printf "\nSOLACE_LOGIN_PATH=%s\n" "$PATH"' </dev/null 2>/dev/null |
+    sed -n 's/^SOLACE_LOGIN_PATH=//p' | tail -n 1)
+if [ -n "$login_path" ]; then
+    PATH=$login_path
+    export PATH
+fi
+
+usage() {
+    echo "usage: solace-desktop running <project> | solace-desktop serve <project> <port>" >&2
+    exit 2
+}
+
+# The port in the lock file is trusted only while the lock is held (D-80).
+running() {
+    lock=$1/.solace/serve.lock
+    [ -f "$lock" ] || exit 1
+    if flock --nonblock "$lock" true; then
+        exit 1
+    fi
+    port=$(sed -n 's/.*"port"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$lock")
+    [ -n "$port" ] || exit 1
+    echo "$port"
+}
+
+serve() {
+    cd "$1"
+    # A background job's input is /dev/null, so the watcher takes a saved copy.
+    exec 3<&0
+    solace serve --port "$2" </dev/null 3<&- &
+    server=$!
+    (
+        while IFS= read -r _; do :; done
+        kill -TERM "$server" 2>/dev/null || exit 0
+        sleep 2
+        kill -KILL "$server" 2>/dev/null
+    ) <&3 3<&- >/dev/null 2>&1 &
+    watcher=$!
+    exec 3<&-
+    code=0
+    wait "$server" || code=$?
+    kill "$watcher" 2>/dev/null || true
+    exit "$code"
+}
+
+case "${1:-}" in
+    running)
+        [ "$#" -eq 2 ] || usage
+        running "$2"
+        ;;
+    serve)
+        [ "$#" -eq 3 ] || usage
+        serve "$2" "$3"
+        ;;
+    *)
+        usage
+        ;;
+esac
