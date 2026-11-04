@@ -20,6 +20,7 @@
     "active": true,
     "targets": ["deb", "appimage", "dmg", "app"],
     "externalBin": ["binaries/solace"],
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png"],
+    "licenseFile": "../LICENSE.md"
   }
 }

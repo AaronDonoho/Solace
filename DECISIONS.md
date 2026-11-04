@@ -1398,3 +1398,12 @@ Why: Codex logs retrying stream drops ("Reconnecting... n/5") and warnings as `e
 3. No agent and no language toolchain is shipped, so clients aren't tied to one agent. A later feature installs them through Solace.
 4. The first goal is a working `Solace-Setup.exe`. The security and client-readiness work listed in `WINDOWS.md` follows before any client receives it.
 Why: clients get Solace on Windows with little setup, the distro behaves the same on every machine, and the Rust sandbox keeps working because WSL is real Linux.
+
+## D-225 Solace uses the Sustainable Use License
+(Aaron, 2026-11-04).
+1. Solace is under the Sustainable Use License 1.0, the license n8n uses, in `LICENSE.md`. Aaron Donoho is the licensor. It is source-available, so Solace isn't described as open source.
+2. Third-party components keep their own licenses, and programs people build with Solace are theirs and fall outside these terms.
+3. Anyone may use and change Solace for personal, non-commercial or internal business purposes, and share it free of charge for non-commercial purposes. For-profit companies may therefore use it free in-house, including a competitor building its own product; this was accepted over stricter licenses.
+4. A pull request carries the short contributor agreement in `CONTRIBUTING.md`, which lets Aaron license contributions on any terms.
+5. Desktop app bundles carry `LICENSE.md`, and the Windows installer shows it for acceptance.
+Why: this stops others from selling Solace or offering it as a competing service while people can still extend it and suggest changes. Without the contributor agreement, outside code would arrive under the same limits and couldn't go into a paid service.

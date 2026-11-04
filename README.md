@@ -388,3 +388,11 @@ cd bench/visualizer/frontend
 gleam build --target javascript
 bun build build/dev/javascript/bench_visualizer_frontend/bench_visualizer_frontend.mjs --outfile ../priv/app.js --minify-syntax --minify-whitespace --target browser
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to suggest a change and the short agreement that comes with a pull request.
+
+## License
+
+Solace is source-available under the Sustainable Use License, not an open source license. You can use and change it for free for personal use, non-commercial use and your own organization's internal work, and you can share it free of charge for non-commercial purposes. Selling Solace or offering it to others as a service needs permission from Aaron Donoho. Programs you build with Solace are yours. The full terms are in [LICENSE.md](LICENSE.md).

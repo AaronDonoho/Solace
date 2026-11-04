@@ -1,6 +1,6 @@
 # Solace on Windows
 
-How Solace reaches Windows machines with little setup (D-224). Last updated 2026-11-03.
+How Solace reaches Windows machines with little setup (D-224). Last updated 2026-11-04.
 
 **Where things stand:** the first installer is built and works on one Windows 11 x64 laptop. It's for us to try, not for clients. None of this work is committed yet.
 
@@ -70,7 +70,7 @@ Each of these is its own iteration, in rough order.
 
 ### 3. Legal
 
-- [ ] **A license or terms.** The repository has no `LICENSE` file; to be decided later.
+- [x] **A license.** The Sustainable Use License, in [LICENSE.md](LICENSE.md) (D-225). The installer shows it for acceptance. Ask a lawyer to review how it is applied, along with the third-party notices.
 - [ ] **Third-party notices.** The distro redistributes GPL software (Git and much of Debian), which carries source obligations. Get a lawyer's view.
 
 ## Keep in mind
