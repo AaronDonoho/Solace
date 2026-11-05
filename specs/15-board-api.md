@@ -293,7 +293,7 @@ A client shows the copy's full path and "Migration in progress" while `state` is
 
 ### Changes made outside Solace (D-58)
 
-Solace never writes over a Gleam file under `src/` or `test/` that differs from what it last wrote there (`.solace/written`). Such a file was changed outside Solace: at the start of every command, and from the board's poll about once a second, Solace reads it into the store as new revisions (a removed file retires its symbols). It compares sizes and modified times and reads only files whose size or time changed. A file that changes while a command runs is left as it is and read at the next command.
+Solace never writes over a graph source file that differs from what it last wrote there (`.solace/written`): a Gleam project's files under `src/` or `test/`, or a Rust module file the store holds (D-158). Such a file was changed outside Solace: at the start of every command, and from the board's poll about once a second, Solace reads it into the store as new revisions (a removed file retires its symbols). It compares sizes and modified times and reads only files whose size or time changed. A file that changes while a command runs is left as it is and read at the next command.
 
 - **During a work run** the changes join that task's `changes` and before-state records, so its review shows them and `revert` undoes them. The task gets a note naming them, and so does the agent's reply.
 - **A process a command runs** (`format`, `build`, a declared command) changes code as part of that command: Solace reads it in right after, and in a run records it with the command's other changes.

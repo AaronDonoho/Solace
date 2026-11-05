@@ -12,11 +12,11 @@ use crate::lockdown::files::copy_files;
 
 /// Runs a Rust probe in the crate's reusable scratch copy. A lock serializes
 /// runs on it; each run refreshes it and restores only the probe text.
-pub(crate) fn run(s: &Store, text: &str, module: Option<&str>, from: Option<&str>) -> Out {
+pub(crate) fn run(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, limit: u64) -> Out {
     let base = s.root.join("target").join("solace-probe");
     fs::create_dir_all(&base)?;
     let _lock = fsx::lock_file(&base.join("lock"))?;
-    at(s, text, module, from, &base.join("crate"))
+    at(s, text, module, from, &base.join("crate"), limit)
 }
 
 /// What a probe needs after its copy is ready: the index, the file and text
@@ -35,11 +35,27 @@ struct Prepared {
 /// A Rust probe: copy the store's crate to `dir`, add a test module holding
 /// `text`, run that test with output, and report compiler errors against the
 /// module.
-fn at(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir: &Path) -> Out {
+fn at(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir: &Path, limit: u64) -> Out {
     let prepared = prepare(s, text, module, from, dir)?;
-    let output = lockdown::command(&s.root, &prepared.argv, 600, usize::MAX, false, true);
+    let build = lockdown::command(&s.root, &build_argv(&prepared.argv), 600, usize::MAX, false, true);
+    let run = match &build {
+        Ok(output) if lockdown::passed(output) => {
+            let cmd = crate::migrate::cargo_sandboxed_probe(&prepared.argv, &s.root);
+            Some(cmd.and_then(|cmd| crate::lockdown::commands::run_probe(&s.root, cmd, limit)))
+        }
+        _ => None,
+    };
     let _ = fs::write(&prepared.file, &prepared.before);
-    report(&prepared, module.is_none() && from.is_none(), &output?)
+    let build = build?;
+    if !lockdown::passed(&build) {
+        return report(&prepared, module.is_none() && from.is_none(), &build);
+    }
+    let ran = run.expect("a passing build runs the probe")?;
+    if ran.timed_out {
+        return fail(out_of_time(&prepared, &ran, limit));
+    }
+    let output = format!("exit code: {} ({:.1}s)\n{}", ran.code.unwrap_or(-1), ran.seconds, ran.output);
+    report(&prepared, module.is_none() && from.is_none(), &output)
 }
 
 fn prepare(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir: &Path) -> Result<Prepared, Failure> {
@@ -1310,4 +1326,17 @@ fn panic_location(line: &str) -> Option<(&str, usize)> {
     let at = line.find("panicked at ")? + "panicked at ".len();
     let (path, row, _, _) = cargo::parse_location(&line[at..])?;
     Some((path, row))
+}
+
+/// The probe's `cargo test` without its test filter, so the run step only runs.
+fn build_argv(argv: &[String]) -> Vec<String> {
+    let mut build = argv.iter().take_while(|a| *a != "--").cloned().collect::<Vec<_>>();
+    build.push("--no-run".into());
+    build
+}
+
+/// The reply when a probe's own code is still running at `limit`.
+fn out_of_time(p: &Prepared, ran: &crate::lockdown::commands::ProbeRun, limit: u64) -> String {
+    let output = clean(&ran.output, &p.files, &p.test);
+    crate::lockdown::commands::probe_stopped(limit, &output, ran.cut_short)
 }

@@ -100,7 +100,7 @@ pub(super) fn start(root: PathBuf, t: Value, rid: String, m: Value) {
                     // A discussion agent that exited after replying gets a fresh agent,
                     // briefed with every note, at the human's next note.
                     Err(Failure(_, REPLIED)) => {
-                        wait_discussion(&open(&root)?, tid, &rid)?;
+                        wait_discussion(&open(&root)?, tid, &rid, None)?;
                         result = agent_process(&root, &task(&root, tid)?, &rid, &m, false, false);
                     }
                     other => break other,
@@ -226,6 +226,9 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     let detail = crate::board::setup::detail(&settings);
     let asking = crate::board::setup::asking(&settings);
     let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, &at, m["run"].is_array(), involvement, detail, asking);
+    if run["kind"] == "discuss" {
+        crate::board::delivery::mark_discussion_brief(root, tid, rid, t)?;
+    }
     let timeout = settings["task_timeout"].as_u64().unwrap_or(3600);
     if author {
         // Only an exited process has a reusable session; a server crash during
@@ -359,7 +362,10 @@ pub(crate) fn spawn_agent(
         None => env::current_exe()?,
     };
     let agent = agent_of(m);
-    let stored_key = m["id"].as_str().and_then(|id| crate::board::setup::stored(&crate::board::setup::keys_path(), id)).filter(|_| m.get("endpoint").is_some());
+    let stored_key = m["id"]
+        .as_str()
+        .and_then(|id| crate::board::setup::stored(&crate::board::setup::keys_path(), id))
+        .filter(|_| m.get("endpoint").is_some());
     let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, dir, &binary, timeout)?).unwrap();
     let mut argv: Vec<String> = if let Some(a) = custom {
         a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
@@ -464,7 +470,11 @@ pub(crate) fn spawn_agent(
             }
         }
     }
-    cmd.env("SOLACE_TASK", ids[0]).env("SOLACE_RUN", ids[1]).env("SOLACE_SESSION", ids[1]).env("SOLACE_BIN", &binary);
+    cmd.env("SOLACE_TASK", ids[0])
+        .env("SOLACE_RUN", ids[1])
+        .env("SOLACE_SESSION", ids[1])
+        .env("SOLACE_BIN", &binary)
+        .env("SOLACE_LAUNCH_TIMEOUT_SECS", timeout.to_string());
     let mut child = cmd.spawn().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => Failure(crate::board::agents::missing_program_at_launch(m), 1),
         _ => Failure(e.to_string(), 1),
@@ -1052,9 +1062,14 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]
         // The run waits for an answer: an agent that went on without it (its ask was
         // queued) holds still until the human replies, or stops if no server is there to hear.
         if r["state"] == "waiting" && a.first() != Some(&"task") {
+            let notes = t["notes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let replied = r["kind"] == "discuss" && crate::board::delivery::pending_task_reply(r, notes, rid);
             drop(guard);
             if !tasks::serving(&scope::top(root)) {
                 return err("E7003", "the run waits for an answer and no board server is running; stop now");
+            }
+            if replied {
+                return err("E7003", "the human replied; call `task wait` to receive it");
             }
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -1125,8 +1140,16 @@ pub fn task_command(
             &format!("nothing was sent. Resend with `command` set to just `task {}` and the whole message in the `text` argument", a[1]),
         );
     }
-    let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
     let discussing = t["runs"][i]["kind"] == "discuss";
+    // A wait-only call keeps waiting without sending the same note again.
+    if a.get(1) == Some(&"wait") {
+        if !discussing {
+            return err("E7001", "task wait is only for a discussion");
+        }
+        drop(guard);
+        return wait_discussion(s, tid, rid, Some(crate::board::delivery::wait_limit()));
+    }
+    let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
     let top = scope::top(&s.root);
     // The agent sends the task server a message; the server applies it (D-77).
     let mut m = json!({"kind":"agent","task":tid,"run":rid,"command":a.get(1),"text":text});
@@ -1141,7 +1164,7 @@ pub fn task_command(
             if tasks::rejected(&top, &sent) {
                 return err("E7001", REJECTED);
             }
-            return wait_discussion(s, tid, rid);
+            return wait_discussion(s, tid, rid, Some(crate::board::delivery::wait_limit()));
         }
         Some("done" | "ask") if discussing => return err("E7010", "a discussion goes on until the human ends it; reply with task note"),
         Some("note") => {
@@ -1191,7 +1214,7 @@ pub fn task_command(
         _ => {
             return usage(concat!(
                 "task peek <task> [--notes [3,7,10..12]] [--from <n>] | task peek feature | ",
-                "task note | task ask | task done, with the text in `text`; ",
+                "task note | task wait | task ask | task done, with the text in `text`; ",
                 "task diff [--since-review] [name ...]",
             ));
         }
@@ -1229,26 +1252,24 @@ pub(crate) fn wait_reply(s: &Store, tid: &str, rid: &str) -> Out {
 
 /// Holds a discussion's reply until the human writes again or ends it. Waiting
 /// doesn't count toward the task timeout.
-fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
+fn wait_discussion(s: &Store, tid: &str, rid: &str, limit: Option<Duration>) -> Out {
     let top = scope::top(&s.root);
+    let started = std::time::Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(50));
         // No server, so the human can't reply: return rather than wait forever.
         if !tasks::serving(&top) {
             return err("E7003", "the board server stopped while waiting");
         }
+        if limit.is_some_and(|limit| started.elapsed() > limit) {
+            return Ok(crate::board::delivery::WAIT_AGAIN.into());
+        }
         let t = task(&s.root, tid)?;
         let i = run_at(&t, rid)?;
         if t["runs"][i]["state"] == "ended" {
             return Ok("The discussion has ended. Stop now, without further calls.\n".into());
         }
-        let notes = t["notes"].as_array().unwrap();
-        let after = notes.iter().rposition(|n| n["run"] == rid && n["author"] == "agent").map_or(0, |l| l + 1);
-        let new: Vec<&str> =
-            notes[after..].iter().filter(|n| n["run"] == rid && n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
-        if !new.is_empty() && t["paused_from"].is_null() {
-            let reply = format!("The human replied:\n\n{}\n", new.join("\n\n"));
-            tasks::send(&scope::top(&s.root), json!({"kind":"resume","task":tid,"run":rid}))?;
+        if let Some(reply) = crate::board::delivery::claim_task_reply(&s.root, tid, rid)? {
             return Ok(reply);
         }
     }

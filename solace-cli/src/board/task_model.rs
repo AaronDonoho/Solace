@@ -468,7 +468,7 @@ pub(crate) fn active(t: &Value) -> bool {
 }
 
 pub(crate) fn note(t: &mut Value, author: &str, run: Option<&str>, text: &str) {
-    t["notes"].as_array_mut().unwrap().push(json!({"author":author,"run":run,"time":now(),"text":text}));
+    t["notes"].as_array_mut().unwrap().push(json!({"id":unique_id(),"author":author,"run":run,"time":now(),"text":text}));
 }
 
 /// Marks a task as needing a human. The next action a human takes on it clears the mark.
@@ -1440,13 +1440,8 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 _ => return err("E7001", "unknown agent message"),
             }
         }
-        // The human replied to a discussion; its agent goes on.
-        "resume" => {
-            let i = run_at(t, rid.unwrap_or(""))?;
-            if t["runs"][i]["state"] == "waiting" {
-                t["runs"][i]["state"] = json!("running");
-            }
-        }
+        // A message left by an older version; delivery wakes the run now.
+        "resume" => {}
         "settings" => {
             let i = run_at(t, rid.unwrap_or(""))?;
             if t["runs"][i]["state"] == "ended" {

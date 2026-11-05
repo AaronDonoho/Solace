@@ -64,7 +64,7 @@ pub type Model {
     /// Whether the selected task's band is collapsed to its bar.
     task_collapsed: Bool,
     error: String,
-    source: Option(Source),
+    source: Option(solace_task.Source),
     /// The `base` attribute: this instance's API prefix, "" for the page's.
     prefix: String,
     connected: Bool,
@@ -235,7 +235,7 @@ pub type Msg {
   /// The reply to a row's Plan: the task's project, and the task or a refusal.
   Planned(String, String)
   BaseChanged(String)
-  Listening(Source)
+  Listening(solace_task.Source)
   Connected
   Disconnected
   /// Begins editing the vision as it is now.
@@ -631,8 +631,6 @@ pub type Filters {
   )
 }
 
-pub type Source
-
 @external(javascript, "./api.mjs", "request")
 fn request(
   base: String,
@@ -641,16 +639,6 @@ fn request(
   body: String,
   receive: fn(String) -> Nil,
 ) -> Nil
-
-@external(javascript, "./api.mjs", "events")
-fn events(
-  base: String,
-  receive: fn(String) -> Nil,
-  ready: fn() -> Nil,
-) -> Source
-
-@external(javascript, "./api.mjs", "close_events")
-fn close_events(source: Source) -> Nil
 
 /// A page on `tab` with nothing loaded yet.
 pub fn new(tab: Tab) -> Model {
@@ -758,9 +746,11 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
       effect.from(fn(send) {
         send(
           Listening(
-            events(model.prefix, fn(text) { send(Live(text)) }, fn() {
-              send(CaughtUp)
-            }),
+            solace_task.events(
+              model.prefix,
+              fn(text) { send(Live(text)) },
+              fn() { send(CaughtUp) },
+            ),
           ),
         )
       }),
@@ -770,7 +760,7 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
 
 fn stop(model: Model) -> Model {
   case model.source {
-    Some(source) -> close_events(source)
+    Some(source) -> solace_task.close_events(source)
     None -> Nil
   }
   Model(..model, source: None)

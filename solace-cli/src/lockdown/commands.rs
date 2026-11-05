@@ -156,17 +156,7 @@ pub fn kill_group(child: &mut std::process::Child) {
 /// Waits for `child`, started in its own process group, up to `timeout`;
 /// past it, kills the group and returns `None`.
 pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let start = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        if start.elapsed() >= timeout {
-            kill_group(child);
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    Ok(wait_or_kill_bounded(child, timeout, None)?.0)
 }
 
 /// Runs `argv` in `root`: the exit code and elapsed time, then the output
@@ -223,3 +213,96 @@ fn prepared(root: &Path, argv: &[String], sandbox: bool) -> Result<std::process:
     }
     Ok(cmd)
 }
+
+/// A probe's run: whether the timeout stopped it, whether its output was cut
+/// short, its exit code, how long it ran, and what it wrote.
+pub struct ProbeRun {
+    pub timed_out: bool,
+    pub cut_short: bool,
+    pub code: Option<i32>,
+    pub seconds: f64,
+    pub output: String,
+}
+
+/// Runs a prepared probe command and keeps its output even when the timeout
+/// stops it. A private PID namespace stops programs it detached, and a log
+/// past `PROBE_OUTPUT_BYTES` stops a probe that only prints.
+pub fn run_probe(root: &Path, mut cmd: Command, timeout: u64) -> Result<ProbeRun, Failure> {
+    use std::os::unix::process::CommandExt;
+    let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
+    let out = fs::File::create(&log)?;
+    let mut child = cmd.process_group(0).stdout(out.try_clone()?).stderr(out).spawn()?;
+    let start = Instant::now();
+    let (status, cut_short) = wait_or_kill_bounded(&mut child, Duration::from_secs(timeout), Some((&log, PROBE_OUTPUT_BYTES)))?;
+    let output = diagnostics::strip_ansi(&String::from_utf8_lossy(&read_bounded(&log, PROBE_OUTPUT_BYTES as usize)?));
+    fs::remove_file(log)?;
+    Ok(ProbeRun {
+        timed_out: status.is_none(),
+        cut_short,
+        code: status.and_then(|s| s.code()),
+        seconds: start.elapsed().as_secs_f64(),
+        output,
+    })
+}
+
+/// How much of a probe's output is kept: enough to see how far it got.
+const PROBE_OUTPUT_BYTES: u64 = 256 * 1024;
+
+/// The reply when a probe is stopped at `limit`, with its output so far.
+pub fn probe_stopped(limit: u64, output: &str, cut_short: bool) -> String {
+    let output =
+        if output.trim().is_empty() { "The probe produced no output before it was stopped.".to_string() } else { output.to_string() };
+    let why = if cut_short {
+        format!("The probe ran out of output room: it was stopped before the {limit}s run limit and only part of its output is shown.")
+    } else {
+        format!("The probe ran out of run time: it reached the {limit}s run limit.")
+    };
+    format!("{why}\n\n{output}")
+}
+
+/// The start and end of `path`, with a note between them when it is longer
+/// than `max`, reading only a bounded amount.
+fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let mut kept = Vec::new();
+    file.by_ref().take(max.saturating_add(1) as u64).read_to_end(&mut kept)?;
+    if kept.len() <= max {
+        return Ok(kept);
+    }
+    let half = max / 2;
+    kept.truncate(half);
+    kept.extend_from_slice(CUT_NOTE);
+    let mut tail = vec![0; half];
+    file.seek(SeekFrom::End(-(half as i64)))?;
+    file.read_exact(&mut tail)?;
+    kept.extend_from_slice(&tail);
+    Ok(kept)
+}
+
+/// Waits for `child` up to `timeout`, or until its log passes `log`'s byte
+/// limit; either stops the group. Says whether the log stopped it.
+fn wait_or_kill_bounded(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    log: Option<(&Path, u64)>,
+) -> std::io::Result<(Option<std::process::ExitStatus>, bool)> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((Some(status), false));
+        }
+        let too_big = log.is_some_and(|(path, max)| fs::metadata(path).is_ok_and(|m| m.len() > max));
+        if too_big {
+            kill_group(child);
+            return Ok((None, true));
+        }
+        if start.elapsed() >= timeout {
+            kill_group(child);
+            return Ok((None, false));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+const CUT_NOTE: &[u8] = b"\n[probe output cut short]\n";

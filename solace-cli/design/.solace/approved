@@ -1,0 +1,6 @@
+# Solace: the code as last approved (D-58). Commit this file; Solace keeps it current.
+6cb1443947c5824d0f9a2a954bc8563c design (imports)
+6d2513b607af1f79812617b24bc2cf50 design.main
+9eb0c573ab86cfd0bf42109593a4d2d5 design_test (imports)
+45152a014355ff12ccc3fade8ed1a54c design_test.hello_world_test
+a127f48e8d26d57b98ad4475ba0d01ed design_test.main

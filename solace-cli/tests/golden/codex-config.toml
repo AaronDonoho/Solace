@@ -23,7 +23,7 @@ tool_suggest = false
 [mcp_servers.solace]
 command = "/bin/solace"
 args = ["mcp", "--budget", "32000"]
-env_vars = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG"]
+env_vars = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG", "SOLACE_LAUNCH_TIMEOUT_SECS"]
 default_tools_approval_mode = "approve"
 tool_timeout_sec = 3600
 required = true

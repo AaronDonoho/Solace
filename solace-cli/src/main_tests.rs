@@ -1945,7 +1945,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "f5220b2c024f1f03435c5997f8a264556d6e4f8e4c246391f7abb014939d45a9");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "2db97ecb34438fea3c6ee4fc6d2e258cad2b688ba85bcb36685f7d1dd1e9be0c");
 }
 
 #[test]
@@ -2606,4 +2606,148 @@ fn a_guarded_local_name_is_not_imported() {
     assert!(!out.contains("import solace_task as task"), "{out}");
     let file = fs::read_to_string(store.root.join("src/solace_task.gleam")).unwrap();
     assert!(!file.contains("import solace_task"), "{file}");
+}
+
+#[test]
+fn a_gleam_probe_stops_at_its_run_limit_and_keeps_its_output() {
+    let store = probe_project();
+    let code = "pub fn main() {\n  echo \"started\"\n  spin()\n}\n\nfn spin() {\n  spin()\n}\n";
+    let err = store.probe_with_limit(code, None, &[], None, 2).unwrap_err().0;
+    assert!(err.contains("ran out of run time") && err.contains("2s") && err.contains("started"), "{err}");
+    assert!(!store.root.join("test/solace_probe.gleam").exists());
+}
+
+#[test]
+fn a_gleam_probe_compile_error_is_still_reported() {
+    let store = probe_project();
+    let err = store.probe_with_limit("pub fn main() {\n  nope()\n}\n", None, &[], None, 2).unwrap_err().0;
+    assert!(err.contains("The probe ran as test/solace_probe.gleam") && err.contains("nope"), "{err}");
+    assert!(!store.root.join("test/solace_probe.gleam").exists());
+}
+
+#[test]
+fn a_rust_probe_stops_at_its_run_limit_and_keeps_its_output() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = testing::rust_project(lib);
+    let code = "println!(\"started\"); loop { std::thread::sleep(std::time::Duration::from_millis(20)); }";
+    let err = store.probe_with_limit(code, None, &[], None, 3).unwrap_err().0;
+    assert!(err.contains("ran out of run time") && err.contains("3s") && err.contains("started"), "{err}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+}
+
+#[test]
+fn a_rust_probe_compile_error_is_still_reported() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let err = store.probe_with_limit("let x: i32 = \"no\";", None, &[], None, 2).unwrap_err().0;
+    assert!(err.contains("Compile error:") && err.contains("The probe's text:"), "{err}");
+}
+
+#[test]
+fn a_rust_probe_stops_the_programs_it_detached() {
+    if !crate::language::cargo::installed() || !crate::migrate::sandbox_works() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = testing::rust_project(lib);
+    let code = concat!(
+        "let beat = std::env::current_dir().unwrap().join(\"beat\");\n",
+        "let script = format!(\"while :; do echo x >> '{}'; sleep 0.2; done\", beat.display());\n",
+        "std::process::Command::new(\"setsid\").args([\"sh\", \"-c\", script.as_str()]).spawn().unwrap();\n",
+        "println!(\"started\");\n",
+        "loop { std::thread::sleep(std::time::Duration::from_millis(20)); }\n",
+    );
+    let err = store.probe_with_limit(code, None, &[], None, 3).unwrap_err().0;
+    assert!(err.contains("ran out of run time") && err.contains("started"), "{err}");
+    let beat = root.join("target/solace-probe/crate/beat");
+    let first = fs::read(&beat).unwrap().len();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(fs::read(&beat).unwrap().len(), first);
+}
+
+#[test]
+fn a_gleam_probe_stops_the_programs_it_detached() {
+    if !crate::migrate::sandbox_works() {
+        return;
+    }
+    let store = probe_project();
+    let code = concat!(
+        "@external(erlang, \"erlang\", \"binary_to_list\")\n",
+        "fn binary_to_list(binary: String) -> List(Int)\n\n",
+        "@external(erlang, \"os\", \"cmd\")\n",
+        "fn os_cmd(command: List(Int)) -> List(Int)\n\n",
+        "pub fn main() {\n",
+        "  echo \"started\"\n",
+        "  let _ = os_cmd(binary_to_list(\"setsid sh -c 'while :; do echo x >> beat; sleep 0.2; done' >/dev/null 2>&1 &\"))\n",
+        "  spin()\n",
+        "}\n\n",
+        "fn spin() {\n  spin()\n}\n",
+    );
+    let err = store.probe_with_limit(code, None, &[], None, 3).unwrap_err().0;
+    assert!(err.contains("ran out of run time") && err.contains("started"), "{err}");
+    let beat = store.root.join("beat");
+    let first = fs::read(&beat).unwrap().len();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(fs::read(&beat).unwrap().len(), first);
+}
+
+#[test]
+fn a_rust_probe_stops_endless_output() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = testing::rust_project(lib);
+    let code = "println!(\"started\");\nloop { println!(\"x\"); }";
+    let err = store.probe_with_limit(code, None, &[], None, 30).unwrap_err().0;
+    assert!(
+        err.contains("out of output room") && err.contains("started") && err.len() < 400_000,
+        "{} bytes: {}",
+        err.len(),
+        &err[..err.len().min(200)]
+    );
+    let logs: Vec<String> = fs::read_dir(root.join(".solace"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("command-") && n.ends_with(".log"))
+        .collect();
+    assert!(logs.is_empty(), "{logs:?}");
+}
+
+#[test]
+fn a_gleam_probe_stops_endless_output() {
+    let store = probe_project();
+    let code = "pub fn main() {\n  echo \"started\"\n  spin()\n}\n\nfn spin() {\n  echo \"x\"\n  spin()\n}\n";
+    let err = store.probe_with_limit(code, None, &[], None, 30).unwrap_err().0;
+    assert!(
+        err.contains("out of output room") && err.contains("started") && err.len() < 400_000,
+        "{} bytes: {}",
+        err.len(),
+        &err[..err.len().min(200)]
+    );
+    let logs: Vec<String> = fs::read_dir(store.root.join(".solace"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("command-") && n.ends_with(".log"))
+        .collect();
+    assert!(logs.is_empty(), "{logs:?}");
+}
+
+#[test]
+fn a_probe_sandbox_protects_the_original() {
+    if !crate::migrate::sandbox_works() {
+        return;
+    }
+    let root = Scratch::new();
+    let protect = root.join("original");
+    fs::create_dir_all(&protect).unwrap();
+    let cmd = crate::migrate::probe_sandboxed(&["true".into()], &root, Some(&protect));
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert!(args.iter().any(|a| a == "--unshare-pid"), "{args:?}");
+    assert!(args.windows(2).any(|w| w[0] == "--ro-bind" && w[1] == protect.to_string_lossy()), "{args:?}");
 }

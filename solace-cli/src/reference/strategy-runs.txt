@@ -20,13 +20,19 @@ command not listed here is refused.
                                 whole step as notes do
   strategy show run <task> <run> --failed
                                 failed tool steps only, each with its error
-  strategy note                 reply to the human, the reply in `text`; waits
-                                for their next message. Text outside it shows
-                                only in the run's live transcript on the page
+  strategy note                 reply to the human, the reply in `text`; the
+                                call returns on their next message, which may
+                                already be waiting. Text outside it shows only
+                                in the run's live transcript on the page
+  strategy wait                 send nothing and keep waiting; use it when a
+                                note or proposal call returned because the
+                                wait reached its limit
   strategy task|feature|milestone [<id>]
                                 propose creating one (no id) or editing one: the
-                                request's fields as a JSON object in `text`;
-                                waits for Approve or Reject. Alone in its call.
+                                request's fields as a JSON object in `text`; the
+                                call returns when the human answers or writes,
+                                and the proposal stays open until answered.
+                                Alone in its call.
                                 task: title, body, feature, milestone,
                                 dependsOn (task ids), and scope (project folders, as
                                 the brief lists them; every one must be a project)

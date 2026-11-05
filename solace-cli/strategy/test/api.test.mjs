@@ -785,6 +785,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
     if (path === '/workflow') return Response.json({ columns: [] });
     if (path === '/models') return Response.json([{ id: 'fake', label: 'Fake' }, { id: 'big', label: 'Big', available: false, reason: 'no key' }]);
+    if (path === '/role-models') return Response.json([{ role: 'strategist', name: 'Strategist', default: 'fake' }]);
     if (path === '/strategy/runs' && req.method === 'POST') {
       r1 = { id: 'r1', kind: 'strategy', model: body.model, state: 'running', started: 200, context: body.context, notes: [{ author: 'human', text: body.text }], questions: [] };
       return Response.json(r1);
@@ -953,27 +954,17 @@ test('Planning panel width is stored after a drag or a key and read back on load
 });
 
 test('transport uses the base it is given; project paths stay absolute', async () => {
-  const oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
+  const oldFetch = globalThis.fetch;
   const paths = [];
-  let source;
   globalThis.fetch = async path => { paths.push(path); return new Response('{}'); };
-  globalThis.EventSource = class {
-    constructor(path) { this.path = path; source = this; }
-    addEventListener() {}
-    close() { this.closed = true; }
-  };
   try {
     const api = await import('../src/api.mjs');
     await new Promise(resolve => api.request('/p/shop', '/projects', 'GET', '', resolve));
     await new Promise(resolve => api.request('/p/shop', '/p/other/tasks/t1', 'PATCH', '{}', resolve));
     await new Promise(resolve => api.request('', '/projects', 'GET', '', resolve));
     expect(paths).toEqual(['/p/shop/projects', '/p/other/tasks/t1', '/projects']);
-    expect(api.events('/p/shop', () => {})).toBe(source);
-    expect(source.path).toBe('/p/shop/events');
-    api.close_events(source);
-    expect(source.closed).toBe(true);
   } finally {
-    globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+    globalThis.fetch = oldFetch;
   }
 });
 

@@ -239,3 +239,16 @@ fn a_background_command_drops_the_agents_task_context() {
     }
 }
 
+/// A log past the limit keeps its first and last bytes, not the middle.
+#[test]
+fn a_long_log_keeps_its_head_and_tail() {
+    let text = format!("start{}end", "x".repeat(10_000));
+    let dir = Scratch::new().with(&[("probe.log", text.as_str()), ("short.log", "short\n")]);
+    let max = 1_000;
+    let kept = read_bounded(&dir.join("probe.log"), max).unwrap();
+    assert!(kept.len() <= max + CUT_NOTE.len(), "{} bytes", kept.len());
+    assert!(kept.starts_with(b"start") && kept.ends_with(b"end"), "{}", String::from_utf8_lossy(&kept));
+    assert!(kept.windows(CUT_NOTE.len()).any(|w| w == CUT_NOTE), "{}", String::from_utf8_lossy(&kept));
+    assert_eq!(read_bounded(&dir.join("short.log"), max).unwrap(), b"short\n".to_vec());
+}
+

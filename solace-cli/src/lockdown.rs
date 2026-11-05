@@ -494,12 +494,12 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
             config += &format!(
                 concat!(
                     "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\n",
-                    "env_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\"]\n",
+                    "env_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\", \"SOLACE_LAUNCH_TIMEOUT_SECS\"]\n",
                     "default_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n",
                     "required = true\nstartup_timeout_sec = 60\n"
                 ),
                 json!(binary),
-                timeout.max(3600)
+                tool_timeout(timeout)
             );
             fs::write(dir.join("config.toml"), config)?;
             json!({"args":[],"env":{"CODEX_HOME":dir},"config":"config.toml"})
@@ -507,7 +507,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
         "claude" => {
             fs::write(
                 dir.join("mcp.json"),
-                json!({"mcpServers":{"solace":{"command":binary,"args":["mcp","--budget","40000"]}}}).to_string(),
+                json!({"mcpServers":{"solace":{"command":binary,"args":["mcp","--budget","40000"],"env":{"SOLACE_LAUNCH_TIMEOUT_SECS":timeout.to_string()}}}}).to_string(),
             )?;
             fs::write(
                 dir.join("settings.json"),
@@ -541,7 +541,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 ],
                 "env": {
                     "MCP_TIMEOUT": "60000",
-                    "MCP_TOOL_TIMEOUT": (timeout.max(3600) * 1000).to_string()
+                    "MCP_TOOL_TIMEOUT": (tool_timeout(timeout) * 1000).to_string()
                 },
                 "config": "settings.json"
             })
@@ -2024,4 +2024,10 @@ mod tests {
         assert_eq!(rest, "red\n");
         assert!(!out.contains('\u{1b}'));
     }
+}
+
+/// The seconds an agent client allows one tool call: at least an hour, so a
+/// task's own timeout can be shorter without cutting a wait short.
+pub fn tool_timeout(timeout: u64) -> u64 {
+    timeout.max(3600)
 }

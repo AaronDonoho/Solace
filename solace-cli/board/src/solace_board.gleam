@@ -28,13 +28,6 @@ fn request(
   receive: fn(String) -> Nil,
 ) -> Nil
 
-@external(javascript, "./api.mjs", "events")
-fn events(
-  base: String,
-  receive: fn(String) -> Nil,
-  ready: fn() -> Nil,
-) -> Source
-
 @external(javascript, "./api.mjs", "reload")
 fn reload() -> Nil
 
@@ -96,7 +89,7 @@ pub type Model {
     /// Copy ID in the bar: how many copies were asked for, and what it says
     /// for a moment after the last ("" for Copy ID).
     copy: #(Int, String),
-    source: Option(Source),
+    source: Option(solace_task.Source),
     /// The `base` attribute: this instance's API prefix, "" for the page's.
     prefix: String,
     /// The component's shadow root, once it has rendered.
@@ -160,7 +153,7 @@ pub type Msg {
   /// in project `dir`, and bring its details into view.
   Focus(String, String)
   BaseChanged(String)
-  Listening(Source)
+  Listening(solace_task.Source)
   Attached(dynamic.Dynamic)
   Disconnected
   Connected
@@ -1027,11 +1020,6 @@ fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
   })
 }
 
-pub type Source
-
-@external(javascript, "./api.mjs", "close_events")
-fn close_events(source: Source) -> Nil
-
 @external(javascript, "./api.mjs", "prevent_drag")
 fn prevent_drag(root: dynamic.Dynamic) -> Nil
 
@@ -1098,9 +1086,11 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
       effect.from(fn(send) {
         send(
           Listening(
-            events(model.prefix, fn(text) { send(Live(text)) }, fn() {
-              send(CaughtUp)
-            }),
+            solace_task.events(
+              model.prefix,
+              fn(text) { send(Live(text)) },
+              fn() { send(CaughtUp) },
+            ),
           ),
         )
       }),
@@ -1111,7 +1101,7 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
 /// Closes the event stream.
 fn stop(model: Model) -> Model {
   case model.source {
-    Some(source) -> close_events(source)
+    Some(source) -> solace_task.close_events(source)
     None -> Nil
   }
   Model(..model, source: None)
@@ -1924,10 +1914,16 @@ fn tasks_update(
   model: Model,
   dir: String,
   text: String,
-  _notify: Bool,
+  notify: Bool,
 ) -> Result(Model, Nil) {
   use pair <- result.try(task_list(text))
   let #(tasks, unreadable) = pair
+  let new = case lane_of(model, dir), notify {
+    Ok(lane), True ->
+      list.flat_map(tasks, fn(task) { task_notices(model, lane, task) })
+    _, _ -> []
+  }
+  let model = Model(..model, notices: list.append(model.notices, new))
   let model = map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
   Ok(unreadable_tasks(model, dir, unreadable))
 }
@@ -2041,9 +2037,12 @@ fn waiting_discussion_notice(
   && list.any(task.runs, fn(r) {
     r.kind == "discuss"
     && newly_waiting(old, r)
-    && list.any(task.notes, fn(n) {
-      n.author == "agent" && n.run == r.id && n.text == notice.text
-    })
+    && {
+      list.any(task.notes, fn(n) {
+        n.author == "agent" && n.run == r.id && n.text == notice.text
+      })
+      || list.is_empty(task.notes)
+    }
   })
 }
 

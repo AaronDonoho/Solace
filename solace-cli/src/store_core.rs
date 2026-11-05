@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args
 CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
 CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
+CREATE TABLE IF NOT EXISTS board_ends(task TEXT, module TEXT NOT NULL, parent TEXT NOT NULL, last TEXT NOT NULL, sep TEXT NOT NULL, PRIMARY KEY(task,module,parent));
 -- the warnings as of the last check, so a submit can name the new ones
 CREATE TABLE IF NOT EXISTS warnings(key TEXT PRIMARY KEY, module TEXT NOT NULL DEFAULT 'project');
 CREATE TABLE IF NOT EXISTS warning_checks(one INTEGER PRIMARY KEY CHECK (one = 1));
@@ -224,8 +225,7 @@ impl Store {
         {
             return Err(Failure(format!("E6013 {why}"), 1));
         }
-        let tool = self.lang().tool();
-        let program = crate::language::tool_path(tool).unwrap_or_else(|| PathBuf::from(tool));
+        let program = self.tool_program();
         let mut argv = vec![program.to_string_lossy().into_owned()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
@@ -613,6 +613,12 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// The language tool's program.
+    pub(crate) fn tool_program(&self) -> PathBuf {
+        let tool = self.lang().tool();
+        crate::language::tool_path(tool).unwrap_or_else(|| PathBuf::from(tool))
     }
 
 }

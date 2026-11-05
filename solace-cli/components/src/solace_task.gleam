@@ -35,14 +35,14 @@ fn request(
 ) -> Nil
 
 @external(javascript, "./task_api.mjs", "events")
-fn events(
+pub fn events(
   base: String,
   receive: fn(String) -> Nil,
   ready: fn() -> Nil,
 ) -> Source
 
 @external(javascript, "./task_api.mjs", "close_events")
-fn close_events(source: Source) -> Nil
+pub fn close_events(source: Source) -> Nil
 
 @external(javascript, "./task_api.mjs", "after")
 fn after(ms: Int, callback: fn() -> Nil) -> Nil

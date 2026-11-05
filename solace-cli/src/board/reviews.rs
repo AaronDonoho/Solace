@@ -166,10 +166,10 @@ pub fn changes_of(s: &Store, t: &Value) -> Result<Vec<Value>, Failure> {
     let tid = t["id"].as_str().unwrap_or("");
     let (mut out, mut seen) = (vec![], HashSet::new());
     for (dir, st) in scope_stores(s, t)? {
-        let mut q = st.db.prepare("SELECT entity,run,name FROM board_touches WHERE task=?1 ORDER BY seq")?;
-        for row in
-            q.query_map(params![tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?
-        {
+        let mut q = st.db.prepare("SELECT entity,run,name FROM board_touches WHERE task=?1 AND (run IS NULL OR run <> ?2) ORDER BY seq")?;
+        for row in q.query_map(params![tid, LAYOUT_RUN], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+        })? {
             let (entity, run, name) = row?;
             let (run, name) = (run.unwrap_or_default(), name.unwrap_or_else(|| entity.clone()));
             if !seen.insert((dir.clone(), entity.clone())) {
@@ -734,71 +734,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
 }
 
 pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
-    let mut kept = HashMap::new();
-    for (key, v) in states {
-        if let Some(id) = key.strip_prefix("symbol:") {
-            if v.is_null() {
-                s.db.execute("DELETE FROM symbols WHERE id=?", [id])?;
-            } else {
-                // A snapshot from before the nested columns has only the first eight (D-158).
-                s.db.execute(
-                    "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live,parent,sep,tail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                    params![
-                        v[0].as_str(),
-                        v[1].as_str(),
-                        v[2].as_str(),
-                        v[3].as_str(),
-                        v[4].as_str(),
-                        v[5].as_i64(),
-                        v[6].as_str(),
-                        v[7].as_i64(),
-                        v.get(8).and_then(|x| x.as_str()),
-                        v.get(9).and_then(|x| x.as_str()),
-                        v.get(10).and_then(|x| x.as_str()).unwrap_or("")
-                    ],
-                )?;
-            }
-        } else if let Some(name) = key.strip_prefix("module:") {
-            if !v.is_array() {
-                // Where its file's folders stop going, when recorded (D-136).
-                if let Some(k) = v["kept"].as_str() {
-                    // A Rust module's row holds its file; a Gleam one its dir (D-168).
-                    let row: Option<(String, Option<String>)> =
-                        s.db.query_row("SELECT dir, file FROM modules WHERE path=?", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok();
-                    if let Some((dir, file)) = row {
-                        kept.insert(file.unwrap_or_else(|| outside::file_of(&dir, name)), k.to_string());
-                    }
-                }
-                // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
-                s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
-            } else {
-                // ON CONFLICT keeps a Rust module's `file` and `owns_dir`; a snapshot from
-                // before them reads as None.
-                let (path, dir, header) = (v[0].as_str(), v[1].as_str(), v[2].as_str());
-                let (file, owns) = (v.get(3).and_then(|x| x.as_str()), v.get(4).and_then(|x| x.as_i64()));
-                s.db.execute(
-                    "INSERT INTO modules(path,dir,header,file,owns_dir) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, header=excluded.header, file=excluded.file, owns_dir=excluded.owns_dir",
-                    params![path, dir, header, file, owns],
-                )?;
-            }
-        } else if let Some(name) = key.strip_prefix("file:") {
-            let p = lockdown::path(&s.root, name)?;
-            if let Some(bytes) = v.as_array() {
-                fs::create_dir_all(p.parent().unwrap())?;
-                fs::write(p, jsonx::bytes(bytes))?;
-            } else if p.exists() {
-                fs::remove_file(&p)?;
-                // with the folders that leaves empty, such as those a carried file made (D-103),
-                // up to the top folder or the one recorded as there before (D-136)
-                let top = name.split('/').next().unwrap_or_default();
-                let stop = v["kept"].as_str().filter(|k| k.len() > top.len()).unwrap_or(top);
-                outside::remove_empty_dirs(&s.root.join(stop), p.parent());
-            }
-        }
-    }
-    let ix = s.index()?;
-    s.materialize_to(&ix, &s.root, &kept)?;
-    Ok(())
+    restore_states(s, None, states)
 }
 
 /// Whether the check after an undo runs in the project: a project with a
@@ -822,11 +758,15 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     for (_, st) in &projects {
         lockdown::recover(&st.root, st, &[])?;
     }
-    let changes = changes_of(s, t)?;
-    let named = |dir: &str, key: &str| -> String {
-        let name = changes.iter().find(|c| c["entity"] == key && c["project"] == dir);
-        let name = name.and_then(|c| c["name"].as_str()).unwrap_or(key);
-        if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() }
+    let named = |st: &Store, dir: &str, key: &str| -> String {
+        let name: Option<String> = st
+            .db
+            .query_row("SELECT name FROM board_touches WHERE task=?1 AND entity=?2 ORDER BY seq LIMIT 1", params![tid, key], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| key.to_string());
+        if projects.len() > 1 { format!("{dir}: {name}") } else { name }
     };
     let (mut plans, mut conflicts) = (vec![], vec![]);
     for (dir, st) in &projects {
@@ -839,7 +779,7 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         for (key, _) in &states {
             let later:Option<String>=st.db.query_row("SELECT task FROM board_touches WHERE entity=?1 AND seq > (SELECT MIN(seq) FROM board_touches WHERE task=?2 AND entity=?1) AND task!=?2 ORDER BY seq DESC LIMIT 1",params![key,tid],|r|r.get(0)).optional()?;
             if let Some(other) = later {
-                conflicts.push(format!("{}: task {other}", named(dir, key)));
+                conflicts.push(format!("{}: task {other}", named(st, dir, key)));
             }
         }
         plans.push((dir, st, states));
@@ -867,7 +807,7 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         }
         st.db.execute_batch("SAVEPOINT revert_task")?;
         done.push((*st, undo));
-        if let Err(e) = restore(st, states) {
+        if let Err(e) = restore_task(st, &tid, states) {
             failed = Some((dir.as_str(), *st, e));
             break;
         }
@@ -1090,6 +1030,7 @@ pub fn fingerprint(s: &Store) -> Out {
 
 pub(crate) fn drop_before(s: &Store, tid: &str) -> Result<(), Failure> {
     s.db.execute("DELETE FROM board_before WHERE task=?", [tid])?;
+    s.db.execute("DELETE FROM board_ends WHERE task=?", [tid])?;
     let p = before_dir(&s.root, tid);
     if p.exists() {
         fs::remove_dir_all(p)?;
@@ -1323,4 +1264,259 @@ fn assessment_label(line: &str) -> Option<&'static str> {
         "Assessment: Needs work" => Some("Assessment: Needs work"),
         _ => None,
     }
+}
+
+/// Records the rows that changed only in layout, so cancel puts them back
+/// without listing them among the task's changes. An approved text change in
+/// `keys` keeps its text while its `ord`, `parent`, `sep` and `tail` go back.
+pub fn record_layout(s: &Store, tid: &str, before: &Value, after: &Value, keys: &[String]) -> Result<(), Failure> {
+    for key in keys {
+        if before[key] == after[key] {
+            continue;
+        }
+        let approved = !after[key].is_null() && before[key].get(4) != after[key].get(4);
+        let row = if after[key].is_null() { &before[key] } else { &after[key] };
+        let name = format!("{}.{}", row[1].as_str().unwrap_or(""), row[2].as_str().unwrap_or(""));
+        let value = layout_value(before, after, key, approved);
+        if !(approved && merge_stored_layout(s, tid, key, &value)?) {
+            s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, value.to_string()])?;
+        }
+        let touched: bool =
+            s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND entity=?2)", params![tid, key], |r| r.get(0))?;
+        if !touched {
+            s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, key, LAYOUT_RUN, name])?;
+        }
+    }
+    Ok(())
+}
+
+const LAYOUT_RUN: &str = "layout";
+
+/// Gives rows that share a place after a restore distinct `ord`s, in their current order.
+fn renumber_duplicate_orders(s: &Store, modules: &HashSet<String>) -> Result<(), Failure> {
+    for module in modules {
+        let duplicate: bool = s.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM symbols WHERE module=?1 AND live=1 GROUP BY parent, ord HAVING COUNT(*) > 1)",
+            [module.as_str()],
+            |r| r.get(0),
+        )?;
+        if !duplicate {
+            continue;
+        }
+        let rows: Vec<(String, Option<String>)> = {
+            let mut stmt = s.db.prepare("SELECT id, parent FROM symbols WHERE module=?1 AND live=1 ORDER BY parent, ord, rowid")?;
+            stmt.query_map([module.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?
+        };
+        let mut next: HashMap<Option<String>, i64> = HashMap::new();
+        for (id, parent) in rows {
+            let ord = next.entry(parent).or_insert(0);
+            s.db.execute("UPDATE symbols SET ord=?2 WHERE id=?1", params![id, *ord])?;
+            *ord += 1;
+        }
+    }
+    Ok(())
+}
+
+fn layout_value(before: &Value, after: &Value, key: &str, approved: bool) -> Value {
+    if !approved {
+        return before[key].clone();
+    }
+    let mut value = after[key].clone();
+    for i in [5, 8, 9, 10] {
+        value[i] = before[key].get(i).cloned().unwrap_or(Value::Null);
+    }
+    value
+}
+
+/// Keeps an approved text change in a stored undo row while leaving its place.
+fn merge_stored_layout(s: &Store, tid: &str, key: &str, value: &Value) -> Result<bool, Failure> {
+    let old: Option<String> =
+        s.db.query_row("SELECT data FROM board_before WHERE task=?1 AND entity=?2", params![tid, key], |r| r.get(0)).optional()?;
+    let Some(mut stored) = old.as_deref().and_then(|old| serde_json::from_str::<Value>(old).ok()).filter(Value::is_array) else {
+        return Ok(false);
+    };
+    stored[4] = value[4].clone();
+    stored[6] = value[6].clone();
+    s.db.execute("INSERT OR REPLACE INTO board_before VALUES (?1,?2,?3)", params![tid, key, stored.to_string()])?;
+    Ok(true)
+}
+
+pub(crate) fn record_approved_layout(s: &Store, tids: &[String], before: &Value, after: &Value, key: &str) -> Result<(), Failure> {
+    let value = layout_value(before, after, key, true);
+    for tid in tids {
+        merge_stored_layout(s, tid, key, &value)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn layout_tasks(s: &Store, key: &str) -> Result<Vec<String>, Failure> {
+    let mut q = s.db.prepare("SELECT DISTINCT task FROM board_touches WHERE entity=?1 AND run=?2")?;
+    Ok(q.query_map(params![key, LAYOUT_RUN], |r| r.get(0))?.collect::<Result<_, _>>()?)
+}
+
+pub(crate) fn drop_layout(s: &Store, removed: &[(String, Vec<String>)]) -> Result<(), Failure> {
+    for (key, tids) in removed {
+        for tid in tids {
+            s.db.execute("DELETE FROM board_before WHERE task=?1 AND entity=?2", params![tid, key])?;
+            s.db.execute("DELETE FROM board_touches WHERE task=?1 AND entity=?2 AND run=?3", params![tid, key, LAYOUT_RUN])?;
+        }
+    }
+    Ok(())
+}
+
+/// Records the ending a task's cancel should restore at each level it changes.
+pub(crate) fn record_endings(
+    s: &Store,
+    before: &Value,
+    after: &Value,
+    keys: &[String],
+    open: &HashSet<String>,
+    target: Option<&str>,
+) -> Result<(), Failure> {
+    let mut levels: HashSet<(String, String)> = HashSet::new();
+    for key in keys {
+        if !key.starts_with("symbol:") {
+            continue;
+        }
+        let row = if after[key].is_array() { &after[key] } else { &before[key] };
+        if let Some((module, parent)) = row_level(row) {
+            levels.insert((module.to_string(), parent.to_string()));
+        }
+    }
+    for (module, parent) in levels {
+        let Some(last) = last_at_level(before, &module, &parent) else { continue };
+        let Some(id) = last.get(0).and_then(Value::as_str) else { continue };
+        let sep = last.get(9).and_then(Value::as_str).unwrap_or("");
+        for tid in open {
+            if target == Some(tid.as_str()) || task_has_level(s, tid, &module, &parent)? {
+                s.db.execute(
+                    "INSERT OR IGNORE INTO board_ends(task,module,parent,last,sep) VALUES (?1,?2,?3,?4,?5)",
+                    params![tid, module, parent, id, sep],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn last_at_level<'a>(before: &'a Value, module: &str, parent: &str) -> Option<&'a Value> {
+    before
+        .as_object()?
+        .values()
+        .filter(|r| r.is_array() && row_level(r) == Some((module, parent)))
+        .max_by_key(|r| (r.get(5).and_then(Value::as_i64).unwrap_or(0), r.get(0).and_then(Value::as_str).unwrap_or("")))
+}
+
+fn row_level(row: &Value) -> Option<(&str, &str)> {
+    Some((row.get(1)?.as_str()?, row.get(8).and_then(Value::as_str).unwrap_or("")))
+}
+
+fn task_has_level(s: &Store, tid: &str, module: &str, parent: &str) -> Result<bool, Failure> {
+    let mut st = s.db.prepare("SELECT data FROM board_before WHERE task=?1 AND entity LIKE 'symbol:%'")?;
+    for data in st.query_map([tid], |r| r.get::<_, String>(0))? {
+        let Ok(row) = serde_json::from_str::<Value>(&data?) else { continue };
+        if row.is_array() && row_level(&row) == Some((module, parent)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn restore_task(s: &Store, tid: &str, states: &[(String, Value)]) -> Result<(), Failure> {
+    restore_states(s, Some(tid), states)
+}
+
+fn restore_states(s: &Store, tid: Option<&str>, states: &[(String, Value)]) -> Result<(), Failure> {
+    let mut kept = HashMap::new();
+    let mut restored = HashSet::new();
+    for (key, v) in states {
+        if let Some(id) = key.strip_prefix("symbol:") {
+            if v.is_null() {
+                s.db.execute("DELETE FROM symbols WHERE id=?", [id])?;
+            } else {
+                if let Some(module) = v.get(1).and_then(Value::as_str) {
+                    restored.insert(module.to_string());
+                }
+                // A snapshot from before the nested columns has only the first eight (D-158).
+                s.db.execute(
+                    "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live,parent,sep,tail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![
+                        v[0].as_str(),
+                        v[1].as_str(),
+                        v[2].as_str(),
+                        v[3].as_str(),
+                        v[4].as_str(),
+                        v[5].as_i64(),
+                        v[6].as_str(),
+                        v[7].as_i64(),
+                        v.get(8).and_then(|x| x.as_str()),
+                        v.get(9).and_then(|x| x.as_str()),
+                        v.get(10).and_then(|x| x.as_str()).unwrap_or("")
+                    ],
+                )?;
+            }
+        } else if let Some(name) = key.strip_prefix("module:") {
+            if !v.is_array() {
+                // Where its file's folders stop going, when recorded (D-136).
+                if let Some(k) = v["kept"].as_str() {
+                    // A Rust module's row holds its file; a Gleam one its dir (D-168).
+                    let row: Option<(String, Option<String>)> =
+                        s.db.query_row("SELECT dir, file FROM modules WHERE path=?", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+                    if let Some((dir, file)) = row {
+                        kept.insert(file.unwrap_or_else(|| outside::file_of(&dir, name)), k.to_string());
+                    }
+                }
+                // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
+                s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
+            } else {
+                // ON CONFLICT keeps a Rust module's `file` and `owns_dir`; a snapshot from
+                // before them reads as None.
+                let (path, dir, header) = (v[0].as_str(), v[1].as_str(), v[2].as_str());
+                let (file, owns) = (v.get(3).and_then(|x| x.as_str()), v.get(4).and_then(|x| x.as_i64()));
+                s.db.execute(
+                    "INSERT INTO modules(path,dir,header,file,owns_dir) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, header=excluded.header, file=excluded.file, owns_dir=excluded.owns_dir",
+                    params![path, dir, header, file, owns],
+                )?;
+            }
+        } else if let Some(name) = key.strip_prefix("file:") {
+            let p = lockdown::path(&s.root, name)?;
+            if let Some(bytes) = v.as_array() {
+                fs::create_dir_all(p.parent().unwrap())?;
+                fs::write(p, jsonx::bytes(bytes))?;
+            } else if p.exists() {
+                fs::remove_file(&p)?;
+                // with the folders that leaves empty, such as those a carried file made (D-103),
+                // up to the top folder or the one recorded as there before (D-136)
+                let top = name.split('/').next().unwrap_or_default();
+                let stop = v["kept"].as_str().filter(|k| k.len() > top.len()).unwrap_or(top);
+                outside::remove_empty_dirs(&s.root.join(stop), p.parent());
+            }
+        }
+    }
+    renumber_duplicate_orders(s, &restored)?;
+    if let Some(tid) = tid {
+        apply_endings(s, tid)?;
+    }
+    let ix = s.index()?;
+    s.materialize_to(&ix, &s.root, &kept)?;
+    Ok(())
+}
+
+fn apply_endings(s: &Store, tid: &str) -> Result<(), Failure> {
+    let mut st = s.db.prepare("SELECT module,parent,last,sep FROM board_ends WHERE task=?1")?;
+    let rows: Vec<(String, String, String, String)> =
+        st.query_map([tid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?;
+    for (module, parent, last, sep) in rows {
+        let id: Option<String> =
+            s.db.query_row(
+                "SELECT id FROM symbols WHERE module=?1 AND live=1 AND COALESCE(parent,'')=?2 ORDER BY ord DESC, id DESC LIMIT 1",
+                params![module, parent],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id.filter(|id| id != &last) {
+            s.db.execute("UPDATE symbols SET sep=?2 WHERE id=?1", params![id, sep])?;
+        }
+    }
+    Ok(())
 }

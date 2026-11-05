@@ -602,10 +602,10 @@ impl Events {
         let list = format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs}));
         Ok(Some(list + &self.strategy_state() + &self.state_of(&added)))
     }
-}
 
-impl Read for Events {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+    /// Fills `out` with the next event, or waits for one. An error here ends
+    /// the stream: the browser must see the connection close so it reconnects.
+    fn next(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         if out.is_empty() {
             return Ok(0);
         }
@@ -674,6 +674,12 @@ impl Read for Events {
             self.bytes = std::io::Cursor::new(b": keepalive\n\n".to_vec());
             return self.bytes.read(out);
         }
+    }
+}
+
+impl Read for Events {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.next(out)
     }
 }
 
@@ -892,24 +898,10 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 Ok(None) => (None, full.clone()),
             };
             if url.split('?').next() == Some("/events") {
-                let last = req.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).map(|h| h.value.as_str().to_string());
-                let mut reader = crate::board::server::Events::new(board.clone(), root.clone(), last.as_deref());
-                let mut writer = req.into_writer();
-                if writer
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                    )
-                    .and_then(|_| writer.flush())
-                    .is_err()
-                {
-                    return;
-                }
-                let mut buf = [0; 8192];
-                while let Ok(n) = reader.read(&mut buf) {
-                    if n == 0 || writer.write_all(&buf[..n]).and_then(|_| writer.flush()).is_err() {
-                        break;
-                    }
-                }
+                let header = req.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).map(|h| h.value.as_str().to_string());
+                let last = events_position(&full, header.as_deref());
+                let reader = crate::board::server::Events::new(board.clone(), root.clone(), last.as_deref());
+                crate::board::server::respond_events(req, reader);
                 return;
             }
             // A link's address, `/task/{id}` (D-98), `/feature/{id}` or `/milestone/{id}`
@@ -1021,4 +1013,92 @@ fn root_route(path: &str, explicit: bool) -> bool {
         || path == "/migration"
         || path.starts_with("/migration/")
         || (path == "/events" && explicit)
+}
+
+/// Answers `/events` with the stream as the response body: when the stream
+/// ends, the response ends too, so the browser reconnects instead of waiting
+/// on a connection that stays open but silent.
+pub(crate) fn respond_events(req: tiny_http::Request, mut reader: impl std::io::Read) {
+    let mut writer = req.into_writer();
+    let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\
+                 Connection: close\r\n\r\n";
+    if writer.write_all(head).and_then(|_| writer.flush()).is_err() {
+        return;
+    }
+    let mut buf = [0; 8192];
+    loop {
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read(&mut buf)));
+        match read {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                let chunk = &buf[..n];
+                let framed = format!("{:X}\r\n", chunk.len());
+                if writer
+                    .write_all(framed.as_bytes())
+                    .and_then(|_| writer.write_all(chunk))
+                    .and_then(|_| writer.write_all(b"\r\n"))
+                    .and_then(|_| writer.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Err(e)) => {
+                log_event_error(&e.to_string());
+                break;
+            }
+            Err(_) => {
+                eprintln!("events stream panicked");
+                break;
+            }
+        }
+    }
+    // The terminal chunk ends the response, so the browser closes the stream
+    // and reconnects even though tiny_http keeps the socket for another request.
+    let _ = writer.write_all(b"0\r\n\r\n").and_then(|_| writer.flush());
+}
+
+/// The position a reconnect asks for: the `Last-Event-ID` header a native
+/// reconnect sends, or the `?last=` query a page names when it opens a new
+/// stream. The header wins when both are present.
+fn events_position(full: &str, header: Option<&str>) -> Option<String> {
+    header.map(str::to_string).or_else(|| {
+        full.split_once('?')
+            .map(|(_, query)| query)
+            .unwrap_or("")
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("last="))
+            .map(view::percent_decode)
+    })
+}
+
+/// Whether to print `reason` now: each reason is news once and then worth
+/// repeating only after `quiet` has passed, whatever other reasons came between.
+fn note_event_error(last: &mut Vec<(String, std::time::Instant)>, reason: &str, now: std::time::Instant, quiet: Duration) -> bool {
+    const KEPT: usize = 8;
+    if let Some((_, at)) = last.iter_mut().find(|(old, _)| old == reason) {
+        if now.duration_since(*at) < quiet {
+            return false;
+        }
+        *at = now;
+        return true;
+    }
+    if last.len() >= KEPT {
+        if let Some((i, _)) = last.iter().enumerate().min_by_key(|(_, (_, at))| *at) {
+            last.remove(i);
+        }
+    }
+    last.push((reason.to_string(), now));
+    true
+}
+
+/// Prints an event-stream failure, keeping a browser's reconnect loop from
+/// printing the same line every few seconds.
+fn log_event_error(reason: &str) {
+    static LAST: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap();
+    if note_event_error(&mut last, reason, std::time::Instant::now(), Duration::from_secs(60)) {
+        eprintln!("events stream ended: {reason}");
+    }
 }

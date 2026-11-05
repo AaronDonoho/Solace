@@ -6,7 +6,8 @@ Checking
   test --all                    run every test
   check [--warnings]            type-check everything; lists broken symbols
   probe                         run throwaway code (`text`) and show its output;
-                                nothing is saved. In a Gleam project,
+                                nothing is saved. Its own code runs for at most
+                                120 seconds, after it compiles. In a Gleam project,
                                 statements become `main`'s body, or give a
                                 module with `pub fn main()`; `echo value`
                                 prints a value, and a single expression is

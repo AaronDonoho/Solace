@@ -16,15 +16,42 @@ export function request(base, path, method, body, receive) {
     )
     .catch(error => console.error(error));
 }
+const streams = new WeakMap();
 export function events(base, receive, ready = () => {}) {
-  const source = new EventSource(base + '/events');
-  source.onmessage = event => receive(event.data);
-  source.addEventListener('ready', () => ready());
-  // Native EventSource reconnects with Last-Event-ID.
-  source.onerror = () => {};
+  const state = { base, receive, ready, last: '', attempt: 0, timer: null, current: null, stopped: false };
+  const open = () => {
+    if (state.stopped) return null;
+    // Native EventSource reconnects with Last-Event-ID. One the browser has
+    // closed for good is opened afresh, and the query carries the position a
+    // script can't put in that header.
+    const source = new EventSource(state.base + '/events' + (state.last ? '?last=' + encodeURIComponent(state.last) : ''));
+    state.current = source;
+    source.onmessage = event => {
+      if (event.lastEventId) state.last = event.lastEventId;
+      state.receive(event.data);
+    };
+    source.addEventListener('ready', () => { state.attempt = 0; state.ready(); });
+    source.onerror = () => {
+      // While the browser is retrying, it keeps its own position.
+      if (state.stopped || source.readyState !== 2) return;
+      source.close();
+      const wait = Math.min(1000 * 2 ** state.attempt, 30000);
+      state.attempt++;
+      state.timer = setTimeout(() => { state.timer = null; open(); }, wait);
+    };
+    return source;
+  };
+  const source = open();
+  if (source) streams.set(source, state);
   return source;
 }
-export function close_events(source) { source?.close(); }
+export function close_events(source) {
+  const state = source && streams.get(source);
+  if (!state) return source?.close();
+  state.stopped = true;
+  if (state.timer) clearTimeout(state.timer);
+  state.current?.close();
+}
 export function after(ms, callback) {
   setTimeout(callback, ms);
 }

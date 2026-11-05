@@ -327,11 +327,15 @@ fn rust_items_under(ix: &Index, pieces: &[language::rust::Piece], stored: &[usiz
     let mut out = vec![];
     for p in pieces {
         let namespace = rust_namespaces(p.kind, &p.text);
-        let hit = (0..stored.len()).find(|&k| {
-            !used[k]
-                && ix.syms[stored[k]].name == p.name
-                && rust_namespaces(&ix.syms[stored[k]].kind_text, &ix.syms[stored[k]].text) == namespace
-        });
+        let hit = paired_index(
+            stored
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| !used[*k])
+                .map(|(k, &i)| (k, ix.syms[i].name.as_str(), rust_namespaces(&ix.syms[i].kind_text, &ix.syms[i].text))),
+            p.name.as_str(),
+            namespace,
+        );
         if let Some(k) = hit {
             used[k] = true;
         }
@@ -545,15 +549,11 @@ impl Store {
         added: &mut Vec<(String, String)>,
     ) -> Result<(), Failure> {
         for (ord, item) in items.iter().enumerate() {
-            let rev = revision(&item.text);
             match item.stored {
                 Some(i) => {
                     let id = ix.syms[i].id.clone();
                     let edited = ix.syms[i].text != item.text || ix.syms[i].kind_text != item.kind;
-                    self.db.execute(
-                        "UPDATE symbols SET name = ?2, kind = ?3, text = ?4, ord = ?5, revision = ?6, sep = ?7, tail = ?8 WHERE id = ?1",
-                        params![id, item.name, item.kind, item.text, ord as i64, rev, item.sep, item.tail],
-                    )?;
+                    self.rust_update_item(&id, &item.name, item.kind, &item.text, ord as i64, parent, &item.sep, &item.tail)?;
                     if edited {
                         self.history(&id, "edit", &item.name)?;
                         changed.push((id.clone(), item.name.clone()));
@@ -561,12 +561,7 @@ impl Store {
                     self.rust_save_items(module, Some(id.as_str()), &item.children, ix, changed, added)?;
                 }
                 None => {
-                    let id = new_id(language::rust::id_kind(item.kind));
-                    self.db.execute(
-                        "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                        params![id, module, item.name, item.kind, item.text, ord as i64, rev, parent, item.sep, item.tail],
-                    )?;
+                    let id = self.rust_insert_item(module, parent, ord as i64, &item.name, item.kind, &item.text, &item.sep, &item.tail)?;
                     self.history(&id, "create", &item.name)?;
                     added.push((id.clone(), item.name.clone()));
                     self.rust_save_items(module, Some(id.as_str()), &item.children, ix, changed, added)?;
@@ -1388,6 +1383,47 @@ impl Store {
         let (id, name, file_module) = (sym.id.clone(), sym.name.clone(), sym.module.clone());
         self.save_imports(&file_module, &saved, || self.set_symbol_text(&id, &name, &text))
     }
+
+    /// Writes one stored Rust row, taking the text's name, kind, text, `ord`,
+    /// `sep` and `tail`; the columns every Rust reader and submit share.
+    fn rust_update_item(
+        &self,
+        id: &str,
+        name: &str,
+        kind: &str,
+        text: &str,
+        ord: i64,
+        parent: Option<&str>,
+        sep: &str,
+        tail: &str,
+    ) -> Result<(), Failure> {
+        self.db.execute(
+            "UPDATE symbols SET name = ?2, kind = ?3, text = ?4, revision = ?5, ord = ?6, parent = ?7, sep = ?8, tail = ?9 WHERE id = ?1",
+            params![id, name, kind, text, revision(text), ord, parent, sep, tail],
+        )?;
+        Ok(())
+    }
+
+    /// Adds one Rust row with the same columns `rust_update_item` writes.
+    fn rust_insert_item(
+        &self,
+        module: &str,
+        parent: Option<&str>,
+        ord: i64,
+        name: &str,
+        kind: &str,
+        text: &str,
+        sep: &str,
+        tail: &str,
+    ) -> Result<String, Failure> {
+        let id = new_id(language::rust::id_kind(kind));
+        self.db.execute(
+            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, module, name, kind, text, ord, revision(text), parent, sep, tail],
+        )?;
+        Ok(id)
+    }
 }
 
 /// A note for the lines of `text` that rustfmt left longer than `max_width`.
@@ -1787,4 +1823,161 @@ fn mod_identity(text: &str) -> String {
         return text.to_string();
     };
     format!("{}{}{}", &text[..start], indent, rest.trim_start())
+}
+
+/// A stored Rust row while a changed file is paired with it by name.
+struct OutsideRow {
+    id: String,
+    name: String,
+    text: String,
+    parent: Option<String>,
+    namespace: u8,
+}
+
+/// A piece of a changed Rust file and the stored row it keeps, if any.
+struct OutsideNode<'a> {
+    piece: &'a language::rust::Piece,
+    id: Option<String>,
+    kids: Vec<OutsideNode<'a>>,
+}
+
+/// Reads a changed Rust file in by symbol (D-58, D-158): its header and every
+/// item become new revisions, paired by name under their parent; a removed file
+/// retires its symbols. A file the splitter refuses stays unread.
+pub(crate) fn read_outside(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String>, Failure> {
+    let module = {
+        let mut stmt = s.db.prepare("SELECT path FROM modules WHERE file = ?1")?;
+        let mut rows = stmt.query_map([rel], |r| r.get::<_, String>(0))?;
+        match rows.next() {
+            Some(m) => m?,
+            None => return Ok(Ok(())),
+        }
+    };
+    let Some(text) = text else {
+        let ids: Vec<String> = {
+            let mut stmt = s.db.prepare("SELECT id FROM symbols WHERE module = ?1 AND live = 1")?;
+            let rows = stmt.query_map([&module], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for id in &ids {
+            s.retire(id, "outside Solace")?;
+        }
+        s.db.execute("DELETE FROM modules WHERE path = ?1", [&module])?;
+        return Ok(Ok(()));
+    };
+    let parsed = match language::rust::split(text, &module) {
+        Ok(file) => file,
+        Err(e) => return Ok(Err(format!("{rel}: {}", e.0))),
+    };
+    if let Some(r) = parsed.refusals.first() {
+        return Ok(Err(format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)));
+    }
+    if let Some(name) = language::rust::inline_file_mod(text, &parsed.items) {
+        return Ok(Err(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet")));
+    }
+    let rows: Vec<OutsideRow> = {
+        let mut stmt =
+            s.db.prepare("SELECT id, name, kind, text, parent FROM symbols WHERE module = ?1 AND live = 1 ORDER BY parent, ord")?;
+        stmt.query_map([&module], |r| {
+            let kind: String = r.get(2)?;
+            let text: String = r.get(3)?;
+            Ok(OutsideRow { id: r.get(0)?, name: r.get(1)?, namespace: rust_namespaces(&kind, &text), text, parent: r.get(4)? })
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    s.db.execute("UPDATE modules SET header = ?2 WHERE path = ?1", params![module, parsed.header])?;
+    let mut used = vec![false; rows.len()];
+    let mut nodes = pair_outside(&parsed.items, None, &rows, &mut used);
+    for node in &mut nodes {
+        pair_outside_global(node, &rows, &mut used);
+    }
+    write_outside(s, &module, None, &nodes, &rows)?;
+    for (i, row) in rows.iter().enumerate() {
+        if !used[i] {
+            s.retire(&row.id, "outside Solace")?;
+        }
+    }
+    Ok(Ok(()))
+}
+
+fn pair_outside<'a>(
+    pieces: &'a [language::rust::Piece],
+    parent: Option<&str>,
+    rows: &[OutsideRow],
+    used: &mut [bool],
+) -> Vec<OutsideNode<'a>> {
+    pieces
+        .iter()
+        .map(|p| {
+            let ns = rust_namespaces(p.kind, &p.text);
+            let hit = paired_index(
+                rows.iter()
+                    .enumerate()
+                    .filter(|(i, row)| !used[*i] && row.parent.as_deref() == parent)
+                    .map(|(i, row)| (i, row.name.as_str(), row.namespace)),
+                p.name.as_str(),
+                ns,
+            );
+            let id = hit.map(|i| {
+                used[i] = true;
+                rows[i].id.clone()
+            });
+            let kids = match id.as_deref() {
+                Some(id) => pair_outside(&p.children, Some(id), rows, used),
+                None => unpaired_outside(&p.children),
+            };
+            OutsideNode { piece: p, id, kids }
+        })
+        .collect()
+}
+
+fn pair_outside_global(node: &mut OutsideNode<'_>, rows: &[OutsideRow], used: &mut [bool]) {
+    if node.id.is_none() {
+        let ns = rust_namespaces(node.piece.kind, &node.piece.text);
+        let hit = paired_index(
+            rows.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(i, row)| (i, row.name.as_str(), row.namespace)),
+            node.piece.name.as_str(),
+            ns,
+        );
+        if let Some(i) = hit {
+            used[i] = true;
+            let id = rows[i].id.clone();
+            node.id = Some(id.clone());
+            node.kids = pair_outside(&node.piece.children, Some(&id), rows, used);
+        }
+    }
+    for kid in &mut node.kids {
+        pair_outside_global(kid, rows, used);
+    }
+}
+
+fn unpaired_outside(pieces: &[language::rust::Piece]) -> Vec<OutsideNode<'_>> {
+    pieces.iter().map(|p| OutsideNode { piece: p, id: None, kids: unpaired_outside(&p.children) }).collect()
+}
+
+fn write_outside(s: &Store, module: &str, parent: Option<&str>, nodes: &[OutsideNode<'_>], rows: &[OutsideRow]) -> Result<(), Failure> {
+    for (ord, node) in nodes.iter().enumerate() {
+        let (text, tail, sep) = store::piece_parts(node.piece);
+        let id = match &node.id {
+            Some(id) => {
+                s.rust_update_item(id, &node.piece.name, node.piece.kind, &text, ord as i64, parent, &sep, &tail)?;
+                if rows.iter().find(|r| &r.id == id).is_some_and(|r| r.text != text) {
+                    s.history(id, "edit", "outside Solace")?;
+                }
+                id.clone()
+            }
+            None => {
+                let id = s.rust_insert_item(module, parent, ord as i64, &node.piece.name, node.piece.kind, &text, &sep, &tail)?;
+                s.history(&id, "add", "outside Solace")?;
+                id
+            }
+        };
+        write_outside(s, module, Some(&id), &node.kids, rows)?;
+    }
+    Ok(())
+}
+
+/// Pairs a stored Rust row with a piece by name and namespace (D-158).
+fn paired_index<'a>(mut rows: impl Iterator<Item = (usize, &'a str, u8)>, name: &str, namespace: u8) -> Option<usize> {
+    rows.find_map(|(i, row_name, row_namespace)| (row_name == name && row_namespace == namespace).then_some(i))
 }

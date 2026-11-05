@@ -1683,6 +1683,27 @@ class Root(unittest.TestCase):
         # A command in the project sees nothing new.
         self.assertNotIn('outside Solace', self.cli('check', cwd=self.root/'b'))
 
+    def test_a_rust_change_made_outside_solace_waits_for_review(self):
+        # Spec 15 U1 for Rust: the poll reads an outside edit in by symbol, keeps
+        # the file, and cancel puts back both.
+        body = 'pub fn one() -> i32 {\n    1\n}\n\nfn main() {}\n'
+        cargo_package(self.root/'rust', body=body)
+        self.start()
+        self.api('POST', '/projects', {'dir': 'rust'})
+        edited = body.replace('    1', '    2')
+        (self.root/'rust/src/main.rs').write_text(edited)
+        end = time.monotonic() + 20
+        while not (found := [t for t in self.api('GET', '/p/rust/tasks') if t.get('unexpected')]) and time.monotonic() < end:
+            time.sleep(.1)
+        self.assertEqual([t['title'] for t in found], ['Unexpected Changes'])
+        t = self.wait('/p/rust', found[0], lambda v: v['notes'])
+        self.assertEqual([c['name'] for c in t['changes']], ['crate.one'])
+        self.assertIn('Changed outside Solace: crate.one', t['notes'][0]['text'])
+        self.assertEqual((self.root/'rust/src/main.rs').read_text(), edited)
+        self.api('POST', f'/p/rust/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assertEqual((self.root/'rust/src/main.rs').read_text(), body)
+        self.assertNotIn('outside Solace', self.cli('check', cwd=self.root/'rust'))
+
     def test_the_store_is_shared_but_its_local_files_are_not(self):
         # D-179: the symbol database and approved list are committed; locks,
         # logs, caches, migration scratch and board run data stay ignored.

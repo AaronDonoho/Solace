@@ -1,5 +1,5 @@
 //! Changes made outside Solace (D-58). Solace remembers what it last wrote to
-//! each Gleam file (`.solace/written`) and never writes over a file that
+//! each source file (`.solace/written`) and never writes over a file that
 //! differs from that; such a file is read into the store instead, and the
 //! change goes to the running task or to Unexpected Changes for review.
 //! `.solace/approved` holds each symbol's and header's hash as last approved,
@@ -13,7 +13,6 @@ use crate::store::projection;
 use std::collections::HashMap;
 #[cfg(test)] use crate::lockdown::settings::settings;
 #[cfg(test)] use crate::board::task_model::open;
-
 pub const TITLE: &str = "Unexpected Changes";
 
 fn digest(bytes: &[u8]) -> String {
@@ -30,6 +29,7 @@ fn stat(path: &Path) -> Option<(u64, u128)> {
 /// `! hash path` for a version it couldn't read in and already reported,
 /// `? digest` for the ignore file that last hid the store, and
 /// `# old-copies-removed` once the old id-keyed copies are gone.
+/// `# rust-bad-marks-cleared` once an older store's Rust refusals were retried.
 pub struct Written {
     root: PathBuf,
     files: BTreeMap<String, (String, u64, u128)>,
@@ -40,6 +40,8 @@ pub struct Written {
     pub known: bool,
     /// True once copies under the old id-keyed layout have been removed.
     old_copies_removed: bool,
+    /// True once the Rust files an older store refused were retried.
+    rust_bad_cleared: bool,
     dirty: bool,
 }
 
@@ -48,9 +50,14 @@ impl Written {
         let text = fs::read_to_string(root.join(".solace/written"));
         let (mut files, mut bad, mut hidden) = (BTreeMap::new(), BTreeMap::new(), None);
         let mut old_copies_removed = false;
+        let mut rust_bad_cleared = false;
         for line in text.as_deref().unwrap_or("").lines() {
             if line == OLD_COPIES_REMOVED {
                 old_copies_removed = true;
+                continue;
+            }
+            if line == RUST_BAD_CLEARED {
+                rust_bad_cleared = true;
                 continue;
             }
             if let Some(h) = line.strip_prefix("? ") {
@@ -66,7 +73,7 @@ impl Written {
                 files.insert(path.to_string(), (h.to_string(), size.parse().unwrap_or(0), time.parse().unwrap_or(0)));
             }
         }
-        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), old_copies_removed, dirty: false }
+        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), old_copies_removed, rust_bad_cleared, dirty: false }
     }
 
     pub fn save(&mut self) -> Result<(), Failure> {
@@ -74,6 +81,10 @@ impl Written {
             let mut text: String = self.hidden.iter().map(|h| format!("? {h}\n")).collect();
             if self.old_copies_removed {
                 text.push_str(OLD_COPIES_REMOVED);
+                text.push('\n');
+            }
+            if self.rust_bad_cleared {
+                text.push_str(RUST_BAD_CLEARED);
                 text.push('\n');
             }
             text.extend(self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")));
@@ -281,10 +292,8 @@ pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
 
 /// Reads one changed file into the store, or says why it can't.
 fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String>, Failure> {
-    // Reading a changed Rust file back into the store is the Rust store
-    // task's; until then the change is reported, not lost (D-158).
     if language::is_rust(&s.root) {
-        return Ok(Err(format!("{rel}: changes to Rust files outside Solace aren't read in yet")));
+        return crate::rust_submit::read_outside(s, rel, text);
     }
     let (dir, file) = rel.split_once('/').unwrap();
     let module = file.strip_suffix(".gleam").unwrap();
@@ -368,6 +377,12 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         w.known = true;
         w.dirty = true;
     }
+    if language::is_rust(&s.root) && !w.rust_bad_cleared {
+        // An older store refused every Rust file; retry each once before trusting the mark.
+        w.bad.clear();
+        w.rust_bad_cleared = true;
+        w.dirty = true;
+    }
     if !s.root.join(".solace/approved").exists() {
         approve_all(s)?;
     }
@@ -439,6 +454,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     let here = scope::dir(&top, &s.root);
     let all = scope::tasks_in(&top, &here)?;
     let open: Vec<&(PathBuf, Value)> = all.iter().filter(|(_, t)| board::column(&flow, t)["final"] != true).collect();
+    let mut open_ids: HashSet<String> = open.iter().filter_map(|(_, t)| t["id"].as_str().map(String::from)).collect();
     let mut touched: HashSet<String> = HashSet::new();
     for (_, t) in &open {
         let changes = board::changes_of(s, t)?;
@@ -446,10 +462,27 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     }
     let list = approved(&s.root);
     let keys: HashSet<&String> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
-    let mut unexpected = vec![];
-    for key in keys {
+    let changed: Vec<String> = keys.iter().map(|key| (*key).clone()).collect();
+    let running = open.iter().find_map(|(home, t)| {
+        let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
+        Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
+    });
+    let mut unexpected_tid = open
+        .iter()
+        .map(|(_, t)| t)
+        .find(|t| t["unexpected"] == true && board::task(&s.root, t["id"].as_str().unwrap_or("")).is_ok())
+        .and_then(|t| t["id"].as_str().map(String::from));
+    let target = running.as_ref().map(|(_, tid, _)| tid.clone()).or_else(|| unexpected_tid.clone());
+    let layout_tasks = |key: &str| -> Result<Vec<String>, Failure> {
+        Ok(crate::board::reviews::layout_tasks(s, key)?.into_iter().filter(|tid| open_ids.contains(tid)).collect())
+    };
+    let (mut unexpected, mut layout, mut approved_layout, mut removed_layout) = (vec![], vec![], vec![], vec![]);
+    for key in &changed {
         if before[key] == after[key] {
             continue;
+        }
+        if key.starts_with("symbol:") && before[key].get(4).and_then(Value::as_str) == after[key].get(4).and_then(Value::as_str) {
+            layout.push(key.clone());
         }
         let quiet = !touched.contains(key.as_str())
             && match approval(key, &after[key]) {
@@ -458,9 +491,32 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
             };
         if !quiet {
             unexpected.push(key.clone());
+        } else {
+            let decision = classify_quiet_layout(key, &before, &after, target.as_deref(), &layout_tasks)?;
+            layout.extend(decision.layout);
+            approved_layout.extend(decision.approved);
+            removed_layout.extend(decision.removed);
         }
     }
+    for (key, holders) in &approved_layout {
+        crate::board::reviews::record_approved_layout(s, holders, &before, &after, key)?;
+    }
+    if running.is_none() && unexpected_tid.is_none() && (!unexpected.is_empty() || !unreadable.is_empty()) {
+        let tid = create_unexpected_task(&top, &here, &flow, &all)?;
+        open_ids.insert(tid.clone());
+        unexpected_tid = Some(tid);
+    }
+    let write_target = running.as_ref().map(|(_, tid, _)| tid.as_str()).or(unexpected_tid.as_deref());
+    crate::board::reviews::record_endings(s, &before, &after, &changed, &open_ids, write_target)?;
+    crate::board::reviews::drop_layout(s, &removed_layout)?;
     if unexpected.is_empty() && unreadable.is_empty() {
+        if !layout.is_empty() {
+            if let Some((_, tid, _)) = &running {
+                crate::board::reviews::record_layout(s, tid, &before, &after, &layout)?;
+            } else if let Some(tid) = &unexpected_tid {
+                crate::board::reviews::record_layout(s, tid, &before, &after, &layout)?;
+            }
+        }
         return Ok(hidden);
     }
     let pick = |v: &Value| json!(unexpected.iter().map(|k| (k.clone(), v[k].clone())).collect::<serde_json::Map<_, _>>());
@@ -474,16 +530,16 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
             })
             .collect();
         n.sort();
+        n.dedup();
         n
     };
-    let running = open.iter().find_map(|(home, t)| {
-        let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
-        Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
-    });
     // Tasks change through the task server (D-77).
     if let Some((_, tid, rid)) = running {
         if !unexpected.is_empty() {
             board::record(s, &tid, &rid, &bf, &af, None)?;
+        }
+        if !layout.is_empty() {
+            crate::board::reviews::record_layout(s, &tid, &before, &after, &layout)?;
         }
         let text = format!(
             "{}{unreadable_note}",
@@ -493,33 +549,17 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
                 format!("Changed outside Solace during this run and added to this task: {}.\n", names.join(", "))
             }
         );
-        tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
-        return Ok(format!("{hidden}Note: {text}"));
+        if !text.is_empty() {
+            tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
+        }
+        return Ok(if text.is_empty() { hidden } else { format!("{hidden}Note: {text}") });
     }
-    let tid =
-        match open.iter().map(|(_, t)| t).find(|t| t["unexpected"] == true && board::task(&s.root, t["id"].as_str().unwrap_or("")).is_ok())
-        {
-            Some(t) => t["id"].as_str().unwrap().to_string(),
-            None => {
-                let rank = all.iter().filter_map(|(_, t)| t["rank"].as_f64()).fold(0., f64::min) - 1.;
-                let mut t = board::new_task(
-                    TITLE,
-                    concat!(
-                        "Code changed outside Solace while no agent was working. Complete this task to keep ",
-                        "the changes, or cancel it to restore the code Solace had. No agent starts work until ",
-                        "it is completed or canceled."
-                    ),
-                    &flow["events"]["finished"],
-                    rank,
-                );
-                t["unexpected"] = json!(true);
-                t["home"] = json!(here);
-                tasks::deliver(&top, json!({"kind":"create","new":t}))?;
-                t["id"].as_str().unwrap().to_string()
-            }
-        };
+    let tid = unexpected_tid.expect("an Unexpected Changes task is created before its changes are recorded");
     if !unexpected.is_empty() {
         board::record(s, &tid, "outside", &bf, &af, None)?;
+    }
+    if !layout.is_empty() {
+        crate::board::reviews::record_layout(s, &tid, &before, &after, &layout)?;
     }
     let compiled = match s.check() {
         Ok(out) => out,
@@ -859,6 +899,1813 @@ mod tests {
         assert!(ignores_store("/.solace/store.db\n", "."));
         assert!(!ignores_store("/.solace/store.db\n", "project"));
         assert!(ignores_store("/project/.solace/store.db\n", "project"));
+    }
+
+    const LIB: &str = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+
+    fn rust_app() -> (Scratch, Store) {
+        let (root, s) = rust_project(LIB);
+        board::open(&s.root).unwrap();
+        (root, s)
+    }
+
+    fn rust_file(s: &Store) -> String {
+        fs::read_to_string(s.root.join("src/lib.rs")).unwrap()
+    }
+
+    fn rust_text(s: &Store, name: &str) -> Option<String> {
+        s.db.query_row("SELECT text FROM symbols WHERE module = 'crate' AND name = ?1 AND live = 1", [name], |r| r.get(0))
+            .optional()
+            .unwrap()
+    }
+
+    /// D-58.1/4/5 for Rust: an outside edit is read in by symbol, nested items
+    /// included, and the file is never written over.
+    #[test]
+    fn rust_edits_are_read_in_and_reviewed() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let edited = LIB.replace("    2", "    22") + "\npub fn three() -> i32 {\n    3\n}\n";
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains(TITLE) && note.contains("crate.three, crate.two"), "{note}");
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    22\n}"));
+        assert!(rust_text(&s, "three").is_some());
+        assert_eq!(rust_file(&s), edited);
+        let ix = s.index().unwrap();
+        let m = ix.modules.iter().find(|m| m.path == "crate").unwrap();
+        assert_eq!(crate::store::projection(&ix, m).0, edited);
+        assert!(crate::store::drift(&ix, m, &edited).is_empty());
+        s.materialize(&s.index().unwrap()).unwrap();
+        assert_eq!(rust_file(&s), edited);
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        assert_eq!(t["column"], "needs_review");
+        assert!(t["notes"][0]["text"].as_str().unwrap().contains("Check:"), "{}", t["notes"]);
+    }
+
+    /// D-58.1 for Rust: nested items keep their identity, and two `impl` blocks
+    /// of one name pair in order.
+    #[test]
+    fn rust_nested_items_keep_their_ids() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_project(concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn one(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "impl S {\n    pub fn two(&self) -> i32 {\n        2\n    }\n}\n",
+        ));
+        board::open(&s.root).unwrap();
+        let id = |name: &str| -> String {
+            s.db.query_row("SELECT id FROM symbols WHERE module = 'crate' AND name = ?1 AND live = 1", [name], |r| r.get(0)).unwrap()
+        };
+        let (s_id, one, two) = (id("S"), id("S::one"), id("S::two"));
+        let edited = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn one(&self) -> i32 {\n        11\n    }\n}\n\n",
+            "impl S {\n    pub fn two(&self) -> i32 {\n        22\n    }\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("crate.S::one") && note.contains("crate.S::two"), "{note}");
+        assert_eq!((id("S"), id("S::one"), id("S::two")), (s_id, one, two));
+        assert_eq!(rust_text(&s, "S::one").as_deref(), Some("    pub fn one(&self) -> i32 {\n        11\n    }"));
+        let ix = s.index().unwrap();
+        let m = ix.modules.iter().find(|m| m.path == "crate").unwrap();
+        assert!(crate::store::drift(&ix, m, edited).is_empty());
+    }
+
+    /// D-58.6 for Rust: completing keeps the change and puts it on the approved list.
+    #[test]
+    fn rust_complete_keeps_the_change() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let edited = LIB.replace("    1", "    11");
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    11\n}"));
+        assert_eq!(rust_file(&s), edited);
+        assert_eq!(approved(&s.root).get("crate.one"), Some(&digest(b"pub fn one() -> i32 {\n    11\n}")));
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+    }
+
+    /// D-58.1 for Rust: cancel restores the file and the store.
+    #[test]
+    fn rust_cancel_restores_the_file_and_the_store() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let original: String =
+            s.db.query_row("SELECT id FROM symbols WHERE module = 'crate' AND name = 'one' AND live = 1", [], |r| r.get(0)).unwrap();
+        fs::write(s.root.join("src/lib.rs"), LIB.replace("    1", "    11")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{}/actions", t["id"].as_str().unwrap()), json!({"action":"cancel"})).unwrap();
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    1\n}"));
+        let same: String =
+            s.db.query_row("SELECT id FROM symbols WHERE module = 'crate' AND name = 'one' AND live = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(same, original);
+    }
+
+    /// D-58.6 for Rust: an approved hash is read in without a task.
+    #[test]
+    fn rust_approved_code_is_read_in_quietly() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let pulled = LIB.replace("    1", "    11");
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), &pulled).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    11\n}"));
+        assert!(board::tasks(&s.root).unwrap().is_empty());
+    }
+
+    /// D-58.2 for Rust: an outside edit during a run joins that task.
+    #[test]
+    fn rust_edits_during_a_run_join_its_task() {
+        let (_root, s) = rust_app();
+        let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":"Work"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+        tasks::put(&s, &t).unwrap();
+        fs::write(s.root.join("src/lib.rs"), LIB.replace("    2", "    9")).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert_eq!(note, "Note: Changed outside Solace during this run and added to this task: crate.two.\n");
+        let t = board::task(&s.root, t["id"].as_str().unwrap()).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))), "{}", json!(changes));
+        assert_eq!(board::tasks(&s.root).unwrap().len(), 1);
+    }
+
+    /// D-58.1 for Rust: a removed file retires its symbols.
+    #[test]
+    fn a_removed_rust_file_retires_its_symbols() {
+        let (_root, s) = rust_project(LIB);
+        fs::remove_file(s.root.join("src/lib.rs")).unwrap();
+        assert_eq!(absorb(&s, Mode::Command).unwrap(), "");
+        assert!(rust_text(&s, "one").is_none());
+        assert!(s.index().unwrap().modules.is_empty());
+    }
+
+    /// D-58.5 for Rust: an old refusal is retried once, not hidden by its hash.
+    #[test]
+    fn an_old_bad_mark_does_not_hide_a_rust_edit() {
+        let (_root, s) = rust_project(LIB);
+        let edited = LIB.replace("    2", "    22");
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        fs::write(s.root.join(".solace/written"), format!("! {} src/lib.rs\n", digest(edited.as_bytes()))).unwrap();
+        assert_eq!(absorb(&s, Mode::Command).unwrap(), "");
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    22\n}"));
+    }
+
+    /// D-58 point 4 for Rust: code that doesn't compile is still read in.
+    #[test]
+    fn rust_code_that_does_not_compile_is_still_read_in() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let broken = LIB.replace("    1", "    \"one\"");
+        fs::write(s.root.join("src/lib.rs"), &broken).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("crate.one"), "{note}");
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    \"one\"\n}"));
+    }
+
+    /// D-58.5 for Rust: a file Solace can't split is left as it is and reported once.
+    #[test]
+    fn a_rust_file_that_cannot_be_split_is_left_alone() {
+        let (_root, s) = rust_project(LIB);
+        let bad = "pub fn one() -> i32 {\n    1\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        let note = absorb(&s, Mode::Command).unwrap();
+        assert!(note.contains("Not read in:"), "{note}");
+        assert_eq!(rust_file(&s), bad);
+        assert_eq!(absorb(&s, Mode::Command).unwrap(), "");
+    }
+
+    fn rust_row(s: &Store, name: &str) -> (String, Option<String>, i64) {
+        s.db.query_row("SELECT id, parent, ord FROM symbols WHERE module = 'crate' AND name = ?1 AND live = 1", [name], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap()
+    }
+
+    fn rust_projection(s: &Store) -> String {
+        let ix = s.index().unwrap();
+        let m = ix.modules.iter().find(|m| m.path == "crate").unwrap();
+        crate::store::projection(&ix, m).0
+    }
+
+    fn rust_cancel(s: &Store) {
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+    }
+
+    /// D-58.1 for Rust: cancel restores a function added after an unchanged one.
+    #[test]
+    fn rust_cancel_restores_an_appended_function() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let (one, two) = (rust_row(&s, "one"), rust_row(&s, "two"));
+        let edited = format!("{LIB}\npub fn three() -> i32 {{\n    3\n}}\n");
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.three"));
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!((rust_row(&s, "one"), rust_row(&s, "two")), (one, two));
+        assert!(rust_text(&s, "three").is_none());
+    }
+
+    /// D-58.1 for Rust: cancel restores the function removed from the end.
+    #[test]
+    fn rust_cancel_restores_a_removed_last_function() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let (one, two) = (rust_row(&s, "one"), rust_row(&s, "two"));
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    1\n}\n").unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!((rust_row(&s, "one"), rust_row(&s, "two")), (one, two));
+    }
+
+    /// D-58.1 for Rust: cancel restores a swap whose moved function kept its text.
+    #[test]
+    fn rust_cancel_restores_a_reordered_and_edited_function() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let (one, two) = (rust_row(&s, "one"), rust_row(&s, "two"));
+        let edited = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("crate.one"), "{note}");
+        assert!(!note.contains("crate.two"), "{note}");
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!((rust_row(&s, "one"), rust_row(&s, "two")), (one, two));
+    }
+
+    /// D-58.1 for Rust: a method moved into another `impl S` keeps its id, and
+    /// cancel restores the block the method left.
+    #[test]
+    fn rust_cancel_restores_a_removed_impl_block() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "impl S {\n    pub fn b(&self) -> i32 {\n        2\n    }\n}\n",
+        );
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let (a, b) = (rust_row(&s, "S::a"), rust_row(&s, "S::b"));
+        let edited = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n",
+            "    pub fn b(&self) -> i32 {\n        2\n    }\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        assert_eq!(rust_row(&s, "S::a").0, a.0);
+        assert_eq!(rust_row(&s, "S::b").0, b.0);
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), original);
+        assert_eq!(rust_projection(&s), original);
+        assert_eq!((rust_row(&s, "S::a"), rust_row(&s, "S::b")), (a, b));
+    }
+
+    /// D-58.2 for Rust: an outside edit during a run is recorded so cancel puts
+    /// the file and the store back.
+    #[test]
+    fn rust_cancel_restores_an_edit_during_a_run() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let (one, two) = (rust_row(&s, "one"), rust_row(&s, "two"));
+        let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":"Work"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+        tasks::put(&s, &t).unwrap();
+        let edited = format!("{LIB}\npub fn three() -> i32 {{\n    3\n}}\n");
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.three"));
+        let t = board::task(&s.root, t["id"].as_str().unwrap()).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!((rust_row(&s, "one"), rust_row(&s, "two")), (one, two));
+    }
+
+    fn rust_work_task(s: &Store, title: &str, rid: &str) -> Value {
+        let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":title})).unwrap();
+        t["runs"] = json!([{"id":rid,"kind":"work","state":"running"}]);
+        tasks::put(s, &t).unwrap();
+        t
+    }
+
+    /// A layout-only row still orders undo against a later task's edit.
+    #[test]
+    fn a_layout_only_cancel_conflicts_with_a_later_edit() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let a = rust_work_task(&s, "A", "ra");
+        let swapped = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut a = board::task(&s.root, a["id"].as_str().unwrap()).unwrap();
+        a["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &a).unwrap();
+        let _b = rust_work_task(&s, "B", "rb");
+        let edited = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let tid = a["id"].as_str().unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap_err();
+        assert!(e.0.contains("E7007"), "{}", e.0);
+        assert!(e.0.contains("crate.two"), "{}", e.0);
+        assert!(!e.0.contains("symbol:"), "{}", e.0);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    22\n}"));
+        assert_eq!(rust_file(&s), edited);
+        assert_eq!(rust_projection(&s), edited);
+    }
+
+    /// A later task that has settled still prevents an earlier layout-only undo.
+    #[test]
+    fn a_settled_later_edit_still_conflicts_with_an_earlier_layout() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let a = rust_work_task(&s, "A", "ra");
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n").unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut a = board::task(&s.root, a["id"].as_str().unwrap()).unwrap();
+        a["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &a).unwrap();
+        let b = rust_work_task(&s, "B", "rb");
+        let edited = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let b = board::task(&s.root, b["id"].as_str().unwrap()).unwrap();
+        crate::board::reviews::settle(&s, &b).unwrap();
+        let tid = a["id"].as_str().unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap_err();
+        assert!(e.0.contains("E7007"), "{}", e.0);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    22\n}"));
+        assert_eq!(rust_file(&s), edited);
+        assert_eq!(rust_projection(&s), edited);
+    }
+
+    /// D-58.1 for Rust: a later reorder joins a task that is already open for review.
+    #[test]
+    fn rust_cancel_restores_a_reorder_after_an_open_task() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let rows = (rust_row(&s, "one"), rust_row(&s, "two"), rust_row(&s, "three"));
+        let edited = original.replace("    1", "    11");
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let notes = t["notes"].as_array().unwrap().len();
+        let swapped = edited.replace(
+            "pub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n",
+            "pub fn three() -> i32 {\n    3\n}\n\npub fn two() -> i32 {\n    2\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), &swapped).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        assert_eq!(t["notes"].as_array().unwrap().len(), notes);
+        assert_eq!(board::changes_of(&s, &t).unwrap().len(), 1);
+        assert_eq!(board::tasks(&s.root).unwrap().len(), 1);
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), original);
+        assert_eq!(rust_projection(&s), original);
+        assert_eq!((rust_row(&s, "one"), rust_row(&s, "two"), rust_row(&s, "three")), rows);
+    }
+
+    /// D-58.1 for Gleam: cancel restores a file reordered around one edit.
+    #[test]
+    fn a_layout_only_cancel_restores_a_gleam_file() {
+        let original = concat!("pub fn one() -> Int {\n  1\n}\n\npub fn two() -> Int {\n  2\n}\n\n", "pub fn three() -> Int {\n  3\n}\n",);
+        let p = project(&[("src/app.gleam", original)]);
+        board::open(&p.root).unwrap();
+        let s = p;
+        let edited = original.replace("  1", "  11");
+        fs::write(s.root.join("src/app.gleam"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("app.one"));
+        let swapped = edited.replace(
+            "pub fn two() -> Int {\n  2\n}\n\npub fn three() -> Int {\n  3\n}\n",
+            "pub fn three() -> Int {\n  3\n}\n\npub fn two() -> Int {\n  2\n}\n",
+        );
+        fs::write(s.root.join("src/app.gleam"), &swapped).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(file(&s), original);
+    }
+
+    /// An approved text change keeps its bytes while cancel restores its place.
+    #[test]
+    fn an_approved_edit_keeps_its_place_on_cancel() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert_ne!(rust_row(&s, "one").2, rust_row(&s, "two").2);
+    }
+
+    /// A recorded file with no module row is forgotten, not refused.
+    #[test]
+    fn a_written_entry_with_no_module_is_forgotten() {
+        let (_root, s) = rust_project(LIB);
+        let mut w = Written::load(&s.root);
+        w.record("src/gone.rs", b"pub fn gone() {}");
+        w.save().unwrap();
+        assert_eq!(absorb(&s, Mode::Command).unwrap(), "");
+        assert!(Written::load(&s.root).files.get("src/gone.rs").is_none());
+    }
+
+    /// An approved function added beside an unexpected edit survives cancel.
+    #[test]
+    fn an_approved_added_function_survives_cancel() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.insert("crate.three".into(), digest(b"pub fn three() -> i32 {\n    3\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let edited = format!("{}\npub fn three() -> i32 {{\n    3\n}}\n", LIB.replace("    2", "    22"));
+        fs::write(s.root.join("src/lib.rs"), &edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        rust_cancel(&s);
+        let expected = format!("{LIB}pub fn three() -> i32 {{\n    3\n}}\n");
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    2\n}"));
+        assert_eq!(rust_text(&s, "three").as_deref(), Some("pub fn three() -> i32 {\n    3\n}"));
+        let (one, two, three) = (rust_row(&s, "one").2, rust_row(&s, "two").2, rust_row(&s, "three").2);
+        assert!(one < two && two < three, "{one} {two} {three}");
+    }
+
+    /// An approved edit that arrives after a layout keeps its text and place.
+    #[test]
+    fn an_approved_edit_after_a_layout_is_kept_on_cancel() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let approved_text = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), approved_text).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    11\n}"));
+        assert!(rust_row(&s, "one").2 < rust_row(&s, "two").2);
+    }
+
+    /// A later save that only moves rows leaves the earlier edit undoable.
+    #[test]
+    fn a_move_after_an_edit_is_undone_by_cancel() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        fs::write(s.root.join("src/lib.rs"), LIB.replace("    2", "    22")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    2\n}"));
+    }
+
+    /// A row the task added is deleted on cancel, even after a later move.
+    #[test]
+    fn a_moved_added_row_is_removed_on_cancel() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let added = format!("{LIB}\npub fn three() -> i32 {{\n    3\n}}\n");
+        fs::write(s.root.join("src/lib.rs"), &added).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.three"));
+        let moved = "pub fn three() -> i32 {\n    3\n}\n\npub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        fs::write(s.root.join("src/lib.rs"), moved).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert!(rust_text(&s, "three").is_none());
+    }
+
+    /// An outside move during a run leaves the agent's edit undoable.
+    #[test]
+    fn an_outside_move_during_a_run_keeps_the_agents_edit_undoable() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let t = rust_work_task(&s, "A", "ra");
+        let tid = t["id"].as_str().unwrap().to_string();
+        let before = board::snapshot(&s).unwrap();
+        s.submit_symbols(Some("crate.two"), None, "pub fn two() -> i32 {\n    22\n}\n").unwrap();
+        let after = board::snapshot(&s).unwrap();
+        board::record(&s, &tid, "ra", &before, &after, None).unwrap();
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let mut t = board::task(&s.root, &tid).unwrap();
+        t["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &t).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(rust_file(&s), LIB);
+        assert_eq!(rust_projection(&s), LIB);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    2\n}"));
+    }
+
+    /// An approved unmoved edit the task never touched adds no undo or conflict row.
+    #[test]
+    fn an_approved_edit_the_task_never_touched_records_nothing() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        fs::write(s.root.join("src/lib.rs"), LIB.replace("    2", "    22")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let both = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    22\n}\n";
+        fs::write(s.root.join("src/lib.rs"), both).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let key = {
+            let snap = board::snapshot(&s).unwrap();
+            snap.as_object().unwrap().iter().find(|(_, v)| v[2].as_str() == Some("one")).map(|(k, _)| k.clone()).unwrap()
+        };
+        let before: i64 =
+            s.db.query_row("SELECT COUNT(*) FROM board_before WHERE task=?1 AND entity=?2", params![tid, key], |r| r.get(0)).unwrap();
+        let touches: i64 =
+            s.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task=?1 AND entity=?2", params![tid, key], |r| r.get(0)).unwrap();
+        assert_eq!((before, touches), (0, 0));
+        s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES ('other',?1,'work','crate.one')", [&key]).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// An approved row inserted between others keeps a distinct place on cancel.
+    #[test]
+    fn an_approved_insert_between_rows_gets_a_distinct_order() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.insert("crate.three".into(), digest(b"pub fn three() -> i32 {\n    3\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let inserted = "pub fn one() -> i32 {\n    1\n}\n\npub fn three() -> i32 {\n    3\n}\n\npub fn two() -> i32 {\n    22\n}\n";
+        fs::write(s.root.join("src/lib.rs"), inserted).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn three() -> i32 {\n    3\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        let (one, three, two) = (rust_row(&s, "one").2, rust_row(&s, "three").2, rust_row(&s, "two").2);
+        assert!(one < three && three < two, "{one} {three} {two}");
+    }
+
+    fn rust_cancel_task(s: &Store, tid: &str) {
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+    }
+
+    /// An approved edit updates every open task that holds its row as layout,
+    /// without giving a task that doesn't hold it a new undo row.
+    #[test]
+    fn an_approved_edit_keeps_its_text_for_another_open_task() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let u = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let uid = u["id"].as_str().unwrap().to_string();
+        let b = rust_work_task(&s, "B", "rb");
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let approved_text = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), approved_text).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let key = {
+            let snap = board::snapshot(&s).unwrap();
+            snap.as_object().unwrap().iter().find(|(_, v)| v[2].as_str() == Some("one")).map(|(k, _)| k.clone()).unwrap()
+        };
+        let count = |table: &str, tid: &str| -> i64 {
+            s.db.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE task=?1 AND entity=?2"), params![tid, key], |r| r.get(0)).unwrap()
+        };
+        assert_eq!((count("board_before", b["id"].as_str().unwrap()), count("board_touches", b["id"].as_str().unwrap())), (0, 0));
+        let mut b = board::task(&s.root, b["id"].as_str().unwrap()).unwrap();
+        b["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &b).unwrap();
+        rust_cancel_task(&s, &uid);
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// An approved edit keeps its text when no run or Unexpected Changes task is open.
+    #[test]
+    fn an_approved_edit_after_a_layout_with_no_target_keeps_its_text() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let a = rust_work_task(&s, "A", "ra");
+        let swapped = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut a = board::task(&s.root, a["id"].as_str().unwrap()).unwrap();
+        a["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &a).unwrap();
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let approved_text = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), approved_text).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        rust_cancel_task(&s, a["id"].as_str().unwrap());
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// An approved text change is kept even when another change in the same read joins the task.
+    #[test]
+    fn an_approved_edit_and_an_unexpected_edit_are_read_in_together() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let u = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let both =
+            concat!("pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    22\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), both).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.three"));
+        rust_cancel_task(&s, u["id"].as_str().unwrap());
+        let expected = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "three").is_none());
+    }
+
+    /// An approved removal of a layout row stays gone when the holding task is canceled.
+    #[test]
+    fn an_approved_removal_of_a_layout_row_keeps_the_removal() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let swapped = "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let u = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let mut list = approved(&s.root);
+        list.remove("crate.one");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    22\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, u["id"].as_str().unwrap());
+        let expected = "pub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "one").is_none());
+    }
+
+    /// A restored row that becomes last ends the file with one newline.
+    #[test]
+    fn a_cancel_after_an_approved_removal_of_the_last_row_ends_with_one_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let swapped = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        list.remove("crate.two");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// An approved removal stays gone when a running task holds the removed row's layout.
+    #[test]
+    fn an_approved_removal_during_a_run_keeps_the_removal() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let t = rust_work_task(&s, "A", "ra");
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n").unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.remove("crate.one");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    2\n}\n").unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        rust_cancel_task(&s, t["id"].as_str().unwrap());
+        let expected = "pub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "one").is_none());
+    }
+
+    /// An approved removal stays gone when no run or Unexpected Changes task is open.
+    #[test]
+    fn an_approved_removal_after_a_layout_with_no_target_keeps_the_removal() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        let a = rust_work_task(&s, "A", "ra");
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n").unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut a = board::task(&s.root, a["id"].as_str().unwrap()).unwrap();
+        a["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &a).unwrap();
+        let mut list = approved(&s.root);
+        list.remove("crate.one");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    2\n}\n").unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        rust_cancel_task(&s, a["id"].as_str().unwrap());
+        let expected = "pub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "one").is_none());
+    }
+
+    /// A Gleam cancel keeps an approved edit and an approved removal.
+    #[test]
+    fn a_gleam_cancel_keeps_an_approved_edit_and_an_approved_removal() {
+        let original = "pub fn one() -> Int {\n  1\n}\n\npub fn two() -> Int {\n  2\n}\n\npub fn three() -> Int {\n  3\n}\n";
+        let p = project(&[("src/app.gleam", original)]);
+        board::open(&p.root).unwrap();
+        let s = p;
+        let a = rust_work_task(&s, "A", "ra");
+        let swapped = "pub fn two() -> Int {\n  2\n}\n\npub fn one() -> Int {\n  1\n}\n\npub fn three() -> Int {\n  3\n}\n";
+        fs::write(s.root.join("src/app.gleam"), swapped).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.insert("app.one".into(), digest(b"pub fn one() -> Int {\n  11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let approved_text = "pub fn two() -> Int {\n  2\n}\n\npub fn one() -> Int {\n  11\n}\n\npub fn three() -> Int {\n  3\n}\n";
+        fs::write(s.root.join("src/app.gleam"), approved_text).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.remove("app.two");
+        save_approved(&s.root, &list).unwrap();
+        let remaining = "pub fn one() -> Int {\n  11\n}\n\npub fn three() -> Int {\n  3\n}\n";
+        fs::write(s.root.join("src/app.gleam"), remaining).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        rust_cancel_task(&s, a["id"].as_str().unwrap());
+        assert_eq!(file(&s), remaining);
+    }
+
+    fn cancel_after_editing_one(original: &str) {
+        cancel_after_outside_edit(original, &original.replace("    1", "    11"), "crate.one");
+    }
+
+    /// Cancel restores a file that ended without a newline.
+    #[test]
+    fn a_cancel_keeps_a_file_without_a_final_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_editing_one("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}");
+    }
+
+    /// Cancel restores a file that ended in blank lines.
+    #[test]
+    fn a_cancel_keeps_a_file_ending_in_blank_lines() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_editing_one("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\n\n");
+    }
+
+    /// An approved removal of the last row keeps a file's missing final newline.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_keeps_no_final_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}";
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let swapped = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), swapped).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        list.remove("crate.two");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    fn cancel_after_outside_edit(original: &str, edited: &str, changed: &str) {
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains(changed));
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), original);
+        assert_eq!(rust_projection(&s), original);
+    }
+
+    /// Cancel keeps a file with no final newline after an outside append.
+    #[test]
+    fn a_cancel_keeps_a_file_without_a_final_newline_after_appending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_outside_edit(
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}",
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n",
+            "crate.three",
+        );
+    }
+
+    /// Cancel keeps a file with no final newline after an outside swap.
+    #[test]
+    fn a_cancel_keeps_a_file_without_a_final_newline_after_swapping() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_outside_edit(
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}",
+            "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n",
+            "crate.one",
+        );
+    }
+
+    /// Cancel keeps a file ending in blank lines after an outside swap.
+    #[test]
+    fn a_cancel_keeps_a_file_ending_in_blank_lines_after_swapping() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_outside_edit(
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n",
+            "crate.one",
+        );
+    }
+
+    /// Cancel keeps a file with a final newline after an outside append.
+    #[test]
+    fn a_cancel_keeps_a_file_with_a_final_newline_after_appending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_outside_edit(
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n",
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}",
+            "crate.three",
+        );
+    }
+
+    fn cancel_after_reorder_and_removal(edited: &str, after_removal: &str, removed: &[&str], expected: &str) {
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        cancel_after_editing_and_removing(
+            original,
+            edited,
+            after_removal,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            removed,
+            expected,
+        );
+    }
+
+    /// Cancel gives the last restored row the ending of the row that was last before the edit.
+    #[test]
+    fn a_cancel_after_a_reorder_and_removing_the_last_row_keeps_the_new_last_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_reorder_and_removal(
+            "pub fn three() -> i32 {\n    3\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n",
+            "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    11\n}\n",
+            &["crate.three"],
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n",
+        );
+    }
+
+    /// Cancel keeps order-independent endings when one absorb removes several rows.
+    #[test]
+    fn a_cancel_after_a_reorder_and_removing_two_rows_keeps_the_true_last_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        for _ in 0..16 {
+            cancel_after_reorder_and_removal(
+                "pub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n\npub fn one() -> i32 {\n    11\n}\n",
+                "pub fn one() -> i32 {\n    11\n}\n",
+                &["crate.two", "crate.three"],
+                "pub fn one() -> i32 {\n    1\n}\n",
+            );
+        }
+    }
+
+    /// A row the task never held stays gone when another removed row hands its ending down.
+    #[test]
+    fn a_cancel_after_a_reorder_and_removing_an_unheld_row_keeps_it_gone() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        list.remove("crate.two");
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "two").is_none());
+    }
+
+    /// A cancel after a reorder keeps every approved function and undoes the rest.
+    #[test]
+    fn a_cancel_after_a_reorder_keeps_an_approved_edit_when_a_removed_last_row_hands_down() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited = concat!(
+            "pub fn four() -> i32 {\n    4\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn one() -> i32 {\n    11\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.insert("crate.one".into(), digest(b"pub fn one() -> i32 {\n    11\n}"));
+        list.remove("crate.four");
+        list.insert("crate.five".into(), digest(b"pub fn five() -> i32 {\n    5\n}"));
+        list.insert("crate.three".into(), digest(b"pub fn three() -> i32 {\n    33\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let after = concat!(
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    33\n}\n\n",
+            "pub fn five() -> i32 {\n    5\n}\n\n",
+            "pub fn one() -> i32 {\n    11\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), after).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        assert_eq!(rust_projection(&s), rust_file(&s));
+        for (name, text) in [
+            ("one", "pub fn one() -> i32 {\n    1\n}"),
+            ("two", "pub fn two() -> i32 {\n    2\n}"),
+            ("three", "pub fn three() -> i32 {\n    33\n}"),
+            ("five", "pub fn five() -> i32 {\n    5\n}"),
+        ] {
+            assert_eq!(rust_text(&s, name).as_deref(), Some(text));
+        }
+        assert!(!rust_file(&s).contains("pub fn four"));
+    }
+
+    /// An approved removal of an unheld row leaves it gone even when a held row
+    /// is removed with it.
+    #[test]
+    fn a_cancel_after_a_reorder_and_removing_an_unheld_row_with_a_held_one_keeps_it_gone() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.two");
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "two").is_none());
+    }
+
+    /// A receiver with no undo row takes this absorb's approved text.
+    #[test]
+    fn a_cancel_after_replacing_the_last_row_keeps_the_approved_edit() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited = concat!(
+            "pub fn four() -> i32 {\n    4\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn one() -> i32 {\n    11\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.four");
+        list.insert("crate.five".into(), digest(b"pub fn five() -> i32 {\n    5\n}"));
+        list.insert("crate.three".into(), digest(b"pub fn three() -> i32 {\n    33\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let after = concat!(
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    33\n}\n\n",
+            "pub fn one() -> i32 {\n    11\n}\n\n",
+            "pub fn five() -> i32 {\n    5\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), after).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    33\n}\n\n",
+            "pub fn five() -> i32 {\n    5\n}\n",
+        );
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// A new row that shares the removed row's order is placed after the rows
+    /// cancel restores, and takes the ending of the row that was last.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_and_adding_a_row_keeps_the_new_order() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        list.insert("crate.five".into(), digest(b"pub fn five() -> i32 {\n    5\n}"));
+        save_approved(&s.root, &list).unwrap();
+        let after =
+            concat!("pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n\n", "pub fn five() -> i32 {\n    5\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), after).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn five() -> i32 {\n    5\n}\n",);
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// Removing an unheld last row hands its ending to the row the task holds.
+    #[test]
+    fn a_cancel_after_removing_an_unheld_last_row_keeps_the_new_last_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    22\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let mut list = approved(&s.root);
+        list.insert("crate.two".into(), digest(b"pub fn two() -> i32 {\n    22\n}"));
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    22\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// The ending an unheld last row hands down keeps a missing final newline.
+    #[test]
+    fn a_cancel_after_removing_an_unheld_last_row_keeps_no_final_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    22\n}\n\n", "pub fn three() -> i32 {\n    3\n}",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let mut list = approved(&s.root);
+        list.insert("crate.two".into(), digest(b"pub fn two() -> i32 {\n    22\n}"));
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    22\n}").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// A middle removal leaves the true last row's ending alone.
+    #[test]
+    fn a_cancel_after_removing_a_middle_row_keeps_the_last_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), original.replace("    1", "    11")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.two");
+        save_approved(&s.root, &list).unwrap();
+        let after = concat!("pub fn one() -> i32 {\n    11\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), after).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// Removing the first row hands no ending down and keeps the last one.
+    #[test]
+    fn a_cancel_after_removing_the_first_row_keeps_the_last_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let b = rust_work_task(&s, "B", "rb");
+        let reordered =
+            concat!("pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    1\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), reordered).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.remove("crate.one");
+        save_approved(&s.root, &list).unwrap();
+        let after = concat!("pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), after).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, b["id"].as_str().unwrap());
+        assert_eq!(rust_file(&s), after);
+        assert_eq!(rust_projection(&s), after);
+    }
+
+    fn cancel_after_removal_with_an_unapproved_five(edited: &str, later: &str) {
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert!(rust_text(&s, "five").is_none());
+    }
+
+    /// An unapproved row after the removed last row does not become the receiver.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_before_an_unapproved_row_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_removal_with_an_unapproved_five(
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",),
+            concat!("pub fn two() -> i32 {\n    2\n}\n\n", "pub fn five() -> i32 {\n    5\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",),
+        );
+    }
+
+    /// An unapproved row after an earlier row does not become the receiver.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_after_an_unapproved_row_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_removal_with_an_unapproved_five(
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",),
+            concat!("pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n\n", "pub fn five() -> i32 {\n    5\n}\n",),
+        );
+    }
+
+    /// An unapproved row at the end does not take the ending from the true last row.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_and_an_unapproved_row_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        cancel_after_removal_with_an_unapproved_five(
+            "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n",
+            "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn five() -> i32 {\n    5\n}\n",
+        );
+    }
+
+    /// An unapproved edit to the new last row still goes back on cancel.
+    #[test]
+    fn a_cancel_after_removing_the_last_row_keeps_an_unapproved_edit_undoable() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited =
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), "pub fn two() -> i32 {\n    22\n}\n\npub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    /// Canceling after an unheld removal works, and no task gets a row for a
+    /// function neither it nor the removal touched.
+    #[test]
+    fn a_cancel_after_removing_an_unheld_last_row_marks_no_other_task() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), original.replace("    1", "    11")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let b = rust_work_task(&s, "B", "rb");
+        let with_two = concat!(
+            "pub fn one() -> i32 {\n    11\n}\n\n",
+            "pub fn two() -> i32 {\n    22\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        fs::write(s.root.join("src/lib.rs"), with_two).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.two"));
+        let mut b = board::task(&s.root, b["id"].as_str().unwrap()).unwrap();
+        b["runs"][0]["state"] = json!("ended");
+        tasks::put(&s, &b).unwrap();
+        let mut list = approved(&s.root);
+        list.remove("crate.four");
+        save_approved(&s.root, &list).unwrap();
+        let without_four =
+            concat!("pub fn one() -> i32 {\n    11\n}\n\n", "pub fn two() -> i32 {\n    22\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        fs::write(s.root.join("src/lib.rs"), without_four).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        let key = {
+            let snap = board::snapshot(&s).unwrap();
+            snap.as_object().unwrap().iter().find(|(_, v)| v[2].as_str() == Some("three")).map(|(k, _)| k.clone()).unwrap()
+        };
+        let tid = b["id"].as_str().unwrap();
+        let count: i64 =
+            s.db.query_row("SELECT COUNT(*) FROM board_before WHERE task=?1 AND entity=?2", params![tid, key], |r| r.get(0)).unwrap();
+        let layout: i64 = s
+            .db
+            .query_row("SELECT COUNT(*) FROM board_touches WHERE task=?1 AND entity=?2 AND run='layout'", params![tid, key], |r| r.get(0))
+            .unwrap();
+        assert_eq!((count, layout), (0, 0));
+        rust_cancel(&s);
+        assert_eq!(rust_text(&s, "three").as_deref(), Some("pub fn three() -> i32 {\n    3\n}"));
+    }
+
+    fn cancel_after_editing_and_removing(
+        original: &str,
+        edited: &str,
+        later: &str,
+        changed: &str,
+        approved_text: &[(&str, &str)],
+        removed: &[&str],
+        expected: &str,
+    ) {
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains(changed));
+        let mut list = approved(&s.root);
+        for (name, text) in approved_text {
+            list.insert((*name).into(), digest(text.as_bytes()));
+        }
+        for name in removed {
+            list.remove(*name);
+        }
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_without_reordering_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let edited = original.replace("    1", "    11");
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.three"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_without_reordering_keeps_no_final_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}");
+        let edited = original.replace("    1", "    11");
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}";
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}";
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.three"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_without_reordering_keeps_blank_lines() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n\n",
+        );
+        let edited = original.replace("    1", "    11");
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\n\n";
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.three"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_without_reordering_keeps_an_unapproved_edit_undoable() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let edited = original.replace("    1", "    11");
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    22\n}\n";
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.three"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_and_a_middle_row_without_reordering_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let edited = original.replace("    1", "    11");
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn three() -> i32 {\n    3\n}\n";
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn three() -> i32 {\n    3\n}\n";
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.two", "crate.four"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_method_without_reordering_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub struct S;\n\nimpl S {\n",
+            "    pub fn a(&self) -> i32 {\n        1\n    }\n\n",
+            "    pub fn b(&self) -> i32 {\n        2\n    }\n\n",
+            "    pub fn c(&self) -> i32 {\n        3\n    }\n}\n",
+        );
+        let edited = original.replace("        1\n", "        11\n");
+        let later = concat!(
+            "pub struct S;\n\nimpl S {\n",
+            "    pub fn a(&self) -> i32 {\n        11\n    }\n\n",
+            "    pub fn b(&self) -> i32 {\n        2\n    }\n}\n",
+        );
+        let expected = concat!(
+            "pub struct S;\n\nimpl S {\n",
+            "    pub fn a(&self) -> i32 {\n        1\n    }\n\n",
+            "    pub fn b(&self) -> i32 {\n        2\n    }\n}\n",
+        );
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.S::a",
+            &[("crate.S::a", "    pub fn a(&self) -> i32 {\n        11\n    }")],
+            &["crate.S::c"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_without_reordering_keeps_an_approved_edit() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let t = rust_work_task(&s, "A", "ra");
+        let reordered = "pub fn two() -> i32 {\n    2\n}\n\npub fn one() -> i32 {\n    1\n}\n\npub fn three() -> i32 {\n    3\n}\n";
+        fs::write(s.root.join("src/lib.rs"), reordered).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let mut list = approved(&s.root);
+        list.insert("crate.two".into(), digest(b"pub fn two() -> i32 {\n    22\n}"));
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    22\n}\n";
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, t["id"].as_str().unwrap());
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    22\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_during_a_run_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let t = rust_work_task(&s, "A", "ra");
+        let edited = original.replace("    1", "    11");
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> i32 {\n    11\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, t["id"].as_str().unwrap());
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+    }
+
+    #[test]
+    fn a_gleam_cancel_after_removing_the_last_row_keeps_the_ending() {
+        let original = "pub fn one() -> Int {\n  1\n}\n\npub fn two() -> Int {\n  2\n}\n\npub fn three() -> Int {\n  3\n}\n";
+        let p = project(&[("src/app.gleam", original)]);
+        board::open(&p.root).unwrap();
+        let s = p;
+        let edited = original.replace("  1", "  11");
+        fs::write(s.root.join("src/app.gleam"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("app.one"));
+        let mut list = approved(&s.root);
+        list.remove("app.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> Int {\n  11\n}\n\npub fn two() -> Int {\n  2\n}\n";
+        fs::write(s.root.join("src/app.gleam"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> Int {\n  1\n}\n\npub fn two() -> Int {\n  2\n}\n";
+        assert_eq!(file(&s), expected);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_when_a_run_holds_nothing_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let t = rust_work_task(&s, "A", "ra");
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, t["id"].as_str().unwrap());
+        assert_eq!(rust_file(&s), later);
+        assert_eq!(rust_projection(&s), later);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_when_a_run_holds_nothing_keeps_no_final_newline() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}");
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let t = rust_work_task(&s, "A", "ra");
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}";
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel_task(&s, t["id"].as_str().unwrap());
+        assert_eq!(rust_file(&s), later);
+        assert_eq!(rust_projection(&s), later);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_when_the_task_holds_another_level_keeps_the_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n",
+        );
+        let edited = original.replace("        1\n", "        11\n");
+        let later = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        11\n    }\n}\n\n",
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n",
+        );
+        let expected = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n",
+        );
+        cancel_after_editing_and_removing(original, &edited, later, "crate.S::a", &[], &["crate.three"], expected);
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_after_a_reorder_keeps_the_restored_order() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let edited = original.replace("    1", "    11");
+        let later =
+            concat!("pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn one() -> i32 {\n    11\n}\n",);
+        let expected =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.four"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_after_another_reorder_keeps_the_restored_order() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn three() -> i32 {\n    3\n}\n\n",
+            "pub fn four() -> i32 {\n    4\n}\n",
+        );
+        let edited = original.replace("    1", "    11");
+        let later =
+            concat!("pub fn one() -> i32 {\n    11\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n",);
+        let expected =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        cancel_after_editing_and_removing(
+            original,
+            &edited,
+            later,
+            "crate.one",
+            &[("crate.one", "pub fn one() -> i32 {\n    11\n}")],
+            &["crate.four"],
+            expected,
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_removing_the_last_row_keeps_an_unapproved_removal() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original =
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn three() -> i32 {\n    3\n}\n",);
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        let edited = original.replace("    1", "    11");
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let mut list = approved(&s.root);
+        list.remove("crate.three");
+        save_approved(&s.root, &list).unwrap();
+        let later = "pub fn one() -> i32 {\n    11\n}\n";
+        fs::write(s.root.join("src/lib.rs"), later).unwrap();
+        let _ = absorb(&s, Mode::Notice).unwrap();
+        rust_cancel(&s);
+        let expected = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        assert_eq!(rust_file(&s), expected);
+        assert_eq!(rust_projection(&s), expected);
+        assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    2\n}"));
     }
 }
 
@@ -1250,4 +3097,55 @@ fn store_dirs(store: &str) -> Vec<String> {
         dirs.push(dir.clone());
     }
     dirs
+}
+
+const RUST_BAD_CLEARED: &str = "# rust-bad-marks-cleared";
+
+fn classify_quiet_layout(
+    key: &str,
+    before: &Value,
+    after: &Value,
+    target: Option<&str>,
+    layout_tasks: &impl Fn(&str) -> Result<Vec<String>, Failure>,
+) -> Result<QuietLayout, Failure> {
+    let mut decision = QuietLayout::default();
+    if key.starts_with("symbol:") && !before[key].is_null() && !after[key].is_null() && before[key].get(4) != after[key].get(4) {
+        let holders = layout_tasks(key)?;
+        let target_holds = target.is_some_and(|tid| holders.iter().any(|holder| holder == tid));
+        if [5, 8, 9, 10].iter().any(|&i| before[key].get(i) != after[key].get(i)) || target_holds {
+            // Approved text keeps its new bytes; cancel still restores its old place.
+            decision.layout = Some(key.to_string());
+        }
+        if !holders.is_empty() {
+            decision.approved = Some((key.to_string(), holders));
+        }
+    } else if key.starts_with("symbol:") && !before[key].is_null() && after[key].is_null() {
+        decision.removed = Some((key.to_string(), layout_tasks(key)?));
+    }
+    Ok(decision)
+}
+
+#[derive(Default)]
+struct QuietLayout {
+    layout: Option<String>,
+    approved: Option<(String, Vec<String>)>,
+    removed: Option<(String, Vec<String>)>,
+}
+
+fn create_unexpected_task(top: &Path, here: &str, flow: &Value, all: &[(PathBuf, Value)]) -> Result<String, Failure> {
+    let rank = all.iter().filter_map(|(_, t)| t["rank"].as_f64()).fold(0., f64::min) - 1.;
+    let mut t = board::new_task(
+        TITLE,
+        concat!(
+            "Code changed outside Solace while no agent was working. Complete this task to keep ",
+            "the changes, or cancel it to restore the code Solace had. No agent starts work until ",
+            "it is completed or canceled."
+        ),
+        &flow["events"]["finished"],
+        rank,
+    );
+    t["unexpected"] = json!(true);
+    t["home"] = json!(here);
+    tasks::deliver(top, json!({"kind":"create","new":t}))?;
+    Ok(t["id"].as_str().unwrap().to_string())
 }

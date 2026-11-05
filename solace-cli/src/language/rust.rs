@@ -691,7 +691,7 @@ fn walk(
 }
 
 /// The first `mod x;` inside an inline module of `pieces`.
-fn inline_file_mod(text: &str, pieces: &[Piece]) -> Option<String> {
+pub(crate) fn inline_file_mod(text: &str, pieces: &[Piece]) -> Option<String> {
     pieces.iter().filter(|p| p.kind == "mod").flat_map(|p| &p.children).find_map(|c| {
         if c.kind == "mod" && c.children.is_empty() && text[c.item.clone()].ends_with(';') {
             Some(c.name.clone())

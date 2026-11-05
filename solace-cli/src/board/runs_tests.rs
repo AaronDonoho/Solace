@@ -527,3 +527,15 @@ fn an_agent_error_without_a_reply_is_shown() {
     assert!(outcome.contains(said), "{outcome}");
 }
 
+#[test]
+fn a_launch_names_its_timeout_for_the_agents_wait() {
+    let p = testing::project(&[("src/app.gleam", "pub fn one() { 1 }\n")]);
+    let dir = testing::Scratch::new();
+    let log = dir.join("env.txt");
+    let m = json!({"agent":"codex","run":["sh","-c","cat >/dev/null; env"]});
+    let mut child = spawn_agent(&p.root, &dir, &log, &m, "", &[], None, false, ["t", "r"], 7200).unwrap();
+    child.wait().unwrap();
+    let env = std::fs::read_to_string(&log).unwrap();
+    assert!(env.lines().any(|line| line == "SOLACE_LAUNCH_TIMEOUT_SECS=7200"), "{env}");
+}
+

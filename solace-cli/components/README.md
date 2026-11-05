@@ -77,9 +77,6 @@ and `notice` (`{heading, text, id, tab}`, from its own stream only; a host raise
 Its styles set no colors: the page's custom properties (`--paper`, `--ink`, ...) reach it from its host,
 so the board's dark theme applies. A page that hosts it outside the board defines them.
 
-The last agent and effort chosen are kept in the browser under `solace-board-agent` and
-`solace-board-effort`.
-
 ## Markdown editor
 
 `solace_task.editor` is the markdown editor of every page: the task's description and note box, and

@@ -2153,3 +2153,58 @@ pub fn notice_attention_is_fixed_when_raised_test() {
   |> string.contains("needs-attention")
   |> should.be_true
 }
+
+/// A snapshot after catch-up raises the notices a live update would, so a
+/// question missed while the position was outside the pruned log still shows.
+pub fn a_snapshot_after_catch_up_raises_notices_test() {
+  let task = fn(question: String) {
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"questions\":["
+    <> question
+    <> "]}"
+  }
+  let #(model, _) = board.init(Nil)
+  // The first load's snapshot is replayed with notices off.
+  let #(model, _) =
+    board.update(model, board.Live("{\"tasks\":[" <> task("") <> "]}"))
+  let #(model, _) = board.update(model, board.CaughtUp)
+  model.notices |> should.equal([])
+  // A later snapshot, after catch-up, compares with the lane's copy.
+  let question = "{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[]}"
+  let #(model, _) =
+    board.update(model, board.Live("{\"tasks\":[" <> task(question) <> "]}"))
+  let assert [toast] = model.notices
+  toast.notice.heading |> should.equal("Question on T")
+  toast.attention |> should.equal(True)
+}
+
+/// A discussion reply in a reconnect snapshot arrives without its note, but
+/// still asks for the human's attention like a live reply.
+pub fn a_snapshot_reply_after_catch_up_asks_for_attention_test() {
+  let task = fn(state) {
+    "{\"project\":\"a\",\"tasks\":[{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"discuss\",\"state\":\""
+    <> state
+    <> "\",\"model\":\"m\",\"log\":\"/l\"}]}]}"
+  }
+  let #(model, _) = board.update(deps_board(), board.Live(task("running")))
+  let #(model, _) = board.update(model, board.Live(task("waiting")))
+  let assert [toast] = model.notices
+  toast.notice.heading |> should.equal("a: Reply on T")
+  toast.notice.text |> should.equal("The agent replied.")
+  toast.attention |> should.equal(True)
+}
+
+/// A work run that ends with a note raises a notes-tab toast in the same update
+/// as a waiting discussion: only the reply asks for attention.
+pub fn a_finished_run_with_a_note_is_not_a_discussion_reply_test() {
+  let running =
+    ",\"runs\":[{\"id\":\"w1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"},{\"id\":\"d1\",\"kind\":\"discuss\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]"
+  let ended =
+    ",\"notes\":[{\"author\":\"agent\",\"run\":\"w1\",\"text\":\"Finished the work\",\"time\":2},{\"author\":\"agent\",\"run\":\"d1\",\"text\":\"Here is my take\",\"time\":3}],\"runs\":[{\"id\":\"w1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"},{\"id\":\"d1\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"log\":\"/l\"}]"
+  let model =
+    deps_board()
+    |> put_task("a", "1", "T", "planning", running)
+    |> put_task("a", "1", "T", "planning", ended)
+  model.notices
+  |> list.map(fn(t) { t.attention })
+  |> should.equal([False, True])
+}

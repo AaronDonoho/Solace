@@ -718,7 +718,7 @@ class Board(unittest.TestCase):
         self.action(t,'investigate','E7003',model='fake')
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'And Y?'})
-        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==4)
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])>=4 and len(self.replies(rid))>=1)
         t=self.action(t,'end_discussion')
         self.assertEqual(t['runs'][-1]['outcome'],'discussed')
         self.assertEqual(len(t['notes']),1);n=t['notes'][0]
@@ -742,6 +742,133 @@ class Board(unittest.TestCase):
         t=self.action(t,'discuss',model='fake',text='What about Z?')
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
         self.assertIn('agent exited without finishing',t['notes'][-1]['text']);self.assertIsNotNone(t['attention'])
+    def test_discussion_mid_work_notes_arrive_once_in_order(self):
+        steps=[{'sleep':.4},{'command':'task note first reply'},{'sleep':.4},
+               {'command':'task note second reply'},{'sleep':.4},{'command':'task note third reply'}]
+        t=self.create(steps);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:(self.root/'.solace'/(rid+'.prompt')).exists())
+        for text in ['mid one','mid two']:self.api('POST','/tasks/'+t['id']+'/notes',{'text':text})
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])>=4 and len(self.replies(rid))>=1)
+        self.assertEqual(self.replies(rid)[0],'The human replied:\n\nmid one\n\nmid two\n')
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'mid three'})
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])>=7 and len(self.replies(rid))>=2)
+        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nmid three\n')
+        self.action(t,'end_discussion')
+    def test_discussion_note_survives_a_plain_reply(self):
+        t=self.create([{'sleep':.6},{'say':'plain reply'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:(self.root/'.solace'/(rid+'.prompt')).exists())
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'mid note'})
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==4)
+        self.assertIn('mid note',(self.root/'.solace'/(rid+'.prompt')).read_text())
+        time.sleep(.4)
+        self.assertEqual(len(self.get(t)['notes']),4)  # The fresh brief consumed it once.
+        self.action(self.get(t),'end_discussion')
+    def test_wait_again_takes_a_wait_only_call(self):
+        # A wait that reaches the tool call's limit sends nothing and returns
+        # `WAIT_AGAIN`; the wait-only command then takes the human's next note.
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        t=self.create([{'command':'task note first reply'},{'command':'task wait'},{'say':'after wait'}])
+        self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(self.replies(rid))>=1)
+        self.assertIn('`task wait` (a discussion)',self.replies(rid)[0])
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'after the limit'})
+        t=self.wait(t,lambda x:len(self.replies(rid))>=2)
+        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
+        self.assertEqual(len(t['notes']),3)  # The wait sent no note of its own.
+        self.action(t,'end_discussion')
+        steps=[{'command':'strategy note','text':'first plan'},{'command':'strategy wait'},{'say':'after wait'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(self.replies(rid))>=1)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'after the limit'})
+        run=self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
+        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
+        self.assertEqual((len(run['notes']),run['questions']),(3,[]))  # No note or proposal from the wait.
+        self.api('POST',f'/strategy/runs/{rid}/end')
+    def test_a_read_after_wait_again_names_the_wait(self):
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        steps=[{'command':'task note first reply'},{'sleep':1.5},{'command':'view app'},
+               {'command':'task wait'},{'command':'task bad x'},{'say':'after wait'}]
+        t=self.create(steps);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(self.replies(rid))>=1)
+        self.assertIn('`task wait` (a discussion)',self.replies(rid)[0])
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'after the limit'})
+        t=self.wait(t,lambda x:len(self.replies(rid))>=2)
+        self.assertIn('the human replied; call `task wait`',self.replies(rid)[1])
+        t=self.wait(t,lambda x:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[2],'The human replied:\n\nafter the limit\n')
+        t=self.wait(t,lambda x:len(self.replies(rid))>=4)
+        self.assertIn('task wait',self.replies(rid)[3])
+        self.action(t,'end_discussion')
+        steps=[{'command':'strategy note','text':'first plan'},{'sleep':1.5},{'command':'view app'},
+               {'command':'strategy wait'},{'say':'after wait'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(self.replies(rid))>=1)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'after the limit'})
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
+        self.assertIn('the human replied; call `strategy wait`',self.replies(rid)[1])
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[2],'The human replied:\n\nafter the limit\n')
+        self.api('POST',f'/strategy/runs/{rid}/end')
+    def test_a_proposal_after_wait_again_waits_for_strategy_wait(self):
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        steps=[{'command':'strategy task','text':json.dumps({'title':'After limit'})},{'sleep':1.5},
+               {'command':'view app'},{'command':'strategy wait'},{'say':'after wait'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and r['questions'] and len(self.replies(rid))>=1)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.api('POST',f'/strategy/runs/{rid}/questions/{run["questions"][0]["id"]}',{'option':'Reject'})
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
+        self.assertIn('the human replied; call `strategy wait`',self.replies(rid)[1])
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[2],'The human answered the proposal Create task "After limit": Reject\n')
+        self.api('POST',f'/strategy/runs/{rid}/end')
+    def test_paused_discussion_holds_a_note_until_resume(self):
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'10'})
+        t=self.create([{'command':'task note first reply'},{'say':'after resume'}])
+        self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and any(n['text']=='first reply' for n in x['notes']))
+        self.action(t,'pause')
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'held note'})
+        time.sleep(.6)
+        self.assertFalse((self.root/'.solace'/(rid+'.responses')).exists())
+        t=self.action(t,'resume')
+        t=self.wait(t,lambda x:len(self.replies(rid))>=1)
+        self.assertEqual(self.replies(rid)[0],'The human replied:\n\nheld note\n')
+        self.assertEqual(sum(1 for n in t['notes'] if n['text']=='held note'),1)
+        self.action(t,'end_discussion')
+    def test_a_plain_reply_keeps_waiting_past_the_tool_limit(self):
+        # The server's own wait has no limit: a plain-text reply leaves it
+        # waiting for the human, with no new agent launched by the clock.
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        t=self.create([{'say':'plain reply'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==2)
+        pid=(self.root/'.solace'/(rid+'.pid')).read_text()
+        time.sleep(1.6)
+        t=self.get(t)
+        self.assertEqual((len(t['notes']),(self.root/'.solace'/(rid+'.pid')).read_text()),(2,pid))
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'And Y?'})
+        t=self.wait(t,lambda x:len(x['notes'])==4)
+        self.assertIn('And Y?',(self.root/'.solace'/(rid+'.prompt')).read_text())
+        self.action(t,'end_discussion')
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps([{'say':'plain plan'}]),'context':{'kind':'page'}})['id']
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and (self.root/'.solace'/(rid+'.prompt')).exists())
+        notes=run['notes']
+        pid=(self.root/'.solace'/(rid+'.pid')).read_text()
+        time.sleep(1.6)
+        run=self.api('GET',f'/strategy/runs/{rid}')
+        self.assertEqual(run['notes'],notes)
+        self.assertEqual((self.root/'.solace'/(rid+'.pid')).read_text(),pid)
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'after the limit'})
+        self.wait_run(rid,lambda r:'after the limit' in (self.root/'.solace'/(rid+'.prompt')).read_text())
+        self.api('POST',f'/strategy/runs/{rid}/end')
     def test_a5_question_wait_and_new_agent(self):
         t=self.assign([{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done answered'}])
         t=self.wait(t,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(t['column'],'assigned');rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text());os.kill(pid,0)
@@ -1588,7 +1715,7 @@ class Board(unittest.TestCase):
         run=self.wait_run(rid,lambda r:r['state']=='waiting' and r['notes'][-1]['text']=='Done proposing')
         out=self.replies(rid)
         self.assertTrue(out[0].startswith('E7017'),out[0])
-        self.assertEqual(out[1],'The human answered the proposal: Reject\n')
+        self.assertEqual(out[1],'The human answered the proposal Create task "Rejected one": Reject\n')
         self.assertIn(f'Approved and applied: created task:{t["id"]}',out[2]);self.assertIn('Not applied: E7026',out[3])
         # Every answer is on the run's notes, and so in its transcript once it ends.
         answers=[n['text'] for n in run['notes'] if n['author']=='solace']
@@ -1596,6 +1723,100 @@ class Board(unittest.TestCase):
         for a,want in zip(answers,['Answer: Reject','Answer: Approved and applied','Answer: Not applied: E7026']):self.assertIn(want,a)
         ended=self.api('POST',f'/strategy/runs/{rid}/end')
         self.assertEqual((ended['outcome'],len(ended['notes'])),('planned',1));self.assertIn('Answer: Not applied: E7026',ended['notes'][0]['text'])
+
+    def test_strategy_mid_work_notes_arrive_once_in_order(self):
+        steps=[{'sleep':.4},{'command':'strategy note','text':'first plan'},
+               {'sleep':.4},{'command':'strategy note','text':'second plan'},
+               {'sleep':.4},{'command':'strategy note','text':'third plan'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        self.wait_run(rid,lambda r:(self.root/'.solace'/(rid+'.prompt')).exists())
+        for text in ['mid one','mid two']:self.api('POST',f'/strategy/runs/{rid}/notes',{'text':text})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])>=4 and len(self.replies(rid))>=1)
+        self.assertEqual(self.replies(rid)[0],'The human replied:\n\nmid one\n\nmid two\n')
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'mid three'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])>=7 and len(self.replies(rid))>=2)
+        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nmid three\n')
+        self.api('POST',f'/strategy/runs/{rid}/end')
+
+    def test_strategy_note_survives_a_plain_reply(self):
+        steps=[{'sleep':.6},{'say':'plain plan'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        self.wait_run(rid,lambda r:(self.root/'.solace'/(rid+'.prompt')).exists())
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'mid note'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])==4)
+        self.assertIn('mid note',(self.root/'.solace'/(rid+'.prompt')).read_text())
+        time.sleep(.4)
+        self.assertEqual(len(self.api('GET',f'/strategy/runs/{rid}')['notes']),4)
+        self.api('POST',f'/strategy/runs/{rid}/end')
+
+    def test_strategy_note_during_a_proposal_and_late_answer(self):
+        steps=[{'command':'strategy task','text':json.dumps({'title':'Proposed'})},
+               {'command':'strategy note','text':'heard note'},
+               {'command':'strategy note','text':'heard answer'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        q=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==1)['questions'][0]
+        for text in ['change title','also add scope']:self.api('POST',f'/strategy/runs/{rid}/notes',{'text':text})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])==4 and len(self.replies(rid))==1)
+        self.assertEqual(self.replies(rid)[0],'The human replied:\n\nchange title\n\nalso add scope\n')
+        self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])==6 and len(self.replies(rid))==2)
+        self.assertIn('The human answered the proposal Create task "Proposed": Approved and applied',self.replies(rid)[1])
+        time.sleep(.4)
+        self.assertEqual(len(self.replies(rid)),2)  # The late answer is delivered once.
+        self.api('POST',f'/strategy/runs/{rid}/end')
+
+    def test_a_proposal_answered_while_the_agent_works_reaches_its_next_note(self):
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        steps=[{'command':'strategy task','text':json.dumps({'title':'While working'})},
+               {'sleep':1.5},{'command':'strategy note','text':'heard while working'},
+               {'command':'strategy wait'},{'say':'after'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and r['questions'] and len(self.replies(rid))>=1)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.api('POST',f'/strategy/runs/{rid}/questions/{run["questions"][0]["id"]}',{'option':'Reject'})
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[1],'The human answered the proposal Create task "While working": Reject\n')
+        self.assertEqual(self.replies(rid)[2],'Still waiting for the human. Call `strategy wait` (a strategy run) or `task wait` (a discussion) to keep waiting; it sends nothing.\n')
+        self.api('POST',f'/strategy/runs/{rid}/end')
+
+    def test_a_proposal_answered_after_a_plain_reply_reaches_the_fresh_brief(self):
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        steps=[{'command':'strategy task','text':json.dumps({'title':'After exit'})},{'say':'plain plan'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and r['questions'] and len(self.replies(rid))>=1)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.api('POST',f'/strategy/runs/{rid}/questions/{run["questions"][0]["id"]}',{'option':'Reject'})
+        prompt=self.root/'.solace'/(rid+'.prompt')
+        end=time.monotonic()+10
+        while 'Answer: Reject' not in prompt.read_text() and time.monotonic()<end:time.sleep(.03)
+        text=prompt.read_text()
+        self.assertIn('Answer: Reject',text)
+        self.assertIn('Create task "After exit"',text)
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[1])
+        self.assertFalse(any('The human answered the proposal' in r for r in self.replies(rid)),self.replies(rid))
+        self.api('POST',f'/strategy/runs/{rid}/end')
+
+    def test_answering_an_older_proposal_wakes_the_agent(self):
+        steps=[{'command':'strategy task','text':json.dumps({'title':'First proposal'})},
+               {'command':'strategy task','text':json.dumps({'title':'Second proposal'})},
+               {'command':'strategy note','text':'heard the first answer'},
+               {'command':'strategy note','text':'heard the second answer'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        first=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==1)['questions'][0]
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'change it'})
+        second=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==2)['questions'][-1]
+        self.assertIn('The human replied:\n\nchange it',self.replies(rid)[0])
+        # Approving the older proposal reaches the agent while a newer one waits.
+        self.api('POST',f'/strategy/runs/{rid}/questions/{first["id"]}',{'option':'Approve'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(self.replies(rid))>=2)
+        self.assertIn('The human answered the proposal Create task "First proposal": Approved and applied',self.replies(rid)[1])
+        self.assertNotIn('Second proposal',self.replies(rid)[1])
+        self.api('POST',f'/strategy/runs/{rid}/questions/{second["id"]}',{'option':'Approve'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and len(self.replies(rid))>=3)
+        self.assertIn('The human answered the proposal Create task "Second proposal": Approved and applied',self.replies(rid)[2])
+        self.assertEqual(len([r for r in self.replies(rid) if 'First proposal' in r]),1)
+        self.api('POST',f'/strategy/runs/{rid}/end')
 
     def test_a_strategy_proposal_scope_names_projects(self):  # D-129
         # A scope folder that isn't a project is refused when the proposal is

@@ -1151,3 +1151,9 @@ fn a_nested_project_run_gets_workspace_role_skills_only() {
     assert!(!brief.contains("- general:") && !brief.contains("General rules"), "{brief}");
 }
 
+#[test]
+fn a_note_without_an_id_keeps_its_old_hash_key() {
+    let note = json!({"author":"human","run":null,"text":"one","time":1});
+    assert_eq!(note_fingerprint(&note), crate::sha256(note.to_string().as_bytes()));
+}
+

@@ -367,7 +367,7 @@ fn review_role(read_only: &str, verify: &str, debt: &str) -> String {
 /// The discussion role's direction in a task brief.
 fn discussion_role(read_only: &str, verify: &str) -> String {
     format!(
-        "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} {verify} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+        "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} {verify} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. When a call says it reached its wait limit, reply with `task wait`; it sends nothing. Keep replying until a call says the discussion has ended, then stop without further calls."
     )
 }
 
@@ -858,7 +858,10 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn note_fingerprint(note: &Value) -> String {
-    sha256(note.to_string().as_bytes())
+    match note["id"].as_str() {
+        Some(id) => format!("id:{id}"),
+        None => sha256(note.to_string().as_bytes()),
+    }
 }
 
 /// The task's drafts, with their project folders, from every project in its scope.

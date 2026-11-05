@@ -39,6 +39,7 @@ pub(crate) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let detail = super::setup::detail(&config);
     let asking = super::setup::asking(&config);
     let prompt = strategy_brief(top, &run, involvement, detail, asking);
+    super::delivery::mark_strategy_brief(top, &run)?;
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY_RUN, rid], timeout);
     let supervised = launched.and_then(|mut child| {
         supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
@@ -76,7 +77,7 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "To propose one, send `strategy task|feature|milestone` (the id to edit, none to create) ",
     "and the request's fields as a JSON object in `text`, ",
     "or `strategy vision` with the new vision in `text`, alone in its call; ",
-    "it waits for the human's approval, and the reply says which, with a new record's id. ",
+    "the call returns on the human's answer or next message, and says which; a proposal stays open until answered, and an approval's reply gives the new record's id. ",
     "The fields: a task `title`, `body`, `feature`, `milestone`, `dependsOn` (task ids), ",
     "with `scope` (the workspace's project folders, listed in the brief) only when creating; ",
     "a feature `title`, `body`, `milestone`, `state` (proposed: suggested, not agreed; upcoming: agreed and queued; ",
@@ -111,7 +112,7 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "The human's message is the last note. ",
     "Reply only with `strategy note`: `command` is just `strategy note`, and the whole reply goes in `text`, in short Markdown: ",
     "lead with the answer, then only what the human needs to act on. ",
-    "The call waits and returns the human's next message. ",
+    "The call waits and returns the human's next message or answer, which may already be waiting. ",
     "Text outside `strategy note` shows only in this run's live transcript on the page, ",
     "so anything the human should keep goes in a `strategy note`. ",
     "Keep replying until a call says the run has ended, then stop.",
@@ -179,6 +180,21 @@ pub(super) fn strategy_brief(top: &Path, run: &Value, involvement: &str, detail:
         .unwrap_or_default();
     if !notes.is_empty() {
         out += &format!("\nNotes so far:\n{}\n", notes.join("\n"));
+    }
+    let questions: Vec<String> = run["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|q| {
+            format!(
+                "- {}: {}",
+                cut_line(q["text"].as_str().unwrap_or("").lines().next().unwrap_or("")),
+                q["answer"].as_str().unwrap_or("unanswered")
+            )
+        })
+        .collect();
+    if !questions.is_empty() {
+        out += &format!("\nProposals so far (an unanswered one is still open):\n{}\n", questions.join("\n"));
     }
     out
 }
@@ -447,6 +463,9 @@ pub fn strategy_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> 
             if !tasks::serving(top) {
                 return err("E7003", "the run waits for the human and no board server is running; stop now");
             }
+            if crate::board::delivery::pending_strategy_reply(&run) {
+                return err("E7003", "the human replied; call `strategy wait` to receive it");
+            }
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
@@ -516,8 +535,9 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
             if tasks::rejected(top, &sent) {
                 return err("E7001", REJECTED);
             }
-            wait_strategy(top, rid)
+            wait_strategy(top, rid, Some(super::delivery::wait_limit()))
         }
+        ["strategy", "wait"] => wait_strategy(top, rid, Some(super::delivery::wait_limit())),
         ["strategy", kind @ ("task" | "feature" | "milestone" | "vision"), rest @ ..] => {
             if rest.first().is_some_and(|w| w.starts_with("--")) {
                 return err(
@@ -547,7 +567,6 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
             }
             // Checked now as the request would be; applied only when the human approves.
             let question = tasks::proposal(top, rid, kind, id, &text)?;
-            let qid = question["id"].as_str().unwrap_or("").to_string();
             let sent = tasks::send(top, json!({"kind":"strategy_propose","run":rid,"question":question}))?;
             if !tasks::applied(top, &sent) {
                 return Ok(format!("{}\n", tasks::QUEUED));
@@ -555,55 +574,36 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
             if tasks::rejected(top, &sent) {
                 return err("E7001", REJECTED);
             }
-            wait_answer(top, rid, &qid)
+            wait_strategy(top, rid, Some(super::delivery::wait_limit()))
         }
         _ => usage(concat!(
             "strategy list [--archived] | strategy show <task|feature|milestone> <id>... | ",
             "strategy show note <task> <notes> [--from <n>] | ",
             "strategy show run <task> <run> [<steps>|all] [--from <n>] or --failed | ",
-            "strategy note, with the reply in `text` | ",
+            "strategy note, with the reply in `text` | strategy wait | ",
             "strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
         )),
     }
 }
-/// Holds a strategy run's proposal until the human answers it or ends the run.
-/// Waiting doesn't count toward the timeout.
-fn wait_answer(top: &Path, rid: &str, qid: &str) -> Out {
-    loop {
-        std::thread::sleep(Duration::from_millis(50));
-        if !tasks::serving(top) {
-            return err("E7003", "the board server stopped while waiting");
-        }
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
-        }
-        let answer = run["questions"].as_array().and_then(|qs| qs.iter().find(|q| q["id"] == qid)).map(|q| q["answer"].clone());
-        if let Some(Value::String(a)) = answer {
-            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
-            return Ok(format!("The human answered the proposal: {a}\n"));
-        }
-    }
-}
 /// Holds a strategy run's reply until the human writes again or ends the run,
 /// as `wait_discussion` does. Waiting doesn't count toward the timeout.
-pub(crate) fn wait_strategy(top: &Path, rid: &str) -> Out {
+pub(crate) fn wait_strategy(top: &Path, rid: &str, limit: Option<Duration>) -> Out {
+    let started = std::time::Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(50));
         // No server, so the human can't reply: return rather than wait forever.
         if !tasks::serving(top) {
             return err("E7003", "the board server stopped while waiting");
         }
+        if limit.is_some_and(|limit| started.elapsed() > limit) {
+            return Ok(super::delivery::WAIT_AGAIN.into());
+        }
         let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
         if run["state"] == "ended" {
             return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
         }
-        let notes = run["notes"].as_array().cloned().unwrap_or_default();
-        let after = notes.iter().rposition(|n| n["author"] == "agent").map_or(0, |l| l + 1);
-        let new: Vec<&str> = notes[after..].iter().filter(|n| n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
-        if !new.is_empty() {
-            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
-            return Ok(format!("The human replied:\n\n{}\n", new.join("\n\n")));
+        if let Some(reply) = super::delivery::claim_strategy_reply(top, rid)? {
+            return Ok(reply);
         }
     }
 }
@@ -740,7 +740,7 @@ pub(super) fn start_strategy(top: PathBuf, rid: String) {
         let result = (|| {
             let mut result = strategy_process(&top, &rid);
             while let Err(Failure(_, REPLIED)) = result {
-                wait_strategy(&top, &rid)?;
+                wait_strategy(&top, &rid, None)?;
                 result = strategy_process(&top, &rid);
             }
             result

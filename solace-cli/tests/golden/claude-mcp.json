@@ -1,1 +1,1 @@
-{"mcpServers":{"solace":{"args":["mcp","--budget","40000"],"command":"/bin/solace"}}}
+{"mcpServers":{"solace":{"args":["mcp","--budget","40000"],"command":"/bin/solace","env":{"SOLACE_LAUNCH_TIMEOUT_SECS":"3600"}}}}

@@ -96,29 +96,18 @@ test('draft storage survives missing or throwing storage', async () => {
 });
 
 test('transport uses the base it is given; explicit project paths stay absolute', async () => {
-  const oldLocation = globalThis.location, oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
+  const oldLocation = globalThis.location, oldFetch = globalThis.fetch;
   const paths = [];
-  let source;
   globalThis.location = { pathname: '/p/web/contracts' };
   globalThis.fetch = async path => { paths.push(path); return new Response('{}'); };
-  globalThis.EventSource = class {
-    constructor(path) { this.path = path; source = this; }
-    addEventListener() {}
-    close() { this.closed = true; }
-  };
   try {
     const api = await import('../src/api.mjs');
     await new Promise(resolve => api.request('/p/shop', '/graph', 'GET', '', resolve));
     await new Promise(resolve => api.request('/p/shop', '/p/other/tasks', 'GET', '', resolve));
     await new Promise(resolve => api.request('', '/graph', 'GET', '', resolve));
     expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/graph']);
-    expect(api.events('/p/shop', () => {})).toBe(source);
-    expect(source.path).toBe('/p/shop/events');
-    api.close_events(source);
-    expect(source.closed).toBe(true);
-    expect(api.events('', () => {}).path).toBe('/events');
   } finally {
-    globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+    globalThis.location = oldLocation; globalThis.fetch = oldFetch;
   }
 });
 
@@ -158,9 +147,11 @@ function fakeBrowser(search = '', replies = {}, pathname = '/') {
   globalThis.setTimeout = callback => { timers.push(callback); return 0; };
   globalThis.EventSource = class {
     listeners = {};
-    constructor(path) { this.path = path; sources.push(this); }
+    constructor(path) { this.path = path; this.readyState = 1; sources.push(this); }
     addEventListener(name, f) { this.listeners[name] = f; }
-    close() { this.closed = true; }
+    close() { this.closed = true; this.readyState = 2; }
+    // A connection the browser has given up on, not one it will retry.
+    fail() { this.readyState = 2; this.onerror?.(); }
   };
   const restore = () => { for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k]; };
   return { paths, sources, timers, restore };
@@ -238,9 +229,31 @@ test('notices come and go', async () => {
     b.dispatch(new board.CaughtUp());
     b.dispatch(new board.Live(task('running')));
     b.dispatch(new board.Live(task('ended')));
-    expect(Array.from(b.model.notices).map(n => n.heading)).toEqual(['Finished T']);
-    b.dispatch(new board.Dismiss(b.model.notices.head));
+    expect(Array.from(b.model.notices).map(n => n.notice.heading)).toEqual(['Finished T']);
+    b.dispatch(new board.Dismiss(b.model.notices.head.notice));
     expect(Array.from(b.model.notices)).toEqual([]);
+  } finally { browser.restore(); }
+});
+
+test('a question asked while the stream was down is toasted when it reopens', async () => {
+  const browser = fakeBrowser();
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    browser.sources[0].listeners.ready();
+    const old = { id: 't1', title: 'T', body: '', column: 'assigned', rank: 1, runs: [], questions: [] };
+    b.dispatch(new board.Live(JSON.stringify({ task: old })));
+    // The browser closes the stream for good, and the page opens it from the last position.
+    browser.sources[0].fail();
+    expect(browser.timers).toHaveLength(1);
+    browser.timers[0]();
+    const reopened = browser.sources[1];
+    expect(reopened.path).toBe('/events');
+    // The replay carries the question asked during the gap.
+    reopened.onmessage({ data: JSON.stringify({ task: old }), lastEventId: '{"tasks":1,".":0}' });
+    const question = { id: 'q1', text: 'Which?', options: ['A', 'B'], answer: '' };
+    reopened.onmessage({ data: JSON.stringify({ task: { ...old, questions: [question] } }), lastEventId: '{"tasks":2,".":0}' });
+    expect(Array.from(b.model.notices).map(n => n.notice.heading)).toContain('Question on T');
   } finally { browser.restore(); }
 });
 

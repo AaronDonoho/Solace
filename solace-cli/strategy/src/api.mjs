@@ -8,15 +8,6 @@ export function request(base, path, method, body, receive) {
     .then(async response => receive(await response.text()))
     .catch(error => receive(JSON.stringify({ message: String(error) })));
 }
-export function events(base, receive, ready = () => {}) {
-  const source = new EventSource(base + '/events');
-  source.onmessage = event => receive(event.data);
-  source.addEventListener('ready', () => ready());
-  // Native EventSource reconnects with Last-Event-ID.
-  source.onerror = () => {};
-  return source;
-}
-export function close_events(source) { source?.close(); }
 // The planning panel's transcript polling: one step later.
 export function after(ms, callback) { setTimeout(callback, ms); }
 // A create's `request` id: a repeated save of the same draft makes one record (Spec 15).

@@ -291,20 +291,7 @@ fn bwrap() -> bool {
 }
 /// `argv` run in `dir`, seeing `protect` read-only when bubblewrap is available.
 pub fn sandboxed(argv: &[String], dir: &Path, protect: Option<&Path>) -> Command {
-    let mut c = match protect.filter(|p| p.exists() && bwrap()) {
-        Some(p) => {
-            let mut c = Command::new("bwrap");
-            c.args(["--die-with-parent", "--dev-bind", "/", "/", "--ro-bind"]).arg(p).arg(p).arg("--chdir").arg(dir).arg("--").args(argv);
-            c
-        }
-        None => {
-            let mut c = Command::new(&argv[0]);
-            c.args(&argv[1..]);
-            c
-        }
-    };
-    c.current_dir(dir);
-    c
+    sandboxed_with(argv, dir, protect, false)
 }
 /// The folder a command in `root` must not change: the original while a
 /// migration is in progress, `<name>.pre-solace` once it's adopted.
@@ -369,32 +356,7 @@ pub fn cargo_sandbox_args(
 /// dependencies' build scripts (D-158 point 4). Without bubblewrap, or a home
 /// folder, a plain command: approval is the guardrail elsewhere.
 pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Result<Command, Failure> {
-    let home = env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()).filter(|_| bwrap());
-    let mut c = match home {
-        Some(home) => {
-            let _ = fs::create_dir_all(root.join("target"));
-            // A fresh package has no lockfile; a writable bind needs the file
-            // to exist, and cargo writes it as it would without the sandbox.
-            let lock = root.join("Cargo.lock");
-            if !lock.exists() {
-                let _ = fs::write(&lock, "");
-            }
-            let elsewhere = |key: &str| env::var_os(key).map(PathBuf::from).filter(|p| p.is_absolute());
-            let cargo_home = elsewhere("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
-            let rustup_home = elsewhere("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
-            let mut c = Command::new("bwrap");
-            c.args(cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home)?);
-            c
-        }
-        None => {
-            let mut c = Command::new(&argv[0]);
-            c.args(&argv[1..]);
-            c
-        }
-    };
-    c.current_dir(root);
-    drop_task_context(&mut c);
-    Ok(c)
+    cargo_sandboxed_with(argv, root, false)
 }
 
 /// Runs `argv` in `dir`: whether it exited with 0, and the end of its output.
@@ -1869,4 +1831,77 @@ fn hold_within(top: &Path, deadline: Duration) -> Result<Vec<fs::File>, Failure>
         held.push(f);
     }
     Ok(held)
+}
+
+/// `argv` run in `dir` in a private PID namespace when bubblewrap is
+/// available, so a program the probe detached is stopped with it. `protect`
+/// stays read-only, as it does for every other command in a migration copy.
+pub fn probe_sandboxed(argv: &[String], dir: &Path, protect: Option<&Path>) -> Command {
+    let mut c = sandboxed_with(argv, dir, protect, true);
+    drop_task_context(&mut c);
+    c
+}
+
+/// `cargo_sandboxed` for a probe's run: a private PID namespace, so a program
+/// the probe detached is stopped with it wherever bubblewrap is available.
+pub fn cargo_sandboxed_probe(argv: &[String], root: &Path) -> Result<Command, Failure> {
+    cargo_sandboxed_with(argv, root, true)
+}
+
+fn cargo_sandboxed_with(argv: &[String], root: &Path, unshare_pid: bool) -> Result<Command, Failure> {
+    let home = env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()).filter(|_| bwrap());
+    let mut c = match home {
+        Some(home) => {
+            let _ = fs::create_dir_all(root.join("target"));
+            // A fresh package has no lockfile; a writable bind needs the file
+            // to exist, and cargo writes it as it would without the sandbox.
+            let lock = root.join("Cargo.lock");
+            if !lock.exists() {
+                let _ = fs::write(&lock, "");
+            }
+            let elsewhere = |key: &str| env::var_os(key).map(PathBuf::from).filter(|p| p.is_absolute());
+            let cargo_home = elsewhere("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
+            let rustup_home = elsewhere("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
+            let mut args = cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home)?;
+            if unshare_pid {
+                args.insert(2, "--unshare-pid".into());
+            }
+            let mut c = Command::new("bwrap");
+            c.args(args);
+            c
+        }
+        None => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+    };
+    c.current_dir(root);
+    drop_task_context(&mut c);
+    Ok(c)
+}
+
+/// `sandboxed`, in a private PID namespace when `unshare_pid`, so a probe's
+/// detached programs stop with it.
+fn sandboxed_with(argv: &[String], dir: &Path, protect: Option<&Path>, unshare_pid: bool) -> Command {
+    let protect = protect.filter(|p| p.exists());
+    let mut c = if bwrap() && (protect.is_some() || unshare_pid) {
+        let mut c = Command::new("bwrap");
+        c.args(["--die-with-parent"]);
+        if unshare_pid {
+            c.arg("--unshare-pid");
+        }
+        c.args(["--dev-bind", "/", "/"]);
+        if let Some(p) = protect {
+            c.arg("--ro-bind").arg(p).arg(p);
+        }
+        c.args(["--chdir"]).arg(dir).arg("--").args(argv);
+        c
+    } else {
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        c
+    };
+    c.current_dir(dir);
+    c
 }

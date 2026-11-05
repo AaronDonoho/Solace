@@ -895,84 +895,7 @@ impl Store {
     /// scratch copy of the crate, placed in `module` when one is named, or after
     /// the body of `from`'s test. Project imports it uses are added. Nothing is saved.
     pub(crate) fn probe(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>) -> Out {
-        if crate::language::is_rust(&self.root) {
-            if from.is_some() && module.is_some() {
-                return crate::failure::fail("E1006 --from and --in can't be combined: --from places the probe in the test's module.");
-            }
-            if !trace.is_empty() {
-                return crate::failure::fail(
-                    "E1006 --trace is Gleam only: Rust has no call tracing at run time; print values with `println!` or `dbg!`.",
-                );
-            }
-            return crate::rust_probe::run(self, text, module, from);
-        }
-        if module.is_some() {
-            return crate::failure::fail("E1006 --in is Rust only: a Gleam probe reaches project modules with `import`.");
-        }
-        let ix = self.index()?;
-        let deps = self.dependency_modules();
-        if ix.modules.iter().any(|m| m.path == crate::cli::PROBE) {
-            return crate::failure::fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
-        }
-        let (prelude, setup) = match from {
-            Some(name) => self.probe_from(&ix, name)?,
-            None => (String::new(), String::new()),
-        };
-        // A single expression is printed: `probe` with `money.percent(7400, 5)` shows 370.
-        let one = text.trim();
-        let text = if !one.is_empty()
-            && !one.contains('\n')
-            && !["echo ", "let ", "assert ", "import ", "use ", "panic", "todo"].iter().any(|k| one.starts_with(k))
-        {
-            format!("echo {one}")
-        } else {
-            text.to_string()
-        };
-        let mut code = if text.contains("fn main(") {
-            if from.is_some() {
-                return crate::failure::fail("E1005 --from adds statements to a test's body; give statements, not a module.");
-            }
-            text
-        } else {
-            let (imports, body): (Vec<&str>, Vec<&str>) = text.lines().partition(|l| l.starts_with("import "));
-            format!("{prelude}{}\n\npub fn main() {{\n{setup}{}\n}}\n", imports.join("\n"), body.join("\n"))
-        };
-        // the probe lives in test/, so test helpers such as `support` are importable
-        for need in missing_imports(&ix, &deps, &code, &code, true) {
-            code = format!("{}\n{code}", need.line());
-        }
-        self.materialize(&ix)?;
-        let traced = self.trace_sources(&ix, trace)?;
-        let file = self.root.join("test").join(format!("{PROBE}.gleam"));
-        let result = (|| -> Result<(bool, String), Failure> {
-            for (path, content) in &traced {
-                self.rewrite(path, content)?;
-            }
-            fs::create_dir_all(file.parent().unwrap())?;
-            fs::write(&file, &code)?;
-            self.tool(&["run", "-m", crate::cli::PROBE])
-        })();
-        // Remove the probe and put traced modules back in every case.
-        let _ = fs::remove_file(&file);
-        if !traced.is_empty() {
-            self.materialize(&ix)?;
-        }
-        let (ok, output) = result?;
-        // Compiler warnings (mostly the probe's unused imports) are noise here.
-        let mut out = self.lang().quiet(&output);
-        if !trace.is_empty() {
-            out = trace_report(&out);
-        }
-        if !ok {
-            if out.contains("Unknown module value") {
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out += "Hint: print a value with `echo value`.\n";
-            }
-            out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
-        }
-        if ok { Ok(out) } else { crate::failure::fail(out) }
+        self.probe_with_limit(text, from, trace, module, PROBE_LIMIT)
     }
     /// `probe --from <fn>`: the imports of its module and its body, so a
     /// probe can start from a test's setup and use its local variables.
@@ -1247,6 +1170,121 @@ impl Store {
         }
         out += &also;
         if ok { Ok(out + &untested + &next) } else { crate::failure::fail(out) }
+    }
+
+    /// `probe` with its run limit given, so a test can use one short enough.
+    pub(crate) fn probe_with_limit(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>, limit: u64) -> Out {
+        if crate::language::is_rust(&self.root) {
+            return self.rust_probe_with_limit(text, module, from, trace, limit);
+        }
+        self.gleam_probe_with_limit(text, from, trace, module, limit)
+    }
+
+    fn rust_probe_with_limit(&self, text: &str, module: Option<&str>, from: Option<&str>, trace: &[&str], limit: u64) -> Out {
+        if from.is_some() && module.is_some() {
+            return crate::failure::fail("E1006 --from and --in can't be combined: --from places the probe in the test's module.");
+        }
+        if !trace.is_empty() {
+            return crate::failure::fail(
+                "E1006 --trace is Gleam only: Rust has no call tracing at run time; print values with `println!` or `dbg!`.",
+            );
+        }
+        crate::rust_probe::run(self, text, module, from, limit)
+    }
+
+    fn gleam_probe_with_limit(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>, limit: u64) -> Out {
+        if module.is_some() {
+            return crate::failure::fail("E1006 --in is Rust only: a Gleam probe reaches project modules with `import`.");
+        }
+        let ix = self.index()?;
+        let deps = self.dependency_modules();
+        if ix.modules.iter().any(|m| m.path == crate::cli::PROBE) {
+            return crate::failure::fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
+        }
+        let code = self.gleam_probe_code(&ix, &deps, text, from)?;
+        let outcome = self.run_gleam_probe(&ix, &code, trace, limit)?;
+        self.gleam_probe_reply(outcome, &code, trace, limit)
+    }
+
+    fn gleam_probe_code(&self, ix: &Index, deps: &[DependencyModule], text: &str, from: Option<&str>) -> Result<String, Failure> {
+        let (prelude, setup) = match from {
+            Some(name) => self.probe_from(ix, name)?,
+            None => (String::new(), String::new()),
+        };
+        // A single expression is printed: `probe` with `money.percent(7400, 5)` shows 370.
+        let one = text.trim();
+        let text = if !one.is_empty()
+            && !one.contains('\n')
+            && !["echo ", "let ", "assert ", "import ", "use ", "panic", "todo"].iter().any(|k| one.starts_with(k))
+        {
+            format!("echo {one}")
+        } else {
+            text.to_string()
+        };
+        let mut code = if text.contains("fn main(") {
+            if from.is_some() {
+                return crate::failure::fail("E1005 --from adds statements to a test's body; give statements, not a module.");
+            }
+            text
+        } else {
+            let (imports, body): (Vec<&str>, Vec<&str>) = text.lines().partition(|l| l.starts_with("import "));
+            format!("{prelude}{}\n\npub fn main() {{\n{setup}{}\n}}\n", imports.join("\n"), body.join("\n"))
+        };
+        // the probe lives in test/, so test helpers such as `support` are importable
+        for need in missing_imports(ix, deps, &code, &code, true) {
+            code = format!("{}\n{code}", need.line());
+        }
+        Ok(code)
+    }
+
+    fn run_gleam_probe(&self, ix: &Index, code: &str, trace: &[&str], limit: u64) -> Result<ProbeOutcome, Failure> {
+        self.materialize(ix)?;
+        let traced = self.trace_sources(ix, trace)?;
+        let file = self.root.join("test").join(format!("{PROBE}.gleam"));
+        let result = (|| -> Result<ProbeOutcome, Failure> {
+            for (path, content) in &traced {
+                self.rewrite(path, content)?;
+            }
+            fs::create_dir_all(file.parent().unwrap())?;
+            fs::write(&file, code)?;
+            let (built, output) = self.tool(&["build"])?;
+            if !built {
+                return Ok(ProbeOutcome { ok: false, timed_out: false, cut_short: false, output });
+            }
+            let program = self.tool_program();
+            let argv = vec![program.to_string_lossy().into_owned(), "run".into(), "-m".into(), crate::cli::PROBE.to_string()];
+            let cmd = crate::migrate::probe_sandboxed(&argv, &self.root, crate::migrate::protected(&self.root).as_deref());
+            let ran = crate::lockdown::commands::run_probe(&self.root, cmd, limit)?;
+            Ok(ProbeOutcome { ok: ran.code == Some(0), timed_out: ran.timed_out, cut_short: ran.cut_short, output: ran.output })
+        })();
+        // Remove the probe and put traced modules back in every case.
+        let _ = fs::remove_file(&file);
+        if !traced.is_empty() {
+            self.materialize(ix)?;
+        }
+        result
+    }
+
+    fn gleam_probe_reply(&self, outcome: ProbeOutcome, code: &str, trace: &[&str], limit: u64) -> Out {
+        let ProbeOutcome { ok, timed_out, cut_short, output } = outcome;
+        // Compiler warnings (mostly the probe's unused imports) are noise here.
+        let mut out = self.lang().quiet(&output);
+        if !trace.is_empty() {
+            out = trace_report(&out);
+        }
+        if timed_out {
+            return crate::failure::fail(crate::lockdown::commands::probe_stopped(limit, &out, cut_short));
+        }
+        if !ok {
+            if out.contains("Unknown module value") {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out += "Hint: print a value with `echo value`.\n";
+            }
+            out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
+        }
+        if ok { Ok(out) } else { crate::failure::fail(out) }
     }
 }
 
@@ -1626,4 +1664,13 @@ fn stale_binary_notice_from(
 struct ReachTargets {
     names: Vec<String>,
     ids: Vec<String>,
+}
+
+pub(crate) const PROBE_LIMIT: u64 = 120;
+
+struct ProbeOutcome {
+    ok: bool,
+    timed_out: bool,
+    cut_short: bool,
+    output: String,
 }

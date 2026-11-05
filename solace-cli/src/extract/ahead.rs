@@ -384,4 +384,17 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         dir
     }
+
+    #[test]
+    fn undo_keeps_layout_rows() {
+        let (_root, s) = crate::testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
+        let before = crate::board::snapshot(&s).unwrap();
+        let mut after = before.clone();
+        let key = before.as_object().unwrap().keys().find(|k| k.starts_with("symbol:")).unwrap().clone();
+        after[&key][5] = json!(99);
+        crate::board::reviews::record_layout(&s, "t", &before, &after, &[key.clone()]).unwrap();
+        undo(&s, &json!({"before": before}), "t", "r", &[]).unwrap();
+        let left: i64 = s.db.query_row("SELECT COUNT(*) FROM board_before WHERE task='t'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1);
+    }
 }

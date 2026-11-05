@@ -32,6 +32,7 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
     if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '', name: 'fixture', base: '' }], found: [] });
     if (path === '/models') return Response.json([{ id: 'fake', label: 'Fake' }]);
+    if (path === '/role-models') return Response.json([{ role: '', name: 'Default', default: 'fake' }]);
     if (req.method === 'GET') return Response.json(path === '/graph/review' ? { summary: '1 effects added, 0 signature changed, 0 test unfinished' } : path === '/workflow' ? workflow : current);
     const body = await req.json();
     if (path.endsWith('/actions')) {
@@ -304,7 +305,7 @@ test('block turns whole selected lines into a markdown block', async () => {
   expect(block(null, 'e', '', 'code')).toBe('```\n\n```');
 });
 
-test('saved choices survive missing or throwing storage', async () => {
+test('storage helpers survive missing or throwing storage', async () => {
   const { load, store } = await import('../src/task_api.mjs');
   const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   try {
@@ -313,11 +314,10 @@ test('saved choices survive missing or throwing storage', async () => {
     expect(() => store('k', 'v')).not.toThrow();
     const values = new Map();
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: k => values.delete(k) } });
-    store('solace-board-agent', 'fake'); expect(load('solace-board-agent')).toBe('fake');
-    // A new element starts from the agent and effort chosen last.
-    store('solace-board-effort', 'high');
+    store('k', 'v'); expect(load('k')).toBe('v');
+    // A new element leaves the model to the task's role.
     const t = mount();
-    expect([t.model.model, t.model.effort]).toEqual(['fake', 'high']);
+    expect([t.model.model, t.model.effort]).toEqual(['', '']);
     store('k', ''); expect(load('k')).toBe('');
   } finally {
     if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
@@ -378,6 +378,42 @@ test('transport uses the base it is given; explicit project paths stay absolute'
     expect(api.events('', () => {}).path).toBe('/events');
   } finally {
     globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+  }
+});
+
+test('a stream the browser closed for good reopens from the last event, with backoff', async () => {
+  const saved = Object.fromEntries(['EventSource', 'setTimeout', 'clearTimeout'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const sources = [], timers = [];
+  globalThis.setTimeout = (callback, wait) => { timers.push({ callback, wait }); return timers.length; };
+  globalThis.clearTimeout = () => {};
+  globalThis.EventSource = class {
+    readyState = 1;
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener() {}
+    close() { this.closed = true; this.readyState = 2; }
+  };
+  try {
+    const api = await import('../src/task_api.mjs');
+    const got = [];
+    const source = api.events('/p/shop', text => got.push(text));
+    expect(source.path).toBe('/p/shop/events');
+    source.onmessage({ data: 'one', lastEventId: '{"tasks":3,".":2}' });
+    expect(got).toEqual(['one']);
+    source.readyState = 2;
+    source.onerror();
+    expect(timers[0].wait).toBe(1000);
+    timers[0].callback();
+    expect(sources[1].path).toBe('/p/shop/events?last=' + encodeURIComponent('{"tasks":3,".":2}'));
+    sources[1].readyState = 2;
+    sources[1].onerror();
+    expect(timers[1].wait).toBe(2000);
+    api.close_events(source);
+    expect(sources[1].closed).toBe(true);
+    timers[1].callback();
+    expect(sources).toHaveLength(2);
+    expect(api.events('', () => {}).path).toBe('/events');
+  } finally {
+    for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
   }
 });
 

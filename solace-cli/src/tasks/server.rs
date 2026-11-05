@@ -317,9 +317,43 @@ pub(crate) fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
         t["inbox"] = json!(id);
         return write(top, &t).map(|_| None);
     }
+    // A wait hands over the notes and answers it read: the server alone records
+    // them, and only while the run is still open.
+    if m["kind"] == "delivery" {
+        if m["target"] == "strategy" {
+            let rid = m["run"].as_str().unwrap_or("");
+            let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+            if run["inbox"].as_str().is_some_and(|last| last == id) {
+                return Ok(None);
+            }
+            crate::board::delivery::record(&mut run, m, false);
+            run["inbox"] = json!(id);
+            put_run(top, &run)?;
+            return Ok(None);
+        }
+        let tid = m["task"].as_str().unwrap_or("");
+        if !valid_id(tid) {
+            return board::err("E7001", "invalid task id");
+        }
+        let path = store_dir(top).join(format!("{tid}.json"));
+        let mut t = read_task(top, &path)?;
+        if t["inbox"].as_str().is_some_and(|last| last == id) {
+            return Ok(None);
+        }
+        let i = crate::board::task_model::run_at(&t, m["run"].as_str().unwrap_or(""))?;
+        let paused = !t["paused_from"].is_null();
+        crate::board::delivery::record(&mut t["runs"][i], m, paused);
+        t["inbox"] = json!(id);
+        write(top, &t)?;
+        return Ok(None);
+    }
+    // A message left by an older version; delivery wakes the run now.
+    if m["kind"] == "strategy_resume" {
+        return Ok(None);
+    }
     // A strategy run's agent (D-93): its reply or proposal waits for the human,
     // whose next note or answer sets the run going again.
-    if let Some(kind @ ("strategy_note" | "strategy_propose" | "strategy_resume")) = m["kind"].as_str() {
+    if let Some(kind @ ("strategy_note" | "strategy_propose")) = m["kind"].as_str() {
         let rid = m["run"].as_str().unwrap_or("");
         let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
         if run["inbox"].as_str().is_some_and(|last| last == id) {
@@ -348,7 +382,7 @@ pub(crate) fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
         }
         // A run that ended keeps the note, but nothing wakes it.
         if !ended {
-            run["state"] = json!(if kind == "strategy_resume" { "running" } else { "waiting" });
+            run["state"] = json!("waiting");
         }
         run["inbox"] = json!(id);
         put_run(top, &run)?;

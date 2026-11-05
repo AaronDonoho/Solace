@@ -233,11 +233,11 @@ The new task form has no Cancel (Close keeps the draft), and Title is a placehol
 Why: separate setups keep every guardrail per project, and what's shared is a thin layer.
 
 ## D-58 Changes made outside Solace become reviewed work
-1. Solace never overwrites a source file it didn't write last (`.solace/written`); a changed file is read into the store as a new revision. Solace checks at each command and, while the board runs, about once a second.
+1. Solace never overwrites a source file (Gleam or Rust) it didn't write last (`.solace/written`); a changed file is read into the store as a new revision. Solace checks at each command and, while the board runs, about once a second.
 2. Changes made during a work run belong to that task; changes a command makes (`format`, declared commands) belong to that command.
-3. Other changes go to an **Unexpected Changes** task in needs review, with the diff and compile result. Completing it keeps them, cancelling restores Solace's code, and while it's open no work run starts or continues (`E7012`).
+3. Other changes go to an **Unexpected Changes** task in needs review, with the diff and compile result. Completing it keeps them, canceling restores Solace's code, and while it's open no work run starts or continues (`E7012`).
 4. Code that doesn't compile is still read in; Solace never reverts on its own.
-5. Only graph files raise this.
+5. Only graph files raise this: a Gleam project's `src/` and `test/` files, or a Rust module file the store holds (D-158).
 6. Pulls and branch switches stay quiet when the code matches `.solace/approved`, the hashes as last approved, committed with the project.
 Why: files on disk stay authoritative, so other tools keep working and a Solace bug never traps code, while outside work still waits for review.
 
@@ -1407,3 +1407,9 @@ Why: clients get Solace on Windows with little setup, the distro behaves the sam
 4. A pull request carries the short contributor agreement in `CONTRIBUTING.md`, which lets Aaron license contributions on any terms.
 5. Desktop app bundles carry `LICENSE.md`, and the Windows installer shows it for acceptance.
 Why: this stops others from selling Solace or offering it as a competing service while people can still extend it and suggest changes. Without the contributor agreement, outside code would arrive under the same limits and couldn't go into a paid service.
+
+## D-226 Cancel keeps approved edits and removals of layout rows
+Amends D-58 point 3. (Aaron, board task "outside: read in Rust changes", 2026-11-05).
+1. Code that matches `.solace/approved` is not part of an open task. Canceling a task keeps an approved edit to a row the task holds only as layout, and keeps an approved removal of that row; cancel restores the other rows' places.
+2. Every open task holding that row as layout takes the approved text and revision, or loses its undo row and layout touch for an approved removal. A task that doesn't hold the row gets no undo row.
+Why: canceling a task undoes its own work, not approved work that arrived meanwhile; otherwise the next pull or commit could show an approved deletion as new code.
