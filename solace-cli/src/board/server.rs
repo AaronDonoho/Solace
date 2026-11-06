@@ -252,7 +252,10 @@ impl Board {
                 return crate::board::setup::save_agent_setting(&config_path(), body).and_then(|_| crate::board::setup::agent_settings());
             }
             ("POST", "/role-models") => {
-                return crate::board::setup::save_role_model(&config_path(), body).and_then(|_| crate::board::setup::role_models());
+                crate::board::setup::save_role_model(&config_path(), body)?;
+                let saved = crate::board::setup::role_models()?;
+                crate::tasks::store::log(&self.top, "", &json!({"roleModels": saved.clone()}));
+                return Ok(saved);
             }
             ("GET", "/models") => return models(),
             ("POST", "/models/try-again") => return crate::board::agents::try_again(body).and_then(|_| models()),
@@ -471,8 +474,8 @@ impl Events {
     fn at_root(&self) -> bool {
         self.merged || self.streams.iter().any(|s| s.0 == ".")
     }
-    /// The root's milestones, features, vision and strategy runs as they are,
-    /// after the tasks.
+    /// The root's milestones, features, vision, personas, role models and
+    /// strategy runs as they are, after the tasks.
     fn strategy_state(&self) -> String {
         if !self.at_root() {
             return String::new();
@@ -482,12 +485,16 @@ impl Events {
             (json!({"milestones":crate::tasks::records(top, "milestones")}), json!({"features":crate::tasks::records(top, "features")}));
         let vision = json!({"vision": crate::tasks::vision(top)});
         let personas = json!({"personas": crate::tasks::personas(top)});
+        let role_models = match crate::board::setup::role_models() {
+            Ok(models) => format!("id: {id}\ndata: {}\n\n", json!({"roleModels": models})),
+            Err(_) => String::new(),
+        };
         let runs = json!({"strategyRuns": crate::tasks::strategy_runs(top)});
         // Tasks with no project (D-129) ride on the root's streams, marked so
         // the Strategy page can list them whatever their home.
         let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -923,6 +930,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                             | "/migrate"
                             | "/contracts"
                             | "/strategy"
+                            | "/design"
                             | "/settings"
                             | "/knowledgebase"
                             | "/app.js"
@@ -933,7 +941,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             {
                 let (data, kind) = match page {
                     _ if record_link => (INDEX_HTML, "text/html"),
-                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => {
+                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/design" | "/settings" | "/knowledgebase" => {
                         (INDEX_HTML, "text/html")
                     }
                     "/fonts/sans-400.woff2" => (SANS_400, "font/woff2"),

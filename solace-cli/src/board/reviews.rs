@@ -326,6 +326,7 @@ fn clear_reviews(s: &Store, tid: &str) -> Result<(), Failure> {
 }
 
 pub(crate) fn review_state(s: &Store, t: &Value) -> Result<Value, Failure> {
+    let tid = t["id"].as_str().unwrap_or("");
     let changes = changes_of(s, t)?;
     let mut projects = json!({});
     let mut context = json!({});
@@ -335,7 +336,7 @@ pub(crate) fn review_state(s: &Store, t: &Value) -> Result<Value, Failure> {
         for c in changes.iter().filter(|c| c["project"] == dir) {
             let key = c["entity"].as_str().unwrap();
             entities[key] = match key.strip_prefix("file:") {
-                Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
+                Some(f) => json!(file_after(&st.root, tid, f)),
                 None => current[key].clone(),
             };
         }
@@ -408,21 +409,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
     let mut unsafe_lines: Vec<String> = vec![];
     for (dir, st) in &projects {
         let current = snapshot(st)?;
-        let mut rows = st.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
-        let before: HashMap<String, Value> = rows
-            .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap())))
-            .collect::<Result<_, _>>()?;
-        let text = |key: &str, v: &Value| -> Option<String> {
-            if key.starts_with("symbol:") {
-                (v[7].as_i64() == Some(1)).then(|| v[4].as_str().unwrap_or("").to_string())
-            } else if key.starts_with("module:") {
-                v[2].as_str().map(|h| h.to_string())
-            } else {
-                let bytes = jsonx::bytes(v.as_array()?);
-                Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
-            }
-        };
+        let before: HashMap<String, Value> = before_of(st, tid)?.into_iter().collect();
         for c in changes.iter().filter(|c| c["project"] == *dir) {
             let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
             let Some(original) = before.get(key) else { continue };
@@ -437,7 +424,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
                 continue;
             }
             let new = match key.strip_prefix("file:") {
-                Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
+                Some(f) => json!(file_after(&st.root, tid, f)),
                 None => current[key].clone(),
             };
             if baseline.is_some() && old == &new {
@@ -450,7 +437,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
             {
                 unsafe_lines.push(line);
             }
-            let part = match (text(key, old), text(key, &new)) {
+            let part = match (text_of(key, old), text_of(key, &new)) {
                 (a, b) if a == b && baseline.is_some() => format!("## {shown} (metadata or binary content changed)\n"),
                 (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
                 // an extract into another project: shown once, with the diff, where it landed
@@ -770,12 +757,7 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     };
     let (mut plans, mut conflicts) = (vec![], vec![]);
     for (dir, st) in &projects {
-        let mut rows = st.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
-        let mut states = vec![];
-        for row in rows.query_map([&tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (k, v) = row?;
-            states.push((k, serde_json::from_str::<Value>(&v).unwrap()));
-        }
+        let states = before_of(st, &tid)?;
         for (key, _) in &states {
             let later:Option<String>=st.db.query_row("SELECT task FROM board_touches WHERE entity=?1 AND seq > (SELECT MIN(seq) FROM board_touches WHERE task=?2 AND entity=?1) AND task!=?2 ORDER BY seq DESC LIMIT 1",params![key,tid],|r|r.get(0)).optional()?;
             if let Some(other) = later {
@@ -847,6 +829,15 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
             for (st, _) in &done {
                 st.db.execute_batch("RELEASE revert_task")?;
             }
+            for (_, st, states) in &plans {
+                let mut w = outside::Written::load(&st.root);
+                for (key, _) in states {
+                    if let Some(name) = key.strip_prefix("file:") {
+                        w.clear_bad(name);
+                    }
+                }
+                w.save()?;
+            }
         }
     }
     for (_, st) in &projects {
@@ -879,7 +870,8 @@ pub(crate) fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
 }
 
 /// The body of a Tech Debt task (D-112).
-const TECH_DEBT_BODY: &str = "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.";
+pub(crate) const TECH_DEBT_BODY: &str =
+    "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.";
 
 /// The findings of a note's `### Tech debt` section (D-112): one per top-level
 /// bullet (`-`, `*`, `+` or `1.`), with the indented lines below it. The
@@ -933,12 +925,12 @@ pub(crate) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize, u
     if let Some((rid, text)) = last_review(t) {
         let found = tech_debt_items(&text);
         review = found.len();
-        items.extend(found.into_iter().map(|item| format!("Tech debt from the review of task:{tid} (review run {rid}):\n\n{item}")));
+        items.extend(found.into_iter().map(|item| format!("{REVIEW_FINDING_PREFIX}{tid} (review run {rid}):\n\n{item}")));
     }
     if let Some((rid, text)) = last_work(t) {
         let found = tech_debt_items(&text);
         work = found.len();
-        items.extend(found.into_iter().map(|item| format!("Tech debt from the work on task:{tid} (work run {rid}):\n\n{item}")));
+        items.extend(found.into_iter().map(|item| format!("{WORK_FINDING_PREFIX}{tid} (work run {rid}):\n\n{item}")));
     }
     if items.is_empty() {
         return Ok(None);
@@ -947,7 +939,10 @@ pub(crate) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize, u
     let feature = fid.and_then(|f| tasks::record(top, "features", f));
     let mut debt = match (fid, feature) {
         (Some(fid), Some(feature)) => {
-            let open = |o: &Value| flow(&scope::path(top, o["home"].as_str().unwrap_or("."))).is_ok_and(|w| crate::board::task_model::column(&w, o)["final"] != true);
+            let open = |o: &Value| {
+                flow(&scope::path(top, o["home"].as_str().unwrap_or(".")))
+                    .is_ok_and(|w| crate::board::task_model::column(&w, o)["final"] != true)
+            };
             let found = all_tasks(top)?.into_iter().find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o));
             match found {
                 Some(d) => d,
@@ -1519,4 +1514,140 @@ fn apply_endings(s: &Store, tid: &str) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+const REVIEW_FINDING_PREFIX: &str = "Tech debt from the review of task:";
+
+const WORK_FINDING_PREFIX: &str = "Tech debt from the work on task:";
+
+/// The content of the `solace` notes that filing wrote as task `t`'s tech
+/// debt, without the line naming the task and run each came from (D-112).
+pub(crate) fn tech_debt_findings(t: &Value) -> String {
+    let mut out = String::new();
+    for note in t["notes"].as_array().into_iter().flatten() {
+        if note["author"] != "solace" {
+            continue;
+        }
+        let Some(text) = note["text"].as_str() else { continue };
+        let Some((head, body)) = text.split_once("\n\n") else { continue };
+        if !head.starts_with(REVIEW_FINDING_PREFIX) && !head.starts_with(WORK_FINDING_PREFIX) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(body);
+    }
+    out
+}
+
+/// Where a task keeps an unreadable file's text as it arrived, so the diff
+/// survives the store replacing the file.
+pub fn after_file(root: &Path, tid: &str, name: &str) -> PathBuf {
+    before_dir(root, tid).join("after").join(sha256(name.as_bytes()))
+}
+
+/// Saves an unreadable outside edit for the task's diff.
+pub fn save_after(root: &Path, tid: &str, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+    let path = after_file(root, tid, name);
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// A file change's after text: the outside edit a task kept, else the file now.
+pub fn file_after(root: &Path, tid: &str, name: &str) -> Option<Vec<u8>> {
+    fs::read(after_file(root, tid, name)).ok().or_else(|| fs::read(lockdown::path(root, name).ok()?).ok())
+}
+
+/// Drops one file change a task holds, with the before and after copies it kept.
+pub(crate) fn drop_change(s: &Store, tid: &str, key: &str) -> Result<(), Failure> {
+    if let Some(name) = key.strip_prefix("file:") {
+        for path in [before_file(&s.root, tid, name), after_file(&s.root, tid, name)] {
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        let absent = before_file(&s.root, tid, name).with_extension("absent");
+        if absent.exists() {
+            fs::remove_file(absent)?;
+        }
+    }
+    s.db.execute("DELETE FROM board_before WHERE task=?1 AND entity=?2", params![tid, key])?;
+    s.db.execute("DELETE FROM board_touches WHERE task=?1 AND entity=?2", params![tid, key])?;
+    Ok(())
+}
+
+/// Drops the file changes every task in this project holds for `names`.
+pub(crate) fn drop_file_changes(s: &Store, names: &[String]) -> Result<Vec<String>, Failure> {
+    let mut out = vec![];
+    for name in names {
+        let key = format!("file:{name}");
+        for tid in file_change_tasks(s, std::slice::from_ref(name))? {
+            if !out.contains(&tid) {
+                out.push(tid.clone());
+            }
+            drop_change(s, &tid, &key)?;
+        }
+    }
+    Ok(out)
+}
+
+/// The tasks in this project that hold a `file:` change for one of `names`.
+pub(crate) fn file_change_tasks(s: &Store, names: &[String]) -> Result<Vec<String>, Failure> {
+    let mut out = vec![];
+    for name in names {
+        let key = format!("file:{name}");
+        let mut st = s.db.prepare("SELECT DISTINCT task FROM board_touches WHERE entity=?")?;
+        let tids: Vec<String> = st.query_map([&key], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        for tid in tids {
+            if !out.contains(&tid) {
+                out.push(tid);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a task holds this file change with the after text its diff needs.
+pub(crate) fn holds_file_change(s: &Store, name: &str) -> bool {
+    file_change_tasks(s, &[name.to_string()]).unwrap_or_default().iter().any(|tid| after_file(&s.root, tid, name).exists())
+}
+
+/// The text a review compares for `key`: a symbol's source, a module's header, or a file's bytes.
+pub(crate) fn text_of(key: &str, v: &Value) -> Option<String> {
+    if key.starts_with("symbol:") {
+        (v[7].as_i64() == Some(1)).then(|| v[4].as_str().unwrap_or("").to_string())
+    } else if key.starts_with("module:") {
+        v[2].as_str().map(|h| h.to_string())
+    } else {
+        let bytes = jsonx::bytes(v.as_array()?);
+        Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
+    }
+}
+
+/// Drops from task `tid` every one of `keys` whose text now equals the task's before state,
+/// returning those it dropped.
+pub(crate) fn drop_unchanged(s: &Store, tid: &str, keys: &[String], now: &Value) -> Result<Vec<String>, Failure> {
+    let stored: HashMap<String, Value> = before_of(s, tid)?.into_iter().collect();
+    let mut dropped = vec![];
+    for key in keys {
+        let Some(old) = stored.get(key) else { continue };
+        if text_of(key, old) == text_of(key, &now[key]) {
+            drop_change(s, tid, key)?;
+            dropped.push(key.clone());
+        }
+    }
+    Ok(dropped)
+}
+
+/// The state each entity held before task `tid` first touched it.
+pub(crate) fn before_of(s: &Store, tid: &str) -> Result<Vec<(String, Value)>, Failure> {
+    let mut rows = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
+    rows.query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .map(|r| {
+            let (key, data) = r?;
+            Ok((key, serde_json::from_str(&data).map_err(|e| Failure(e.to_string(), 1))?))
+        })
+        .collect()
 }

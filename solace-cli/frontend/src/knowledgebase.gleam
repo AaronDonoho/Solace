@@ -59,7 +59,7 @@ pub fn sections() -> List(Section) {
     Section(
       "menu",
       "The menu bar",
-      "<p>A menu bar at the top of every page has six pages: <strong>Workspace</strong> (<code>/workspace</code>), <strong>Strategy</strong> (<code>/strategy</code>), <strong>Board</strong> (<code>/</code>), <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace), <strong>Knowledgebase</strong> (<code>/knowledgebase</code>, this guide) and <strong>Settings</strong> (<code>/settings</code>).</p>",
+      "<p>A menu bar at the top of every page has seven pages: <strong>Workspace</strong> (<code>/workspace</code>), <strong>Strategy</strong> (<code>/strategy</code>), <strong>Design</strong> (<code>/design</code>), <strong>Board</strong> (<code>/</code>), <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace), <strong>Knowledgebase</strong> (<code>/knowledgebase</code>, this guide) and <strong>Settings</strong> (<code>/settings</code>).</p>",
     ),
     Section(
       "how-it-works",

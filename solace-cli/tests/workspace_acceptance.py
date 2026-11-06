@@ -567,6 +567,7 @@ class Root(unittest.TestCase):
         self.assertEqual(self.next_event(events)[1], {'features': []})
         self.assertEqual(self.next_event(events)[1]['vision']['text'], '')
         self.assertEqual(self.next_event(events)[1], {'personas': []})
+        self.assertIn('roleModels', self.next_event(events)[1])
         self.assertEqual(self.next_event(events)[1], {'strategyRuns': []})
         # D-129: the tasks with no project follow the runs, marked.
         self.assertEqual(self.next_event(events)[1], {'noProject': True, 'tasks': []})
@@ -861,7 +862,7 @@ class Root(unittest.TestCase):
             ident, data = self.next_event(events)
             if ident == 'ready': break
             # D-87: the root's records come with the snapshot, with no project to name.
-            if 'milestones' in data or 'features' in data or 'vision' in data or 'personas' in data or 'strategyRuns' in data or data.get('noProject'): continue
+            if 'milestones' in data or 'features' in data or 'vision' in data or 'personas' in data or 'roleModels' in data or 'strategyRuns' in data or data.get('noProject'): continue
             projects.add(data['project'])
         self.assertEqual(projects, {'.', 'frontend'})
         # The root project's agents can't reach into the project below it, only read it.

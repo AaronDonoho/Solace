@@ -261,8 +261,6 @@ pub type Model {
     models: List(Agent),
     /// The model assigned to each role.
     role_models: List(RoleModel),
-    /// The role each action's run step belongs to, from the workflow.
-    action_roles: Dict(String, String),
     model: String,
     effort: String,
     /// Where the current model pick came from.
@@ -482,7 +480,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       projects: [],
       models: [],
       role_models: [],
-      action_roles: dict.new(),
       model: "",
       effort: "",
       model_source: RoleDefault,
@@ -587,7 +584,6 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         ..cleared(stop(model)),
         generation: model.generation + 1,
         workflow: Workflow([], dict.new()),
-        action_roles: dict.new(),
         copy: #(model.copy.0 + 1, ""),
       )
   }
@@ -826,26 +822,12 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
         }
         Ok(_) -> #(model, effect.none())
         Error(_) ->
-          case
-            json.parse(
-              text,
-              decode.at(["workflow"], workflow_with_roles_decoder()),
-            )
-          {
-            Ok(#(w, roles)) ->
+          case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
+            Ok(w) ->
               case model.staged {
                 Some(#(t, _)) ->
-                  settle(
-                    Model(
-                      ..model,
-                      action_roles: roles,
-                      staged: Some(#(t, Some(w))),
-                    ),
-                  )
-                None -> #(
-                  Model(..model, workflow: w, action_roles: roles),
-                  effect.none(),
-                )
+                  settle(Model(..model, staged: Some(#(t, Some(w)))))
+                None -> #(Model(..model, workflow: w), effect.none())
               }
             Error(_) ->
               case json.parse(text, decode.at(["removed"], decode.string)) {
@@ -1183,8 +1165,14 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
 }
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
-  workflow_with_roles_decoder()
-  |> decode.map(fn(pair) { pair.0 })
+  use columns <- decode.field("columns", decode.list(column_decoder()))
+  let label = decode.optional_field("label", "", decode.string, decode.success)
+  use labels <- decode.optional_field(
+    "actions",
+    dict.new(),
+    decode.dict(decode.string, label),
+  )
+  decode.success(Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })))
 }
 
 fn column_decoder() -> decode.Decoder(Column) {
@@ -2839,12 +2827,7 @@ fn settle(model: Model) -> #(Model, Effect(Msg)) {
 /// the new task.
 fn unstage(model: Model) -> Model {
   case model.staged {
-    Some(_) ->
-      Model(
-        ..cleared(model),
-        workflow: Workflow([], dict.new()),
-        action_roles: dict.new(),
-      )
+    Some(_) -> Model(..cleared(model), workflow: Workflow([], dict.new()))
     None -> model
   }
 }
@@ -3278,7 +3261,8 @@ fn note_actions(model: Model, t: Task) -> List(EditorAction(Msg)) {
 /// The fields of an action's request: its name, the chosen model and effort,
 /// and the editor's text when it isn't empty.
 pub fn action_body(model: Model, name: String) -> String {
-  let #(chosen, effort) = action_choice(model, name)
+  let chosen = model.model
+  let effort = model.effort
   let fields = [#("action", json.string(name))]
   let fields = case chosen {
     "" -> fields
@@ -3661,7 +3645,7 @@ fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
 
 fn live_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
   case msg {
-    Live(text) -> Some(live(model, text))
+    Live(text) -> Some(role_models_live(model, text))
     Handed(messages) -> {
       let fresh =
         messages
@@ -3671,7 +3655,10 @@ fn live_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         list.fold(fresh, #(model, effect.none()), fn(acc, m) {
           let #(so_far, fx) = acc
           let #(next, more) =
-            live(Model(..so_far, seen: int.max(so_far.seen, m.0)), m.1)
+            role_models_live(
+              Model(..so_far, seen: int.max(so_far.seen, m.0)),
+              m.1,
+            )
           #(next, effect.batch([fx, more]))
         }),
       )
@@ -3732,21 +3719,13 @@ fn opening_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       })
     WorkflowLoaded(generation, text) if generation == model.generation ->
       Some({
-        case json.parse(text, workflow_with_roles_decoder()) {
-          Ok(#(w, roles)) ->
+        case json.parse(text, workflow_decoder()) {
+          Ok(w) ->
             case model.staged {
               Some(#(t, _)) ->
-                settle(
-                  Model(
-                    ..model,
-                    action_roles: roles,
-                    staged: Some(#(t, Some(w))),
-                  ),
-                )
+                settle(Model(..model, staged: Some(#(t, Some(w)))))
               None -> #(
-                choose_role_model(
-                  Model(..model, workflow: w, action_roles: roles),
-                ),
+                choose_role_model(Model(..model, workflow: w)),
                 effect.none(),
               )
             }
@@ -3832,7 +3811,7 @@ fn model_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     RoleModelsLoaded(text) ->
       Some(case json.parse(text, role_models_decoder()) {
         Ok(role_models) -> #(
-          choose_role_model(Model(..model, role_models: role_models)),
+          with_role_models(model, role_models),
           effect.none(),
         )
         Error(_) -> #(model, effect.none())
@@ -4561,7 +4540,11 @@ fn choose_role_model(model: Model) -> Model {
     RoleDefault -> {
       let id =
         role_model_chosen(model.models, model.role_models, main_role(model))
-      Model(..model, model: id, effort: "", model_source: RoleDefault)
+      let effort = case id == model.model {
+        True -> effort_for(model.models, id, model.effort)
+        False -> ""
+      }
+      Model(..model, model: id, effort: effort, model_source: RoleDefault)
     }
   }
 }
@@ -4582,31 +4565,6 @@ pub fn kept_effort(agent: Agent, effort: String) -> String {
   case list.contains(agent.efforts, effort) {
     True -> effort
     False -> ""
-  }
-}
-
-/// The role an action's run step gives its model pick, "" when it runs no
-/// agent.
-fn action_role(model: Model, name: String) -> String {
-  case dict.get(model.action_roles, name) {
-    Ok(role) -> role
-    Error(_) -> ""
-  }
-}
-
-/// The model and effort an action uses: a human's pick for every action, else
-/// its own role's default.
-fn action_choice(model: Model, name: String) -> #(String, String) {
-  case model.model_source {
-    Human -> #(model.model, model.effort)
-    RoleDefault ->
-      case action_role(model, name) {
-        "" -> #(model.model, model.effort)
-        role -> {
-          let id = role_model_chosen(model.models, model.role_models, role)
-          #(id, "")
-        }
-      }
   }
 }
 
@@ -4632,23 +4590,41 @@ pub fn role_model_chosen(
   }
 }
 
-fn workflow_with_roles_decoder() -> decode.Decoder(
-  #(Workflow, Dict(String, String)),
-) {
-  use columns <- decode.field("columns", decode.list(column_decoder()))
-  let label = decode.optional_field("label", "", decode.string, decode.success)
-  use labels <- decode.optional_field(
-    "actions",
-    dict.new(),
-    decode.dict(decode.string, label),
-  )
-  use roles <- decode.optional_field(
-    "roles",
-    dict.new(),
-    decode.dict(decode.string, decode.string),
-  )
-  decode.success(#(
-    Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })),
-    roles,
-  ))
+/// A page's tab bar: a row of tabs with the chosen one marked.
+pub const tab_styles =
+  ".tabs{display:flex;flex:none;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}
+.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:var(--tab-pad);cursor:pointer}
+.tabs button:hover{background:var(--hover)}
+.tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
+.tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
+"
+
+/// Whether a live update carries the model assigned to each role.
+pub fn role_models_event(text: String) -> Bool {
+  json.parse(text, decode.at(["roleModels"], decode.dynamic))
+  |> result.is_ok
+}
+
+/// Applies a live role model change to the picker, or any other message as
+/// `live` does.
+fn role_models_live(model: Model, text: String) -> #(Model, Effect(Msg)) {
+  case json.parse(text, decode.at(["roleModels"], role_models_decoder())) {
+    Ok(role_models) -> #(with_role_models(model, role_models), effect.none())
+    Error(_) -> live(model, text)
+  }
+}
+
+/// The picker after a role model change: a hand pick stays, a role default
+/// follows the new list.
+fn with_role_models(model: Model, role_models: List(RoleModel)) -> Model {
+  choose_role_model(Model(..model, role_models: role_models))
+}
+
+/// The effort that survives a pick of `id`: its agent's `kept_effort`, or
+/// empty when no agent has `id`.
+pub fn effort_for(models: List(Agent), id: String, effort: String) -> String {
+  case list.find(models, fn(a) { a.id == id }) {
+    Ok(a) -> kept_effort(a, effort)
+    Error(_) -> ""
+  }
 }

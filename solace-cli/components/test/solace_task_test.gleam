@@ -4216,9 +4216,8 @@ pub fn refetched_column_change_follows_the_new_roles_default_test() {
   assert !string.contains(html(manual), "Your choice")
 }
 
-/// Planning's Investigate and Assign each send their own role's model. A
-/// human's pick overrides both.
-pub fn planning_actions_use_their_roles_model_test() {
+/// Planning's Investigate and Assign send the model in the picker.
+pub fn planning_actions_send_the_picked_model_test() {
   let task_json =
     "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
   let workflow =
@@ -4238,7 +4237,7 @@ pub fn planning_actions_use_their_roles_model_test() {
     task.action_body(model, "investigate"),
     "\"model\":\"b\"",
   )
-  assert string.contains(task.action_body(model, "assign"), "\"model\":\"a\"")
+  assert string.contains(task.action_body(model, "assign"), "\"model\":\"b\"")
   let #(picked, _) = task.update(model, task.AgentSelected("c"))
   assert string.contains(
     task.action_body(picked, "investigate"),
@@ -4296,9 +4295,9 @@ pub fn role_model_or_placeholder_test() {
   assert changed.model_source == task.RoleDefault
 }
 
-/// A live workflow change refreshes the role each action follows, so its
-/// button and request take the new role's model.
-pub fn live_workflow_refreshes_action_roles_test() {
+/// A live workflow change leaves the picker's model alone: every action sends
+/// the model in the picker.
+pub fn a_live_workflow_leaves_the_picker_model_test() {
   let task_json =
     "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
   let first =
@@ -4314,7 +4313,7 @@ pub fn live_workflow_refreshes_action_roles_test() {
   let #(model, _) = task.update(model, task.RoleModelsLoaded(roles))
   let model = task.update(model, task.ModelsLoaded(models)).0
   let #(model, _) = task.update(model, task.CaughtUp)
-  assert string.contains(task.action_body(model, "assign"), "\"model\":\"a\"")
+  assert string.contains(task.action_body(model, "assign"), "\"model\":\"b\"")
   let #(model, _) =
     task.update(
       model,
@@ -4323,7 +4322,7 @@ pub fn live_workflow_refreshes_action_roles_test() {
   assert string.contains(task.action_body(model, "assign"), "\"model\":\"b\"")
   assert string.contains(
     task.action_body(model, "investigate"),
-    "\"model\":\"a\"",
+    "\"model\":\"b\"",
   )
 }
 
@@ -4347,4 +4346,143 @@ pub fn workflow_decoder_accepts_roles_test() {
     )
   assert with_roles.columns
     == [task.Column("planning", "Planning", [], False, "")]
+}
+
+/// Every tabbed page's bar takes the same rules: the row, its buttons, the
+/// chosen mark and its focus ring, so the pages cannot drift apart.
+pub fn tab_styles_are_shared_test() {
+  assert string.contains(task.tab_styles, ".tabs{display:flex;flex:none")
+  assert string.contains(task.tab_styles, ".tabs button{font:inherit")
+  assert string.contains(task.tab_styles, ".tabs button[aria-selected=true]")
+  assert string.contains(task.tab_styles, ".tabs button:focus-visible")
+}
+
+/// A live role model change fills a picker still following the role, and a
+/// hand pick stays.
+pub fn a_live_role_model_change_reaches_the_picker_test() {
+  let task_json =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"assign\"],\"role\":\"investigator\"}]}"
+  let start = fn() {
+    let model = loaded(task_json)
+    let #(model, _) =
+      task.update(model, task.WorkflowLoaded(model.generation, workflow))
+    let #(model, _) =
+      task.update(
+        model,
+        task.RoleModelsLoaded(
+          "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"b\"}]",
+        ),
+      )
+    let #(model, _) =
+      task.update(
+        model,
+        task.ModelsLoaded(
+          "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]",
+        ),
+      )
+    task.update(model, task.CaughtUp).0
+  }
+  let update =
+    "{\"roleModels\":[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"c\"}]}"
+  let model = start()
+  assert model.model == "b"
+  let #(next, _) = task.update(model, task.Live(update))
+  assert next.model == "c"
+  let #(picked, _) = task.update(model, task.AgentSelected("a"))
+  let #(kept, _) = task.update(picked, task.Live(update))
+  assert kept.model == "a"
+  assert kept.model_source == task.Human
+}
+
+/// An effort chosen on a role's default model stays through a refresh while
+/// that default stays the same, and starts fresh when it changes.
+pub fn an_effort_survives_a_role_models_refresh_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(
+        model.generation,
+        "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"assign\"],\"role\":\"worker\"}]}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"b\"}]",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  let #(model, _) = task.update(model, task.EffortSelected("high"))
+  let #(kept, _) =
+    task.update(
+      model,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"b\"}]",
+      ),
+    )
+  assert kept.model == "b"
+  assert kept.effort == "high"
+  let #(narrowed, _) =
+    task.update(
+      kept,
+      task.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\"]}]",
+      ),
+    )
+  assert narrowed.model == "b"
+  assert narrowed.effort == ""
+  let #(changed, _) =
+    task.update(
+      model,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"a\"}]",
+      ),
+    )
+  assert changed.model == "a"
+  assert changed.effort == ""
+}
+
+/// An action sends the model and effort shown in the picker.
+pub fn an_action_sends_the_selected_model_and_effort_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  let #(model, _) = task.update(model, task.AgentSelected("b"))
+  let #(model, _) = task.update(model, task.EffortSelected("high"))
+  let body = task.action_body(model, "assign")
+  assert string.contains(body, "\"model\":\"b\"")
+  assert string.contains(body, "\"effort\":\"high\"")
+}
+
+/// A live role model change is recognized, and another message is not.
+pub fn role_models_events_are_recognized_test() {
+  task.role_models_event(
+    "{\"roleModels\":[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"b\"}]}",
+  )
+  |> should.be_true
+  task.role_models_event(
+    "{\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}}",
+  )
+  |> should.be_false
 }

@@ -27,6 +27,9 @@ pub fn routes_test() {
     #("/strategy?tab=personas", frontend.Strategy("personas")),
     #("/strategy?tab=tasks", frontend.Strategy("tasks")),
     #("/strategy?tab=nope", frontend.Strategy("vision")),
+    #("/design", frontend.Design("architecture")),
+    #("/design?tab=ui-ux", frontend.Design("ui-ux")),
+    #("/design?tab=nope", frontend.Design("architecture")),
     #("/settings", frontend.Settings),
     #("/knowledgebase", frontend.Knowledgebase),
     #("/guide", frontend.Knowledgebase),
@@ -63,6 +66,14 @@ pub fn page_elements_test() {
     #(
       #(frontend.Strategy("vision"), True),
       "<solace-strategy tab=\"vision\"></solace-strategy>",
+    ),
+    #(
+      #(frontend.Design("architecture"), True),
+      "<solace-design tab=\"architecture\"></solace-design>",
+    ),
+    #(
+      #(frontend.Design("ui-ux"), False),
+      "<solace-design hidden tab=\"ui-ux\"></solace-design>",
     ),
     #(#(frontend.Settings, True), "<solace-settings></solace-settings>"),
     #(#(frontend.Settings, False), "<solace-settings hidden></solace-settings>"),
@@ -121,10 +132,19 @@ pub fn menu_current_test() {
   assert !string.contains(board, "Migration</a>")
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
   assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
+  assert string.contains(board, "<a href=\"/design\">Design</a>")
   assert string.contains(board, "<a href=\"/settings\">Settings</a>")
   assert string.contains(board, "<a href=\"/knowledgebase\">Knowledgebase</a>")
   let order =
-    ["Workspace", "Strategy", "Board", "Contracts", "Knowledgebase", "Settings"]
+    [
+      "Workspace",
+      "Strategy",
+      "Design",
+      "Board",
+      "Contracts",
+      "Knowledgebase",
+      "Settings",
+    ]
     |> list.map(fn(label) {
       let assert [before, _] = string.split(board, label <> "</a>")
       string.length(before)
@@ -165,6 +185,24 @@ pub fn menu_current_test() {
   assert string.contains(
     strategy_elsewhere,
     "<a href=\"/strategy?tab=tasks\">Strategy</a>",
+  )
+  let design_page =
+    element.to_string(
+      frontend.view(
+        frontend.Model(
+          frontend.Design("architecture"),
+          [frontend.Design("architecture")],
+          frontend.no_focus,
+          [],
+          [],
+          0,
+          [],
+        ),
+      ),
+    )
+  assert string.contains(
+    design_page,
+    "<a aria-current=\"page\" class=\"current\" href=\"/design\">Design</a>",
   )
   let settings_page =
     element.to_string(
@@ -869,7 +907,8 @@ pub fn a_strategy_tab_and_focus_follow_history_test() {
       0,
       [],
     )
-  let #(model, _) = frontend.update(model, frontend.TabChanged("features"))
+  let #(model, _) =
+    frontend.update(model, frontend.TabChanged("solace-strategy", "features"))
   assert model.route == frontend.Strategy("features")
   assert model.opened == [frontend.Strategy("features")]
   assert model.focus
@@ -1115,4 +1154,55 @@ pub fn a_backlog_task_link_opens_on_strategy_test() {
     )
   assert model.route == frontend.Strategy("tasks")
   assert model.focus == frontend.Focus("solace-strategy", "task", ".", "t1", 1)
+}
+
+/// A Design tab change keeps the shell on Design; a tab event from a page
+/// that isn't shown changes nothing.
+pub fn a_design_tab_stays_on_design_test() {
+  let model =
+    frontend.Model(
+      frontend.Design("architecture"),
+      [frontend.Design("architecture")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(model, frontend.TabChanged("solace-design", "ui-ux"))
+  assert model.route == frontend.Design("ui-ux")
+  assert model.opened == [frontend.Design("ui-ux")]
+  let #(same, _) =
+    frontend.update(model, frontend.TabChanged("solace-strategy", "tasks"))
+  assert same.route == frontend.Design("ui-ux")
+  assert same.opened == [frontend.Design("ui-ux")]
+  let #(board, _) =
+    frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
+  let html = element.to_string(frontend.view(board))
+  assert string.contains(html, "<a href=\"/design?tab=ui-ux\">Design</a>")
+  assert frontend.path_of(frontend.Design("architecture")) == "/design"
+  assert frontend.path_of(frontend.Strategy("vision")) == "/strategy"
+}
+
+pub fn a_design_tab_has_one_address_test() {
+  assert frontend.design_path("architecture") == "/design"
+  assert frontend.design_path("ui-ux") == "/design?tab=ui-ux"
+}
+
+/// Each route's path is the address its page uses, without its query.
+pub fn every_route_has_its_page_path_test() {
+  assert frontend.path_of(frontend.Board) == "/"
+  assert frontend.path_of(frontend.Workspace) == "/workspace"
+  assert frontend.path_of(frontend.Contracts("", "")) == "/contracts"
+  assert frontend.path_of(frontend.Contracts("/p/web", "t1"))
+    == "/p/web/contracts"
+  assert frontend.path_of(frontend.Strategy("vision")) == "/strategy"
+  assert frontend.path_of(frontend.Design("ui-ux")) == "/design"
+  assert frontend.path_of(frontend.Settings) == "/settings"
+  assert frontend.path_of(frontend.Knowledgebase) == "/knowledgebase"
+  assert frontend.path_of(frontend.RecordLink("task", "t1")) == "/task/t1"
+  assert frontend.path_of(frontend.RecordLink("feature", "f1")) == "/feature/f1"
+  assert frontend.path_of(frontend.RecordLink("milestone", "m1"))
+    == "/milestone/m1"
 }

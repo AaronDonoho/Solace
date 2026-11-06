@@ -302,12 +302,12 @@ pub(crate) fn persists(m: &Value) -> bool {
 }
 
 /// The project task `t`, at home in `home`, starts its runs in (D-123): the
-/// one of its scope with the most symbols its title and body name as
-/// `module.name`; the home when none has more.
+/// one of its scope with the most symbols its title, body and Tech Debt
+/// findings name as `module.name`; the home when none has more.
 pub(crate) fn start_project(home: &Path, t: &Value) -> String {
     let top = scope::top(home);
     let mine = scope::dir(&top, home);
-    let text = format!("{}\n{}", t["title"].as_str().unwrap_or(""), t["body"].as_str().unwrap_or(""));
+    let text = crate::board::briefs::task_text(t);
     let mut candidates = vec![mine.clone()];
     candidates.extend(scope::of(t, &mine).into_iter().filter(|d| *d != mine));
     let mut best = (0, mine);

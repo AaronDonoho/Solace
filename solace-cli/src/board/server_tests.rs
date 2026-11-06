@@ -177,3 +177,33 @@ fn many_stream_error_reasons_stay_bounded() {
     assert!(last.len() <= 8, "{last:?}");
 }
 
+/// An unreadable settings file leaves the snapshot without a role model
+/// event, so open pickers keep their defaults instead of being cleared.
+#[test]
+fn a_bad_role_model_config_leaves_open_pickers_alone() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let config = p.root.join("config.toml");
+    std::fs::write(&config, "invalid = [").unwrap();
+    crate::board::setup::with_config(&config, || {
+        let board = std::sync::Arc::new(Board::new(p.root.clone(), 0));
+        let events = Events::new(board, None, Some("{\"tasks\":0}"));
+        let state = events.strategy_state();
+        assert!(!state.contains("roleModels"), "{state}");
+    });
+}
+
+/// A readable settings file puts the role models in the snapshot, so open
+/// pickers receive the saved defaults.
+#[test]
+fn a_readable_role_model_config_sends_the_snapshot_role_models() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let config = p.root.join("config.toml");
+    std::fs::write(&config, "[role_models.strategist]\ndefault = \"m1\"\n").unwrap();
+    crate::board::setup::with_config(&config, || {
+        let board = std::sync::Arc::new(Board::new(p.root.clone(), 0));
+        let events = Events::new(board, None, Some("{\"tasks\":0}"));
+        let state = events.strategy_state();
+        assert!(state.contains("roleModels"), "{state}");
+    });
+}
+

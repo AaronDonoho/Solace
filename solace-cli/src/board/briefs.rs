@@ -229,8 +229,9 @@ pub(crate) fn continuation_brief(
     (out, images)
 }
 
-/// The reply `session start --task` gives task `t`'s agent, with the task's
-/// title and description, in `here`, the project its run works in (D-151);
+/// The reply `session start --task` gives task `t`'s agent, with `task_text`'s
+/// ranking of the task's title, description and, for a Tech Debt task, its
+/// findings, in `here`, the project its run works in (D-151, D-228);
 /// none when that folder has no store, or when building it fails, which is
 /// logged so the brief's plain start line can be traced. The brief carries
 /// the reference above this reply.
@@ -1020,10 +1021,21 @@ pub(crate) fn personas_section(top: &Path) -> String {
     out
 }
 
-/// The task's title and description, as `session start --task` reads them.
+/// The task's title, description and, for a Tech Debt task, its findings, as
+/// `session start --task` ranks them (D-151, D-228).
 pub(crate) fn task_text(t: &Value) -> String {
     let text = |k: &str| t[k].as_str().unwrap_or("").trim().to_string();
-    format!("{}\n{}", text("title"), text("body"))
+    let tech_debt = t["techDebt"] == true;
+    let body = text("body");
+    let mut out = format!("{}\n", text("title"));
+    if !tech_debt || body != crate::board::reviews::TECH_DEBT_BODY {
+        out.push_str(&body);
+    }
+    if tech_debt {
+        out.push('\n');
+        out.push_str(&crate::board::reviews::tech_debt_findings(t));
+    }
+    out
 }
 
 /// What every brief asks about user-interface details.

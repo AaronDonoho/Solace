@@ -2208,3 +2208,22 @@ pub fn a_finished_run_with_a_note_is_not_a_discussion_reply_test() {
   |> list.map(fn(t) { t.attention })
   |> should.equal([False, True])
 }
+
+/// A role model saved in Settings reaches the open task's details even in a
+/// workspace whose root is not a lane.
+pub fn a_live_role_model_change_reaches_the_open_detail_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let roles =
+    "{\"roleModels\":[{\"role\":\"worker\",\"name\":\"Worker\",\"default\":\"b\"}]}"
+  let #(model, _) = board.update(model, board.Live(roles))
+  model.live |> should.equal([#(1, roles)])
+}

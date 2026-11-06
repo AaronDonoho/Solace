@@ -1,4 +1,5 @@
 import contracts
+import design
 import gleam/bool
 import gleam/dynamic/decode
 import gleam/int
@@ -28,6 +29,7 @@ pub fn main() -> Nil {
   let assert Ok(_) = strategy.register()
   let assert Ok(_) = migration.register()
   let assert Ok(_) = settings.register()
+  let assert Ok(_) = design.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
     |> lustre.start("#app", Nil)
@@ -41,6 +43,8 @@ pub type Route {
   Contracts(base: String, task: String)
   /// The Strategy page and the tab its address names.
   Strategy(tab: String)
+  /// The Design page and the tab its address names.
+  Design(tab: String)
   Settings
   /// The Knowledgebase page (D-140): the shell's own page, holding the guide. `/guide` lands here.
   Knowledgebase
@@ -52,8 +56,8 @@ pub type Route {
 pub type Msg {
   /// A page's address changed: its route, and the state saved with that entry.
   RouteChanged(Route, String)
-  /// A Strategy tab's event: the tab shown changed.
-  TabChanged(String)
+  /// A page's tab event: the page's element, and the tab shown changed.
+  TabChanged(String, String)
   /// A link was clicked in a page: the record's kind and id.
   Follow(String, String)
   /// A link in a page's shadow root to the Board or a Contract page: its address.
@@ -86,6 +90,13 @@ pub fn route(uri: Uri) -> Route {
       }
       Strategy(strategy.tab_name(strategy.tab_from(query)))
     }
+    ["design"] -> {
+      let query = case uri.query {
+        Some(query) -> query
+        None -> ""
+      }
+      Design(design.tab_name(design.tab_from(query)))
+    }
     ["settings"] -> Settings
     ["knowledgebase"] | ["guide"] -> Knowledgebase
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir, task_query(uri.query))
@@ -115,6 +126,7 @@ pub fn page(
       attribute.attribute("task", task),
     ]
     Strategy(tab) -> [attribute.attribute("tab", tab)]
+    Design(tab) -> [attribute.attribute("tab", tab)]
     _ -> []
   }
   let attributes = case focus.page == page_of(route) && focus.id != "" {
@@ -140,7 +152,7 @@ pub fn page(
     page_of(route),
     [
       event.on("attention", decode.success(Attention(page_of(route)))),
-      event.on("tab", tab_changed()),
+      event.on("tab", tab_changed(page_of(route))),
       ..attributes
     ],
     [],
@@ -222,19 +234,24 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
-    TabChanged(name) -> {
-      let next = strategy_route(name)
-      case model.route == next {
-        True -> #(model, effect.none())
-        False -> {
+    TabChanged(page, name) -> {
+      let next = case page {
+        "solace-strategy" -> strategy_route(name)
+        "solace-design" -> design_route(name)
+        _ -> model.route
+      }
+      case page == page_of(model.route) && model.route != next {
+        False -> #(model, effect.none())
+        True -> {
           let #(model, shown) = show(model, next)
+          let path = path_of(next)
           #(
             model,
             effect.batch([
               shown,
               effect.from(fn(_) {
                 navigate(
-                  "/strategy",
+                  path,
                   query_of(next),
                   // The mounted page keeps its record focus; a tab entry
                   // holds none, so restoring it never switches tabs.
@@ -372,6 +389,7 @@ fn link(
 pub fn view(model: Model) -> Element(Msg) {
   let shown = page_of(model.route)
   let tab = strategy_tab(model)
+  let design_tab = design_tab(model)
   let link = fn(path, label, route) {
     let page = page_of(route)
     link(path, label, shown == page, list.contains(model.attention, page))
@@ -380,6 +398,7 @@ pub fn view(model: Model) -> Element(Msg) {
     html.nav([attribute.class("menu")], [
       link("/workspace", "Workspace", Workspace),
       link(strategy_path(tab), "Strategy", Strategy(tab)),
+      link(design_path(design_tab), "Design", Design(design_tab)),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("", "")),
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
@@ -679,6 +698,7 @@ pub fn page_of(route: Route) -> String {
     Workspace -> "solace-migration"
     Contracts(_, _) -> "solace-contracts"
     Strategy(_) -> "solace-strategy"
+    Design(_) -> "solace-design"
     Settings -> "solace-settings"
     Knowledgebase -> "solace-knowledgebase"
     RecordLink(_, _) -> "solace-board"
@@ -879,7 +899,7 @@ fn load_workflow(receive: fn(String) -> Nil) -> Nil
 
 /// The route for a Strategy tab name, Vision for an unknown one.
 fn strategy_route(tab: String) -> Route {
-  Strategy(strategy.tab_name(strategy.tab_from("tab=" <> tab)))
+  tab_route(tab, strategy.tab_name, strategy.tab_from, Strategy)
 }
 
 /// The record's page: a feature opens Features, a milestone Roadmap and a task Tasks.
@@ -894,32 +914,19 @@ fn record_route(kind: String) -> Route {
 
 /// The tab shown on Strategy, or the tab it will open on.
 fn strategy_tab(model: Model) -> String {
-  case model.route {
-    Strategy(tab) -> tab
-    _ ->
-      case
-        list.find(model.opened, fn(route) {
-          page_of(route) == "solace-strategy"
-        })
-      {
-        Ok(Strategy(tab)) -> tab
-        _ -> strategy.tab_name(strategy.Vision)
-      }
-  }
+  page_tab(model, "solace-strategy", strategy.tab_name(strategy.Vision))
 }
 
 /// The menu's address for a Strategy tab: Vision has no query.
 pub fn strategy_path(tab: String) -> String {
-  case strategy_query(tab) {
-    "" -> "/strategy"
-    query -> "/strategy?" <> query
-  }
+  page_path(Strategy(tab), strategy.tab_name(strategy.Vision))
 }
 
 /// The query a route's address carries.
 fn query_of(route: Route) -> String {
   case route {
     Strategy(tab) -> strategy_query(tab)
+    Design(tab) -> design_query(tab)
     Contracts(_, task) ->
       case task {
         "" -> ""
@@ -965,9 +972,9 @@ fn restored_focus(state: String) -> Focus {
   }
 }
 
-fn tab_changed() -> decode.Decoder(Msg) {
+fn tab_changed(page: String) -> decode.Decoder(Msg) {
   use name <- decode.then(decode.string)
-  decode.success(TabChanged(name))
+  decode.success(TabChanged(page, name))
 }
 
 fn navigate(path: String, query: String, state: String, replace: Bool) -> Nil {
@@ -992,10 +999,7 @@ pub fn history_move(replace: Bool) -> String {
 }
 
 fn strategy_query(tab: String) -> String {
-  case tab {
-    "vision" -> ""
-    _ -> "tab=" <> tab
-  }
+  page_query(tab, strategy.tab_name(strategy.Vision))
 }
 
 @external(javascript, "./history.mjs", "state")
@@ -1017,5 +1021,86 @@ fn task_query(query: Option(String)) -> String {
       |> list.find(fn(pair) { string.starts_with(pair, "task=") })
       |> result.map(fn(pair) { string.drop_start(pair, 5) })
       |> result.unwrap("")
+  }
+}
+
+/// The route for a Design tab name, Architecture for an unknown one.
+fn design_route(tab: String) -> Route {
+  tab_route(tab, design.tab_name, design.tab_from, Design)
+}
+
+/// The tab shown on Design, or the tab it will open on.
+fn design_tab(model: Model) -> String {
+  page_tab(model, "solace-design", design.tab_name(design.Architecture))
+}
+
+/// The menu's address for a Design tab: Architecture has no query.
+pub fn design_path(tab: String) -> String {
+  page_path(Design(tab), design.tab_name(design.Architecture))
+}
+
+fn design_query(tab: String) -> String {
+  page_query(tab, design.tab_name(design.Architecture))
+}
+
+/// The tab `page` shows, from the route shown or the last one opened, else `first`.
+fn page_tab(model: Model, page: String, first: String) -> String {
+  case
+    list.find([model.route, ..model.opened], fn(route) {
+      page_of(route) == page
+    })
+  {
+    Ok(route) -> route_tab(route, first)
+    _ -> first
+  }
+}
+
+/// A tab's query, which the page's first tab leaves out.
+fn page_query(tab: String, first: String) -> String {
+  case tab == first {
+    True -> ""
+    False -> "tab=" <> tab
+  }
+}
+
+/// A tabbed route's menu address: its path and query.
+fn page_path(route: Route, first: String) -> String {
+  let tab = route_tab(route, "")
+  case page_query(tab, first) {
+    "" -> path_of(route)
+    query -> path_of(route) <> "?" <> query
+  }
+}
+
+/// The route for a tab name, through the page's own tab names.
+fn tab_route(
+  tab: String,
+  name: fn(a) -> String,
+  from: fn(String) -> a,
+  route: fn(String) -> Route,
+) -> Route {
+  route(name(from("tab=" <> tab)))
+}
+
+/// The page's path, without its query: a tab change and a link both use it.
+pub fn path_of(route: Route) -> String {
+  case route {
+    Board -> "/"
+    Workspace -> "/workspace"
+    Contracts(base, _) -> base <> "/contracts"
+    Strategy(_) -> "/strategy"
+    Design(_) -> "/design"
+    Settings -> "/settings"
+    Knowledgebase -> "/knowledgebase"
+    RecordLink(kind, id) -> "/" <> kind <> "/" <> id
+  }
+}
+
+/// The tab a route names, or `first` when it isn't a tabbed page.
+fn route_tab(route: Route, first: String) -> String {
+  case route {
+    Strategy(tab) -> tab
+    Design(tab) -> tab
+    _ -> first
   }
 }

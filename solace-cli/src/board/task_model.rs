@@ -371,17 +371,6 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         }
     }
     let actions = w["actions"].clone();
-    // The role each action's run step gives its model pick.
-    let roles: serde_json::Map<String, Value> = actions
-        .as_object()
-        .unwrap()
-        .iter()
-        .filter_map(|(name, action)| {
-            let role = run_role(action);
-            (!role.is_empty()).then(|| (name.clone(), json!(role)))
-        })
-        .collect();
-    w["roles"] = Value::Object(roles);
     for c in w["columns"].as_array_mut().unwrap() {
         if c.get("label").is_none() {
             c["label"] = c["id"].clone();
@@ -505,15 +494,7 @@ pub(crate) fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failur
             t["stamps"].as_object_mut().unwrap().remove(r.as_str().unwrap_or(""));
         }
     }
-    t["column"] = to.clone();
-    // When the task first reaches a final column; never cleared (D-87).
-    if column(w, t)["final"] == true && t["closedTime"].is_null() {
-        t["closedTime"] = json!(now());
-    }
-    // A task that leaves the final columns is back on the board (D-95).
-    if column(w, t)["final"] != true {
-        t["archivedTime"] = Value::Null;
-    }
+    set_column(w, t, to);
     Ok(())
 }
 
@@ -707,6 +688,19 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if let Some(to) = a.get("to") {
         move_to(w, &mut proposed, to)?;
+    }
+    if a["revert"] != true
+        && column(w, &proposed)["final"] == true
+        && let Some(name) = outside::unreadable_change(s, t)?
+    {
+        return err(
+            "E7032",
+            format!(
+                "{name} was changed outside Solace in a form Solace can't read, so this task can't be completed. \
+                 Cancel the task to restore Solace's code, or have an agent redo the change through Solace. \
+                 A file whose name isn't a valid module name can only be renamed or canceled."
+            ),
+        );
     }
     if a["revert"] == true {
         revert(s, t)?;
@@ -1476,6 +1470,24 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 if m["hold"] == true { hold(t, reason) } else { flag(t, reason) }
             }
         }
+        "outside_note" => {
+            outside_note(t, text);
+            if let Some(reason) = m["flag"].as_str() {
+                flag(t, reason);
+            }
+        }
+        "close" => {
+            if t["runs"].as_array().is_some_and(|rs| rs.iter().any(|r| r["state"] != "ended")) {
+                return Ok(());
+            }
+            if let Some(to) = closing_column(w) {
+                set_column(w, t, &to);
+                if t["attention"]["hold"] != true {
+                    t["attention"] = Value::Null;
+                }
+                t["finished"] = Value::Null;
+            }
+        }
         _ => return err("E7001", "unknown task message"),
     }
     Ok(())
@@ -1525,4 +1537,39 @@ fn main_action(column: &str) -> Option<&'static str> {
 /// The role an action's run step belongs to, "" for no run.
 fn run_role(a: &Value) -> &'static str {
     a["run"].as_str().and_then(crate::board::roles::for_run).map_or("", |role| role.id)
+}
+
+/// Replaces the task's outside-changes note in place, so repeated saves do not
+/// pile up notes and one that no longer holds is not left behind.
+pub(crate) fn outside_note(t: &mut Value, text: &str) {
+    let notes = t["notes"].as_array_mut().unwrap();
+    if let Some(n) = notes.iter_mut().find(|n| n["outside"] == true) {
+        n["text"] = json!(text);
+        n["time"] = json!(now());
+    } else {
+        notes.push(json!({"id":unique_id(),"author":"solace","run":Value::Null,"time":now(),"text":text,"outside":true}));
+    }
+}
+
+/// The final column an emptied Unexpected Changes task closes into.
+fn closing_column(w: &Value) -> Option<Value> {
+    let cols = w["columns"].as_array()?;
+    let finished = w["events"]["finished"].as_str()?;
+    let next = cols.iter().find(|c| c["id"] == finished)?.get("next").and_then(Value::as_str);
+    next.filter(|id| cols.iter().any(|c| c["id"] == *id && c["final"] == true))
+        .map(|id| json!(id))
+        .or_else(|| cols.iter().find(|c| c["final"] == true && c["id"] != "cancelled").map(|c| c["id"].clone()))
+        .or_else(|| cols.iter().find(|c| c["final"] == true).map(|c| c["id"].clone()))
+}
+
+fn set_column(w: &Value, t: &mut Value, to: &Value) {
+    t["column"] = to.clone();
+    // When the task first reaches a final column; never cleared (D-87).
+    if column(w, t)["final"] == true && t["closedTime"].is_null() {
+        t["closedTime"] = json!(now());
+    }
+    // A task that leaves the final columns is back on the board (D-95).
+    if column(w, t)["final"] != true {
+        t["archivedTime"] = Value::Null;
+    }
 }

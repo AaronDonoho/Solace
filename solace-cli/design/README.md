@@ -1,24 +1,21 @@
-# design
+# Solace design
 
-[![Package Version](https://img.shields.io/hexpm/v/design)](https://hex.pm/packages/design)
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://design.hexdocs.pm/)
+The Design page, `<solace-design>`, at `/design` in the shell. It has two tabs,
+Architecture and UI/UX, both empty for now.
 
-```sh
-gleam add design@1
-```
-```gleam
-import design
+The tab shown is in the address as `?tab=<name>`; Architecture, the first tab,
+has no query. A missing or unknown tab shows Architecture. A tab click emits
+`tab`, which the shell writes to the history without replacing the page. A
+load, Back or Forward sets the page's `tab` attribute, which restores the tab
+without emitting.
 
-pub fn main() -> Nil {
-  // TODO: An example of the project in use
-}
-```
+## Standalone page
 
-Further documentation can be found at <https://design.hexdocs.pm/>.
+`index.html` shows the page on its own, from `build/dev/javascript`, after
+`gleam build`.
 
-## Development
+## Tests
 
 ```sh
-gleam run   # Run the project
-gleam test  # Run the tests
+gleam test
 ```

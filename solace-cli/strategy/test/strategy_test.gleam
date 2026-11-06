@@ -2514,10 +2514,7 @@ pub fn strategy_uses_the_shared_spacing_test() {
     page,
     ".tasks th:nth-last-child(-n+2){text-align:right}",
   )
-  assert string.contains(
-    page,
-    ".tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}",
-  )
+  assert string.contains(page, solace_task.tab_styles)
   assert string.contains(
     page,
     ".tasks .created,.tasks .closed{color:var(--soft);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}",
@@ -2573,6 +2570,44 @@ pub fn the_plan_keeps_only_an_effort_the_model_still_offers_test() {
     )
   assert dropped.plan_model == "m"
   assert dropped.plan_effort == ""
+  // An effort chosen on the Strategist's default stays while that default
+  // stays, and starts fresh when it changes.
+  let role_default =
+    planned()
+    |> step(strategy.RoleModelsLoaded(
+      "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"b\"}]",
+    ))
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]},{\"id\":\"c\",\"label\":\"C\"}]",
+    ))
+    |> step(strategy.PlanEffort("high"))
+  let kept =
+    step(
+      role_default,
+      strategy.RoleModelsLoaded(
+        "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"b\"}]",
+      ),
+    )
+  assert kept.plan_model == "b"
+  assert kept.plan_effort == "high"
+  let narrowed =
+    step(
+      kept,
+      strategy.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\"]},{\"id\":\"c\",\"label\":\"C\"}]",
+      ),
+    )
+  assert narrowed.plan_model == "b"
+  assert narrowed.plan_effort == ""
+  let changed =
+    step(
+      role_default,
+      strategy.RoleModelsLoaded(
+        "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"c\"}]",
+      ),
+    )
+  assert changed.plan_model == "c"
+  assert changed.plan_effort == ""
 }
 
 /// Start shows on a proposed or upcoming feature (D-154), and on one with no
@@ -3347,10 +3382,7 @@ pub fn the_tasks_panel_is_hidden_on_another_tab_and_keeps_its_height_test() {
     page,
     ".strategy>#panel-tasks:not([hidden]){display:flex;height:calc(var(--view-height) - var(--tabs-height))",
   )
-  assert string.contains(
-    page,
-    ".tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}",
-  )
+  assert string.contains(page, solace_task.tab_styles)
   assert string.contains(
     page,
     "--view-height:calc(100dvh - var(--shell-height))",
@@ -4316,6 +4348,30 @@ pub fn the_plan_follows_the_strategist_default_and_manual_choice_test() {
         "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"c\"}]",
       ),
     )
+  assert kept.plan_model == "a"
+  assert kept.plan_source == solace_task.Human
+}
+
+/// A role model saved in Settings reaches the plan picker and the open task's
+/// details, unless someone picked a model by hand.
+pub fn a_live_role_model_change_reaches_the_plan_and_open_task_test() {
+  let model =
+    workspace()
+    |> step(strategy.RoleModelsLoaded(
+      "[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"b\"}]",
+    ))
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"},{\"id\":\"c\",\"label\":\"C\"}]",
+    ))
+    |> step(strategy.Open("web", "t1"))
+  assert model.plan_model == "b"
+  let roles =
+    "{\"roleModels\":[{\"role\":\"strategist\",\"name\":\"Strategist\",\"default\":\"c\"}]}"
+  let changed = step(model, strategy.Live(roles))
+  assert changed.plan_model == "c"
+  assert list.map(changed.live, fn(m) { m.1 }) == [roles]
+  let manual = step(model, strategy.PlanModel("a"))
+  let kept = step(manual, strategy.Live(roles))
   assert kept.plan_model == "a"
   assert kept.plan_source == solace_task.Human
 }

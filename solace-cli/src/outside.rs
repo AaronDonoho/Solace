@@ -27,13 +27,22 @@ fn stat(path: &Path) -> Option<(u64, u128)> {
 
 /// What Solace last wrote to each graph file: `hash size mtime path` lines,
 /// `! hash path` for a version it couldn't read in and already reported,
-/// `? digest` for the ignore file that last hid the store, and
+/// `@ hash path` for the store's projection when it was marked, `% path why`
+/// for the reason, `? digest` for the ignore file that last hid the store, and
 /// `# old-copies-removed` once the old id-keyed copies are gone.
 /// `# rust-bad-marks-cleared` once an older store's Rust refusals were retried.
 pub struct Written {
     root: PathBuf,
     files: BTreeMap<String, (String, u64, u128)>,
     bad: BTreeMap<String, String>,
+    /// When each unreadable file was marked: the digest of the store's
+    /// projected text then, so only a later store change replaces it.
+    bad_at: BTreeMap<String, String>,
+    /// Why each unreadable file could not be read in, for the task's note.
+    bad_why: BTreeMap<String, String>,
+    /// Files a change at the store has replaced since an unreadable edit, so
+    /// their note is refreshed once the store's text is on disk.
+    redo: std::collections::BTreeSet<String>,
     /// Digest of the ignore files that last hid the store, so the note is said once per change.
     hidden: Option<String>,
     /// False for a store from before D-58 that has no record yet.
@@ -48,7 +57,9 @@ pub struct Written {
 impl Written {
     pub fn load(root: &Path) -> Written {
         let text = fs::read_to_string(root.join(".solace/written"));
-        let (mut files, mut bad, mut hidden) = (BTreeMap::new(), BTreeMap::new(), None);
+        let (mut files, mut bad, mut bad_at, mut bad_why, mut hidden) =
+            (BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), None);
+        let mut redo = std::collections::BTreeSet::new();
         let mut old_copies_removed = false;
         let mut rust_bad_cleared = false;
         for line in text.as_deref().unwrap_or("").lines() {
@@ -68,12 +79,36 @@ impl Written {
                 bad.insert(path.to_string(), h.to_string());
                 continue;
             }
+            if let Some((h, path)) = line.strip_prefix("@ ").and_then(|l| l.split_once(' ')) {
+                bad_at.insert(path.to_string(), h.to_string());
+                continue;
+            }
+            if let Some((path, why)) = line.strip_prefix("% ").and_then(|l| l.split_once(' ')) {
+                bad_why.insert(path.to_string(), why.to_string());
+                continue;
+            }
+            if let Some(path) = line.strip_prefix("~ ") {
+                redo.insert(path.to_string());
+                continue;
+            }
             let mut p = line.splitn(4, ' ');
             if let (Some(h), Some(size), Some(time), Some(path)) = (p.next(), p.next(), p.next(), p.next()) {
                 files.insert(path.to_string(), (h.to_string(), size.parse().unwrap_or(0), time.parse().unwrap_or(0)));
             }
         }
-        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), old_copies_removed, rust_bad_cleared, dirty: false }
+        Written {
+            root: root.into(),
+            files,
+            bad,
+            bad_at,
+            bad_why,
+            redo,
+            hidden,
+            known: text.is_ok(),
+            old_copies_removed,
+            rust_bad_cleared,
+            dirty: false,
+        }
     }
 
     pub fn save(&mut self) -> Result<(), Failure> {
@@ -89,6 +124,9 @@ impl Written {
             }
             text.extend(self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")));
             text.extend(self.bad.iter().map(|(p, h)| format!("! {h} {p}\n")));
+            text.extend(self.bad_at.iter().map(|(p, h)| format!("@ {h} {p}\n")));
+            text.extend(self.bad_why.iter().map(|(p, w)| format!("% {p} {w}\n")));
+            text.extend(self.redo.iter().map(|p| format!("~ {p}\n")));
             fsx::write_atomic(&self.root.join(".solace/written"), text)?;
             self.dirty = false;
         }
@@ -104,6 +142,8 @@ impl Written {
             self.dirty = true;
         }
         self.dirty |= self.bad.remove(rel).is_some();
+        self.dirty |= self.bad_at.remove(rel).is_some();
+        self.dirty |= self.bad_why.remove(rel).is_some();
     }
 
     pub fn forget(&mut self, rel: &str) {
@@ -155,6 +195,68 @@ impl Written {
             self.forget(&rel);
         }
         Ok(())
+    }
+
+    /// Clears the mark that `rel` could not be read in.
+    pub fn clear_bad(&mut self, rel: &str) {
+        self.dirty |= self.bad.remove(rel).is_some();
+        self.dirty |= self.bad_at.remove(rel).is_some();
+        self.dirty |= self.bad_why.remove(rel).is_some();
+    }
+
+    /// Whether writing `content` over `rel` may replace an unreadable outside
+    /// edit: the store's text for that file has moved since it was marked. A
+    /// call site also requires that a task holds the file change.
+    pub fn may_replace(&self, rel: &str, content: &[u8]) -> bool {
+        if self.unchanged(rel) {
+            return true;
+        }
+        self.bad.contains_key(rel) && self.bad_at.get(rel).is_some_and(|h| *h != digest(content))
+    }
+
+    /// Notes that the store replaced an unreadable file, so its file change is
+    /// dropped once the replacement reaches the disk.
+    pub fn note_replacement(&mut self, rel: &str) {
+        self.dirty |= self.redo.insert(rel.to_string());
+    }
+
+    /// The files the store replaced, cleared from the record.
+    pub fn take_replaced(&mut self) -> Vec<String> {
+        let out: Vec<String> = self.redo.iter().cloned().collect();
+        if !out.is_empty() {
+            self.redo.clear();
+            self.dirty = true;
+        }
+        out
+    }
+
+    /// Whether `rel` has an unreadable outside edit that was reported.
+    pub fn marked_bad(&self, rel: &str) -> bool {
+        self.bad.contains_key(rel)
+    }
+
+    /// Records that `rel` could not be read in as `bytes`: its reason, and the
+    /// store's projected text then. The first mark keeps its text, so later
+    /// saves keep the task's first before state.
+    pub fn mark_bad(&mut self, rel: &str, bytes: &[u8], projected: &[u8], why: &str) {
+        let h = digest(bytes);
+        if self.bad.get(rel) != Some(&h) {
+            self.bad.insert(rel.to_string(), h);
+            self.dirty = true;
+        }
+        if !self.bad_at.contains_key(rel) {
+            self.bad_at.insert(rel.to_string(), digest(projected));
+            self.dirty = true;
+        }
+        if self.bad_why.get(rel).map(String::as_str) != Some(why) {
+            self.bad_why.insert(rel.to_string(), why.to_string());
+            self.dirty = true;
+        }
+    }
+
+    /// Why `rel` could not be read in when it was marked.
+    pub fn why_bad(&self, rel: &str) -> Option<&str> {
+        self.bad_why.get(rel).map(String::as_str)
     }
 }
 
@@ -267,11 +369,7 @@ pub fn approve_all(s: &Store) -> Result<(), Failure> {
 /// store after its last write (D-179).
 // takes each entity as it is now, even if a later open task also changed it.
 pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
-    let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
-    let before: Vec<(String, Value)> = st
-        .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-        .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap_or(Value::Null))))
-        .collect::<Result<_, _>>()?;
+    let before = crate::board::reviews::before_of(s, tid)?;
     if before.is_empty() {
         return Ok(());
     }
@@ -387,12 +485,22 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         approve_all(s)?;
     }
     let disk = graph_files(s)?;
+    let ix = s.index()?;
+    let replaced = w.take_replaced();
+    if !replaced.is_empty() {
+        // The outside edit stays visible until the task finishes, but its mark is gone.
+        for tid in crate::board::reviews::file_change_tasks(s, &replaced)? {
+            refresh_note(s, &tid, Ending::Integrated)?;
+        }
+    }
     if !w.old_copies_removed {
         remove_old_copies(&s.root, &disk)?;
         w.old_copies_removed = true;
         w.dirty = true;
     }
     let mut changed: Vec<(String, Option<Vec<u8>>)> = vec![];
+    let mut parked: Vec<(String, Vec<u8>)> = vec![];
+    let mut fixed: Vec<String> = vec![];
     for rel in &disk {
         let path = s.root.join(rel);
         let now = stat(&path);
@@ -402,9 +510,14 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         }
         let bytes = fs::read(&path)?;
         if w.files.get(rel).is_some_and(|(h, ..)| *h == digest(&bytes)) {
+            if w.bad.contains_key(rel) {
+                fixed.push(rel.clone());
+            }
             w.record(rel, &bytes);
         } else if w.bad.get(rel) != Some(&digest(&bytes)) {
             changed.push((rel.clone(), Some(bytes)));
+        } else if matches!(mode, Mode::Notice) && !crate::board::reviews::holds_file_change(s, rel) {
+            parked.push((rel.clone(), bytes));
         }
     }
     for rel in w.files.keys() {
@@ -412,40 +525,18 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
             changed.push((rel.clone(), None));
         }
     }
-    if changed.is_empty() {
-        w.save()?;
-        return Ok(hidden);
+    let (gone_bad, removed) = dropped_gone_bad(&mut w, &disk, &changed, &ix);
+    changed.extend(removed);
+    if changed.is_empty() && parked.is_empty() {
+        return finish_no_changes(s, &mut w, &hidden, &mut fixed, &gone_bad);
     }
-    let before = board::snapshot(s)?;
-    let mut unreadable = vec![];
-    for (rel, bytes) in &changed {
-        let text = match bytes.as_deref().map(std::str::from_utf8) {
-            Some(Err(_)) => {
-                unreadable.push(format!("{rel} isn't UTF-8 text; Solace left it as it is"));
-                w.bad.insert(rel.clone(), digest(bytes.as_deref().unwrap()));
-                w.dirty = true;
-                continue;
-            }
-            Some(Ok(t)) => Some(t),
-            None => None,
-        };
-        match read_in(s, rel, text)? {
-            Ok(()) => match bytes {
-                Some(b) => w.record(rel, b),
-                None => w.forget(rel),
-            },
-            Err(why) => {
-                unreadable.push(why);
-                w.bad.insert(rel.clone(), digest(bytes.as_deref().unwrap_or_default()));
-                w.dirty = true;
-            }
-        }
-    }
-    w.save()?;
-    let after = board::snapshot(s)?;
-    let unreadable_note = unreadable.iter().map(|u| format!("Not read in: {u}.\n")).collect::<String>();
     if matches!(mode, Mode::Command) {
-        return Ok(format!("{hidden}{unreadable_note}"));
+        let outcome = read_changed(s, &ix, &mut w, &changed)?;
+        fixed.extend(outcome.fixed);
+        w.save()?;
+        let dropped = refresh_fixed(s, &mut fixed, &gone_bad)?;
+        retire_empty_unexpected(s, &dropped)?;
+        return Ok(format!("{hidden}{}", unreadable_note(&outcome.unreadable)));
     }
     // What changed, and of that, what wasn't approved elsewhere.
     // Tasks from other projects whose scope includes this one count too (D-61).
@@ -454,6 +545,18 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     let here = scope::dir(&top, &s.root);
     let all = scope::tasks_in(&top, &here)?;
     let open: Vec<&(PathBuf, Value)> = all.iter().filter(|(_, t)| board::column(&flow, t)["final"] != true).collect();
+    let running = open.iter().find_map(|(home, t)| {
+        let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
+        Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
+    });
+    if running.is_none() {
+        for (rel, bytes) in parked {
+            changed.push((rel, Some(bytes)));
+        }
+    }
+    if changed.is_empty() {
+        return finish_no_changes(s, &mut w, &hidden, &mut fixed, &gone_bad);
+    }
     let mut open_ids: HashSet<String> = open.iter().filter_map(|(_, t)| t["id"].as_str().map(String::from)).collect();
     let mut touched: HashSet<String> = HashSet::new();
     for (_, t) in &open {
@@ -461,12 +564,23 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         touched.extend(changes.iter().filter(|c| c["project"] == here).filter_map(|c| c["entity"].as_str().map(String::from)));
     }
     let list = approved(&s.root);
+    let mut before = board::snapshot(s)?;
+    let outcome = read_changed(s, &ix, &mut w, &changed)?;
+    fixed.extend(outcome.fixed);
+    w.save()?;
+    let mut dropped = refresh_fixed(s, &mut fixed, &gone_bad)?;
+    let mut after = board::snapshot(s)?;
+    let unreadable_note = unreadable_note(&outcome.unreadable);
+    if running.is_none() && !outcome.unreadable_files.is_empty() {
+        for (rel, bytes) in &outcome.unreadable_files {
+            let key = format!("file:{rel}");
+            let old = ix.modules.iter().find(|m| m.rel() == *rel).map(|m| projection(&ix, m).0.into_bytes());
+            before[key.clone()] = old.map_or(Value::Null, |b| json!(b));
+            after[key] = bytes.as_ref().map_or(Value::Null, |b| json!(b));
+        }
+    }
     let keys: HashSet<&String> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
-    let changed: Vec<String> = keys.iter().map(|key| (*key).clone()).collect();
-    let running = open.iter().find_map(|(home, t)| {
-        let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
-        Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
-    });
+    let mut changed_keys: Vec<String> = vec![];
     let mut unexpected_tid = open
         .iter()
         .map(|(_, t)| t)
@@ -477,10 +591,12 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         Ok(crate::board::reviews::layout_tasks(s, key)?.into_iter().filter(|tid| open_ids.contains(tid)).collect())
     };
     let (mut unexpected, mut layout, mut approved_layout, mut removed_layout) = (vec![], vec![], vec![], vec![]);
-    for key in &changed {
+    for key in &keys {
+        let key = *key;
         if before[key] == after[key] {
             continue;
         }
+        changed_keys.push(key.clone());
         if key.starts_with("symbol:") && before[key].get(4).and_then(Value::as_str) == after[key].get(4).and_then(Value::as_str) {
             layout.push(key.clone());
         }
@@ -498,18 +614,31 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
             removed_layout.extend(decision.removed);
         }
     }
+    if running.is_none()
+        && let Some(tid) = &unexpected_tid
+        && !unexpected.is_empty()
+    {
+        let gone = crate::board::reviews::drop_unchanged(s, tid, &unexpected, &after)?;
+        if !gone.is_empty() {
+            unexpected.retain(|k| !gone.contains(k));
+            changed_keys.retain(|k| !gone.contains(k));
+            refresh_note(s, tid, Ending::Reverted)?;
+            dropped.push(tid.clone());
+        }
+    }
     for (key, holders) in &approved_layout {
         crate::board::reviews::record_approved_layout(s, holders, &before, &after, key)?;
     }
-    if running.is_none() && unexpected_tid.is_none() && (!unexpected.is_empty() || !unreadable.is_empty()) {
+    if running.is_none() && unexpected_tid.is_none() && (!unexpected.is_empty() || !outcome.unreadable.is_empty()) {
         let tid = create_unexpected_task(&top, &here, &flow, &all)?;
         open_ids.insert(tid.clone());
         unexpected_tid = Some(tid);
     }
     let write_target = running.as_ref().map(|(_, tid, _)| tid.as_str()).or(unexpected_tid.as_deref());
-    crate::board::reviews::record_endings(s, &before, &after, &changed, &open_ids, write_target)?;
+    crate::board::reviews::record_endings(s, &before, &after, &changed_keys, &open_ids, write_target)?;
     crate::board::reviews::drop_layout(s, &removed_layout)?;
-    if unexpected.is_empty() && unreadable.is_empty() {
+    dropped.extend(removed_layout.iter().flat_map(|(_, tids)| tids.iter().cloned()));
+    if unexpected.is_empty() && outcome.unreadable.is_empty() {
         if !layout.is_empty() {
             if let Some((_, tid, _)) = &running {
                 crate::board::reviews::record_layout(s, tid, &before, &after, &layout)?;
@@ -517,6 +646,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
                 crate::board::reviews::record_layout(s, tid, &before, &after, &layout)?;
             }
         }
+        retire_empty_unexpected(s, &dropped)?;
         return Ok(hidden);
     }
     let pick = |v: &Value| json!(unexpected.iter().map(|k| (k.clone(), v[k].clone())).collect::<serde_json::Map<_, _>>());
@@ -552,11 +682,17 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         if !text.is_empty() {
             tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
         }
+        retire_empty_unexpected(s, &dropped)?;
         return Ok(if text.is_empty() { hidden } else { format!("{hidden}Note: {text}") });
     }
     let tid = unexpected_tid.expect("an Unexpected Changes task is created before its changes are recorded");
     if !unexpected.is_empty() {
         board::record(s, &tid, "outside", &bf, &af, None)?;
+    }
+    for (rel, bytes) in &outcome.unreadable_files {
+        if let Some(bytes) = bytes {
+            crate::board::reviews::save_after(&s.root, &tid, rel, bytes)?;
+        }
     }
     if !layout.is_empty() {
         crate::board::reviews::record_layout(s, &tid, &before, &after, &layout)?;
@@ -567,11 +703,13 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     };
     let compiled: String = compiled.chars().take(4000).collect();
     let changed_note = if names.is_empty() { String::new() } else { format!("Changed outside Solace: {}.\n", names.join(", ")) };
+    let note = note_text(s, &tid, Ending::Integrated)?;
     tasks::deliver(
         &top,
-        json!({"kind":"note","task":tid,"author":"solace","text":format!("{changed_note}{unreadable_note}\nCheck: {compiled}"),
+        json!({"kind":"outside_note","task":tid,"author":"solace","text":format!("{}\nCheck: {compiled}", note),
             "flag":"code changed outside Solace"}),
     )?;
+    retire_empty_unexpected(s, &dropped)?;
     Ok(format!(
         "{hidden}Note: code changed outside Solace with no agent working; review it on the {TITLE} task. {changed_note}{unreadable_note}"
     ))
@@ -660,7 +798,7 @@ mod tests {
         assert_eq!(approved(&s.root).get("app.two"), Some(&digest(b"pub fn two() -> Int {\n  5\n}")));
     }
 
-    /// D-58.5: a file Solace can't read into symbols is left as it is and
+    /// D-229: a file Solace can't read into symbols is left as it is and
     /// reported once; once fixed it is read in.
     #[test]
     fn unreadable_files_are_left_alone() {
@@ -1059,7 +1197,7 @@ mod tests {
         assert!(s.index().unwrap().modules.is_empty());
     }
 
-    /// D-58.5 for Rust: an old refusal is retried once, not hidden by its hash.
+    /// D-229 for Rust: an old refusal is retried once, not hidden by its hash.
     #[test]
     fn an_old_bad_mark_does_not_hide_a_rust_edit() {
         let (_root, s) = rust_project(LIB);
@@ -1084,7 +1222,7 @@ mod tests {
         assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    \"one\"\n}"));
     }
 
-    /// D-58.5 for Rust: a file Solace can't split is left as it is and reported once.
+    /// D-229 for Rust: a file Solace can't split is left as it is and reported once.
     #[test]
     fn a_rust_file_that_cannot_be_split_is_left_alone() {
         let (_root, s) = rust_project(LIB);
@@ -2707,6 +2845,499 @@ mod tests {
         assert_eq!(rust_projection(&s), expected);
         assert_eq!(rust_text(&s, "two").as_deref(), Some("pub fn two() -> i32 {\n    2\n}"));
     }
+
+    /// D-58: a level whose rows did not change records no ending of its own.
+    #[test]
+    fn an_untouched_impl_block_records_one_ending() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let original = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn one() -> i32 {\n    1\n}\n",
+        );
+        let edited = concat!(
+            "pub struct S;\n\nimpl S {\n    pub fn a(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn one() -> i32 {\n    2\n}\n",
+        );
+        let (_root, s) = rust_project(original);
+        board::open(&s.root).unwrap();
+        fs::write(s.root.join("src/lib.rs"), edited).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("crate.one"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let rows: i64 = s.db.query_row("SELECT COUNT(*) FROM board_ends WHERE task=?1", [tid], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    /// D-229: an unreadable Gleam edit is held as a file change, blocks
+    /// Complete, and Cancel restores what Solace last wrote.
+    #[test]
+    fn an_unreadable_edit_is_a_file_change_that_can_be_cancelled() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/app.gleam"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(changes.iter().any(|c| c["entity"] == "file:src/app.gleam"), "{}", json!(changes));
+        let diff = board::reviews::task_diff(&s, &tid, &[], 8000).unwrap();
+        assert!(diff.contains("src/app.gleam") && diff.contains("pub fn two"), "{diff}");
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap_err();
+        assert!(e.0.contains("E7032") && e.0.contains("can't read"), "{}", e.0);
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(file(&s), APP);
+        assert!(Written::load(&s.root).bad.is_empty());
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+    }
+
+    /// D-229: once an unreadable edit can be read in, its file change becomes
+    /// symbol changes and Complete works.
+    #[test]
+    fn an_unreadable_edit_that_is_fixed_shows_code_and_completes() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let fixed = APP.replace("  1", "  11");
+        fs::write(s.root.join("src/app.gleam"), &fixed).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(!note.contains("Not read in"), "{note}");
+        let t = board::task(&s.root, &tid).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(!changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("file:"))), "{}", json!(changes));
+        assert!(changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))), "{}", json!(changes));
+        assert!(t["notes"].as_array().unwrap().iter().all(|n| !n["text"].as_str().unwrap_or("").contains("Not read in")));
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(file(&s), fixed);
+    }
+
+    /// D-229 for Rust: an unsplittable edit is a file change, blocks Complete,
+    /// and Cancel puts back Solace's file and clears the mark.
+    #[test]
+    fn an_unreadable_rust_edit_is_reviewed_and_can_be_cancelled() {
+        let (_root, s) = rust_project(LIB);
+        board::open(&s.root).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = "pub fn one() -> i32 {\n    1\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/lib.rs"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        assert!(board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == "file:src/lib.rs"));
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap_err();
+        assert!(e.0.contains("E7032") && e.0.contains("can't read"), "{}", e.0);
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(rust_file(&s), LIB);
+        assert!(Written::load(&s.root).bad.is_empty());
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+    }
+
+    /// D-229 for Rust: an agent redoes the edit through the store; the file
+    /// is replaced, its outside diff stays, and Complete works.
+    #[test]
+    fn an_unreadable_rust_edit_fixed_through_the_store_completes() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_project(LIB);
+        board::open(&s.root).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = "pub fn one() -> i32 {\n    7\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        s.submit_symbols(Some("crate.one"), None, "pub fn one() -> i32 {\n    11\n}\n").unwrap();
+        let fixed = LIB.replace("    1", "    11");
+        assert_eq!(rust_file(&s), fixed);
+        assert!(Written::load(&s.root).bad.is_empty());
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(changes.iter().any(|c| c["entity"] == "file:src/lib.rs"), "{}", json!(changes));
+        let diff = board::reviews::task_diff(&s, &tid, &[], 8000).unwrap();
+        assert!(diff.contains("    7"), "{diff}");
+        assert!(t["notes"].as_array().unwrap().iter().all(|n| !n["text"].as_str().unwrap_or("").contains("Not read in")), "{}", t["notes"]);
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(rust_file(&s), fixed);
+    }
+
+    /// D-229 for Rust: once the edited file can be split, its file change
+    /// becomes symbol changes and Complete works.
+    #[test]
+    fn an_unreadable_rust_edit_that_is_read_in_completes() {
+        let (_root, s) = rust_project(LIB);
+        board::open(&s.root).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = "pub fn one() -> i32 {\n    1\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let fixed = LIB.replace("    1", "    11");
+        fs::write(s.root.join("src/lib.rs"), &fixed).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(!note.contains("Not read in"), "{note}");
+        let t = board::task(&s.root, &tid).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(!changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("file:"))), "{}", json!(changes));
+        assert!(changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))), "{}", json!(changes));
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(rust_file(&s), fixed);
+        assert_eq!(rust_text(&s, "one").as_deref(), Some("pub fn one() -> i32 {\n    11\n}"));
+    }
+
+    /// D-229: a file that isn't UTF-8 and one with a bad module name each hold
+    /// a file change, and repeated saves replace the task's note rather than add one.
+    #[test]
+    fn other_unreadable_causes_are_file_changes_with_one_note() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/Bad-Name.gleam"), "pub fn x() -> Int {\n  1\n}\n").unwrap();
+        fs::write(s.root.join("src/raw.gleam"), [0xff, 0xfe]).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/Bad-Name.gleam") && note.contains("file:src/raw.gleam"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let notes = t["notes"].as_array().unwrap().len();
+        for (entity, why) in [("file:src/Bad-Name.gleam", "isn't a Gleam module name"), ("file:src/raw.gleam", "isn't UTF-8")] {
+            assert!(board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == entity), "{entity}");
+            assert!(t["notes"][0]["text"].as_str().unwrap().contains(why), "{}", t["notes"]);
+        }
+        fs::write(s.root.join("src/raw.gleam"), [0xff, 0xfd]).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::task(&s.root, &tid).unwrap();
+        assert_eq!(t["notes"].as_array().unwrap().len(), notes);
+        let text = t["notes"][0]["text"].as_str().unwrap();
+        assert!(text.contains("src/Bad-Name.gleam") && text.contains("src/raw.gleam"), "{text}");
+        fs::write(s.root.join("src/app.gleam"), APP.replace("  1", "  9")).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::task(&s.root, &tid).unwrap();
+        let text = t["notes"][0]["text"].as_str().unwrap();
+        assert!(text.contains("app.one") && text.contains("src/Bad-Name.gleam") && text.contains("src/raw.gleam"), "{text}");
+    }
+
+    /// D-229: a non-canonical read leaves a digest that differs from the
+    /// projection; a later unreadable save is still left on disk.
+    #[test]
+    fn an_unreadable_edit_is_not_overwritten_by_a_check() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/app.gleam"), format!("{APP}\n\n")).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/app.gleam"), "{note}");
+        assert_eq!(file(&s), twice);
+        let _ = s.check();
+        assert_eq!(file(&s), twice);
+    }
+
+    /// D-229: without a task holding the change, a submit keeps D-58's refusal.
+    #[test]
+    fn an_unreadable_edit_without_a_task_is_never_overwritten() {
+        let s = app();
+        absorb(&s, Mode::Command).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        assert!(absorb(&s, Mode::Command).unwrap().contains("Not read in:"));
+        let e = s.submit_symbols(Some("app.one"), None, "pub fn one() -> Int {\n  5\n}\n").unwrap_err();
+        assert!(e.0.starts_with("E0104"), "{}", e.0);
+        assert_eq!(file(&s), twice);
+    }
+
+    /// D-229: a new unreadable file can be created by the store over its file.
+    #[test]
+    fn a_new_unreadable_file_can_be_redone_through_the_store() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = "pub fn x() -> Int {\n  1\n}\n\npub fn x() -> Int {\n  2\n}\n";
+        fs::write(s.root.join("src/fresh.gleam"), bad).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:src/fresh.gleam"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        s.submit_symbols(None, Some("fresh"), "pub fn x() -> Int {\n  3\n}\n").unwrap();
+        let fixed = "pub fn x() -> Int {\n  3\n}\n";
+        assert_eq!(fs::read_to_string(s.root.join("src/fresh.gleam")).unwrap(), fixed);
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        assert!(board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == "file:src/fresh.gleam"));
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+    }
+
+    /// D-229: a marked file that is gone and has no module is cleared, not
+    /// reported again on every poll.
+    #[test]
+    fn a_deleted_unreadable_new_file_clears_its_mark() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/Bad-Name.gleam"), "pub fn x() -> Int {\n  1\n}\n").unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:src/Bad-Name.gleam"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        fs::remove_file(s.root.join("src/Bad-Name.gleam")).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        assert!(Written::load(&s.root).bad.is_empty());
+        let t = board::task(&s.root, &tid).unwrap();
+        assert!(!board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == "file:src/Bad-Name.gleam"));
+        let flow = board::flow(&s.root).unwrap();
+        assert_eq!(board::column(&flow, &t)["final"], true);
+    }
+
+    /// D-229: a fix that changes no symbol still refreshes the task's note.
+    #[test]
+    fn a_hand_fix_without_a_symbol_change_clears_the_reason() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/app.gleam"), format!("{APP}\n\n")).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        assert!(t["notes"].as_array().unwrap().iter().all(|n| !n["text"].as_str().unwrap_or("").contains("Not read in")), "{}", t["notes"]);
+        let note = t["notes"].as_array().unwrap().iter().find(|n| n["outside"] == true).unwrap();
+        assert_eq!(note["text"].as_str(), Some("The changes made outside Solace were integrated.\n"));
+    }
+
+    /// D-229: an unreadable edit during a run stays a note, and a submit keeps
+    /// D-58's refusal because no file change holds its after copy.
+    #[test]
+    fn an_unreadable_edit_during_a_run_is_never_overwritten() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let (_root, s) = rust_app();
+        rust_work_task(&s, "Work", "r1");
+        let bad = "pub fn one() -> i32 {\n    1\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("Not read in:"), "{bad}");
+        let e = s.submit_symbols(Some("crate.one"), None, "pub fn one() -> i32 {\n    11\n}\n").unwrap_err();
+        assert!(e.0.starts_with("E0104"), "{}", e.0);
+        assert_eq!(rust_file(&s), bad);
+    }
+
+    /// D-229: a file first marked unreadable during a command is picked up by
+    /// the board's next poll, so it can be reviewed and canceled.
+    #[test]
+    fn an_unreadable_edit_marked_during_a_command_is_later_reviewed() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        assert!(absorb(&s, Mode::Command).unwrap().contains("Not read in:"));
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/app.gleam"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        assert!(board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == "file:src/app.gleam"));
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap_err();
+        assert!(e.0.contains("E7032"), "{}", e.0);
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(file(&s), APP);
+        assert!(Written::load(&s.root).bad.is_empty());
+    }
+
+    /// D-229: a file first marked during a run stays a note while it goes,
+    /// then joins Unexpected Changes once the run stops.
+    #[test]
+    fn an_unreadable_edit_marked_during_a_run_is_held_after_it_stops() {
+        let (_root, s) = rust_app();
+        let t = rust_work_task(&s, "Work", "r1");
+        let bad = "pub fn one() -> i32 {\n    1\n";
+        fs::write(s.root.join("src/lib.rs"), bad).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("Not read in:"));
+        assert_eq!(board::tasks(&s.root).unwrap().len(), 1);
+        let mut t = board::task(&s.root, t["id"].as_str().unwrap()).unwrap();
+        t["runs"][0]["state"] = json!("done");
+        tasks::put(&s, &t).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/lib.rs"), "{note}");
+        let unexpected = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        assert!(board::changes_of(&s, &unexpected).unwrap().iter().any(|c| c["entity"] == "file:src/lib.rs"));
+    }
+
+    /// An empty Unexpected Changes task no longer blocks work once its file is restored.
+    #[test]
+    fn a_restored_unreadable_file_closes_the_empty_unexpected_task() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:src/app.gleam"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        fs::write(s.root.join("src/app.gleam"), APP).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        let flow = board::flow(&s.root).unwrap();
+        assert_eq!(board::column(&flow, &t)["final"], true);
+        assert!(board::changes_of(&s, &t).unwrap().is_empty());
+        assert!(t["attention"].is_null(), "{}", t["attention"]);
+        assert!(t["finished"].is_null());
+        let note = t["notes"].as_array().unwrap().iter().find(|n| n["outside"] == true).unwrap();
+        assert_eq!(note["text"].as_str(), Some("The changes made outside Solace were reverted.\n"));
+    }
+
+    /// An old `!` mark without `@` or `%` still holds the file change for review.
+    #[test]
+    fn an_old_unreadable_mark_without_a_reason_is_still_reviewed() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &bad).unwrap();
+        let mut written = fs::read_to_string(s.root.join(".solace/written")).unwrap();
+        written.push_str(&format!("! {} src/app.gleam\n", digest(bad.as_bytes())));
+        fs::write(s.root.join(".solace/written"), written).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("file:src/app.gleam"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        assert!(board::changes_of(&s, &t).unwrap().iter().any(|c| c["entity"] == "file:src/app.gleam"));
+    }
+
+    /// A broken file before the first submit is fixed through the command route and can be completed.
+    #[test]
+    fn a_broken_file_is_redone_through_the_submit_and_test_commands() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &bad).unwrap();
+        let fixed = APP.replace("  2", "  22");
+        let submit = vec!["submit".to_string(), "app.two".to_string()];
+        let out = crate::cli::routing::with_root(&s.root, || {
+            crate::cli::routing::run_options(&submit, &mut || Ok("pub fn two() -> Int {\n  22\n}\n".to_string()), None, 100_000, &[])
+        })
+        .unwrap();
+        assert!(out.contains("Saved app.two"), "{out}");
+        let test = vec!["test".to_string()];
+        let tested = crate::cli::routing::with_root(&s.root, || {
+            crate::cli::routing::run_options(&test, &mut || Ok(String::new()), None, 100_000, &[])
+        })
+        .unwrap();
+        assert!(!tested.is_empty(), "test replied");
+        assert_eq!(file(&s), fixed);
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(file(&s), fixed);
+    }
+
+    /// D-229: an emptied Unexpected task stays open while one of its runs is going.
+    #[test]
+    fn a_restored_file_leaves_the_unexpected_task_open_while_its_run_goes() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:src/app.gleam"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let mut t = board::task(&s.root, &tid).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+        tasks::put(&s, &t).unwrap();
+        fs::write(s.root.join("src/app.gleam"), APP).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        let flow = board::flow(&s.root).unwrap();
+        assert_ne!(board::column(&flow, &t)["final"], true);
+        assert_eq!(t["runs"][0]["state"], "running");
+        assert!(board::changes_of(&s, &t).unwrap().is_empty());
+    }
+
+    /// D-229: restoring a readable edit by hand drops its change and closes the task.
+    #[test]
+    fn a_restored_readable_symbol_closes_the_empty_unexpected_task() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/app.gleam"), APP.replace("  2", "  9")).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("app.two"), "{note}");
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        fs::write(s.root.join("src/app.gleam"), APP).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        let note = t["notes"].as_array().unwrap().iter().find(|n| n["outside"] == true).unwrap();
+        assert_eq!(note["text"].as_str(), Some("The changes made outside Solace were reverted.\n"));
+        let flow = board::flow(&s.root).unwrap();
+        assert_eq!(board::column(&flow, &t)["final"], true);
+        assert!(board::changes_of(&s, &t).unwrap().is_empty());
+        let other = board::api(&s.root, "POST", "/tasks", json!({"title":"Other"})).unwrap();
+        let oid = other["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"plan"})).unwrap();
+        let e = board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"assign","model":"x"})).unwrap_err();
+        assert!(!e.0.starts_with("E7012"), "{}", e.0);
+    }
+
+    /// D-229: one restored file and one fixed file say both endings when the task empties.
+    #[test]
+    fn a_mixed_restore_and_fix_says_both_outcomes() {
+        const OTHER: &str = "pub fn other() -> Int {\n  4\n}\n";
+        let p = project(&[("src/app.gleam", APP), ("src/other.gleam", OTHER)]);
+        let s = board::open(&p.root).unwrap();
+        absorb(&s, Mode::Notice).unwrap();
+        let bad = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &bad).unwrap();
+        fs::write(s.root.join("src/other.gleam"), format!("{OTHER}\npub fn other() -> Int {{\n  5\n}}\n")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        fs::write(s.root.join("src/app.gleam"), APP).unwrap();
+        fs::write(s.root.join("src/other.gleam"), format!("{OTHER}\n")).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let t = board::task(&s.root, &tid).unwrap();
+        let flow = board::flow(&s.root).unwrap();
+        assert_eq!(board::column(&flow, &t)["final"], true);
+        assert!(board::changes_of(&s, &t).unwrap().is_empty());
+        let note = t["notes"].as_array().unwrap().iter().find(|n| n["outside"] == true).unwrap();
+        assert_eq!(note["text"].as_str(), Some("Some changes made outside Solace were reverted and others were integrated.\n"));
+    }
+
+    /// D-229: deleting a module file whose outside edit could not be read
+    /// records its removed symbols instead of failing on the missing file.
+    #[test]
+    fn a_deleted_unreadable_module_file_records_its_removed_symbols() {
+        let s = app();
+        absorb(&s, Mode::Notice).unwrap();
+        fs::write(s.root.join("src/app.gleam"), format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("file:src/app.gleam"));
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        fs::remove_file(s.root.join("src/app.gleam")).unwrap();
+        let got = absorb(&s, Mode::Notice).unwrap();
+        assert!(!got.contains("Not read in"), "{got}");
+        let t = board::task(&s.root, &tid).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
+        assert!(!changes.iter().any(|c| c["entity"] == "file:src/app.gleam"), "{changes:?}");
+        assert!(changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))), "{changes:?}");
+        assert!(
+            t["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|n| n["outside"] == true)
+                .all(|n| !n["text"].as_str().unwrap_or("").contains("Not read in")),
+            "{}",
+            t["notes"]
+        );
+    }
 }
 
 /// Every project's symbol store is committed with the Solace root, but what is
@@ -3148,4 +3779,231 @@ fn create_unexpected_task(top: &Path, here: &str, flow: &Value, all: &[(PathBuf,
     t["home"] = json!(here);
     tasks::deliver(top, json!({"kind":"create","new":t}))?;
     Ok(t["id"].as_str().unwrap().to_string())
+}
+
+/// The first file a task holds that is still unreadable, if any.
+pub(crate) fn unreadable_change(s: &Store, t: &Value) -> Result<Option<String>, Failure> {
+    let changes = crate::board::reviews::changes_of(s, t)?;
+    for (dir, st) in crate::board::reviews::scope_stores(s, t)? {
+        let w = Written::load(&st.root);
+        for c in changes.iter().filter(|c| c["project"] == dir) {
+            let Some(name) = c["entity"].as_str().and_then(|e| e.strip_prefix("file:")) else { continue };
+            if !w.marked_bad(name) {
+                continue;
+            }
+            return Ok(Some(name.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Rewrites a task's outside-changes note from the changes it still holds.
+fn refresh_note(s: &Store, tid: &str, ending: Ending) -> Result<(), Failure> {
+    let top = scope::top(&s.root);
+    let text = note_text(s, tid, ending)?;
+    tasks::deliver(&top, json!({"kind":"outside_note","task":tid,"author":"solace","text":text}))
+}
+
+/// The store's text for `rel`, or empty when the store has no module there.
+fn projected(ix: &crate::Index, rel: &str) -> Vec<u8> {
+    ix.modules.iter().find(|m| m.rel() == rel).map_or_else(Vec::new, |m| projection(ix, m).0.into_bytes())
+}
+
+/// What a task's outside-changes note says now: every change it holds, and why
+/// each held file still can't be read in.
+fn note_text(s: &Store, tid: &str, ending: Ending) -> Result<String, Failure> {
+    let t = board::task(&s.root, tid)?;
+    let changes = crate::board::reviews::changes_of(s, &t)?;
+    let mut names: Vec<String> = vec![];
+    let mut reasons: Vec<String> = vec![];
+    for (dir, st) in crate::board::reviews::scope_stores(s, &t)? {
+        let w = Written::load(&st.root);
+        for c in changes.iter().filter(|c| c["project"] == dir) {
+            if let Some(name) = c["name"].as_str() {
+                names.push(name.to_string());
+            }
+            if let Some(name) = c["entity"].as_str().and_then(|e| e.strip_prefix("file:"))
+                && let Some(why) = w.why_bad(name)
+            {
+                reasons.push(why.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    reasons.sort();
+    reasons.dedup();
+    if names.is_empty() && reasons.is_empty() {
+        return Ok(match ending {
+            Ending::Reverted => "The changes made outside Solace were reverted.\n",
+            Ending::Integrated => "The changes made outside Solace were integrated.\n",
+            Ending::Mixed => "Some changes made outside Solace were reverted and others were integrated.\n",
+        }
+        .to_string());
+    }
+    let mut text = String::new();
+    if !names.is_empty() {
+        text += &format!("Changed outside Solace: {}.\n", names.join(", "));
+    }
+    for why in reasons {
+        text += &format!("Not read in: {why}.\n");
+    }
+    Ok(text)
+}
+
+#[derive(Default)]
+struct ReadOutcome {
+    fixed: Vec<String>,
+    unreadable: Vec<String>,
+    unreadable_files: Vec<(String, Option<Vec<u8>>)>,
+}
+
+/// Removes the marks of files that are gone and reports the module files that went with them.
+fn dropped_gone_bad(
+    w: &mut Written,
+    disk: &[String],
+    changed: &[(String, Option<Vec<u8>>)],
+    ix: &crate::Index,
+) -> (Vec<String>, Vec<(String, Option<Vec<u8>>)>) {
+    let mut gone_bad = vec![];
+    let mut removed = vec![];
+    for rel in w.bad.keys() {
+        if disk.contains(rel) || changed.iter().any(|(r, _)| r == rel) {
+            continue;
+        }
+        if ix.modules.iter().any(|m| m.rel() == *rel) {
+            removed.push((rel.clone(), None));
+        } else {
+            gone_bad.push(rel.clone());
+        }
+    }
+    for rel in &gone_bad {
+        w.clear_bad(rel);
+    }
+    (gone_bad, removed)
+}
+
+/// Reads the changed files into the store, keeping the ones that cannot be read as file changes.
+fn read_changed(s: &Store, ix: &crate::Index, w: &mut Written, changed: &[(String, Option<Vec<u8>>)]) -> Result<ReadOutcome, Failure> {
+    let mut out = ReadOutcome::default();
+    for (rel, bytes) in changed {
+        let text = match bytes.as_deref().map(std::str::from_utf8) {
+            Some(Err(_)) => {
+                let why = format!("{rel} isn't UTF-8 text; Solace left it as it is");
+                w.mark_bad(rel, bytes.as_deref().unwrap_or_default(), &projected(ix, rel), &why);
+                out.unreadable.push(why);
+                out.unreadable_files.push((rel.clone(), bytes.clone()));
+                continue;
+            }
+            Some(Ok(t)) => Some(t),
+            None => None,
+        };
+        match read_in(s, rel, text)? {
+            Ok(()) => {
+                if w.bad.contains_key(rel) {
+                    out.fixed.push(rel.clone());
+                }
+                match bytes {
+                    Some(b) => w.record(rel, b),
+                    None => {
+                        w.clear_bad(rel);
+                        w.forget(rel);
+                    }
+                }
+            }
+            Err(why) => {
+                w.mark_bad(rel, bytes.as_deref().unwrap_or_default(), &projected(ix, rel), &why);
+                out.unreadable.push(why);
+                out.unreadable_files.push((rel.clone(), bytes.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Drops the file changes for fixed and gone files, returning every task that held one.
+fn refresh_fixed(s: &Store, fixed: &mut Vec<String>, gone_bad: &[String]) -> Result<Vec<String>, Failure> {
+    fixed.sort();
+    fixed.dedup();
+    let mut endings: HashMap<String, Ending> = HashMap::new();
+    for rel in fixed.iter() {
+        for tid in crate::board::reviews::file_change_tasks(s, std::slice::from_ref(rel))? {
+            let ending = fixed_ending(s, &tid, rel)?;
+            endings.entry(tid).and_modify(|e| *e = combine_endings(*e, ending)).or_insert(ending);
+        }
+    }
+    for rel in gone_bad {
+        for tid in crate::board::reviews::file_change_tasks(s, std::slice::from_ref(rel))? {
+            endings.entry(tid).and_modify(|e| *e = combine_endings(*e, Ending::Reverted)).or_insert(Ending::Reverted);
+        }
+    }
+    let mut names = fixed.clone();
+    names.extend(gone_bad.iter().cloned());
+    names.sort();
+    names.dedup();
+    let mut dropped = crate::board::reviews::drop_file_changes(s, &names)?;
+    for tid in &dropped {
+        refresh_note(s, tid, endings.get(tid).copied().unwrap_or(Ending::Integrated))?;
+    }
+    dropped.sort();
+    dropped.dedup();
+    Ok(dropped)
+}
+
+/// Saves the written record and retires any Unexpected task left empty by the dropped changes.
+fn finish_no_changes(s: &Store, w: &mut Written, hidden: &str, fixed: &mut Vec<String>, gone_bad: &[String]) -> Result<String, Failure> {
+    w.save()?;
+    let dropped = refresh_fixed(s, fixed, gone_bad)?;
+    retire_empty_unexpected(s, &dropped)?;
+    Ok(hidden.to_string())
+}
+
+/// Closes an Unexpected task that no longer holds a change.
+fn retire_empty_unexpected(s: &Store, tids: &[String]) -> Result<(), Failure> {
+    let top = scope::top(&s.root);
+    let flow = board::flow(&s.root)?;
+    for tid in tids {
+        let Ok(t) = crate::board::task_model::task_at_home(&s.root, tid) else { continue };
+        if t["unexpected"] != true || board::column(&flow, &t)["final"] == true {
+            continue;
+        }
+        if !crate::board::reviews::changes_of(s, &t)?.is_empty() {
+            continue;
+        }
+        tasks::deliver(&top, json!({"kind":"close","task":tid}))?;
+    }
+    Ok(())
+}
+
+fn unreadable_note(unreadable: &[String]) -> String {
+    unreadable.iter().map(|u| format!("Not read in: {u}.\n")).collect()
+}
+
+/// What brought an Unexpected task's changes to nothing.
+#[derive(Clone, Copy)]
+enum Ending {
+    Reverted,
+    Integrated,
+    Mixed,
+}
+
+fn combine_endings(a: Ending, b: Ending) -> Ending {
+    match (a, b) {
+        (Ending::Reverted, Ending::Reverted) => Ending::Reverted,
+        (Ending::Integrated, Ending::Integrated) => Ending::Integrated,
+        _ => Ending::Mixed,
+    }
+}
+
+/// Whether the live file is back at the state `tid` held for it before the outside edit.
+fn fixed_ending(s: &Store, tid: &str, rel: &str) -> Result<Ending, Failure> {
+    let key = format!("file:{rel}");
+    let before = crate::board::reviews::before_of(s, tid)?;
+    let Some((_, old)) = before.into_iter().find(|(k, _)| *k == key) else { return Ok(Ending::Integrated) };
+    let live = match fs::read(s.root.join(rel)) {
+        Ok(live) => live,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ending::Integrated),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(if old.as_array().is_some_and(|bytes| jsonx::bytes(bytes) == live) { Ending::Reverted } else { Ending::Integrated })
 }

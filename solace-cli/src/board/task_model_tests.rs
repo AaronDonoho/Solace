@@ -241,18 +241,11 @@ fn workflow_names_each_columns_main_role() {
     assert_eq!(role("complete"), "");
 }
 
-/// Each action names the role of its run step, so Planning's Investigate and
-/// Assign pick different defaults.
+/// The workflow names no action role: the picker alone chooses the action's
+/// model.
 #[test]
-fn workflow_names_each_actions_role() {
+fn workflow_names_no_action_role() {
     let w = super::workflow(&toml::Value::Table(Default::default())).unwrap();
-    let role = |action: &str| w["roles"][action].as_str().unwrap().to_string();
-    assert_eq!(role("investigate"), "investigator");
-    assert_eq!(role("assign"), "worker");
-    assert_eq!(role("reassign"), "worker");
-    assert_eq!(role("review"), "reviewer");
-    assert_eq!(role("new_agent"), "worker");
-    assert!(w["roles"].get("plan").is_none());
-    assert!(w["roles"].get("approve").is_none());
+    assert!(w.get("roles").is_none());
 }
 

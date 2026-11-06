@@ -1159,7 +1159,7 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/workspace',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/knowledgebase',b'Solace tasks'),('/app.js',b'/workflow')]:
+        for path,expected in [('/',b'Solace tasks'),('/workspace',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/design',b'Solace tasks'),('/design?tab=ui-ux',b'Solace tasks'),('/settings',b'Solace tasks'),('/knowledgebase',b'Solace tasks'),('/app.js',b'/workflow'),('/app.js',b'.design{font:')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
         # The guide's old address still answers, sending the browser on to the Knowledgebase page (D-140).
         c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET','/guide');r=c.getresponse();self.assertEqual(r.status,301);self.assertEqual(r.getheader('Location'),'/knowledgebase');r.read();c.close()
@@ -1235,6 +1235,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertEqual(e['vision']['text'],'')
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
+        _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1486,6 +1487,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertIn('vision',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
+        _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1518,6 +1520,7 @@ class Board(unittest.TestCase):
         while 'vision' not in (e:=self.next_event(stream)[1]):pass
         self.assertEqual(e['vision']['text'],'')
         _,personas=self.next_event(stream);self.assertEqual(personas,{'personas':[]})
+        _,role_models=self.next_event(stream);self.assertIn('roleModels',role_models)
         _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,hp=self.next_event(stream);self.assertEqual(hp,{'noProject':True,'tasks':[]})
@@ -1539,6 +1542,7 @@ class Board(unittest.TestCase):
         stream=self.stream()
         while 'personas' not in (e:=self.next_event(stream)[1]):pass
         self.assertEqual(e,{'personas':[]})
+        self.assertIn('roleModels',self.next_event(stream)[1])
         self.assertEqual(self.next_event(stream)[1],{'strategyRuns':[]})
         self.assertEqual(self.next_event(stream)[1],{'noProject':True,'tasks':[]})
         p=self.api('POST','/personas',{'name':'  Ada  ','objectives':'Ship','tools':'Rust','concerns':'Risk','other':'Notes'})
@@ -1583,6 +1587,7 @@ class Board(unittest.TestCase):
         stream=self.stream()
         while 'vision' not in (e:=self.next_event(stream)[1]):pass
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
+        _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         m=self.api('POST','/milestones',{'title':'M1'})
         f=self.api('POST','/features',{'title':'Feature F1','milestone':m['id']})
@@ -1676,6 +1681,7 @@ class Board(unittest.TestCase):
         fresh=self.stream()
         while 'vision' not in (e:=self.next_event(fresh)[1]):pass
         _,e=self.next_event(fresh);self.assertEqual(e,{'personas':[]})
+        _,e=self.next_event(fresh);self.assertIn('roleModels',e)
         _,e=self.next_event(fresh);self.assertEqual(e,{'strategyRuns':listed})
 
     def test_strategy_proposals_wait_for_approval(self):  # D-93, A19

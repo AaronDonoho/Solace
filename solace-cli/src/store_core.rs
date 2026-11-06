@@ -188,12 +188,20 @@ impl Store {
             let rel = m.rel();
             let path = target.join(&rel);
             if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
-                if written.as_ref().is_some_and(|w| !w.unchanged(&rel)) {
+                let holds = crate::board::reviews::holds_file_change(self, &rel);
+                let replace = written.as_ref().is_none_or(|w| w.unchanged(&rel) || (holds && w.may_replace(&rel, content.as_bytes())));
+                if !replace {
                     maps.push(crate::diagnostics::FileMap { module: m.path.clone(), file: path, ranges });
                     continue;
                 }
+                let replacing_bad = holds && written.as_ref().is_some_and(|w| w.marked_bad(&rel));
                 fs::create_dir_all(path.parent().unwrap())?;
                 fs::write(&path, &content)?;
+                if let Some(w) = written.as_mut()
+                    && replacing_bad
+                {
+                    w.note_replacement(&rel);
+                }
             }
             if let Some(w) = written.as_mut() {
                 w.record(&rel, content.as_bytes());
@@ -375,9 +383,24 @@ impl Store {
         if !crate::language::is_rust(&self.root) {
             return Ok(None);
         }
+        let written = crate::outside::Written::load(&self.root);
         for m in ix.modules.iter().filter(|m| m.file.is_some()) {
             let rel = m.rel();
             let Ok(disk) = fs::read_to_string(self.root.join(&rel)) else { continue };
+            // An unreadable outside edit held by a task may be redone through the
+            // store. Without one, D-58 keeps every submit from writing over it.
+            if written.marked_bad(&rel) {
+                if crate::board::reviews::holds_file_change(self, &rel) {
+                    continue;
+                }
+                return Ok(Some(Failure(
+                    format!(
+                        "E0104 {rel} was changed outside Solace in a form Solace can't read; nothing was saved. \
+                         Fix the file, or cancel the task that holds it."
+                    ),
+                    1,
+                )));
+            }
             let names = crate::store::drift(ix, m, &disk);
             if !names.is_empty() {
                 return Ok(Some(Failure(

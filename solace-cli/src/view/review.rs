@@ -46,10 +46,8 @@ pub(crate) enum Version<'a> {
 pub(crate) fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
     let mut rows = board::snapshot(s)?;
     if let Version::Before(tid) = v {
-        let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?1")?;
-        for row in st.query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (key, data) = row?;
-            rows[&key] = serde_json::from_str(&data).map_err(|e| Failure(e.to_string(), 1))?;
+        for (key, data) in board::reviews::before_of(s, tid)? {
+            rows[&key] = data;
         }
     }
     let mut syms = vec![];

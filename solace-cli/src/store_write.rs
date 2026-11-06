@@ -500,9 +500,22 @@ impl Store {
             }
         }
 
+        let written = crate::outside::Written::load(&self.root);
+        let replaceable = |p: &std::path::Path| {
+            let rel = p.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            written.marked_bad(&rel) && crate::board::reviews::holds_file_change(self, &rel)
+        };
+        let mut rels: Vec<String> = plan.iter().filter_map(|p| ix.modules.iter().find(|m| m.path == p.0).map(|m| m.rel())).collect();
+        rels.extend(created.iter().map(|(module, dir, _)| format!("{dir}/{module}.gleam")));
+        if rels.iter().any(|rel| written.marked_bad(rel) && !crate::board::reviews::holds_file_change(self, rel)) {
+            return crate::failure::fail(
+                "E0104 the module's file was changed outside Solace in a form Solace can't read; nothing was saved. \
+                 Fix the file, or cancel the task that holds it.",
+            );
+        }
         let created_files: Vec<PathBuf> =
             created.iter().map(|(module, dir, _)| self.root.join(dir).join(format!("{module}.gleam"))).collect();
-        if created_files.iter().any(|p| p.exists()) {
+        if created_files.iter().any(|p| p.exists() && !replaceable(p)) {
             return crate::failure::fail(
                 "E0101 the new module's file already exists outside the store; import or resolve it before creating this module",
             );

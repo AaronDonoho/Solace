@@ -542,6 +542,7 @@ pub fn view(model: Model) -> Element(Msg) {
 /// shell's for `/strategy`).
 const view_styles =
   solace_task.control_styles
+  <> solace_task.tab_styles
   <> solace_task.tool_styles
   <> shell_styles
   <> filter_styles
@@ -810,9 +811,9 @@ pub fn live(model: Model, text: String) -> Model {
   }
 }
 
-/// Applies a message about the root's features, milestones, vision, personas and
-/// strategy runs, which names no project (D-87); an error for any other
-/// message.
+/// Applies a message about the root's features, milestones, vision, personas,
+/// role models and strategy runs, which names no project (D-87); an error for
+/// any other message.
 fn records(model: Model, text: String) -> Result(Model, Nil) {
   let without = fn(records: List(a), id: String, id_of: fn(a) -> String) {
     list.filter(records, fn(r) { id_of(r) != id })
@@ -859,6 +860,10 @@ fn records(model: Model, text: String) -> Result(Model, Nil) {
         persona_state: personas.State(..model.persona_state, personas: rs),
       )
     })
+  })
+  |> result.lazy_or(fn() {
+    at(text, "roleModels", solace_task.role_models_decoder())
+    |> result.map(fn(rs) { choose_plan_model(Model(..model, role_models: rs)) })
   })
   // The list holds no notes: a run's stay until the run comes in full.
   |> result.lazy_or(fn() {
@@ -950,7 +955,7 @@ fn projects_event(text: String) -> Bool {
 
 /// Whether a live message can be applied now: its project is listed, it
 /// marks a task with no project (D-129), or it names none (the project
-/// list, features and milestones).
+/// list, features, milestones and role models).
 fn knows(model: Model, text: String) -> Bool {
   projects_event(text)
   || result.is_ok(records(model, text))
@@ -977,8 +982,9 @@ fn settle(model: Model) -> Model {
 /// Whether a live message is for the open task's details: its own update
 /// under any project (`<solace-task>` fetches itself again when one names
 /// another than its home, D-61), the update of a task it depends on, for its
-/// Depends on line, its project's workflow, or a change to the list of
-/// projects, which its Scope tab shows.
+/// Depends on line, its project's workflow, a change to the list of projects,
+/// which its Scope tab shows, or a role model change, which its picker
+/// follows.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected {
     None -> False
@@ -986,7 +992,8 @@ fn for_detail(model: Model, text: String) -> Bool {
       case at(text, "task", decode.at(["id"], decode.string)) {
         Ok(task) -> task == id || list.contains(depends_of(model, id), task)
         Error(_) ->
-          solace_task.projects_changed(text)
+          solace_task.role_models_event(text)
+          || solace_task.projects_changed(text)
           || event_dir(model, text) == home
           && result.is_ok(at(text, "workflow", decode.dynamic))
       }
@@ -2882,11 +2889,6 @@ const shell_styles =
 .strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
 .strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}.strategy>[role=tabpanel][hidden]{display:none}
 @media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
-.tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}
-.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:var(--tab-pad);cursor:pointer}
-.tabs button:hover{background:var(--hover)}
-.tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
-.tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 [role=tabpanel]{padding:var(--space-6)}
 [role=tabpanel] p{color:var(--soft);margin:8px 0}
 [role=alert]{color:var(--revision)}"
@@ -5051,10 +5053,14 @@ fn choose_plan_model(model: Model) -> Model {
           model.role_models,
           "strategist",
         )
+      let effort = case id == model.plan_model {
+        True -> solace_task.effort_for(model.models, id, model.plan_effort)
+        False -> ""
+      }
       Model(
         ..model,
         plan_model: id,
-        plan_effort: "",
+        plan_effort: effort,
         plan_source: solace_task.RoleDefault,
       )
     }

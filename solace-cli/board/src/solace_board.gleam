@@ -1155,10 +1155,11 @@ fn event_dir(model: Model, text: String) -> String {
 
 /// Whether a live message can be applied now: its lane is loaded, or it is
 /// the list of projects or about the root's features, which name no lane,
-/// or about the tasks in no project, which `live` ignores and so are never
-/// held.
+/// about the tasks in no project, which `live` ignores and so are never
+/// held, or a role model change, which every picker follows.
 fn knows(model: Model, text: String) -> Bool {
   no_project(text)
+  || solace_task.role_models_event(text)
   || projects_event(text)
   || result.is_ok(lane_of(model, event_dir(model, text)))
   || result.is_ok(features_event(model, text))
@@ -1187,8 +1188,9 @@ const notice_styles =
 /// Whether a live message is for the open task's details: its own update
 /// under any project (`<solace-task>` fetches itself again when one names
 /// another than its home, D-61), the update of a task it depends on, for its
-/// Depends on line, its project's workflow, or a change to the list of
-/// projects, which its Scope tab shows. Its removal is the board's to follow.
+/// Depends on line, its project's workflow, a change to the list of
+/// projects, which its Scope tab shows, or a role model change, which its
+/// picker follows. Its removal is the board's to follow.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected_card {
     None -> False
@@ -1196,7 +1198,8 @@ fn for_detail(model: Model, text: String) -> Bool {
       case json.parse(text, decode.at(["task", "id"], decode.string)) {
         Ok(task) -> task == id || list.contains(depends_of(model, id), task)
         Error(_) ->
-          projects_event(text)
+          solace_task.role_models_event(text)
+          || projects_event(text)
           || event_dir(model, text) == home
           && json.parse(text, decode.at(["workflow"], decode.dynamic))
           |> result.is_ok

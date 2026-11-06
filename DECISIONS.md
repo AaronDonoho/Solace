@@ -1413,3 +1413,23 @@ Amends D-58 point 3. (Aaron, board task "outside: read in Rust changes", 2026-11
 1. Code that matches `.solace/approved` is not part of an open task. Canceling a task keeps an approved edit to a row the task holds only as layout, and keeps an approved removal of that row; cancel restores the other rows' places.
 2. Every open task holding that row as layout takes the approved text and revision, or loses its undo row and layout touch for an approved removal. A task that doesn't hold the row gets no undo row.
 Why: canceling a task undoes its own work, not approved work that arrived meanwhile; otherwise the next pull or commit could show an approved deletion as new code.
+
+## D-227 Design sits between Strategy and Board
+Amends D-146 point 1 (Aaron, board task "design: page with two tabs", 2026-11-05). Part of the design: page and records feature.
+1. The menu's order is Workspace, Strategy, Design, Board, Contracts, Knowledgebase, Settings. Design is at `/design`.
+Why: design belongs with strategy, before work reaches the board.
+
+## D-228 A Tech Debt task's first read follows its findings
+Amends D-151 point 1 and D-123 point 1. (Aaron, board task "briefs: point Tech Debt at its findings", 2026-11-05).
+1. For a task marked `techDebt`, `session start --task` ranks on its title, its description unless it still equals `board::reviews.TECH_DEBT_BODY`, and its findings: the `solace` notes whose text starts `Tech debt from the review of task:` or `Tech debt from the work on task:`, without the line naming the task and run each came from. Other notes are not read. An edited description still counts, and every other task ranks on its title and description as before.
+2. A Tech Debt task starts its run in the project its findings name most, as D-123 chooses for title and body; other tasks are unchanged.
+Why: every Tech Debt task shares one description, so ranking on it always suggested the wording used to file tech debt rather than the code the findings name.
+
+## D-229 Unreadable outside changes are reviewed as file changes
+Amends D-58 point 3 and Spec 15 §4 (Aaron, board task "outside: reviewable unreadable changes", 2026-11-05; amended after its first review).
+1. With no work run going, a graph file that can't be read in is held on the Unexpected Changes task as a `file:` change: its before is what Solace last wrote and its after is the live file. Later saves keep the first before state, and the task's note is replaced in place. The note names every change the task still holds, with each held file's current reason, and is refreshed whenever a file change is dropped. A file first marked during a work run joins that task at the first poll after the run stops, so its mark can't hide it forever; while the run goes it stays a note on that run's task.
+2. Cancel restores the file and clears its unreadable mark. Complete is refused (`E7032`) while the task still holds such a file, and says to cancel or have an agent redo the change through Solace; a file whose name isn't a valid module name can only be renamed or canceled.
+3. An agent redoes the change with normal commands. A check replaces the file only when the store's text for that file changed after it was marked and a task holds its file change with the after copy; otherwise D-58 keeps every submit from writing over it. The file change and its after copy stay visible until the task finishes, while Complete works once the mark is gone. A new unreadable file can be redone the same way. A person may still fix the file by hand, and it is then read in as usual, dropping its file change.
+4. A marked file that is deleted and has no module is cleared: its mark and file change go, and the next absorb reports nothing.
+5. An Unexpected Changes task that no longer holds a change closes on its own into the workflow's final column and clears its warning mark. It stays open while any of its runs is going, and a run that ends on an emptied task leaves it for the human. With no work run going, a change whose text ends equal to its before state is dropped, so restoring a readable or unreadable edit by hand closes the task.
+Why: a change that can't become symbols still has to be reviewable and acted on, while every kept change goes through Solace.

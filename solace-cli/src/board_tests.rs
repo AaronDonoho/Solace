@@ -906,6 +906,26 @@ fn a_run_starts_where_the_named_symbols_are() {
         "a conversation saved before projects were recorded restarts at the home"
     );
     assert_eq!(run_project(&json!({}), false, &a, &t("Change `plan.answer`.")), "b", "a fresh run starts where its symbols are");
+    let debt = |notes: Value| {
+        json!({
+            "title": "Tech Debt",
+            "body": crate::board::reviews::TECH_DEBT_BODY,
+            "techDebt": true,
+            "scope": ["a", "b"],
+            "notes": notes,
+        })
+    };
+    let found = json!([{"author": "solace", "text": concat!(
+        "Tech debt from the work on task:t (work run w):\n\n",
+        "`plan.answer` is stale."
+    )}]);
+    assert_eq!(start_project(&a, &debt(found)), "b", "a Tech Debt task starts where its findings point");
+    assert_eq!(
+        start_project(&a, &debt(json!([{"author": "agent", "text": "`plan.answer` is fine."}]))),
+        "a",
+        "a Tech Debt task's other notes are not findings"
+    );
+    assert_eq!(start_project(&a, &t("Change `plan.answer`.")), "b", "an ordinary task ranks as before");
 }
 
 /// D-103: a moved symbol's heading names the project that gained it, not
@@ -2931,4 +2951,19 @@ fn a_review_that_recovered_from_a_transient_error_is_reviewed() {
     assert_eq!(t["runs"][0]["outcome"], "reviewed");
     assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "agent" && n["run"] == "r1" && n["text"] == assessment));
     assert!(t["attention"].is_null());
+}
+
+/// Changing a role's model announces the whole list to open pickers.
+#[test]
+fn role_model_changes_are_logged_for_open_pickers() {
+    let root = testing::Scratch::new();
+    let config = root.join("config.toml");
+    setup::with_config(&config, || {
+        let board = event_board(root.to_path_buf());
+        let saved = board.projects_api("POST", "/role-models", &json!({"role": "worker", "default": "cc"})).unwrap();
+        let data: String =
+            tasks::events(&root).unwrap().query_row("SELECT data FROM events ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        let event: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(event["roleModels"], saved);
+    });
 }

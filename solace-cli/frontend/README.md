@@ -1,9 +1,10 @@
 # Solace frontend
 
-The Lustre shell registers the board, contract view, migration, strategy and
-settings components, draws its own Knowledgebase page (the guide, D-140), and
-uses modem for menu navigation and `src/history.mjs` for browser Back and
-Forward, including Strategy tabs, a record link's focus and Contract view links.
+The Lustre shell registers the board, contract view, migration, strategy,
+design and settings components, draws its own Knowledgebase page (the guide,
+D-140), and uses modem for menu navigation and `src/history.mjs` for browser
+Back and Forward, including Strategy and Design tabs, a record link's focus
+and Contract view links.
 
 | Page | Component |
 | --- | --- |
@@ -11,6 +12,7 @@ Forward, including Strategy tabs, a record link's focus and Contract view links.
 | /workspace | solace-migration (the Workspace page, D-146); /migrate lands here |
 | /contracts | solace-contracts |
 | /strategy | solace-strategy |
+| /design | solace-design |
 | /settings | solace-settings |
 | /knowledgebase | the shell's own page, `knowledgebase.gleam` (the guide); /guide lands here |
 | /p/<dir>/contracts | solace-contracts with base="/p/<dir>" |
@@ -20,7 +22,9 @@ Unknown paths fall back to the board. /migration remains the JSON API, and
 
 A Strategy tab change adds `/strategy?tab=<name>` to the history, and Back and
 Forward restore that tab in the mounted page. A direct address naming a tab
-opens on it; an unknown tab shows Vision.
+opens on it; an unknown tab shows Vision. A Design tab change works the same
+way at `/design?tab=<name>`; Architecture has no query, and an unknown tab
+shows it.
 
 ## Task, feature and milestone links (D-98, D-122)
 
@@ -59,7 +63,7 @@ A Contract view link on a lane or a task's Changes tab, and the contract page's
 **← Board** link, are followed in-page the same way. The address is added to the
 history, so Back and Board keep the board mounted with its open task, details
 and editor text.
-The menu (Workspace, Strategy, Board, Contracts, Knowledgebase, Settings) is on every page and
+The menu (Workspace, Strategy, Design, Board, Contracts, Knowledgebase, Settings) is on every page and
 highlights the current one; a workspace project's contract page highlights
 Contracts. The menu is 56px high, and the contract page fills the rest of the
 window (`--contracts-height`). The menu is sticky, always visible while a page
@@ -85,8 +89,8 @@ while reads still work and changes, checks and tests are refused.
 `solace-cli/build.rs` runs this project's `build-release` command as part of
 `cargo build`, so `priv/app.js` is rebuilt when the frontend or one of its
 pages changes. To build it by hand, run from solace-cli/frontend, with the
-sibling board, components, contracts, migration, strategy and settings
-projects present:
+sibling board, components, contracts, migration, strategy, settings and
+design projects present:
 
 ```sh
 bun install
@@ -113,7 +117,7 @@ modem require a browser.
 ## Server integration
 
 The server task must serve this index.html at /, /workspace, /migrate, /contracts, /strategy,
-/settings, /knowledgebase, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
+/design, /settings, /knowledgebase, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
 priv/app.js at /app.js, all on port 3030.
 
 priv/app.js is generated, not source: `cargo build` builds it through this

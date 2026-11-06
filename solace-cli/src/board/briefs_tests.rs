@@ -1157,3 +1157,100 @@ fn a_note_without_an_id_keeps_its_old_hash_key() {
     assert_eq!(note_fingerprint(&note), crate::sha256(note.to_string().as_bytes()));
 }
 
+/// D-228: a Tech Debt task leaves its shared description out of the ranking
+/// and reads its findings, so the first call names the code they name.
+#[test]
+fn tech_debt_findings_lead_the_first_call() {
+    use crate::board::reviews::TECH_DEBT_BODY;
+    let p = testing::project(&[
+        ("src/outside.gleam", "pub fn tests() -> Int {\n  1\n}\n"),
+        ("src/board/reviews.gleam", "pub fn record_approved_layout() -> Int {\n  1\n}\n\npub fn restore() -> Int {\n  2\n}\n"),
+    ]);
+    let t = json!({
+        "id": "t1",
+        "title": "Tech Debt",
+        "body": TECH_DEBT_BODY,
+        "techDebt": true,
+        "notes": [{
+            "author": "solace",
+            "text": concat!(
+                "Tech debt from the review of task:t1 (review run rv):\n\n",
+                "`outside.tests`, `board::reviews.record_approved_layout` and `board::reviews.restore` disagree."
+            ),
+        }],
+    });
+    let ranked = task_text(&t);
+    assert!(ranked.contains("outside.tests") && !ranked.contains(TECH_DEBT_BODY), "{ranked}");
+    let reply = session_reply(&t, &p.root).expect("a reply");
+    let next = reply.lines().find(|l| l.starts_with("Next:")).expect(&reply);
+    for name in ["outside.tests", "reviews.record_approved_layout", "reviews.restore"] {
+        assert!(next.contains(name), "{next}");
+    }
+    assert!(!next.contains("TECH_DEBT_ASK") && !next.contains("TECH_DEBT_BODY"), "{next}");
+}
+
+/// D-228: many named findings still fill the three suggested slots, and two
+/// tests in one module count as one symbol.
+#[test]
+fn tech_debt_findings_fill_three_slots() {
+    use crate::board::reviews::TECH_DEBT_BODY;
+    let p = testing::project(&[
+        ("src/outside.gleam", "pub fn tests() -> Int {\n  1\n}\n"),
+        ("src/board/reviews.gleam", "pub fn record_approved_layout() -> Int {\n  1\n}\n\npub fn restore() -> Int {\n  2\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n\npub fn other() -> Int {\n  2\n}\n"),
+    ]);
+    let t = json!({
+        "id": "t1",
+        "title": "Tech Debt",
+        "body": TECH_DEBT_BODY,
+        "techDebt": true,
+        "notes": [{
+            "author": "solace",
+            "text": concat!(
+                "Tech debt from the work on task:t1 (work run w):\n\n",
+                "`outside.tests::alpha`, `outside.tests::beta`, `board::reviews.restore`, ",
+                "`board::reviews.record_approved_layout`, `app.main` and `app.other`."
+            ),
+        }],
+    });
+    let reply = session_reply(&t, &p.root).expect("a reply");
+    let next = reply.lines().find(|l| l.starts_with("Next:")).expect(&reply);
+    let names = next.split("`inspect ").nth(1).and_then(|s| s.split(" --context`").next()).expect(next);
+    assert_eq!(names.split_whitespace().count(), 3, "{next}");
+    assert!(!next.contains("TECH_DEBT_ASK") && !next.contains("TECH_DEBT_BODY"), "{next}");
+}
+
+#[test]
+fn task_text_keeps_an_edited_description_and_ignores_notes_off_tech_debt() {
+    use crate::board::reviews::TECH_DEBT_BODY;
+    let edited = json!({
+        "title": "Tech Debt",
+        "body": "Findings at the start of the call.",
+        "techDebt": true,
+        "notes": [{
+            "author": "solace",
+            "text": "Tech debt from the review of task:t1 (review run rv):\n\n`app.main`: split it.",
+        }],
+    });
+    let text = task_text(&edited);
+    assert!(text.contains("Findings at the start of the call."), "{text}");
+    assert!(text.contains("`app.main`: split it."), "{text}");
+    assert!(!text.contains(TECH_DEBT_BODY), "{text}");
+
+    let ordinary = json!({
+        "title": "Ordinary",
+        "body": "A normal description.",
+        "notes": [
+            {
+                "author": "solace",
+                "text": "Tech debt from the review of task:t2 (review run rv2):\n\n`app.other`: split it.",
+            },
+            {
+                "author": "solace",
+                "text": "Tech debt from the work on task:t3 (work run w1):\n\n`app.third`: name it.",
+            },
+        ],
+    });
+    assert_eq!(task_text(&ordinary), "Ordinary\nA normal description.");
+}
+

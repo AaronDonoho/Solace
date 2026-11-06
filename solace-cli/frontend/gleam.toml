@@ -13,6 +13,7 @@ migration = { path = "../migration" }
 contracts = { path = "../contracts" }
 strategy = { path = "../strategy" }
 settings = { path = "../settings" }
+design = { path = "../design" }
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
