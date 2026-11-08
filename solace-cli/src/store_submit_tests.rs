@@ -1100,7 +1100,8 @@ fn an_add_to_an_inline_mod_names_its_container() {
     assert!(!err.contains(".solace/format-"), "{err}");
 }
 
-/// A Rust patch rename is refused with the command that renames by stored name.
+/// A Rust patch rename is refused with both names and the command that renames
+/// by stored name.
 #[test]
 fn a_patch_rename_names_submit_with_the_stored_name() {
     if !cargo::installed() {
@@ -1111,7 +1112,7 @@ fn a_patch_rename_names_submit_with_the_stored_name() {
     let patch = "*** Begin Patch\n*** Update: crate.one\n@@\n-pub fn one() -> i32 {\n+pub fn two() -> i32 {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
     assert!(
-        err.contains("renames crate.one")
+        err.contains("replaces crate.one with crate.two")
             && err.contains("`submit crate.one` with the new text renames it and keeps its id")
             && err.contains("change its callers in the same submit")
             && !err.contains("`*** Add:`"),

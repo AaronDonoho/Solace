@@ -738,3 +738,12 @@ fn a_cli_session_start_keeps_the_reference() {
     assert!(store.task_session("change helper", Some("t1"), "").unwrap().contains(&reference));
     assert!(!store.brief_task_session("change helper", Some("t1"), "").unwrap().contains(&reference));
 }
+
+#[test]
+fn find_matches_a_query_with_escaped_quotes() {
+    let (_root, store) = crate::testing::rust_project("pub fn label() -> &'static str {\n    \"say \\\"kind\\\" now\"\n}\n");
+    for query in [r#""\"kind\"""#, r#""kind""#, r#"say \"kind\" now"#] {
+        let out = store.find(query).unwrap();
+        assert!(out.contains("crate.label"), "{query}: {out}");
+    }
+}

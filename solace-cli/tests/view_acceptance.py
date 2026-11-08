@@ -140,6 +140,7 @@ pub fn main_test() {
             (['submit', 'app.main'], 'pub fn main() {\n  let _ = args()\n  io.println("hello")\n  write("out", "hi")\n}'),
             (['drafts'], None), (['delete', 'app.nosuch'], None), (['extract', 'app.nosuch', '--to', 'other'], None), (['merge', 'app.main', 'app.nosuch'], None), (['check'], None), (['test', 'app_test.main_test'], None),
             (['probe'], 'let x = 1'), (['work', 'list'], None), (['files'], None), (['read', 'gleam.toml'], None),
+            (['design', 'list'], None),
             (['write', 'notes.txt'], 'notes\n'), (['write', 'lib.rs'], 'pub fn one() {}\n'), (['view', 'lib.rs::one'], None),
             (['move', 'notes.txt', 'moved.txt'], None), (['remove', 'moved.txt'], None), (['build'], None), (['format'], None),
             (['run', 'nosuch'], None), (['task', 'diff'], None),

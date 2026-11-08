@@ -57,6 +57,10 @@ mod command_tx;
 mod store_core;
 mod store_read;
 mod store_write;
+mod design;
+mod outside_share;
+mod outside_copies;
+mod base64;
 use crate::cli::{next_step, operands, path_dependencies};
 pub(crate) use failure::{Failure, Out, fail, usage};
 use crate::store_core::SCHEMA;
@@ -483,4 +487,9 @@ fn fn_args(rest: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// The first 32 hex characters of SHA-256.
+pub(crate) fn digest(bytes: &[u8]) -> String {
+    sha256(bytes)[..32].to_string()
 }

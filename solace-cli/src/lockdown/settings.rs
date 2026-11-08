@@ -153,6 +153,9 @@ pub(crate) fn rust_setting(name: &str) -> bool {
 /// D-158 point 4): the human-owned files, and a Rust project's Cargo and
 /// rustup settings, its workspace crates' included (D-175).
 pub fn settings_file(root: &Path, name: &str) -> bool {
+    if crate::lockdown::paths::design_path(root, name) {
+        return false;
+    }
     name == "solace.toml" || name == "AGENTS.md" || is_gitignore(name) || (crate::language::is_rust(root) && rust_setting(name))
 }
 

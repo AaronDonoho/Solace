@@ -536,18 +536,24 @@ impl Store {
     }
     pub(crate) fn find(&self, query: &str) -> Out {
         let ix = self.index()?;
-        let query = unquoted(query);
-        let q = query.to_lowercase();
+        let written = unwrapped(query);
+        let unescaped = unquoted(query);
+        let literal = written.to_lowercase();
+        let q = unescaped.to_lowercase();
         let mut hits: Vec<(bool, String)> = vec![];
         for s in &ix.syms {
             let lines: Vec<String> = s
                 .text
                 .lines()
                 .enumerate()
-                .filter(|(_, l)| l.to_lowercase().contains(&q))
+                .filter(|(_, l)| {
+                    let l = l.to_lowercase();
+                    l.contains(&q) || l.contains(&literal)
+                })
                 .map(|(n, l)| format!("  {:>3}: {}", n + 1, l.trim()))
                 .collect();
-            let name_hit = s.name.to_lowercase().contains(&q);
+            let name = s.name.to_lowercase();
+            let name_hit = name.contains(&q) || name.contains(&literal);
             if name_hit || !lines.is_empty() {
                 let more = if lines.len() > 4 { format!("\n  … {} more lines", lines.len() - 4) } else { String::new() };
                 let shown: Vec<String> = lines.into_iter().take(4).collect();
@@ -555,7 +561,7 @@ impl Store {
             }
         }
         if hits.is_empty() {
-            return Ok(format!("No matches for \"{query}\".\n"));
+            return Ok(format!("No matches for \"{written}\".\n"));
         }
         hits.sort_by_key(|h| !h.0);
         let total = hits.len();
@@ -604,7 +610,9 @@ impl Store {
         let ranked = ranked_symbols(&scores, &projects);
         let terms = evidence_terms(task, rare);
         let repro = reproduction(rust, &ranked, &projects, &scores[0]);
-        let packet = symbol_packet(&ranked, &projects, &terms, BUDGET.saturating_sub(modules.len() + repro.len()));
+        // The module list is not capped, so keep a share of the budget for symbols.
+        let room = BUDGET.saturating_sub(modules.len() + repro.len());
+        let packet = symbol_packet(&ranked, &projects, &terms, room.max(BUDGET / 2));
         let mut out = self.project_instructions();
         out += deps;
         let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
@@ -832,10 +840,20 @@ fn possible_users(ix: &Index, target: usize, users: &[usize]) -> String {
     out
 }
 
-/// A search query without the quotes, backticks or apostrophes around it
-/// (`find "Customer(.."`: the quotes delimit the query, run 18).
-fn unquoted(query: &str) -> &str {
-    ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
+/// A search query without its quotes, with escaped quote characters
+/// unescaped (`find "\"kind\""` searches for `"kind"`).
+fn unquoted(query: &str) -> String {
+    let query = unwrapped(query);
+    let mut out = String::with_capacity(query.len());
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek().is_some_and(|next| matches!(next, '"' | '\'' | '`')) {
+            out.push(chars.next().unwrap());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The lines of `text` in `ranges`, numbered as `read --lines` numbers a file.
@@ -1012,15 +1030,14 @@ fn symbol_packet(
 }
 
 fn first_call(ranked: &[(usize, usize)], projects: &[(Option<&str>, &Store, &Index)], mine: &str) -> String {
-    let start: Vec<usize> = ranked.iter().filter(|&&(p, _)| p == 0).map(|&(_, i)| i).take(3).collect();
-    if !start.is_empty() {
-        let names: Vec<String> = start.iter().map(|&i| symbol_name(projects, 0, i)).collect();
+    let Some(&(p, _)) = ranked.first() else {
+        return crate::cli::EXAMPLE_CALL.to_string();
+    };
+    let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| symbol_name(projects, p, i)).take(3).collect();
+    if p == 0 {
         format!("`inspect {} --context`", names.join(" "))
-    } else if let Some(&(p, _)) = ranked.first() {
-        let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| symbol_name(projects, p, i)).take(3).collect();
-        format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine))
     } else {
-        crate::cli::EXAMPLE_CALL.to_string()
+        format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine))
     }
 }
 
@@ -1079,4 +1096,10 @@ fn boost_neighbours(task: &str, projects: &[(Option<&str>, &Store, &Index)], sco
             score[i] = f64::MAX;
         }
     }
+}
+
+/// A search query without the quotes around it, with its escapes kept
+/// (`find "\"kind\""` searches for `\"kind\"`).
+fn unwrapped(query: &str) -> &str {
+    ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
 }

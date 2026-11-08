@@ -248,7 +248,8 @@ test('a contract or board link inside a shadow root is followed in place', () =>
     expect(pages).toHaveLength(2);
     const id = '0123456789abcdef';
     expect(press('/task/' + id)).toBe(true);
-    expect(records).toEqual([['task', id]]);
+    expect(press('/design/' + id)).toBe(true);
+    expect(records).toEqual([['task', id], ['design', id]]);
   } finally {
     dom.restore();
   }
@@ -345,6 +346,13 @@ test('a title is asked for again once its cache expires', async () => {
     await add(expired);
     expect(dom.fetches.length).toBe(2);
     expect(expired.textContent).toBe('First task');
+    const design = new Node('A');
+    design.textContent = 'design:' + id;
+    design.setAttribute('href', '/design/' + id);
+    design.setAttribute('data-design', '');
+    await add(design);
+    expect(design.textContent).toBe('First task');
+    expect(dom.fetches.at(-1)).toBe('/designs/find/' + id);
   } finally {
     dom.restore();
   }

@@ -282,6 +282,8 @@ fn help_answers_one_command_its_own_section() {
     assert!(e.contains("Moving\n") && e.contains("Moved crate.Store::find"), "{e}");
     let s = agent_help(Some("submit"));
     assert!(!s.contains("Moving\n"), "{s}");
+    let g = agent_help(Some("grep"));
+    assert!(g.contains("over the watch limit"), "{g}");
     let n = agent_help(Some("nosuch"));
     assert!(
         n.starts_with("No command `nosuch`")
@@ -1945,7 +1947,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "2db97ecb34438fea3c6ee4fc6d2e258cad2b688ba85bcb36685f7d1dd1e9be0c");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "80892e011f5c40374f68a418f2e7d511e9feeee5601ae59da3eb656ae3b1a83f");
 }
 
 #[test]
@@ -2750,4 +2752,143 @@ fn a_probe_sandbox_protects_the_original() {
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     assert!(args.iter().any(|a| a == "--unshare-pid"), "{args:?}");
     assert!(args.windows(2).any(|w| w[0] == "--ro-bind" && w[1] == protect.to_string_lossy()), "{args:?}");
+}
+
+#[test]
+fn a_long_module_list_still_names_symbols() {
+    let docs: Vec<String> = (0..120).map(|i| format!("//// module {i} {}\npub fn f{i}() -> Int {{\n  {i}\n}}\n", "x".repeat(60))).collect();
+    let paths: Vec<String> = (0..120).map(|i| format!("src/m{i}.gleam")).collect();
+    let mut files: Vec<(&str, &str)> = paths.iter().zip(&docs).map(|(path, doc)| (path.as_str(), doc.as_str())).collect();
+    files.push(("src/app.gleam", "/// Totals.\npub fn total() -> Int {\n  1\n}\n"));
+    let store = project(&files);
+    let out = store.session_task("total").unwrap();
+    let start = out.find("Modules (`view <module>` for an outline):\n").unwrap();
+    let modules = &out[start..];
+    let end = modules.find("\nTest modules: ").unwrap();
+    assert!(modules[..end].len() > 6500, "module list is {} bytes", modules[..end].len());
+    assert!(out.contains("-- app.total"), "{out}");
+}
+
+#[test]
+fn a_gleam_probe_from_a_test_reaches_its_modules_private_items() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        (
+            "test/order_test.gleam",
+            concat!(
+                "const fee = 2\n\n",
+                "type Box {\n  Box(Int)\n}\n\n",
+                "fn add_fee(n: Int) -> Int {\n  n + fee\n}\n\n",
+                "fn twice(n: Int) -> Int {\n  add_fee(add_fee(n))\n}\n\n",
+                "pub fn total_test() {\n",
+                "  let boxed = Box(3)\n",
+                "  let Box(n) = boxed\n",
+                "  let total = twice(n)\n",
+                "  assert total == 7\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let out = store.probe("echo total", Some("order_test.total_test"), &[], None).unwrap();
+    assert!(out.contains("7"), "{out}");
+    assert!(!store.root.join("test/solace_probe.gleam").exists());
+}
+
+#[test]
+fn a_gleam_probe_from_a_test_traces_its_private_helper() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        (
+            "test/order_test.gleam",
+            concat!(
+                "const fee = 2\n\n",
+                "fn add_fee(n: Int) -> Int {\n  n + fee\n}\n\n",
+                "pub fn total_test() {\n",
+                "  let total = add_fee(3)\n",
+                "  assert total == 5\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let out = store.probe("echo total", Some("order_test.total_test"), &["order_test.add_fee"], None).unwrap();
+    assert!(out.contains("→ order_test.add_fee("), "{out}");
+    assert!(!out.contains("no traced function was called"), "{out}");
+    assert!(!store.root.join("test/solace_probe.gleam").exists());
+}
+
+#[test]
+fn a_gleam_probe_from_refuses_to_trace_its_starting_function() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        ("test/order_test.gleam", "pub fn total_test() {\n  assert 1 == 1\n}\n"),
+    ]);
+    let e = store.probe("echo 1", Some("order_test.total_test"), &["order_test.total_test"], None).unwrap_err().0;
+    assert_eq!(e, "E1005 order_test.total_test runs inline in the probe and can't be traced; trace a helper it calls instead.");
+}
+
+#[test]
+fn a_gleam_probe_from_refuses_a_test_that_reaches_main() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        ("test/order_test.gleam", "pub fn main() {\n  Nil\n}\n\npub fn total_test() {\n  main()\n}\n"),
+    ]);
+    let e = store.probe("echo 1", Some("order_test.total_test"), &[], None).unwrap_err().0;
+    assert_eq!(e, "E1005 order_test.total_test can't use --from: it reaches order_test.main, which clashes with the probe's own main.");
+}
+
+#[test]
+fn a_gleam_probe_from_a_recursive_function_runs() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        ("test/order_test.gleam", "pub fn total() {\n  let n = 0\n  case n {\n    0 -> Nil\n    _ -> total()\n  }\n}\n"),
+    ]);
+    let out = store.probe("", Some("order_test.total"), &[], None).unwrap();
+    assert!(!out.contains("not in scope"), "{out}");
+}
+
+#[test]
+fn a_gleam_probe_from_refuses_a_main_that_is_called_back() {
+    let store = project(&[
+        ("src/order.gleam", "pub fn nothing() {\n  0\n}\n"),
+        ("test/order_test.gleam", "pub fn main() {\n  helper()\n}\n\nfn helper() {\n  main()\n}\n"),
+    ]);
+    let e = store.probe("echo 1", Some("order_test.main"), &[], None).unwrap_err().0;
+    assert_eq!(e, "E1005 order_test.main is a main that is called back, so it can't be a starting point.");
+}
+
+#[test]
+fn a_gleam_probe_from_refuses_a_directly_recursive_main() {
+    let store =
+        project(&[("src/order.gleam", "pub fn nothing() {\n  0\n}\n"), ("test/order_test.gleam", "pub fn main() {\n  main()\n}\n")]);
+    let e = store.probe("echo 1", Some("order_test.main"), &[], None).unwrap_err().0;
+    assert_eq!(e, "E1005 order_test.main is a main that is called back, so it can't be a starting point.");
+}
+
+/// The first read follows the best-ranked symbol even when another of the
+/// task's projects holds it.
+#[test]
+fn a_task_session_first_call_reads_the_best_matching_project() {
+    let root = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+        ("a/src/app.gleam", "//// A widget helper.\npub fn helper() -> Int {\n  1\n}\n"),
+        ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+        ("b/src/widget.gleam", "pub fn widget() -> Int {\n  2\n}\n"),
+    ]);
+    for d in ["a", "b"] {
+        import(&root.join(d)).unwrap();
+    }
+    let a = Store::at(&root.join("a")).unwrap();
+    board::open(&a.root).unwrap();
+    let t = board::api(&a.root, "POST", "/tasks", json!({"title": "Widget"})).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    tasks::update(&a.root, tid, |t| {
+        t["scope"] = json!(["a", "b"]);
+        Ok(())
+    })
+    .unwrap();
+    let out = a.task_session("widget", Some(tid), "").unwrap();
+    let next = out.lines().find(|l| l.starts_with("Next:")).expect(&out);
+    assert!(next.contains("`inspect widget.widget --project b --context`"), "{next}");
+    assert!(!next.contains("app.helper"), "{next}");
 }

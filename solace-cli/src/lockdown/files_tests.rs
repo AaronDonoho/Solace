@@ -35,3 +35,18 @@ fn move_names_a_certain_module_without_a_store() {
     assert!(e.contains("can't tell which module"), "{e}");
 }
 
+#[test]
+fn grep_keeps_the_match_when_lowercasing_changes_the_line_length() {
+    let text = format!("{}needle{}\n", "İ".repeat(301), "€".repeat(900));
+    let (shown, cut) = grep_file("a.md", &text, "needle", 0).unwrap();
+    assert!(shown.contains("needle") && cut, "{shown}");
+}
+
+#[test]
+fn grep_finds_a_word_final_sigma_lowercased_as_a_whole() {
+    for query in ["ΟΔΟΣ", "οδος"] {
+        let (shown, _) = grep_file("a.md", "ΟΔΟΣ here\n", &query.to_lowercase(), 0).unwrap();
+        assert!(shown.contains("ΟΔΟΣ"), "{query}: {shown}");
+    }
+}
+

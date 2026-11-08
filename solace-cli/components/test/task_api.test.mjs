@@ -170,10 +170,10 @@ test('markdown links a task by id, as [label](task:<id>) or a bare task:<id> (D-
   expect(markdown(`[x" onclick="y](task:${id})`)).not.toContain('" onclick="');
 });
 
-test('markdown links a feature or milestone by id as it does a task (D-122)', async () => {
+test('markdown links a feature, milestone or design by id as it does a task (D-122, D-234)', async () => {
   const { markdown } = await import('../src/task_api.mjs');
   const id = '0123456789abcdef';
-  for (const kind of ['feature', 'milestone']) {
+  for (const kind of ['feature', 'milestone', 'design']) {
     const link = label => `<a href="/${kind}/${id}" data-${kind}="${id}">${label}</a>`;
     expect(markdown(`See [the plan](${kind}:${id}).`)).toBe(`<p>See ${link('the plan')}.</p>`);
     expect(markdown(`After ${kind}:${id}, then`)).toBe(`<p>After ${link(`${kind}:${id}`)}, then</p>`);

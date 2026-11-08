@@ -2053,6 +2053,17 @@ fn a_task_with_no_feature_files_its_own_tech_debt() {
     assert!(notes[0].contains(&format!("task:{}", t["id"].as_str().unwrap())) && notes[0].contains("rv1"));
     assert!(notes[0].ends_with("`app.main`: name the constant"));
     assert!(notes[1].ends_with("`app.other`: split it"));
+    // A source task saved before scopes has no list: its home is the filed scope.
+    let mut old = t.clone();
+    old.as_object_mut().unwrap().remove("scope");
+    old["notes"].as_array_mut().unwrap().clear();
+    note(&mut old, "agent", Some("rv1"), "### Tech debt\n- `app.main`: name the constant\n");
+    let (debt, _, _) = tech_debt(&top, &old).unwrap().unwrap();
+    assert_eq!(debt["scope"], json!([old["home"].clone()]));
+    // An empty list does the same.
+    old["scope"] = json!([]);
+    let (debt, _, _) = tech_debt(&top, &old).unwrap().unwrap();
+    assert_eq!(debt["scope"], json!([old["home"].clone()]));
     // A review with no section files nothing.
     t["notes"].as_array_mut().unwrap().clear();
     note(&mut t, "agent", Some("rv1"), "**Assessment: Looks good**\n- fine\n");
@@ -2805,7 +2816,11 @@ fn skills_api_saves_lists_and_removes_role_skills() {
         .unwrap();
     assert_eq!(
         saved,
-        json!([{"name":"house-review","description":"Review UI changes.","body":"Check contrast and focus.","roles":["reviewer"]}])
+        json!([{
+            "name":"house-review","description":"Review UI changes.",
+            "body":"Check contrast and focus.","roles":["reviewer"],
+            "managed":true,"all_roles":false
+        }])
     );
     let file = root.join("skills/house-review.md");
     let text = fs::read_to_string(&file).unwrap();
@@ -2826,6 +2841,12 @@ fn skills_api_saves_lists_and_removes_role_skills() {
     fs::write(root.join("skills/folder/SKILL.md"), "Folder skill\n").unwrap();
     let general = root.join("skills/general.md");
     fs::write(&general, "General rules\n").unwrap();
+    let listed = board.projects_api("GET", "/skills", &json!({})).unwrap();
+    let found = |name: &str| listed.as_array().unwrap().iter().find(|skill| skill["name"] == name).unwrap().clone();
+    assert_eq!(found("general")["all_roles"], json!(true), "a hand-written skill reaches every role: {listed}");
+    assert_eq!(found("general")["managed"], json!(false), "a hand-written skill is view only: {listed}");
+    assert_eq!(found("folder")["all_roles"], json!(true), "a folder skill with no roles key reaches every role: {listed}");
+    assert_eq!(found("folder")["managed"], json!(false), "a folder skill is view only: {listed}");
     let before = fs::read_dir(root.join("skills")).unwrap().count();
     let bad = [
         json!({"name":"","description":"x","body":"x","roles":["reviewer"]}),
@@ -2843,6 +2864,25 @@ fn skills_api_saves_lists_and_removes_role_skills() {
         assert!(board.projects_api("POST", "/skills", &body).is_err(), "{body}");
         assert_eq!(fs::read_dir(root.join("skills")).unwrap().count(), before, "{body}");
     }
+    // A skill may be saved with no roles: it reaches no run, and Settings still manages it.
+    let idle = board
+        .projects_api("POST", "/skills", &json!({"name":"idle","description":"Nobody's rules.","body":"Nothing.","roles":[]}))
+        .unwrap();
+    let idle = idle.as_array().unwrap().iter().find(|skill| skill["name"] == "idle").unwrap();
+    assert_eq!(idle["roles"], json!([]));
+    assert_eq!(idle["managed"], json!(true));
+    assert_eq!(idle["all_roles"], json!(false));
+    // A skill whose roles were emptied still edits and deletes.
+    let edited = board
+        .projects_api(
+            "POST",
+            "/skills",
+            &json!({"original":"idle","name":"idle","description":"Still nobody's.","body":"Nothing again.","roles":[]}),
+        )
+        .unwrap();
+    let edited = edited.as_array().unwrap().iter().find(|skill| skill["name"] == "idle").unwrap();
+    assert_eq!(edited["description"], json!("Still nobody's."));
+    assert_eq!(edited["roles"], json!([]));
     assert!(
         board
             .projects_api(
@@ -2856,8 +2896,13 @@ fn skills_api_saves_lists_and_removes_role_skills() {
     assert_eq!(fs::read_to_string(&general).unwrap(), "General rules\n");
     assert!(board.projects_api("DELETE", "/skills/general", &json!({})).is_err(), "a hand-written skill is not deleted");
     assert_eq!(fs::read_to_string(&general).unwrap(), "General rules\n");
-    assert_eq!(board.projects_api("DELETE", "/skills/house-review", &json!({})).unwrap(), json!([]));
+    let left = board.projects_api("DELETE", "/skills/house-review", &json!({})).unwrap();
+    assert!(left.as_array().unwrap().iter().all(|skill| skill["name"] != "house-review"), "{left}");
+    assert_eq!(left.as_array().unwrap().iter().find(|skill| skill["name"] == "idle").unwrap()["roles"], json!([]));
     assert!(!file.exists());
+    let left = board.projects_api("DELETE", "/skills/idle", &json!({})).unwrap();
+    assert!(left.as_array().unwrap().iter().all(|skill| skill["name"] != "idle"), "{left}");
+    assert!(!root.join("skills/idle.md").exists());
     assert!(board.projects_api("DELETE", "/skills/folder", &json!({})).is_err(), "a folder skill is not deleted");
     assert!(root.join("skills/folder/SKILL.md").is_file());
 }
@@ -2966,4 +3011,106 @@ fn role_model_changes_are_logged_for_open_pickers() {
         let event: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(event["roleModels"], saved);
     });
+}
+
+/// A design added to the workspace reaches an open root stream, even when the
+/// root is not a project.
+#[test]
+fn a_design_change_reaches_the_root_stream() {
+    let root = testing::Scratch::new();
+    let last = json!({"tasks": 0}).to_string();
+    let mut reader = Events::new(event_board(root.to_path_buf()), None, Some(&last));
+    let mut buf = [0; 8192];
+    let mut next_designs = |reader: &mut Events| {
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            assert!(n > 0);
+            let text = std::str::from_utf8(&buf[..n]).unwrap();
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let v: Value = serde_json::from_str(data).unwrap();
+                    if v.get("designs").is_some() {
+                        return v;
+                    }
+                }
+            }
+        }
+    };
+    let mut seen = None;
+    crate::design::announce_change(&root, &mut seen);
+    assert_eq!(next_designs(&mut reader), json!({"designs": []}));
+    let design = json!({
+        "schemaVersion": 1,
+        "id": "0123456789abcdef",
+        "title": "Home",
+        "tab": "architecture",
+        "elements": []
+    });
+    crate::design::save(&root, &design, crate::design::Source::Human).unwrap();
+    crate::design::announce_change(&root, &mut seen);
+    assert_eq!(next_designs(&mut reader), json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "architecture"}]}));
+}
+
+/// D-61/D-112: completing a task saved without a project list files its tech
+/// debt with its home as the new task's scope, which reads back whole.
+#[test]
+fn a_task_with_no_scope_files_tech_debt_with_its_home() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Old"})).unwrap();
+    let home = t["home"].clone();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"rv","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some("rv"), "### Tech debt\n- `app.main`: name the constant\n");
+    tasks::put(&s, &t).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"plan"})).unwrap();
+    let mut t = task(&s.root, &tid).unwrap();
+    t.as_object_mut().unwrap().remove("scope");
+    tasks::put(&s, &t).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+    let debt = all_tasks(&top).unwrap().into_iter().find(|d| d["techDebt"] == true).unwrap();
+    assert_eq!(debt["scope"], json!([home]));
+    assert_eq!(debt["notes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn design_reads_work_in_every_run_kind() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Designs"})).unwrap();
+    t["runs"] = json!([
+        {"id":"w","kind":"work","state":"running"},
+        {"id":"i","kind":"investigate","state":"running"},
+        {"id":"r","kind":"review","state":"running"},
+        {"id":"d","kind":"discuss","state":"running"}
+    ]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let id = "0123456789abcdef";
+    std::fs::create_dir_all(p.root.join("designs")).unwrap();
+    std::fs::write(
+        p.root.join("designs").join(format!("{id}.json")),
+        json!({"schemaVersion": crate::design::SCHEMA_VERSION, "id": id, "title": "Home", "tab": "architecture", "elements": []})
+            .to_string(),
+    )
+    .unwrap();
+    let commands = vec!["design list".to_string(), format!("design show {id}"), format!("design show design:{id}")];
+    for rid in ["w", "i", "r", "d"] {
+        for command in &commands {
+            let args: Vec<String> = command.split(' ').map(String::from).collect();
+            let out = crate::cli::routing::with_root(&p.root, || {
+                crate::board::runs::with_context(tid, rid, || {
+                    crate::cli::routing::run_options(&args, &mut || Ok(String::new()), None, 4000, &[])
+                })
+            })
+            .unwrap();
+            assert!(out.contains(id) && out.contains("Home"), "{rid} {command}: {out}");
+        }
+    }
+    for command in &commands[..2] {
+        let args: Vec<String> = command.split(' ').map(String::from).collect();
+        let out = crate::cli::routing::with_root(&p.root, || crate::cli::projects::read_project(".", &args, 4000)).unwrap();
+        assert!(out.contains(id), "{command}: {out}");
+    }
 }

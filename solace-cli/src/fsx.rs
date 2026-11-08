@@ -13,10 +13,15 @@ mod tests;
 /// Writes a file whole or not at all: a reader never sees half of it.
 pub(crate) fn write_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> Result<(), Failure> {
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.{}.tmp", std::process::id(), TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
 }
 
 /// Holds the lock on the file at `path`, created if missing; waits for it.
@@ -118,3 +123,5 @@ fn copy_modified_time(from: &Path, to: &Path) {
     let Ok(file) = fs::OpenOptions::new().write(true).open(to) else { return };
     let _ = file.set_modified(modified);
 }
+
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

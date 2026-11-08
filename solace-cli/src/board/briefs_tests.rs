@@ -149,9 +149,6 @@ fn a_brief_carries_the_features_latest_direction() {
 
 #[test]
 fn note_images_are_checked_numbered_and_encoded() {
-    assert_eq!(base64(b"Man"), "TWFu");
-    assert_eq!(base64(b"Ma"), "TWE=");
-    assert_eq!(base64(b"M"), "TQ==");
     assert_eq!(image_kind(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
     assert_eq!(image_kind(b"<svg onload=alert(1)>"), None);
     assert_eq!(image_type("0123456789abcdef.png"), Some("image/png"));
@@ -469,7 +466,8 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     );
     assert!(
         review.contains(concat!(
-            "Red-team the changes: assume they don't work until you prove they fully meet the need and ",
+            "Red-team the changes: assume they don't work until you prove they meet the task's goal and ",
+            "acceptance criteria and ",
             "break nothing they reach."
         )),
         "review: missing the proof rule"
@@ -512,6 +510,23 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     ] {
         assert!(review.contains(rule), "review: missing {rule}");
         assert!(!work.contains(rule), "work: unexpected {rule}");
+    }
+    for rule in [
+        "Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria, has real bugs, or takes a direction that could be hazardous",
+        "an unlikely, harmless edge case may be mentioned but never blocks on its own",
+        "say so plainly in a `### Summary` right after the assessment label",
+        "code repeated once or twice isn't tech debt by itself",
+        "don't push for an abstraction unless it clearly pays for itself",
+        "Never file tech debt for an unlikely, harmless edge case",
+    ] {
+        assert!(review.contains(rule), "review: missing {rule}");
+        assert!(!work.contains(rule), "work: unexpected {rule}");
+    }
+    for involvement in ["engineer", "collaborator", "director"] {
+        assert!(
+            brief(&t, "review", involvement).contains("say so plainly in a `### Summary` right after the assessment label"),
+            "review/{involvement}: missing the Summary rule"
+        );
     }
     // D-182: only a work run is told to run every test, once, after its last change.
     for kind in ["work", "investigate", "review", "discuss"] {

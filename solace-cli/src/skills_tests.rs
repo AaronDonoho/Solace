@@ -69,7 +69,8 @@ fn the_skills_key_overrides_the_default_folder() {
 }
 
 /// D-27: a skill with roles reaches only that role's brief, in full; a skill
-/// with no roles stays one line for every role.
+/// with no roles key stays one line for every role; a skill naming no roles
+/// reaches none.
 #[test]
 fn role_skills_reach_only_their_role_in_full() {
     let root = Scratch::new().with(&[
@@ -83,17 +84,69 @@ fn role_skills_reach_only_their_role_in_full() {
     assert!(review.contains("### review") && review.contains("Check contrast."), "{review}");
     assert!(review.contains("### work") && review.contains("Keep it small."), "{review}");
     assert!(review.contains("- general: General rules (`read skills/general.md`)"), "{review}");
-    assert!(review.contains("- nobody: Nobody's rules. (`read skills/nobody.md`)"), "{review}");
+    assert!(!review.contains("- nobody") && !review.contains("Nothing."), "{review}");
     let work = section_for(&[&root], Some(&root), "work");
     assert!(work.contains("### work") && !work.contains("### review") && !work.contains("Check contrast."), "{work}");
     assert!(work.contains("- general: General rules"), "{work}");
+    assert!(!work.contains("Nothing."), "{work}");
     let investigation = section_for(&[&root], Some(&root), "investigate");
     assert!(!investigation.contains("### work") && !investigation.contains("### review"), "{investigation}");
     assert!(investigation.contains("- general: General rules"), "{investigation}");
     let api = api(&root);
-    assert_eq!(api.as_array().unwrap().len(), 2, "Settings manages only skills with roles: {api}");
-    assert!(
-        api.as_array().unwrap().iter().all(|skill| skill["name"] != "general" && skill["name"] != "folder" && skill["name"] != "nobody"),
-        "Settings manages only single-file skills with roles: {api}"
-    );
+    let listed = api.as_array().unwrap();
+    assert_eq!(listed.len(), 5, "every skill is listed: {api}");
+    let skill = |name: &str| listed.iter().find(|skill| skill["name"] == name).unwrap();
+    assert_eq!(skill("review")["managed"], json!(true), "{api}");
+    assert_eq!(skill("review")["all_roles"], json!(false), "{api}");
+    assert_eq!(skill("general")["managed"], json!(false), "a hand-written skill is view only: {api}");
+    assert_eq!(skill("general")["all_roles"], json!(true), "{api}");
+    assert_eq!(skill("folder")["managed"], json!(false), "a folder skill is view only: {api}");
+    assert_eq!(skill("nobody")["roles"], json!([]), "{api}");
+    assert_eq!(skill("nobody")["managed"], json!(true), "a skill with no roles is editable: {api}");
+    assert_eq!(skill("nobody")["all_roles"], json!(false), "{api}");
+    // Deleting a skill clears it from every role's brief.
+    remove(&root, "review").unwrap();
+    let review = section_for(&[&root], Some(&root), "review");
+    assert!(!review.contains("### review") && !review.contains("Check contrast."), "{review}");
+}
+
+/// Two saves of one skill at the same time never share a temporary file, so
+/// both finish and the file holds one complete body.
+#[test]
+fn a_concurrent_save_keeps_one_complete_body() {
+    let root = Scratch::new();
+    save(
+        &root,
+        &json!({
+            "name": "house-review",
+            "description": "Review UI changes.",
+            "body": "Start.",
+            "roles": ["reviewer"],
+        }),
+    )
+    .unwrap();
+    let target = &root;
+    let results: Vec<Result<(), crate::failure::Failure>> = std::thread::scope(|scope| {
+        (0..8)
+            .map(|i| {
+                scope.spawn(move || {
+                    let body = json!({
+                        "original": "house-review",
+                        "name": "house-review",
+                        "description": "Review UI changes.",
+                        "body": format!("Body {i}."),
+                        "roles": ["reviewer"],
+                    });
+                    save(target, &body)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let text = std::fs::read_to_string(root.join("skills/house-review.md")).unwrap();
+    let complete = (0..8).filter(|i| text.ends_with(&format!("Body {i}.\n"))).count();
+    assert_eq!(complete, 1, "one complete body: {text}");
 }

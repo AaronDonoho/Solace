@@ -142,15 +142,24 @@ pub const RESEND: &str = "Send the corrected patch again, whole, as `text`.";
 /// The footer of a refusal kept as draft `id`, retried with `cmd` (`submit` or
 /// `write`): it says nothing was saved unless the message already says so,
 /// `--replace` fixes a fault in one block or line, and a fault in the whole
-/// patch is resent; a draft that isn't a patch says the whole text. The kind is
-/// read at the message's end, where a quoted patch line can't reach it. A
-/// replacement kept in a refused retry says the draft holds it.
+/// patch is resent. It says whether `old` is patch text or merged code and
+/// gives a short example. The kind is read at the message's end, where a quoted
+/// patch line can't reach it. A replacement kept in a refused retry says the
+/// draft holds it.
 pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: bool, patch: bool, replaced: bool) -> String {
     let (noun, plural, nothing) =
         if cmd == "write" { ("line", "lines", "Nothing was written.") } else { ("block", "blocks", "Nothing was saved.") };
     let quiet = message.starts_with(if cmd == "write" { "nothing written:" } else { "Not saved:" });
     let prefix = if quiet { String::new() } else { format!("{nothing} ") };
-    let lines = if patch { format!(", which are {PATCH_LINES}") } else { String::new() };
+    let form = if patch {
+        format!(", which are {PATCH_LINES} (for example `old` `-  let x = 1` and `text` `-  let x = 2`)")
+    } else {
+        concat!(
+            ", which are the merged code as `view --draft` shows it, with no patch prefixes ",
+            "(for example `old` `  let x = 1` and `text` `  let x = 2`)",
+        )
+        .to_string()
+    };
     let flag = project_flag();
     let fix = if several {
         let whole = if patch { "patch" } else { "text" };
@@ -159,7 +168,7 @@ pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: boo
                 "Fix only the failing {}: `{} --draft {} --replace{}` with `old` and `text`{}; ",
                 "the other {} stay in the draft, so don't resend the whole {}.",
             ),
-            noun, cmd, id, flag, lines, plural, whole
+            noun, cmd, id, flag, form, plural, whole
         )
     } else {
         format!(
@@ -167,7 +176,7 @@ pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: boo
                 "Fix the failing {}: `{} --draft {} --replace{}` with `old` and `text`{}; ",
                 "the draft keeps your text, so don't resend the whole text.",
             ),
-            noun, cmd, id, flag, lines
+            noun, cmd, id, flag, form
         )
     };
     let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}{flag}`. List: `drafts{flag}`. Drop: `drafts drop {id}{flag}`.");
@@ -335,15 +344,7 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
             }
         } else {
             // leading space is part of the line; only trailing space is forgiven (D-142)
-            let same: [&dyn Fn(&str, &str) -> bool; 2] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end()];
-            let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| {
-                k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
-            };
-            match same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq))) {
-                Some(k) => Some((k, false)),
-                None if !at_end => loose_match(&old, lines),
-                None => None,
-            }
+            hunk_start(&old, lines, from, !at_end)
         };
         let Some((k, loose)) = at_k else {
             let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
@@ -728,7 +729,10 @@ mod tests {
                 "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n",
                 "leaves nothing of app.main",
             ),
-            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n", "renames app.main"),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n",
+                "replaces app.main with app.primary",
+            ),
         ];
         for (patch, why) in cases {
             let e = patch_blocks(&s, patch).unwrap_err().0;
@@ -764,7 +768,7 @@ mod tests {
         let rename = "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n";
         let e = patch_blocks(&s, rename).unwrap_err().0;
         assert!(
-            e.contains("renames app.main (section at line 2)")
+            e.contains("replaces app.main with app.primary (section at line 2)")
                 && e.contains("`submit app.main` with the new text renames it and keeps its id")
                 && e.contains("change its callers in the same submit")
                 && !e.contains("`*** Add:`"),
@@ -780,15 +784,19 @@ mod tests {
         assert!(e.contains("submit app.main") && !e.contains("submit app.other"), "{e}");
         // Units are joined by a NUL line; only a hunk naming that line can remove it.
         let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
-        assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");
+        let e = patch_blocks(&s, spans).unwrap_err().0;
+        assert!(e.contains("a hunk spans two symbols") && e.contains("app.main") && e.contains("app.other"), "{e}");
         // A hunk that copies the blank line `view` shows between symbols crosses them without the NUL.
         let cross = concat!("*** Begin Patch\n*** Update: app\n-}\n-\n-pub fn other() {\n", "+  y\n*** End Patch\n",);
         let e = patch_blocks(&s, cross).unwrap_err().0;
-        assert!(e.contains("a hunk spans two symbols") && !e.contains("aren't adjacent"), "{e}");
+        assert!(
+            e.contains("a hunk spans two symbols") && e.contains("app.main") && e.contains("app.other") && !e.contains("aren't adjacent"),
+            "{e}"
+        );
         // A hunk with different indentation that crosses two symbols gets the same refusal.
         let loose = concat!("*** Begin Patch\n*** Update: app\n-  }\n-\n-pub fn other() {\n", "+  y\n*** End Patch\n",);
         let e = patch_blocks(&s, loose).unwrap_err().0;
-        assert!(e.contains("a hunk spans two symbols"), "{e}");
+        assert!(e.contains("a hunk spans two symbols") && e.contains("app.main") && e.contains("app.other"), "{e}");
         let imports = "*** Begin Patch\n*** Update: app\n-import gleam/int\n+import gleam/list\n*** End Patch\n";
         let e = patch_blocks(&s, imports).unwrap_err().0;
         assert!(
@@ -1004,7 +1012,8 @@ mod tests {
         submit(&s, &["submit"], &mut || Ok(again.into()), None).unwrap();
         assert!(s.view(&["app.main"], false, crate::cli::BUDGET).unwrap().contains("calc.add(1, 5)"));
         let rename = "*** Update: calc.sub\n-pub fn sub(a: Int) -> Int {\n+pub fn minus(a: Int) -> Int {\n";
-        assert!(submit(&s, &["submit"], &mut || Ok(rename.into()), None).unwrap_err().0.contains("renames calc.sub"));
+        let e = submit(&s, &["submit"], &mut || Ok(rename.into()), None).unwrap_err().0;
+        assert!(e.contains("replaces calc.sub with calc.minus"), "{e}");
         // A type error keeps the resulting blocks as a draft.
         let wrong = "*** Update: calc.sub\n-  a - 1\n+  a -. 1.0\n";
         let err = submit(&s, &["submit"], &mut || Ok(wrong.into()), None).unwrap_err().0;
@@ -1613,6 +1622,56 @@ mod tests {
         assert!(e.contains("*** Add: tests.zz_probe"), "{e}");
         assert!(!e.contains("Similar names:"), "{e}");
     }
+
+    #[test]
+    fn retry_advice_names_patch_or_merged_text_with_an_example() {
+        let patch = retry_advice("E0108", "d1", "submit", "", false, true, false);
+        assert!(
+            patch.contains(PATCH_LINES)
+                && patch.contains("`-  let x = 1`")
+                && patch.contains("`-  let x = 2`")
+                && !patch.contains("`+  let x = 2`"),
+            "{patch}"
+        );
+        let merged = retry_advice("E0108", "d1", "submit", "", false, false, false);
+        assert!(merged.contains("merged code") && merged.contains("no patch prefixes") && merged.contains("`  let x = 1`"), "{merged}");
+    }
+
+    /// A retry shaped like the advice's example fixes a line the patch failed
+    /// to find, and the corrected patch saves.
+    #[test]
+    fn a_refused_patch_is_fixed_with_the_advice_example() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  1\n}\n")]);
+        let patch = "*** Begin Patch\n*** Update: app.main\n@@\n-  9\n+  2\n*** End Patch\n";
+        let err = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+        assert!(err.contains("`text` `-  let x = 2`"), "{err}");
+        let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
+        let out = submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok("-  1".into()), Some("-  9")).unwrap();
+        assert!(out.contains("app.main"), "{out}");
+        assert!(list(&s).unwrap().is_empty());
+    }
+
+    /// A hunk that removes a unit separator is refused with only the two
+    /// symbols it joins, not every symbol in the module.
+    #[test]
+    fn a_hunk_that_removes_a_unit_separator_names_the_two_symbols() {
+        let s = board_project(&[(
+            "src/app.gleam",
+            "import gleam/int\n\npub fn main() {\n  1\n}\n\npub fn other() {\n  2\n}\n\npub fn third() {\n  3\n}\n",
+        )]);
+        let patch = "*** Begin Patch\n*** Update: app\n@@ pub fn main\n-\u{0}\n*** End Patch\n";
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(e.contains("(app.main, app.other)"), "{e}");
+        assert!(!e.contains("app.third"), "{e}");
+        let patch = "*** Begin Patch\n*** Update: app\n@@ pub fn third\n-pub fn third() {\n-  3\n-}\n*** End Patch\n";
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(e.contains("leaves nothing of app.third"), "{e}");
+        assert!(e.contains("use `delete <name>`"), "{e}");
+        let patch = "*** Begin Patch\n*** Update: app\n-import gleam/int\n*** End Patch\n";
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(e.contains("submit --imports app"), "{e}");
+        assert!(!e.contains("use `delete <name>`"), "{e}");
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or
@@ -1656,15 +1715,18 @@ fn nothing_left(qname: &str, at_line: usize) -> String {
     format!("the patch leaves nothing of {qname} (section at line {at_line}); use `delete <name>`.")
 }
 
-/// The refusal for an update that would rename its symbol.
-fn renamed(qname: &str, at_line: usize) -> String {
+/// The refusal for an update that would rename its symbol, naming both the
+/// stored symbol and what the patch would replace it with.
+fn renamed(qname: &str, new_names: &[String], at_line: usize) -> String {
+    let with = if new_names.is_empty() { String::new() } else { format!(" with {}", new_names.join(", ")) };
     format!(
         concat!(
-            "the patch renames {qname} (section at line {at_line}); ",
+            "the patch replaces {qname}{with} (section at line {at_line}); ",
             "`submit {qname}` with the new text renames it and keeps its id; ",
             "change its callers in the same submit.",
         ),
         qname = qname,
+        with = with,
         at_line = at_line
     )
 }
@@ -1703,8 +1765,6 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
     let bad = c.bad;
     let target = c.target;
     let at_line = c.at_line;
-    let spans_two_symbols =
-        || bad(format!("in {target} (section at line {at_line}), a hunk spans two symbols; give each symbol its own hunk."));
     // The target's text, a unit per symbol (and a module's header first).
     let (module, mut units): (String, Vec<(Option<usize>, String)>) = match c.s.resolve_module(c.ix, c.target) {
         Some(m) => (
@@ -1719,17 +1779,47 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
         }
     };
     // One list of lines, with a separator no hunk can match between units.
-    const SEP: &str = "\u{0}";
     let mut lines: Vec<String> =
         units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
-    if spans_units(&units, &hunks) {
-        return Err(spans_two_symbols());
+    if let Some((first, last)) = spans_units(&units, &hunks) {
+        let name = |index: usize| match units[index].0 {
+            Some(symbol) => c.ix.syms[symbol].qname(),
+            None => format!("{module}'s header"),
+        };
+        return Err(bad(format!(
+            "in {target} (section at line {at_line}), a hunk spans two symbols, {} and {}; give each symbol its own hunk.",
+            name(first),
+            name(last),
+        )));
     }
+    let touched = touched_units(&lines, &hunks);
     let indented = apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
-    let joined = lines.join("\n");
-    let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
+    let texts = unit_texts(&lines);
+    if texts.len() == units.len() {
+        for ((symbol, text), after) in units.iter().zip(&texts) {
+            let Some(symbol) = symbol else {
+                continue;
+            };
+            if text.trim().is_empty() || !after.trim().is_empty() {
+                continue;
+            }
+            return Err(bad(nothing_left(&c.ix.syms[*symbol].qname(), at_line)));
+        }
+    }
     if texts.len() != units.len() {
-        return Err(spans_two_symbols());
+        let names: Vec<String> = touched
+            .iter()
+            .filter_map(|&index| units.get(index))
+            .map(|(symbol, _)| match symbol {
+                Some(symbol) => c.ix.syms[*symbol].qname(),
+                None => format!("{module}'s header"),
+            })
+            .collect();
+        let names = names.join(", ");
+        let which = if names.is_empty() { String::new() } else { format!(" ({names})") };
+        return Err(bad(format!(
+            "in {target} (section at line {at_line}), a hunk spans two symbols{which}; give each symbol its own hunk.",
+        )));
     }
     for (u, t) in units.iter_mut().zip(&texts) {
         u.1 = t.trim_end().to_string();
@@ -1750,7 +1840,8 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bo
             return Err((c.bad)(nothing_left(&c.ix.syms[*i].qname(), c.at_line)));
         }
         let Some(own) = split.items.iter().find(|item| item.name == c.ix.syms[*i].name) else {
-            return Err((c.bad)(renamed(&c.ix.syms[*i].qname(), c.at_line)));
+            let names: Vec<String> = split.items.iter().map(|item| format!("{module}.{}", item.name)).collect();
+            return Err((c.bad)(renamed(&c.ix.syms[*i].qname(), &names, c.at_line)));
         };
         let mut head = std::mem::take(&mut header);
         push_block(blocks, &mut head, &module, &c.ix.syms[*i].name, &own.text);
@@ -1854,7 +1945,8 @@ fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Re
     }
     let stored = c.ix.syms[i].name.clone();
     let Some(own) = items.iter().find(|item| item.name == stored) else {
-        return Err((c.bad)(renamed(&c.ix.syms[i].qname(), c.at_line)));
+        let names: Vec<String> = items.iter().map(|item| format!("{}.{}", c.ix.syms[i].module, item.name)).collect();
+        return Err((c.bad)(renamed(&c.ix.syms[i].qname(), &names, c.at_line)));
     };
     let module = c.ix.syms[i].module.clone();
     push_block(blocks, &mut String::new(), &module, &stored, &own.text);
@@ -2414,10 +2506,11 @@ fn has_known_parent(s: &Store, ix: &Index, name: &str) -> bool {
     s.resolve_module(ix, parent).is_some() || s.rust_container_in(ix, parent).is_ok_and(|c| c.is_some())
 }
 
-/// Whether a hunk's lines run from one unit into the next: a module patch
-/// changes one symbol per hunk, and the units are joined by a separator no
-/// hunk can see. Matches the way `apply_hunks` matches, exactly or loosely.
-fn spans_units(units: &[(Option<usize>, String)], hunks: &[Hunk]) -> bool {
+/// The first hunk whose lines run from one unit into the next, with both unit
+/// indexes: a module patch changes one symbol per hunk, and the units are
+/// joined by a separator no hunk can see. Matches `apply_hunks`, exactly or
+/// loosely.
+fn spans_units(units: &[(Option<usize>, String)], hunks: &[Hunk]) -> Option<(usize, usize)> {
     let mut lines: Vec<String> = vec![];
     let mut owner: Vec<usize> = vec![];
     for (i, (_, text)) in units.iter().enumerate() {
@@ -2430,18 +2523,18 @@ fn spans_units(units: &[(Option<usize>, String)], hunks: &[Hunk]) -> bool {
             owner.push(i);
         }
     }
-    hunks.iter().any(|(_, hunk, _)| {
+    hunks.iter().find_map(|(_, hunk, _)| {
         let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
         if old.is_empty() || old.len() > lines.len() {
-            return false;
+            return None;
         }
         let crosses = |k: usize| owner[k] != owner[k + old.len() - 1];
         let mut same = false;
-        let mut cross = false;
+        let mut crossing = None;
         for k in 0..=lines.len() - old.len() {
-            if old.iter().zip(&lines[k..]).all(|(o, l)| o.trim_end() == l.trim_end()) {
+            if fits(&old, &lines, k, false) {
                 if crosses(k) {
-                    cross = true;
+                    crossing.get_or_insert((owner[k], owner[k + old.len() - 1]));
                 } else {
                     same = true;
                 }
@@ -2449,11 +2542,75 @@ fn spans_units(units: &[(Option<usize>, String)], hunks: &[Hunk]) -> bool {
         }
         if let Some((k, _)) = loose_match(&old, &lines) {
             if crosses(k) {
-                cross = true;
+                crossing.get_or_insert((owner[k], owner[k + old.len() - 1]));
             } else {
                 same = true;
             }
         }
-        cross && !same
+        if same { None } else { crossing }
     })
 }
+
+/// The units the hunks' old lines touch, in the patch's order; a separator
+/// line names the units on either side of it.
+fn touched_units(lines: &[String], hunks: &[Hunk]) -> Vec<usize> {
+    let mut touched = vec![];
+    for (at, hunk, _) in hunks {
+        let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
+        if old.is_empty() || old.len() > lines.len() {
+            continue;
+        }
+        let from = match at {
+            Some(at) => match lines.iter().position(|l| l.trim().starts_with(at.as_str())) {
+                Some(k) => k + 1,
+                None => continue,
+            },
+            None => 0,
+        };
+        let Some((k, _)) = hunk_start(&old, lines, from, true) else { continue };
+        for j in k..k + old.len() {
+            let before = lines[..j].iter().filter(|l| l.as_str() == SEP).count();
+            let last = if lines[j] == SEP { before + 1 } else { before };
+            for unit in before..=last {
+                if !touched.contains(&unit) {
+                    touched.push(unit);
+                }
+            }
+        }
+    }
+    touched
+}
+
+/// Whether `old` fits `lines` at `k`, exactly or (unless `exact`) ignoring
+/// trailing space.
+fn fits(old: &[&str], lines: &[String], k: usize, exact: bool) -> bool {
+    let eq = |a: &str, b: &str| if exact { a == b } else { a.trim_end() == b.trim_end() };
+    k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
+}
+
+/// Where a hunk's old lines sit: the first fit from `from` and wrapping,
+/// exactly then ignoring trailing space; a `loose` hunk falls back to the one
+/// fit that ignores leading space too (D-204).
+fn hunk_start(old: &[&str], lines: &[String], from: usize, loose: bool) -> Option<(usize, bool)> {
+    let starts = || (from..lines.len()).chain(0..from);
+    if let Some(k) = [true, false].into_iter().find_map(|exact| starts().find(|&k| fits(old, lines, k, exact))) {
+        return Some((k, false));
+    }
+    if loose { loose_match(old, lines) } else { None }
+}
+
+/// Each unit's text after a patch, split at the separator lines.
+fn unit_texts(lines: &[String]) -> Vec<String> {
+    let mut texts = vec![];
+    let mut start = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if line.as_str() == SEP {
+            texts.push(lines[start..i].join("\n"));
+            start = i + 1;
+        }
+    }
+    texts.push(lines[start..].join("\n"));
+    texts
+}
+
+const SEP: &str = "\u{0}";

@@ -81,10 +81,20 @@ pub fn propose_settings(
 /// Applies an approved settings question, unless the file changed since.
 pub(crate) fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     let file = q["settings"]["file"].as_str().unwrap_or("solace.toml").to_string();
-    let p = match q["settings"]["project"].as_str() {
-        Some(dir) => scope::path(&scope::top(root), dir).join(&file),
-        None => root.join(&file),
+    let dir = match q["settings"]["project"].as_str() {
+        Some(project) => scope::path(&scope::top(root), project),
+        None => root.to_path_buf(),
     };
+    if let Err(e) = crate::lockdown::paths::reachable(&dir, &file) {
+        q["answer"] = json!(format!("Not applied: {}", e.0));
+        return Ok(());
+    }
+    if crate::lockdown::paths::design_path(&dir, &file) {
+        let e = crate::lockdown::paths::design_error::<()>(&file).unwrap_err();
+        q["answer"] = json!(format!("Not applied: {}", e.0));
+        return Ok(());
+    }
+    let p = dir.join(&file);
     let current = fs::read_to_string(&p).unwrap_or_default();
     let proposed = q["settings"]["proposed"].as_str().unwrap();
     if current != q["settings"]["base"] || (file == "solace.toml" && lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err())
@@ -104,10 +114,6 @@ pub(crate) fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> 
     fs::write(&p, proposed)?;
     // A failed fetch undoes the approval, so the project stays as it was.
     if cargo {
-        let dir = match q["settings"]["project"].as_str() {
-            Some(d) => scope::path(&scope::top(root), d),
-            None => root.to_path_buf(),
-        };
         if let Err(e) = crate::language::cargo::fetch(&dir) {
             let _ = if existed { fs::write(&p, &current) } else { fs::remove_file(&p) };
             q["answer"] = json!(format!("Not applied: {}", e.0.trim_end()));

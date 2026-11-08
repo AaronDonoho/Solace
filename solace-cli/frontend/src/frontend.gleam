@@ -15,6 +15,7 @@ import lustre/attribute
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
+import lustre/event
 import migration
 import modem
 import settings
@@ -43,13 +44,15 @@ pub type Route {
   Contracts(base: String, task: String)
   /// The Strategy page and the tab its address names.
   Strategy(tab: String)
-  /// The Design page and the tab its address names.
-  Design(tab: String)
-  Settings
+  /// The Design page, the tab its address names, and the design open there.
+  Design(tab: String, design: String)
+  /// The Settings page and the tab its address names.
+  Settings(tab: String)
   /// The Knowledgebase page (D-140): the shell's own page, holding the guide. `/guide` lands here.
   Knowledgebase
   /// A link's address, `/task/<id>` (D-98), `/feature/<id>` or `/milestone/<id>` (D-122): resolved to the
-  /// board or Strategy, never shown itself. `kind` is "task", "feature" or "milestone".
+  /// board or Strategy, or `/design/<id>` (D-234) resolved to Design, never shown itself. `kind` is
+  /// "task", "feature", "milestone" or "design".
   RecordLink(kind: String, id: String)
 }
 
@@ -58,6 +61,8 @@ pub type Msg {
   RouteChanged(Route, String)
   /// A page's tab event: the page's element, and the tab shown changed.
   TabChanged(String, String)
+  /// A page's design event: the page's element, and the design shown changed.
+  DesignChanged(String, String)
   /// A link was clicked in a page: the record's kind and id.
   Follow(String, String)
   /// A link in a page's shadow root to the Board or a Contract page: its address.
@@ -83,26 +88,21 @@ pub fn route(uri: Uri) -> Route {
     [] -> Board
     ["workspace"] | ["migrate"] -> Workspace
     ["contracts"] -> Contracts("", task_query(uri.query))
-    ["strategy"] -> {
-      let query = case uri.query {
-        Some(query) -> query
-        None -> ""
-      }
-      Strategy(strategy.tab_name(strategy.tab_from(query)))
-    }
-    ["design"] -> {
-      let query = case uri.query {
-        Some(query) -> query
-        None -> ""
-      }
-      Design(design.tab_name(design.tab_from(query)))
-    }
-    ["settings"] -> Settings
+    ["strategy"] ->
+      Strategy(strategy.tab_name(strategy.tab_from(uri_query(uri))))
+    ["design"] ->
+      Design(
+        design.tab_name(design.tab_from(uri_query(uri))),
+        design.design_from(uri_query(uri)),
+      )
+    ["settings"] ->
+      Settings(settings.tab_name(settings.tab_from(uri_query(uri))))
     ["knowledgebase"] | ["guide"] -> Knowledgebase
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir, task_query(uri.query))
     ["task" as kind, id]
     | ["feature" as kind, id]
-    | ["milestone" as kind, id] -> RecordLink(kind, id)
+    | ["milestone" as kind, id]
+    | ["design" as kind, id] -> RecordLink(kind, id)
     _ -> Board
   }
 }
@@ -126,7 +126,11 @@ pub fn page(
       attribute.attribute("task", task),
     ]
     Strategy(tab) -> [attribute.attribute("tab", tab)]
-    Design(tab) -> [attribute.attribute("tab", tab)]
+    Design(tab, design) -> [
+      attribute.attribute("tab", tab),
+      attribute.attribute("design", design),
+    ]
+    Settings(tab) -> [attribute.attribute("tab", tab)]
     _ -> []
   }
   let attributes = case focus.page == page_of(route) && focus.id != "" {
@@ -153,6 +157,7 @@ pub fn page(
     [
       event.on("attention", decode.success(Attention(page_of(route)))),
       event.on("tab", tab_changed(page_of(route))),
+      event.on("design", design_changed(page_of(route))),
       ..attributes
     ],
     [],
@@ -217,8 +222,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   )
 }
 
-import lustre/event
-
 /// Showing another page keeps the window's scroll of the one left, read before the view hides it, and
 /// puts back the scroll of the one shown once it is drawn.
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -238,6 +241,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       let next = case page {
         "solace-strategy" -> strategy_route(name)
         "solace-design" -> design_route(name)
+        "solace-settings" -> settings_route(name)
         _ -> model.route
       }
       case page == page_of(model.route) && model.route != next {
@@ -259,6 +263,26 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                   False,
                 )
               }),
+            ]),
+          )
+        }
+      }
+    }
+    DesignChanged(page, id) -> {
+      let next = case model.route {
+        Design(tab, _) -> Design(tab, id)
+        _ -> model.route
+      }
+      case page == page_of(model.route) && model.route != next {
+        False -> #(model, effect.none())
+        True -> {
+          let #(model, shown) = show(model, next)
+          let path = path_of(next)
+          #(
+            model,
+            effect.batch([
+              shown,
+              effect.from(fn(_) { navigate(path, query_of(next), "{}", False) }),
             ]),
           )
         }
@@ -305,6 +329,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             OnBoard(dir) -> go(model, Board, "/", kind, dir, id, replace)
             InStrategy(dir) ->
               go(model, record_route(kind), "/strategy", kind, dir, id, replace)
+            InDesign(tab) ->
+              go(model, Design(tab, id), "/design", kind, "", id, replace)
             nowhere -> {
               let text = case nowhere {
                 Missing -> missing_text(kind)
@@ -390,6 +416,7 @@ pub fn view(model: Model) -> Element(Msg) {
   let shown = page_of(model.route)
   let tab = strategy_tab(model)
   let design_tab = design_tab(model)
+  let current_settings_tab = settings_tab(model)
   let link = fn(path, label, route) {
     let page = page_of(route)
     link(path, label, shown == page, list.contains(model.attention, page))
@@ -398,11 +425,15 @@ pub fn view(model: Model) -> Element(Msg) {
     html.nav([attribute.class("menu")], [
       link("/workspace", "Workspace", Workspace),
       link(strategy_path(tab), "Strategy", Strategy(tab)),
-      link(design_path(design_tab), "Design", Design(design_tab)),
+      link(design_path(design_tab), "Design", Design(design_tab, "")),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("", "")),
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
-      link("/settings", "Settings", Settings),
+      link(
+        settings_path(current_settings_tab),
+        "Settings",
+        Settings(current_settings_tab),
+      ),
     ]),
     setup.view(model.setup, CheckSetup),
     ..list.map(model.opened, fn(r) {
@@ -472,8 +503,9 @@ pub type Html {
 /// renderer (`markdown` in the board's api.mjs): paragraphs and line breaks, headings (the renderer draws every
 /// level as h4, so they come back as ####), blockquotes, nested lists (a numbered one from its start), code blocks
 /// and spans, bold, links, and task images,
-/// whose src loses the project's prefix. Other elements give their text. A task, feature or milestone link
-/// gives its reference back: bare when it was drawn bare, though it shows the record's title (D-122).
+/// whose src loses the project's prefix. Other elements give their text. A task, feature, milestone or
+/// design link gives its reference back: bare when it was drawn bare, though it shows the record's title
+/// (D-122, D-234).
 pub fn to_markdown(nodes: List(Html)) -> String {
   blocks(nodes) |> string.join("\n\n")
 }
@@ -698,8 +730,8 @@ pub fn page_of(route: Route) -> String {
     Workspace -> "solace-migration"
     Contracts(_, _) -> "solace-contracts"
     Strategy(_) -> "solace-strategy"
-    Design(_) -> "solace-design"
-    Settings -> "solace-settings"
+    Design(_, _) -> "solace-design"
+    Settings(_) -> "solace-settings"
     Knowledgebase -> "solace-knowledgebase"
     RecordLink(_, _) -> "solace-board"
   }
@@ -751,9 +783,9 @@ fn show(model: Model, route: Route) -> #(Model, Effect(Msg)) {
   }
 }
 
-/// A link's request to a page (D-98, D-122): the page's element, the record's kind, the project a task is
-/// stored in ("" for a feature or milestone), its id, and how many links were followed, so following the
-/// same one again is news to the page.
+/// A link's request to a page (D-98, D-122, D-234): the page's element, the record's kind, the project a
+/// task is stored in ("" for a feature, milestone or design), its id, and how many links were followed,
+/// so following the same one again is news to the page.
 pub type Focus {
   Focus(page: String, kind: String, dir: String, id: String, n: Int)
 }
@@ -762,49 +794,62 @@ pub type Focus {
 pub const no_focus = Focus("", "", "", "", 0)
 
 /// Where a link opens: on the board, on the Strategy page (an archived task is off the board, D-95, and
-/// features and milestones are only there, D-122), or nowhere: there is no such record, or the lookup failed
-/// (the server or the network), so whether there is one isn't known. The first two name the project a task
-/// is stored in, "" for a feature or milestone.
+/// features and milestones are only there, D-122), on the Design page's tab (D-234), or nowhere: there
+/// is no such record, or the lookup failed (the server or the network), so whether there is one isn't
+/// known. The first two name the project a task is stored in, "" for a feature, milestone or design.
 pub type Target {
   OnBoard(dir: String)
   InStrategy(dir: String)
+  InDesign(tab: String)
   Missing
   Unknown
 }
 
 /// Where a link to a record of `kind` opens, from the reply to `GET /<kind>s/find/{id}`: a task's
-/// `{dir, archived, project, onBoard}`, a feature's or milestone's `{id, title}`; `E7023` for no such
-/// record; any other reply (another error, or a network failure's message) leaves it unknown.
+/// `{dir, archived, project, onBoard}`, a feature's or milestone's `{id, title}`, a design's
+/// `{id, title, tab}`; `E7023` for no such record; any other reply (another error, or a network
+/// failure's message) leaves it unknown.
 pub fn target(kind: String, reply: String) -> Target {
-  let decoder = case kind {
-    "task" -> {
-      use dir <- decode.field("dir", decode.string)
-      use archived <- decode.field("archived", decode.bool)
-      use project <- decode.optional_field("project", True, decode.bool)
-      use on_board <- decode.optional_field(
-        "onBoard",
-        None,
-        decode.optional(decode.bool),
-      )
-      decode.success(#(dir, archived, project, on_board))
+  case kind {
+    "design" -> {
+      let decoder = {
+        use _ <- decode.field("id", decode.string)
+        use tab <- decode.field("tab", decode.string)
+        decode.success(tab)
+      }
+      case json.parse(reply, decoder) {
+        Ok(tab) -> InDesign(tab)
+        Error(_) -> target_error(reply)
+      }
     }
     _ -> {
-      use _ <- decode.field("id", decode.string)
-      decode.success(#("", False, False, None))
-    }
-  }
-  case json.parse(reply, decoder) {
-    Ok(#(dir, _, _, Some(True))) -> OnBoard(dir)
-    Ok(#(dir, _, _, Some(False))) -> InStrategy(dir)
-    // An older server has no `onBoard`: a task opens on the board unless it
-    // is archived or has no project (D-98, D-129).
-    Ok(#(dir, False, True, None)) -> OnBoard(dir)
-    Ok(#(dir, _, _, None)) -> InStrategy(dir)
-    Error(_) ->
-      case json.parse(reply, decode.at(["code"], decode.string)) {
-        Ok("E7023") -> Missing
-        _ -> Unknown
+      let decoder = case kind {
+        "task" -> {
+          use dir <- decode.field("dir", decode.string)
+          use archived <- decode.field("archived", decode.bool)
+          use project <- decode.optional_field("project", True, decode.bool)
+          use on_board <- decode.optional_field(
+            "onBoard",
+            None,
+            decode.optional(decode.bool),
+          )
+          decode.success(#(dir, archived, project, on_board))
+        }
+        _ -> {
+          use _ <- decode.field("id", decode.string)
+          decode.success(#("", False, False, None))
+        }
       }
+      case json.parse(reply, decoder) {
+        Ok(#(dir, _, _, Some(True))) -> OnBoard(dir)
+        Ok(#(dir, _, _, Some(False))) -> InStrategy(dir)
+        // An older server has no `onBoard`: a task opens on the board unless it
+        // is archived or has no project (D-98, D-129).
+        Ok(#(dir, False, True, None)) -> OnBoard(dir)
+        Ok(#(dir, _, _, None)) -> InStrategy(dir)
+        Error(_) -> target_error(reply)
+      }
+    }
   }
 }
 
@@ -839,7 +884,7 @@ fn go(
 }
 
 /// Asks the server about record `id` of `kind`: where a task is (D-98), whether a feature or milestone is
-/// (D-122), and the route and visit count when it was asked.
+/// (D-122), which tab a design is on (D-234), and the route and visit count when it was asked.
 fn find(
   kind: String,
   id: String,
@@ -868,13 +913,14 @@ pub fn failed_text(kind: String) -> String {
   "Couldn't look up the " <> kind <> ". Try again."
 }
 
-/// The markdown reference a link's address stands for (D-98, D-122): `task:<id>` for `/task/<id>`, and
-/// so for a feature or a milestone.
+/// The markdown reference a link's address stands for (D-98, D-122, D-234): `task:<id>` for `/task/<id>`,
+/// and so for a feature, a milestone or a design.
 fn record_ref(href: String) -> Result(String, Nil) {
   case href {
     "/task/" <> id -> Ok("task:" <> id)
     "/feature/" <> id -> Ok("feature:" <> id)
     "/milestone/" <> id -> Ok("milestone:" <> id)
+    "/design/" <> id -> Ok("design:" <> id)
     _ -> Error(Nil)
   }
 }
@@ -926,7 +972,8 @@ pub fn strategy_path(tab: String) -> String {
 fn query_of(route: Route) -> String {
   case route {
     Strategy(tab) -> strategy_query(tab)
-    Design(tab) -> design_query(tab)
+    Design(tab, design) -> design_query(tab, design)
+    Settings(tab) -> settings_query(tab)
     Contracts(_, task) ->
       case task {
         "" -> ""
@@ -1026,7 +1073,7 @@ fn task_query(query: Option(String)) -> String {
 
 /// The route for a Design tab name, Architecture for an unknown one.
 fn design_route(tab: String) -> Route {
-  tab_route(tab, design.tab_name, design.tab_from, Design)
+  Design(design.tab_name(design.tab_from("tab=" <> tab)), "")
 }
 
 /// The tab shown on Design, or the tab it will open on.
@@ -1036,11 +1083,23 @@ fn design_tab(model: Model) -> String {
 
 /// The menu's address for a Design tab: Architecture has no query.
 pub fn design_path(tab: String) -> String {
-  page_path(Design(tab), design.tab_name(design.Architecture))
+  page_path(Design(tab, ""), design.tab_name(design.Architecture))
 }
 
-fn design_query(tab: String) -> String {
-  page_query(tab, design.tab_name(design.Architecture))
+/// The query a Design address carries: its tab, which the first leaves out,
+/// and the open design, when there is one.
+pub fn design_query(tab: String, id: String) -> String {
+  let tab_query = page_query(tab, design.tab_name(design.Architecture))
+  let design_query = case id {
+    "" -> ""
+    id -> "design=" <> id
+  }
+  case tab_query, design_query {
+    "", "" -> ""
+    "", id -> id
+    tab, "" -> tab
+    tab, id -> tab <> "&" <> id
+  }
 }
 
 /// The tab `page` shows, from the route shown or the last one opened, else `first`.
@@ -1089,8 +1148,8 @@ pub fn path_of(route: Route) -> String {
     Workspace -> "/workspace"
     Contracts(base, _) -> base <> "/contracts"
     Strategy(_) -> "/strategy"
-    Design(_) -> "/design"
-    Settings -> "/settings"
+    Design(_, _) -> "/design"
+    Settings(_) -> "/settings"
     Knowledgebase -> "/knowledgebase"
     RecordLink(kind, id) -> "/" <> kind <> "/" <> id
   }
@@ -1100,7 +1159,47 @@ pub fn path_of(route: Route) -> String {
 fn route_tab(route: Route, first: String) -> String {
   case route {
     Strategy(tab) -> tab
-    Design(tab) -> tab
+    Design(tab, _) -> tab
+    Settings(tab) -> tab
     _ -> first
+  }
+}
+
+/// The route for a Settings tab name, Agents for an unknown one.
+fn settings_route(tab: String) -> Route {
+  tab_route(tab, settings.tab_name, settings.tab_from, Settings)
+}
+
+/// The menu's address for a Settings tab: Agents has no query.
+pub fn settings_path(tab: String) -> String {
+  page_path(Settings(tab), settings.tab_name(settings.Agents))
+}
+
+fn settings_query(tab: String) -> String {
+  page_query(tab, settings.tab_name(settings.Agents))
+}
+
+/// The tab shown on Settings, or the tab it will open on.
+fn settings_tab(model: Model) -> String {
+  page_tab(model, "solace-settings", settings.tab_name(settings.Agents))
+}
+
+/// The URI's query, "" when it has none.
+fn uri_query(uri: Uri) -> String {
+  case uri.query {
+    Some(query) -> query
+    None -> ""
+  }
+}
+
+fn design_changed(page: String) -> decode.Decoder(Msg) {
+  use id <- decode.then(decode.string)
+  decode.success(DesignChanged(page, id))
+}
+
+fn target_error(reply: String) -> Target {
+  case json.parse(reply, decode.at(["code"], decode.string)) {
+    Ok("E7023") -> Missing
+    _ -> Unknown
   }
 }

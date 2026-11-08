@@ -21,7 +21,6 @@ use crate::board::reviews::review_path;
 use crate::board::reviews::review_state;
 use crate::board::briefs::continuation_brief;
 use crate::board::briefs::image_type;
-use crate::board::briefs::base64;
 use crate::board::briefs::note_fingerprint;
 use crate::board::reviews::recoverable_review;
 use crate::board::reviews::record_review;
@@ -40,10 +39,10 @@ use crate::board::task_model::run_at;
 use crate::board::task_model::end_run;
 use crate::board::task_model::run_state;
 use crate::failure::Failure;
+use crate::fsx;
 #[cfg(test)]
 #[path = "runs_tests.rs"]
 mod tests;
-use crate::fsx;
 use crate::drafts;
 use crate::tasks;
 use crate::scope;
@@ -485,7 +484,9 @@ pub(crate) fn spawn_agent(
         let mut content = vec![json!({"type":"text","text":prompt})];
         for image in images {
             let media = image_type(&image.to_string_lossy()).unwrap_or("image/png");
-            content.push(json!({"type":"image","source":{"type":"base64","media_type":media,"data":base64(&fs::read(image)?)}}));
+            content.push(
+                json!({"type":"image","source":{"type":"base64","media_type":media,"data":crate::base64::encode(&fs::read(image)?)}}),
+            );
         }
         writeln!(stdin, "{}", json!({"type":"user","message":{"role":"user","content":content}}))?;
     } else {

@@ -283,6 +283,9 @@ pub fn dispatch(
                         }
                     }
                     "write" => {
+                        if crate::lockdown::paths::design_path(root, &name) {
+                            return crate::lockdown::paths::design_error(&name);
+                        }
                         if t == "protected" {
                             if in_skills(v, &name) {
                                 return error("E6002", &name, "skills are the humans' house rules: `read` them; agents can't change them");
@@ -297,9 +300,21 @@ pub fn dispatch(
                             );
                         }
                         not_here(root, &name)?;
-                        return crate::lockdown::files::write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old);
+                        return crate::lockdown::files::write(
+                            root,
+                            v,
+                            &name,
+                            &input()?,
+                            a.contains(&"--replace"),
+                            a.contains(&"--all"),
+                            old,
+                        );
                     }
                     "remove" => {
+                        if crate::lockdown::paths::design_path(root, &name) {
+                            refused.extend(crate::lockdown::paths::design_error::<()>(&name).err());
+                            continue;
+                        }
                         if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
                             refused.extend(
                                 error::<()>(
@@ -2023,6 +2038,425 @@ mod tests {
         assert!(prefix.starts_with("exit code: 0 ("), "{prefix}");
         assert_eq!(rest, "red\n");
         assert!(!out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn grep_checks_an_explicit_file_over_the_limit() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 20\n".parse().unwrap();
+        let bundle = format!("//! {}\nconst marker = \"embedded\";\n", "x".repeat(80));
+        fs::write(s.root.join("priv/app.js"), bundle).unwrap();
+        let wide = call(&s, &v, &["grep", "embedded"], "", None).unwrap();
+        assert!(!wide.contains("const marker") && wide.contains("No matches"), "{wide}");
+        let file = call(&s, &v, &["grep", "embedded", "--in", "priv/app.js"], "", None).unwrap();
+        assert!(file.starts_with("priv/app.js\n") && file.contains("const marker = \"embedded\";"), "{file}");
+    }
+
+    #[test]
+    fn design_files_are_readable_but_never_changed() {
+        let (s, v) = fixture();
+        fs::create_dir_all(s.root.join("designs")).unwrap();
+        let design = s.root.join("designs/0123456789abcdef.json");
+        fs::write(&design, "old\n").unwrap();
+        fs::write(s.root.join("notes"), "one\n").unwrap();
+        let name = "designs/0123456789abcdef.json";
+        assert!(call(&s, &v, &["read", name], "", None).unwrap().contains("old"));
+        crate::board::runs::with_context("t1", "r1", || {
+            for (args, text, old) in [
+                (vec!["write", name], "new\n", None),
+                (vec!["write", name, "--replace"], "new\n", Some("old")),
+                (vec!["remove", name], "", None),
+                (vec!["move", name, "moved.json"], "", None),
+                (vec!["move", "notes", "designs/notes"], "", None),
+                (vec!["move", "designs", "old-designs"], "", None),
+            ] {
+                let e = call(&s, &v, &args, text, old).unwrap_err().0;
+                assert!(e.contains("designs change through the design agent"), "{args:?}: {e}");
+                assert_eq!(fs::read_to_string(&design).unwrap(), "old\n", "{args:?}");
+                assert!(!s.root.join("moved.json").exists(), "{args:?}");
+                assert!(!s.root.join("designs/notes").exists(), "{args:?}");
+                assert!(!s.root.join("old-designs").exists(), "{args:?}");
+            }
+            let patch = concat!(
+                "*** Begin Patch\n",
+                "*** Update File: notes\n-one\n+two\n",
+                "*** Update File: designs/0123456789abcdef.json\n-old\n+new\n",
+                "*** End Patch\n"
+            );
+            let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+            assert!(e.starts_with("nothing written:") && e.contains("designs change through the design agent"), "{e}");
+            assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n");
+            assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
+        });
+    }
+
+    #[test]
+    fn a_design_path_is_never_a_settings_file() {
+        let (s, _) = fixture();
+        assert!(!crate::lockdown::settings::settings_file(&s.root, "designs/.gitignore"));
+        assert!(crate::lockdown::settings::settings_file(&s.root, ".gitignore"));
+    }
+
+    #[test]
+    fn a_work_run_cannot_propose_a_design_settings_change() {
+        let p = testing::project(&[
+            ("solace.toml", ""),
+            ("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"),
+            ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        let mut t = crate::board::server::api(&p.root, "POST", "/tasks", serde_json::json!({"title": "Designs"})).unwrap();
+        t["scope"] = serde_json::json!(["."]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&*p, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        fs::create_dir_all(p.root.join("designs")).unwrap();
+        let path = p.root.join("designs/.gitignore");
+        fs::write(&path, "old\n").unwrap();
+        let e = crate::cli::with_root(&p.root, || {
+            crate::board::runs::with_context(tid, "r1", || {
+                crate::cli::routing::run_options(
+                    &["write".to_string(), "designs/.gitignore".to_string()],
+                    &mut || Ok("new\n".to_string()),
+                    None,
+                    10_000,
+                    &[],
+                )
+            })
+        })
+        .unwrap_err()
+        .0;
+        assert!(e.contains("designs change through the design agent"), "{e}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old\n");
+    }
+
+    fn design_work_run() -> (Project, String) {
+        let p = testing::project(&[
+            ("solace.toml", ""),
+            ("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"),
+            ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        let mut t = crate::board::server::api(&p.root, "POST", "/tasks", serde_json::json!({"title": "Designs"})).unwrap();
+        t["scope"] = serde_json::json!(["."]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&*p, &t).unwrap();
+        (p, t["id"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn a_work_run_refuses_design_changes_through_the_cli() {
+        let (p, tid) = design_work_run();
+        fs::create_dir_all(p.root.join("designs")).unwrap();
+        let design = p.root.join("designs/0123456789abcdef.json");
+        fs::write(&design, "old\n").unwrap();
+        fs::write(p.root.join("notes"), "one\n").unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: notes\n-one\n+two\n",
+            "*** Update File: designs/0123456789abcdef.json\n-old\n+new\n",
+            "*** End Patch\n"
+        );
+        for (args, text) in [
+            (vec!["write", "designs/0123456789abcdef.json"], "new\n"),
+            (vec!["remove", "designs/0123456789abcdef.json"], ""),
+            (vec!["move", "designs/0123456789abcdef.json", "moved.json"], ""),
+            (vec!["write"], patch),
+        ] {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let e = crate::cli::with_root(&p.root, || {
+                crate::board::runs::with_context(&tid, "r1", || {
+                    crate::cli::routing::run_options(&args, &mut || Ok(text.to_string()), None, 10_000, &[])
+                })
+            })
+            .unwrap_err()
+            .0;
+            assert!(e.contains("designs change through the design agent"), "{args:?}: {e}");
+            assert_eq!(fs::read_to_string(&design).unwrap(), "old\n", "{args:?}");
+            assert!(!p.root.join("moved.json").exists(), "{args:?}");
+        }
+        assert_eq!(fs::read_to_string(p.root.join("notes")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn design_path_finds_a_member_path_to_the_workspace_designs() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("web")).unwrap();
+        let web = crate::Store::at(&root.join("web")).unwrap();
+        assert!(crate::lockdown::paths::design_path(&web.root, "../designs/0123456789abcdef.json"));
+        assert!(!crate::lockdown::paths::design_path(&web.root, "designs/0123456789abcdef.json"));
+        assert!(crate::lockdown::paths::design_path(&root, "designs/0123456789abcdef.json"));
+    }
+
+    #[test]
+    fn a_member_work_run_cannot_propose_a_design_settings_change() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("web")).unwrap();
+        let web = crate::Store::at(&root.join("web")).unwrap();
+        let mut t = crate::board::server::api(&web.root, "POST", "/tasks", serde_json::json!({"title": "Designs"})).unwrap();
+        t["scope"] = serde_json::json!(["web"]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&web, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        fs::create_dir_all(root.join("designs")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        let path = root.join("designs/.gitignore");
+        fs::write(&path, "old\n").unwrap();
+        let base = root.0.file_name().unwrap().to_string_lossy();
+        let mut names = vec![
+            "../designs/.gitignore".to_string(),
+            path.to_str().unwrap().to_string(),
+            format!("../../{base}/designs/.gitignore"),
+            "../other/.gitignore".to_string(),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("designs"), web.root.join("link")).unwrap();
+            names.push("link/.gitignore".to_string());
+        }
+        let inbox = crate::tasks::server::inbox(&root.0);
+        let try_write = |name: String| {
+            crate::cli::with_root(&web.root, || {
+                crate::board::runs::with_context(tid, "r1", || {
+                    crate::cli::routing::run_options(&["write".to_string(), name], &mut || Ok("new\n".to_string()), None, 10_000, &[])
+                })
+            })
+            .unwrap_err()
+        };
+        for name in names {
+            let _ = try_write(name.clone());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "old\n", "{name}");
+            assert!(!inbox.exists() || fs::read_dir(&inbox).unwrap().next().is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn design_change_paths_are_all_refused() {
+        let (s, v) = fixture();
+        fs::create_dir_all(s.root.join("designs")).unwrap();
+        let design = s.root.join("designs/0123456789abcdef.json");
+        fs::write(&design, "old\n").unwrap();
+        fs::write(s.root.join("notes"), "one\n").unwrap();
+        let name = "designs/0123456789abcdef.json";
+        crate::board::runs::with_context("t1", "r1", || {
+            for (args, text, old) in [(vec!["write", name, "--replace"], "new\n", Some("old")), (vec!["remove", name, "notes"], "", None)] {
+                let e = call(&s, &v, &args, text, old).unwrap_err().0;
+                assert!(e.contains("designs change through the design agent"), "{args:?}: {e}");
+                assert_eq!(fs::read_to_string(&design).unwrap(), "old\n", "{args:?}");
+                assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n", "{args:?}");
+            }
+            let patch = concat!(
+                "*** Begin Patch\n*** Update File: notes\n-one\n+two\n",
+                "*** Update File: designs/0123456789abcdef.json\n-old\n+new\n",
+                "*** End Patch\n"
+            );
+            let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+            let id = e.split("Draft ").nth(1).and_then(|rest| rest.split(' ').next()).unwrap().to_string();
+            let e = call(&s, &v, &["write", "--draft", &id], "", None).unwrap_err().0;
+            assert!(e.contains("designs change through the design agent"), "{e}");
+            assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n");
+            assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
+            for patch in [
+                concat!("*** Begin Patch\n*** Add File: added.txt\n+ok\n", "*** Add File: designs/new.json\n+new\n*** End Patch\n"),
+                concat!("*** Begin Patch\n*** Delete File: notes\n", "*** Delete File: designs/0123456789abcdef.json\n*** End Patch\n"),
+            ] {
+                let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+                assert!(e.contains("designs change through the design agent"), "{e}");
+                assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n");
+                assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
+                assert!(!s.root.join("added.txt").exists());
+                assert!(!s.root.join("designs/new.json").exists());
+            }
+        });
+    }
+
+    #[test]
+    fn design_settings_paths_follow_the_workspace_root() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("web")).unwrap();
+        let web = crate::Store::at(&root.join("web")).unwrap();
+        assert!(!crate::lockdown::settings::settings_file(&web.root, "../designs/.gitignore"));
+        assert!(crate::lockdown::settings::settings_file(&web.root, "designs/.gitignore"));
+        assert!(!crate::lockdown::settings::settings_file(&root, "designs/.gitignore"));
+        let abs = root.join("designs/.gitignore");
+        // A rooted path is still classified as a setting; a proposal refuses it as unreachable.
+        assert!(crate::lockdown::settings::settings_file(&web.root, abs.to_str().unwrap()));
+        assert!(crate::lockdown::settings::settings_file(&root, abs.to_str().unwrap()));
+        assert!(crate::lockdown::settings::settings_file(&web.root, root.join(".gitignore").to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_rust_member_work_run_cannot_propose_a_design_settings_change() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"rusty\"]\n"),
+            ("rusty/Cargo.toml", CARGO),
+            ("rusty/src/lib.rs", "pub fn one() {}\n"),
+        ]);
+        crate::import(&root.join("rusty")).unwrap();
+        let rusty = crate::Store::at(&root.join("rusty")).unwrap();
+        let mut t = crate::board::server::api(&rusty.root, "POST", "/tasks", serde_json::json!({"title": "Designs"})).unwrap();
+        t["scope"] = serde_json::json!(["rusty"]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&rusty, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        fs::create_dir_all(root.join("designs")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        let manifest = root.join("designs/Cargo.toml");
+        let build = root.join("designs/build.rs");
+        fs::write(&manifest, "old\n").unwrap();
+        fs::write(&build, "old\n").unwrap();
+        let base = root.0.file_name().unwrap().to_string_lossy();
+        let outside = format!("../../{base}/designs");
+        let names = [
+            format!("{outside}/Cargo.toml"),
+            format!("{outside}/build.rs"),
+            manifest.to_str().unwrap().to_string(),
+            build.to_str().unwrap().to_string(),
+            "../other/Cargo.toml".to_string(),
+            "../other/build.rs".to_string(),
+        ];
+        let inbox = crate::tasks::server::inbox(&root.0);
+        let try_write = |name: String| {
+            crate::cli::with_root(&rusty.root, || {
+                crate::board::runs::with_context(tid, "r1", || {
+                    crate::cli::routing::run_options(&["write".to_string(), name], &mut || Ok("new\n".to_string()), None, 10_000, &[])
+                })
+            })
+            .unwrap_err()
+        };
+        for name in names {
+            let _ = try_write(name.clone());
+            assert_eq!(fs::read_to_string(&manifest).unwrap(), "old\n", "{name}");
+            assert_eq!(fs::read_to_string(&build).unwrap(), "old\n", "{name}");
+            assert!(!inbox.exists() || fs::read_dir(&inbox).unwrap().next().is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_project_named_designs_is_not_the_workspace_design_store() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"designs\"]\n"),
+            ("designs/gleam.toml", "name = \"designs\"\nversion = \"1.0.0\"\n"),
+            ("designs/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("designs")).unwrap();
+        let project = crate::Store::at(&root.join("designs")).unwrap();
+        assert!(!crate::lockdown::paths::design_path(&project.root, "src/app.gleam"));
+        assert!(!crate::lockdown::paths::design_path(&project.root, "0123456789abcdef.json"));
+        assert!(crate::lockdown::paths::design_path(&root, "designs/0123456789abcdef.json"));
+    }
+
+    #[test]
+    fn a_root_work_run_cannot_propose_an_outside_settings_change() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("gleam.toml", "name = \"root\"\nversion = \"1.0.0\"\n"),
+            ("src/app.gleam", "pub fn main() { 1 }\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.0).unwrap();
+        crate::import(&root.join("web")).unwrap();
+        let s = crate::Store::at(&root.0).unwrap();
+        let mut t = crate::board::server::api(&s.root, "POST", "/tasks", serde_json::json!({"title": "Designs"})).unwrap();
+        t["scope"] = serde_json::json!(["."]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        fs::create_dir_all(root.join("designs")).unwrap();
+        fs::write(root.join("designs/.gitignore"), "old\n").unwrap();
+        fs::write(root.join("web/.gitignore"), "old\n").unwrap();
+        let base = root.0.file_name().unwrap().to_string_lossy();
+        let outside = format!("../{base}/designs/.gitignore");
+        let inbox = crate::tasks::server::inbox(&root.0);
+        let try_write = |name: String| {
+            crate::cli::with_root(&s.root, || {
+                crate::board::runs::with_context(tid, "r1", || {
+                    crate::cli::routing::run_options(&["write".to_string(), name], &mut || Ok("new\n".to_string()), None, 10_000, &[])
+                })
+            })
+            .unwrap_err()
+        };
+        for name in [outside, "web/.gitignore".to_string()] {
+            let _ = try_write(name.clone());
+            assert_eq!(fs::read_to_string(root.join("designs/.gitignore")).unwrap(), "old\n", "{name}");
+            assert_eq!(fs::read_to_string(root.join("web/.gitignore")).unwrap(), "old\n", "{name}");
+            assert!(!inbox.exists() || fs::read_dir(&inbox).unwrap().next().is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_settings_proposal_needs_a_reachable_path() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("web")).unwrap();
+        let web = crate::Store::at(&root.join("web")).unwrap();
+        let mut t = crate::board::server::api(&web.root, "POST", "/tasks", serde_json::json!({"title": "Settings"})).unwrap();
+        t["scope"] = serde_json::json!(["web"]);
+        t["runs"] = serde_json::json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        crate::tasks::store::put(&web, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        fs::write(web.root.join(".gitignore"), "old\n").unwrap();
+        fs::create_dir_all(web.root.join("designs")).unwrap();
+        fs::write(web.root.join("designs/.gitignore"), "old\n").unwrap();
+        let write = |name: &str| {
+            crate::cli::with_root(&web.root, || {
+                crate::board::runs::with_context(tid, "r1", || {
+                    crate::cli::routing::run_options(
+                        &["write".to_string(), name.to_string()],
+                        &mut || Ok("new\n".to_string()),
+                        None,
+                        10_000,
+                        &[],
+                    )
+                })
+            })
+        };
+        for name in [".gitignore", "designs/.gitignore"] {
+            let out = write(name).unwrap();
+            assert!(out.contains("reaches the board"), "{name}: {out}");
+            assert_eq!(fs::read_to_string(web.root.join(name)).unwrap(), "old\n", "{name}");
+        }
+    }
+
+    #[test]
+    fn an_approved_proposal_for_an_unreachable_path_writes_nothing() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ]);
+        crate::import(&root.join("web")).unwrap();
+        fs::create_dir_all(root.join("designs")).unwrap();
+        let design = root.join("designs/.gitignore");
+        fs::write(&design, "old\n").unwrap();
+        let base = root.0.file_name().unwrap().to_string_lossy();
+        let mut outside = serde_json::json!({"settings":{
+            "file":format!("../../{base}/designs/.gitignore"),
+            "project":"web",
+            "base":"old\n",
+            "proposed":"new\n",
+        }});
+        crate::board::settings::apply_settings(&root.0, &mut outside).unwrap();
+        assert!(outside["answer"].as_str().unwrap().starts_with("Not applied:"), "{outside}");
+        assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
+        let mut design_path = serde_json::json!({"settings":{"file":"designs/.gitignore","base":"old\n","proposed":"new\n"}});
+        crate::board::settings::apply_settings(&root.0, &mut design_path).unwrap();
+        assert!(design_path["answer"].as_str().unwrap().starts_with("Not applied:"), "{design_path}");
+        assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
     }
 }
 

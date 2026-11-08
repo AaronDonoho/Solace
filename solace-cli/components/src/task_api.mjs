@@ -92,11 +92,11 @@ export function clear_draft(editor, owner) {
 // Quotes nest at most `maxQuotes` deep; a deeper `>` stays text, so untrusted
 // text can't exhaust the stack. `depth` is the quotes already open.
 const maxQuotes = 100;
-// A task, feature or milestone reference (D-98, D-122): `[label](<kind>:<id>)`, or a bare `<kind>:<id>`
+// A task, feature, milestone or design reference (D-98, D-122, D-234): `[label](<kind>:<id>)`, or a bare `<kind>:<id>`
 // shown as itself until the shell puts the record's title in its place, links to `/<kind>/<id>`, which the
 // shell opens on the board or the Strategy page. The id is a record's 16 hex digits. A link already made is
 // skipped whole, so a reference inside its label isn't nested in it; an image form (`![x](task:<id>)`) stays text.
-const taskRef = /(<a [^>]*>[\s\S]*?<\/a>)|(!?)\[([^\]]+)\]\((task|feature|milestone):([0-9a-f]{16})\)|(^|[^\w/])(task|feature|milestone):([0-9a-f]{16})(?!\w)/g;
+const taskRef = /(<a [^>]*>[\s\S]*?<\/a>)|(!?)\[([^\]]+)\]\((task|feature|milestone|design):([0-9a-f]{16})\)|(^|[^\w/])(task|feature|milestone|design):([0-9a-f]{16})(?!\w)/g;
 const taskLink = (kind, id, label) => `<a href="/${kind}/${id}" data-${kind}="${id}">${label}</a>`;
 export function markdown(text, base = '', depth = 0) {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

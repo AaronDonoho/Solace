@@ -48,11 +48,20 @@ command not listed here is refused.
                                 text
   strategy vision               propose a new vision, its text in `text`; waits
                                 the same way
+  design list                   the workspace's designs, each with its id,
+                                title and tab, and any file that is not a
+                                valid design
+  design show <id> [--from <element>]
+                                one design, whole; the id may be written
+                                `design:<id>`; a reply over the limit stops at
+                                a whole element and says which `--from` reads
+                                on from
   view | inspect | refs | find  read code, as under Reading
   grep <text> [--in <path>] [--context n]
-                                search watched files and settings: the text as
-                                written, already case-insensitive, no regex;
-                                the options only as the last words
+                                search watched files and settings, and with
+                                `--in <file>` a text file over the watch limit:
+                                the text as written, already case-insensitive,
+                                no regex; the options only as the last words
   files [dir]...                tree with each file's tier and line count
   read <path>... [--lines 3,7,10..12 | --tail n]
                                 each path in order; a --lines or --tail range

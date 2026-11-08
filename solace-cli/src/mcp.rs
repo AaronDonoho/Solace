@@ -19,7 +19,7 @@ pub(crate) fn tool_schema() -> Value {
             "name": "solace",
             "description": concat!(
                 "Read this project's code and plan with the human; this run changes no code. ",
-                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` ",
+                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`, `design list` and `design show <id>` ",
                 "(`--project <folder>` for a project below the root); read the plan with ",
                 "`strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` ",
                 "(one id, or several in one reply) (a task's notes in full: ",

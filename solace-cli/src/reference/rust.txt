@@ -135,7 +135,8 @@ Formatting
 Searching
   find <text>                   finds Rust source, e.g. `find resolve_module`
   grep <text>                   does not search Rust source; it searches other
-                                files and settings, e.g. `grep rust-unit`
+                                files and settings, and with `--in <file>` a
+                                text file over the watch limit, e.g. `grep rust-unit`
 
 Details: `check`, `test` and `build` run cargo and locate errors and failures
 by symbol and libtest name. `delete` removes an item with the items it holds;

@@ -13,6 +13,7 @@ use std::env;
 #[cfg(test)] use crate::store_core::SCHEMA;
 use crate::lockdown::settings::settings;
 #[cfg(test)] use crate::board::task_model::lock;
+use crate::outside_share::share_store;
 
 pub const COPY: &str = "solace-migration";
 const STATE: &str = ".solace/migration.json";
@@ -1295,7 +1296,7 @@ pub fn adopt(copy: &Path, step: &dyn Fn(&str)) -> Result<PathBuf, Failure> {
     save(&original, &state)?;
     // The store is canonical now, but the folder may still hold a generated
     // `.solace/.gitignore`; share_store writes the root's block and removes it (D-179).
-    crate::outside::share_store(&original)?;
+    share_store(&original)?;
     fs::remove_file(journal(parent))?;
     Ok(original)
 }

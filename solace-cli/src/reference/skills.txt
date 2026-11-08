@@ -5,18 +5,23 @@ folder, `skills/` when the key is missing. Each skill is a subfolder with a
 skill with no description is listed by its first line. `roles` holds
 comma-separated role ids (strategist, investigator, worker, reviewer,
 coordinator): a skill with `roles` reaches only a run in those roles, and its
-whole text goes in that run's brief; a skill with no `roles` key reaches every
-role, listed one line with its name, description and the path to `read`. Every
-run's brief (work, investigate, discuss, review, strategy) also carries the
-skills saved on Settings in the workspace root's skills folder, so a skill
-saved once applies to every project in the workspace. Settings manages the
-single-file skills whose front matter names roles: add, edit or remove them
-there with a name, a one-line description, a body and at least one role. A
-name becomes a file name, so names use only letters, digits, spaces, `-` and
-`_`; `README` and a name a folder skill uses are refused. A body is at most
-1000 characters, and an empty name or body is refused before anything is
-written. Skills written by hand keep working: a file with no `roles` key is
-listed to every role as before, and a folder skill is left to its human.
+whole text goes in that run's brief; a skill naming no roles reaches no run;
+a skill with no `roles` key reaches every role, listed one line with its name,
+description and the path to `read`. Every run's brief (work, investigate,
+discuss, review, strategy) also carries the skills saved on Settings in the
+workspace root's skills folder, so a skill saved once applies to every project
+in the workspace. Settings lists every skill in that folder. It manages the
+single-file skills whose front matter has a `roles` key: add, edit or remove
+them there with a name, a one-line description and a body. A saved skill may
+name no roles, and Settings shows it as "Not used by any role". Roles are
+chosen in each agent role's card, which lists every skill in the folder and
+saves a tick straight away. Skills written by hand keep working: a file with
+no `roles` key is listed to every role as before and Settings labels it "All
+roles" and leaves its file alone; a folder skill is likewise left to its
+human. A name becomes a file name, so names use only letters, digits, spaces,
+`-` and `_`; `README` and a name a folder skill uses are refused. A body is at
+most 1000 characters, and an empty name or body is refused before anything is
+written.
 The humans own the folder: agents read skills and change none of them. Solace
 never runs a skill's scripts: a skill that needs a tool names a `[commands]`
 entry the human adds to solace.toml, run with `run <name>` (as `layout_audit`

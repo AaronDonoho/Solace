@@ -4486,3 +4486,43 @@ pub fn role_models_events_are_recognized_test() {
   )
   |> should.be_false
 }
+
+/// A task with no project list, as a Tech Debt filing from a task saved before
+/// scopes, opens with its title, description and notes. A malformed list still
+/// fails.
+pub fn a_task_with_no_project_list_opens_test() {
+  let notes =
+    "[{\"author\":\"solace\",\"run\":null,\"text\":\"first note\",\"time\":1},"
+    <> "{\"author\":\"solace\",\"run\":null,\"text\":\"second note\",\"time\":2},"
+    <> "{\"author\":\"solace\",\"run\":null,\"text\":\"third note\",\"time\":3}]"
+  let opens = fn(scope) {
+    let model =
+      loaded(
+        "{\"id\":\"1\",\"title\":\"Filed debt\",\"body\":\"What it covers\",\"column\":\"planning\",\"rank\":1,\"scope\":"
+        <> scope
+        <> ",\"notes\":"
+        <> notes
+        <> "}",
+      )
+    model.error |> should.equal("")
+    let assert Some(t) = model.task
+    t.scope |> should.equal([])
+    t.notes |> list.length |> should.equal(3)
+    let shown = body(model)
+    shown |> string.contains("Filed debt") |> should.be_true
+    shown |> string.contains("What it covers") |> should.be_true
+    let #(model, _) = task.update(model, task.Tab("notes"))
+    let notes_shown = body(model)
+    ["first note", "second note", "third note"]
+    |> list.each(fn(note) {
+      notes_shown |> string.contains(note) |> should.be_true
+    })
+  }
+  opens("null")
+  opens("[]")
+  let invalid =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":\"a\"}",
+    )
+  invalid.error |> should.equal("Invalid API response")
+}

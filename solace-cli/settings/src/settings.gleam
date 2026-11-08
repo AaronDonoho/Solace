@@ -3,6 +3,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import gleam/uri
 import lustre
 import lustre/attribute
@@ -11,6 +12,7 @@ import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
+import skill_writes
 import solace_task
 
 /// Registers the element on its own, for `index.html`.
@@ -50,19 +52,29 @@ fn follow_theme() -> Nil
 pub type Model {
   Model(
     dark: Bool,
+    /// The tab shown.
+    tab: Tab,
     /// Stops listening for theme changes; Some while the element is in the page.
     unsubscribe: Option(fn() -> Nil),
     /// The models this computer can pick, from the system settings.
     models: List(Entry),
     /// The languages on this computer, from the system settings.
     languages: List(Language),
+    /// The version of the Solace program running this page.
+    version: String,
     /// How agents address the human, how much they write, and how readily they ask.
     behavior: Behavior,
     /// The saved choices while a change is in flight, so a refusal can restore them.
     behavior_before: Option(Behavior),
     /// The choices whose save is still in flight, in the order they were made.
     behavior_pending: List(#(Setting, String)),
-    /// The skills Settings manages in this workspace.
+    /// The skills request waiting for its reply.
+    skills_writing: Option(skill_writes.SkillWrite),
+    /// The skills requests queued until the one in flight finishes.
+    skills_waiting: List(skill_writes.SkillWrite),
+    /// The newest server state whose reply was applied.
+    skills_server: List(Skill),
+    /// The skills in this workspace, with ticks still waiting shown on top.
     skills: List(Skill),
     /// The agent roles whose skills Settings shows.
     roles: List(Role),
@@ -78,6 +90,10 @@ pub type Model {
 }
 
 pub type Msg {
+  /// The tab chosen on the page.
+  Select(Tab)
+  /// The shell's `tab` attribute: the tab the address names.
+  TabShown(Tab)
   /// The Dark mode switch: on or off.
   SetDark(Bool)
   /// The theme setting changed, here or in another window; "" follows the system.
@@ -92,25 +108,29 @@ pub type Msg {
   ModelsLoaded(String)
   /// The server's language list, or why it refused a change.
   LanguagesLoaded(String)
+  /// The running program's version, or why it refused.
+  AboutLoaded(String)
   /// The server's agent behavior choices, or why it refused a change.
   BehaviorLoaded(String)
   /// The server's roles, or why it refused.
   RolesLoaded(String)
   /// The server's model for each role, or why it refused.
   RoleModelsLoaded(String)
-  /// The server's managed skills, or why it refused a change.
+  /// The server's skills, or why it refused a change.
   SkillsLoaded(String)
+  /// The server's skills after a save or delete; an empty form follows.
+  SkillsSaved(String)
+  /// The server's skills after a role-card tick, or why it was refused.
+  SkillTickSaved(String)
   /// Opens a skill in the form.
   EditSkill(Skill)
-  /// Empties the form for a new skill in a role.
-  NewSkill(String)
+  /// Empties the form for a new skill.
+  NewSkill
   /// A skill form field, by name, and its new value.
   SkillField(String, String)
-  /// Adds or removes a role on the skill in the form.
-  ChooseSkillRole(String, Bool)
   SaveSkill
-  /// Removes a skill from one role.
-  RemoveSkill(String, String)
+  /// Adds or removes one role on a saved skill.
+  AssignSkill(String, String, Bool)
   /// Removes a skill file.
   DeleteSkill(String)
   /// Empties the skill form.
@@ -139,6 +159,12 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
+    Select(tab) if tab == model.tab -> #(model, effect.none())
+    Select(tab) -> #(
+      Model(..model, tab:),
+      event.emit("tab", json.string(tab_name(tab))),
+    )
+    TabShown(tab) -> #(Model(..model, tab:), effect.none())
     SetDark(dark) -> #(
       Model(..model, dark:),
       effect.from(fn(_) {
@@ -160,27 +186,31 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Connected ->
       case model.unsubscribe {
         Some(_) -> #(model, effect.none())
-        // A change made while it was away shows now.
-        None -> #(
-          Model(..model, dark: theme() == "dark"),
-          effect.batch([
-            effect.from(fn(dispatch) {
-              dispatch(
-                Subscribed(
-                  subscribe(theme_key, fn(value) {
-                    dispatch(ThemeChanged(value))
-                  }),
-                ),
-              )
-            }),
-            call("/models", "GET", ""),
-            call_languages("GET", ""),
-            call_behavior("GET", ""),
-            call_roles("GET", ""),
-            call_role_models("GET", ""),
-            call_skills("GET", ""),
-          ]),
-        )
+        None -> {
+          let #(model, skills_effect) =
+            queue_skill_load(Model(..model, dark: theme() == "dark"))
+          #(
+            model,
+            effect.batch([
+              effect.from(fn(dispatch) {
+                dispatch(
+                  Subscribed(
+                    subscribe(theme_key, fn(value) {
+                      dispatch(ThemeChanged(value))
+                    }),
+                  ),
+                )
+              }),
+              call("/models", "GET", ""),
+              call_languages("GET", ""),
+              call_about(),
+              call_behavior("GET", ""),
+              call_roles("GET", ""),
+              call_role_models("GET", ""),
+              skills_effect,
+            ]),
+          )
+        }
       }
     Subscribed(stop) -> #(
       Model(..model, unsubscribe: Some(stop)),
@@ -217,12 +247,20 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
       }
     SkillsLoaded(text) ->
-      case json.parse(text, skills_decoder()) {
-        Ok(skills) -> #(
-          Model(..model, skills:, skill_form: blank_skill_form, error: ""),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
+      case model.skills_writing {
+        Some(skill_writes.LoadWrite) -> skills_loaded(model, text)
+        _ -> #(model, effect.none())
+      }
+    SkillsSaved(text) ->
+      case model.skills_writing {
+        Some(skill_writes.SaveWrite(_)) -> skills_saved(model, text)
+        Some(skill_writes.DeleteWrite(_)) -> skills_saved(model, text)
+        _ -> #(model, effect.none())
+      }
+    SkillTickSaved(text) ->
+      case model.skills_writing {
+        Some(skill_writes.TickWrite(_)) -> skills_loaded(model, text)
+        _ -> #(model, effect.none())
       }
     EditSkill(skill) -> #(
       Model(
@@ -232,14 +270,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           skill.name,
           skill.description,
           skill.body,
-          skill.roles,
         ),
         error: "",
       ),
       effect.none(),
     )
-    NewSkill(role) -> #(
-      Model(..model, skill_form: SkillForm("", "", "", "", [role]), error: ""),
+    NewSkill -> #(
+      Model(..model, skill_form: blank_skill_form, error: ""),
       effect.none(),
     )
     SkillField(name, value) -> {
@@ -252,43 +289,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
       #(Model(..model, skill_form:), effect.none())
     }
-    ChooseSkillRole(role, chosen) -> {
-      let f = model.skill_form
-      let roles = case chosen {
-        True ->
-          case list.contains(f.roles, role) {
-            True -> f.roles
-            False -> [role, ..f.roles]
-          }
-        False -> list.filter(f.roles, fn(id) { id != role })
-      }
-      #(Model(..model, skill_form: SkillForm(..f, roles:)), effect.none())
-    }
-    SaveSkill -> #(model, call_skills("POST", skill_body(model.skill_form)))
-    RemoveSkill(name, role) ->
-      case list.find(model.skills, fn(skill) { skill.name == name }) {
-        Ok(skill) -> {
-          let roles = list.filter(skill.roles, fn(id) { id != role })
-          case roles {
-            [] -> #(model, delete_skill(name))
-            _ -> #(
-              model,
-              call_skills(
-                "POST",
-                skill_body(SkillForm(
-                  name,
-                  name,
-                  skill.description,
-                  skill.body,
-                  roles,
-                )),
-              ),
-            )
-          }
-        }
-        Error(_) -> #(model, effect.none())
-      }
-    DeleteSkill(name) -> #(model, delete_skill(name))
+    SaveSkill ->
+      start_skill_write(model, skill_writes.SaveWrite(skill_save_body(model)))
+    AssignSkill(name, role, chosen) -> assign_skill(model, name, role, chosen)
+    DeleteSkill(name) ->
+      start_skill_write(model, skill_writes.DeleteWrite(name))
     CancelSkill -> #(
       Model(..model, skill_form: blank_skill_form, error: ""),
       effect.none(),
@@ -296,6 +301,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     LanguagesLoaded(text) ->
       case json.parse(text, languages_decoder()) {
         Ok(languages) -> #(Model(..model, languages:, error: ""), effect.none())
+        Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
+      }
+    AboutLoaded(text) ->
+      case json.parse(text, version_decoder()) {
+        Ok(version) -> #(Model(..model, version:, error: ""), effect.none())
         Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
       }
     BehaviorLoaded(text) ->
@@ -431,38 +441,71 @@ pub fn theme_control(dark: Bool) -> Element(Msg) {
 }
 
 pub fn view(model: Model) -> Element(Msg) {
-  html.main([attribute.class("settings")], [
-    html.style([], view_styles),
-    html.section([attribute.attribute("aria-labelledby", "appearance")], [
-      html.h2([attribute.id("appearance")], [html.text("Appearance")]),
-      theme_control(model.dark),
+  let panels =
+    list.map(tabs(), fn(tab) {
+      html.div(
+        [
+          attribute.id("panel-" <> tab_name(tab)),
+          attribute.role("tabpanel"),
+          attribute.attribute("aria-labelledby", "tab-" <> tab_name(tab)),
+          attribute.hidden(tab != model.tab),
+        ],
+        case tab {
+          Agents -> [
+            behavior_section(model),
+            role_models_section(model),
+            models_section(model),
+            skills_section(model),
+          ]
+          Appearance -> [appearance_section(model.dark)]
+          Languages -> [languages_section(model)]
+          About -> [about_section(model)]
+        },
+      )
+    })
+  html.main(
+    [attribute.class("settings")],
+    list.flatten([
+      [
+        html.style([], view_styles),
+        html.div(
+          [
+            attribute.class("tabs"),
+            attribute.role("tablist"),
+            attribute.attribute("aria-label", "Settings"),
+          ],
+          list.map(tabs(), fn(tab) { tab_button(tab, model.tab) }),
+        ),
+      ],
+      panels,
+      [
+        case model.error {
+          "" -> element.none()
+          e ->
+            html.p([attribute.class("error"), attribute.role("alert")], [
+              html.text(e),
+            ])
+        },
+      ],
     ]),
-    behavior_section(model),
-    role_models_section(model),
-    languages_section(model),
-    models_section(model),
-    skills_section(model),
-    case model.error {
-      "" -> element.none()
-      e ->
-        html.p([attribute.class("error"), attribute.role("alert")], [
-          html.text(e),
-        ])
-    },
-  ])
+  )
 }
 
 /// The light colour set; the dark one is the page's (`index.html`, and the
 /// shell's for `/settings`).
 const view_styles =
   solace_task.control_styles
+  <> solace_task.tab_styles
   <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6}
-.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;padding:var(--space-6);background:var(--sheet);color:var(--ink)}
+.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;background:var(--sheet);color:var(--ink);--tabs-height:44px;--tab-pad:0 18px}
+.settings>[role=tabpanel]{padding:var(--space-6)}
+.settings>[role=tabpanel][hidden]{display:none}
 .settings section{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
 .settings h2{margin:0 0 10px;font-size:var(--h2)}
 .settings p{color:var(--soft);margin:8px 0}
 .settings section+section{margin-top:var(--space-6)}
 .settings h3{margin:16px 0 8px;font-size:inherit}
+.about-license{margin-top:12px}.about-license>summary{cursor:pointer}.about-license .md h4{margin:16px 0 8px;font-size:var(--h4)}.about-license .md p,.about-license .md li{color:var(--ink)}.about-license .md ul{margin:8px 0;padding-left:20px}
 .models{margin:0;padding:0 0 0 18px}.models li{margin:6px 0}.models button{margin-right:8px}
 .languages{margin:0;padding:0;list-style:none}.languages li{margin:6px 0}
 .behavior-groups{margin-top:8px}
@@ -482,13 +525,12 @@ const view_styles =
 .role-models{margin-top:8px}.role-model{margin:14px 0}.role-model-picks{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));max-width:640px}
 .role-model .field{max-width:none}
 .field{display:grid;gap:4px;margin:8px 0;max-width:480px}
-.settings .error{color:var(--ink);font-weight:600}
+.settings .error{color:var(--ink);font-weight:600;padding:0 var(--space-6) var(--space-6)}
 .switch{display:flex;align-items:center;gap:10px;width:fit-content;cursor:pointer}
 .switch input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}
 .switch input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}
 .switch input:checked{background:var(--focus)}.switch input:checked::before{transform:translateX(14px)}
 .switch input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.role-skills-group{margin:14px 0}
 .skills{margin:0;padding:0 0 0 18px}.skills li{margin:6px 0}.skills button{margin-left:8px}
 .skill-roles{display:flex;flex-wrap:wrap;gap:12px;margin:8px 0}
 .skill-body{min-height:8rem;font:inherit}
@@ -500,6 +542,9 @@ pub fn register() -> Result(Nil, lustre.Error) {
   follow_theme()
   lustre.register(
     lustre.component(init, update, view, [
+      component.on_attribute_change("tab", fn(name) {
+        Ok(TabShown(tab_from("?tab=" <> name)))
+      }),
       component.on_connect(Connected),
       component.on_disconnect(Disconnected),
       component.adopt_styles(False),
@@ -545,12 +590,17 @@ pub const blank_form = Form("", "", "codex", "", "", "", False)
 pub fn initial(dark: Bool) -> Model {
   Model(
     dark:,
+    tab: Agents,
     unsubscribe: None,
     models: [],
     languages: [],
+    version: "",
     behavior: default_behavior,
     behavior_before: None,
     behavior_pending: [],
+    skills_writing: None,
+    skills_waiting: [],
+    skills_server: [],
     skills: [],
     roles: [],
     assignments: [],
@@ -758,7 +808,9 @@ fn language_body(id: String, enabled: Bool) -> String {
 /// The languages on this computer, each with its switch and missing state.
 pub fn languages_section(model: Model) -> Element(Msg) {
   html.section([attribute.attribute("aria-labelledby", "languages")], [
-    html.h2([attribute.id("languages")], [html.text("Languages")]),
+    html.h2([attribute.id("languages")], [
+      html.text("Enabled programming languages"),
+    ]),
     html.p([], [
       html.text(
         "Turn a language off on this computer, even when its toolchain is installed. Its projects stay readable, but changes, checks and tests are refused until it is turned back on.",
@@ -989,23 +1041,26 @@ pub type Role {
   Role(id: String, name: String, purpose: String)
 }
 
-/// A skill Settings manages.
+/// A skill in this workspace.
 pub type Skill {
-  Skill(name: String, description: String, body: String, roles: List(String))
-}
-
-/// The skill form; `original` is "" for a new skill.
-pub type SkillForm {
-  SkillForm(
-    original: String,
+  Skill(
     name: String,
     description: String,
     body: String,
     roles: List(String),
+    /// Whether Settings may edit or delete it.
+    managed: Bool,
+    /// Whether the file has no `roles` key, so every role receives it.
+    all_roles: Bool,
   )
 }
 
-pub const blank_skill_form = SkillForm("", "", "", "", [])
+/// The skill form; `original` is "" for a new skill.
+pub type SkillForm {
+  SkillForm(original: String, name: String, description: String, body: String)
+}
+
+pub const blank_skill_form = SkillForm("", "", "", "")
 
 /// The roles in a `GET /roles` reply.
 pub fn roles_decoder() -> decode.Decoder(List(Role)) {
@@ -1017,14 +1072,23 @@ pub fn roles_decoder() -> decode.Decoder(List(Role)) {
   })
 }
 
-/// The managed skills in a `GET /skills` reply.
+/// The skills in a `GET /skills` reply.
 pub fn skills_decoder() -> decode.Decoder(List(Skill)) {
   decode.list({
     use name <- decode.field("name", decode.string)
     use description <- decode.optional_field("description", "", decode.string)
     use body <- decode.optional_field("body", "", decode.string)
     use roles <- decode.optional_field("roles", [], decode.list(decode.string))
-    decode.success(Skill(name:, description:, body:, roles:))
+    use managed <- decode.optional_field("managed", False, decode.bool)
+    use all_roles <- decode.optional_field("all_roles", False, decode.bool)
+    decode.success(Skill(
+      name:,
+      description:,
+      body:,
+      roles:,
+      managed:,
+      all_roles:,
+    ))
   })
 }
 
@@ -1041,66 +1105,80 @@ fn call_skills(method: String, body: String) -> Effect(Msg) {
   })
 }
 
-fn skill_body(f: SkillForm) -> String {
+fn skill_body(f: SkillForm, roles: List(String)) -> String {
   json.to_string(
     json.object([
       #("original", json.string(f.original)),
       #("name", json.string(f.name)),
       #("description", json.string(f.description)),
       #("body", json.string(f.body)),
-      #("roles", json.array(f.roles, of: json.string)),
+      #("roles", json.array(roles, of: json.string)),
     ]),
   )
 }
 
-/// The skills a run in each role receives, with a form to add or edit one.
+/// The workspace's skills, with a form to add or edit one.
 pub fn skills_section(model: Model) -> Element(Msg) {
   html.section([attribute.attribute("aria-labelledby", "skills")], [
     html.h2([attribute.id("skills")], [html.text("Skills")]),
     html.p([], [
       html.text(
-        "Instructions for agents in each role. A skill saved here applies to every project in this workspace.",
+        "Instructions for agents. A skill saved here applies to every project in this workspace.",
       ),
     ]),
-    html.div(
-      [attribute.class("role-skills")],
-      list.map(model.roles, fn(role) { role_skills(model, role) }),
-    ),
-    skill_form(model.skill_form, model.roles),
+    case model.skills {
+      [] -> html.p([], [html.text("No skills yet.")])
+      skills ->
+        html.ul([attribute.class("skills")], list.map(skills, skill_row))
+    },
+    html.button([attribute.type_("button"), event.on_click(NewSkill)], [
+      html.text("Add a skill"),
+    ]),
+    skill_form(model.skill_form),
   ])
 }
 
 fn role_skills(model: Model, role: Role) -> Element(Msg) {
-  let mine =
-    list.filter(model.skills, fn(skill) { list.contains(skill.roles, role.id) })
-  html.div([attribute.class("role-skills-group")], [
-    html.h3([], [html.text(role.name)]),
-    html.p([attribute.class("reason")], [html.text(role.purpose)]),
-    case mine {
-      [] -> html.p([], [html.text("No skills yet.")])
-      _ ->
-        html.ul(
-          [attribute.class("skills")],
-          list.map(mine, fn(skill) { skill_row(skill, role.id) }),
-        )
-    },
-    html.button([attribute.type_("button"), event.on_click(NewSkill(role.id))], [
-      html.text("Add a skill"),
-    ]),
-  ])
+  case model.skills {
+    [] -> element.none()
+    skills ->
+      html.div(
+        [attribute.class("skill-roles")],
+        list.map(skills, fn(skill) { skill_role_choice(skill, role) }),
+      )
+  }
 }
 
-fn skill_row(skill: Skill, role: String) -> Element(Msg) {
+fn skill_row(skill: Skill) -> Element(Msg) {
   html.li([], [
     html.strong([], [html.text(skill.name)]),
     html.text(" " <> skill.description),
-    html.button([attribute.type_("button"), event.on_click(EditSkill(skill))], [
-      html.text("Edit"),
-    ]),
-    html.button(
-      [attribute.type_("button"), event.on_click(RemoveSkill(skill.name, role))],
-      [html.text("Remove")],
-    ),
+    case skill_status(skill) {
+      "" -> element.none()
+      status ->
+        html.span([attribute.class("skill-status")], [
+          html.text(" (" <> status <> ")"),
+        ])
+    },
+    case skill.managed {
+      False -> element.none()
+      True ->
+        html.button(
+          [attribute.type_("button"), event.on_click(EditSkill(skill))],
+          [html.text("Edit")],
+        )
+    },
+    case skill.managed {
+      False -> element.none()
+      True ->
+        html.button(
+          [
+            attribute.type_("button"),
+            event.on_click(DeleteSkill(skill.name)),
+          ],
+          [html.text("Delete")],
+        )
+    },
   ])
 }
 
@@ -1120,21 +1198,23 @@ fn skill_text_field(
   ])
 }
 
-fn skill_role_choice(f: SkillForm, role: Role) -> Element(Msg) {
+fn skill_role_choice(skill: Skill, role: Role) -> Element(Msg) {
+  let chosen = skill.all_roles || list.contains(skill.roles, role.id)
   html.label([attribute.class("switch")], [
     html.input([
       attribute.type_("checkbox"),
-      attribute.name("skill-role"),
-      attribute.value(role.id),
-      attribute.checked(list.contains(f.roles, role.id)),
-      event.on_check(fn(chosen) { ChooseSkillRole(role.id, chosen) }),
+      attribute.name("role-skill"),
+      attribute.value(skill.name),
+      attribute.checked(chosen),
+      attribute.disabled(!skill.managed),
+      event.on_check(fn(chosen) { AssignSkill(skill.name, role.id, chosen) }),
     ]),
-    html.text(role.name),
+    html.text(skill.name),
   ])
 }
 
-/// The skill form; its roles say which runs receive it.
-pub fn skill_form(f: SkillForm, roles: List(Role)) -> Element(Msg) {
+/// The skill form: its name, description and body.
+pub fn skill_form(f: SkillForm) -> Element(Msg) {
   html.form(
     [attribute.class("model-form"), event.on_submit(fn(_) { SaveSkill })],
     [
@@ -1157,19 +1237,7 @@ pub fn skill_form(f: SkillForm, roles: List(Role)) -> Element(Msg) {
           f.body,
         ),
       ]),
-      html.div(
-        [attribute.class("skill-roles")],
-        list.map(roles, fn(role) { skill_role_choice(f, role) }),
-      ),
       html.button([attribute.type_("submit")], [html.text("Save skill")]),
-      case f.original {
-        "" -> element.none()
-        _ ->
-          html.button(
-            [attribute.type_("button"), event.on_click(DeleteSkill(f.original))],
-            [html.text("Delete skill")],
-          )
-      },
       case f.original {
         "" -> element.none()
         _ ->
@@ -1185,7 +1253,7 @@ pub fn skill_form(f: SkillForm, roles: List(Role)) -> Element(Msg) {
 fn delete_skill(name: String) -> Effect(Msg) {
   effect.from(fn(send) {
     request("/skills/" <> uri.percent_encode(name), "DELETE", "", fn(text) {
-      send(SkillsLoaded(text))
+      send(SkillsSaved(text))
     })
   })
 }
@@ -1266,6 +1334,7 @@ fn role_model_row(model: Model, role: Role) -> Element(Msg) {
     html.div([attribute.class("role-model-picks")], [
       role_model_pick(model.models, role, assignment),
     ]),
+    role_skills(model, role),
   ])
 }
 
@@ -1323,4 +1392,349 @@ pub fn role_model_body(
 ) -> String {
   let assignment = assignment_for(assignments, role)
   assignment_body(Assignment(..assignment, default: choice))
+}
+
+/// The Settings page's tabs, in the order they show.
+pub type Tab {
+  Agents
+  Appearance
+  Languages
+  About
+}
+
+pub fn tabs() -> List(Tab) {
+  [Agents, Appearance, Languages, About]
+}
+
+pub fn label(tab: Tab) -> String {
+  case tab {
+    Agents -> "Agents"
+    Appearance -> "Appearance"
+    Languages -> "Languages"
+    About -> "About"
+  }
+}
+
+/// The tab's name in the URL: `/settings?tab=<name>`.
+pub fn tab_name(tab: Tab) -> String {
+  case tab {
+    Agents -> "agents"
+    Appearance -> "appearance"
+    Languages -> "languages"
+    About -> "about"
+  }
+}
+
+/// The tab a URL query names ("?tab=languages"); Agents when it names none or an unknown one.
+pub fn tab_from(query: String) -> Tab {
+  let named =
+    query
+    |> string.replace("?", "")
+    |> string.split("&")
+    |> list.find(fn(pair) { string.starts_with(pair, "tab=") })
+  case named {
+    Ok(pair) -> {
+      let name = string.replace(pair, "tab=", "")
+      case list.find(tabs(), fn(tab) { tab_name(tab) == name }) {
+        Ok(tab) -> tab
+        Error(_) -> Agents
+      }
+    }
+    Error(_) -> Agents
+  }
+}
+
+fn tab_button(tab: Tab, current: Tab) -> Element(Msg) {
+  let selected = tab == current
+  html.button(
+    [
+      attribute.id("tab-" <> tab_name(tab)),
+      attribute.role("tab"),
+      attribute.attribute("aria-selected", case selected {
+        True -> "true"
+        False -> "false"
+      }),
+      attribute.attribute("aria-controls", "panel-" <> tab_name(tab)),
+      event.on_click(Select(tab)),
+    ],
+    [html.text(label(tab))],
+  )
+}
+
+fn appearance_section(dark: Bool) -> Element(Msg) {
+  html.section([attribute.attribute("aria-labelledby", "appearance")], [
+    html.h2([attribute.id("appearance")], [html.text("Theme")]),
+    theme_control(dark),
+  ])
+}
+
+/// The running program's version in a `GET /about` reply.
+pub fn version_decoder() -> decode.Decoder(String) {
+  use version <- decode.field("version", decode.string)
+  decode.success(version)
+}
+
+/// The about route; its reply is the running program's version, or a refusal.
+fn call_about() -> Effect(Msg) {
+  effect.from(fn(send) {
+    request("/about", "GET", "", fn(text) { send(AboutLoaded(text)) })
+  })
+}
+
+/// The running program's version and the license it ships under.
+pub fn about_section(model: Model) -> Element(Msg) {
+  let version = case model.version {
+    "" -> []
+    version -> [html.p([], [html.text("Software version: " <> version)])]
+  }
+  html.section(
+    [attribute.attribute("aria-labelledby", "about")],
+    list.flatten([
+      [html.h2([attribute.id("about")], [html.text("About")])],
+      version,
+      [
+        html.details([attribute.class("about-license")], [
+          html.summary([], [html.text("Sustainable Use License 1.0")]),
+          solace_task.md("", license_text),
+        ]),
+      ],
+    ]),
+  )
+}
+
+/// The license this program ships under, from `LICENSE.md`.
+const license_text =
+  "# License\n\n"
+  <> "Copyright (c) 2026 Aaron Donoho\n\n"
+  <> "Portions of this software are licensed as follows:\n\n"
+  <> "- All third party components incorporated into Solace are licensed under the original license provided by the owner of the applicable component. For example, the IBM Plex fonts are under the SIL Open Font License in `solace-cli/board/priv/fonts/LICENSE-OFL.txt`.\n"
+  <> "- Programs and other work you build with Solace are yours. These terms do not apply to them.\n"
+  <> "- All other content is available under the \"Sustainable Use License\" as defined below.\n\n"
+  <> "## Sustainable Use License\n\n"
+  <> "Version 1.0\n\n"
+  <> "### Acceptance\n\n"
+  <> "By using the software, you agree to all of the terms and conditions below.\n\n"
+  <> "### Copyright License\n\n"
+  <> "The licensor grants you a non-exclusive, royalty-free, worldwide, non-sublicensable, non-transferable license to use, copy, distribute, make available, and prepare derivative works of the software, in each case subject to the limitations below.\n\n"
+  <> "### Limitations\n\n"
+  <> "You may use or modify the software only for your own internal business purposes or for non-commercial or personal use. You may distribute the software or provide it to others only if you do so free of charge for non-commercial purposes. You may not alter, remove, or obscure any licensing, copyright, or other notices of the licensor in the software. Any use of the licensor’s trademarks is subject to applicable law.\n\n"
+  <> "### Patents\n\n"
+  <> "The licensor grants you a license, under any patent claims the licensor can license, or becomes able to license, to make, have made, use, sell, offer for sale, import and have imported the software, in each case subject to the limitations and conditions in this license. This license does not cover any patent claims that you cause to be infringed by modifications or additions to the software. If you or your company make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.\n\n"
+  <> "### Notices\n\n"
+  <> "You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms. If you modify the software, you must include in any modified copies of the software a prominent notice stating that you have modified the software.\n\n"
+  <> "### No Other Rights\n\n"
+  <> "These terms do not imply any licenses other than those expressly granted in these terms.\n\n"
+  <> "### Termination\n\n"
+  <> "If you use the software in violation of these terms, such use is not licensed, and your license will automatically terminate. If the licensor provides you with a notice of your violation, and you cease all violation of this license no later than 30 days after you receive that notice, your license will be reinstated retroactively. However, if you violate these terms after such reinstatement, any additional violation of these terms will cause your license to terminate automatically and permanently.\n\n"
+  <> "### No Liability\n\n"
+  <> "As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.\n\n"
+  <> "### Definitions\n\n"
+  <> "The “licensor” is the entity offering these terms.\n\n"
+  <> "The “software” is the software the licensor makes available under these terms, including any portion of it.\n\n"
+  <> "“You” refers to the individual or entity agreeing to these terms.\n\n"
+  <> "“Your company” is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. Control means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.\n\n"
+  <> "“Your license” is the license granted to you for the software under these terms.\n\n"
+  <> "“Use” means anything you do with the software requiring your license.\n\n"
+  <> "“Trademark” means trademarks, service marks, and similar rights.\n"
+
+fn skill_status(skill: Skill) -> String {
+  case skill.all_roles {
+    True -> "All roles"
+    False ->
+      case skill.roles {
+        [] -> "Not used by any role"
+        _ -> ""
+      }
+  }
+}
+
+/// The POST body for the skill in the form; an edit keeps that skill's roles.
+pub fn skill_save_body(model: Model) -> String {
+  let f = model.skill_form
+  let roles = case
+    list.find(model.skills, fn(skill) { skill.name == f.original })
+  {
+    Ok(skill) -> skill.roles
+    Error(_) -> []
+  }
+  skill_body(f, roles)
+}
+
+/// The POST body that sets one skill's roles after a role card tick.
+pub fn skill_roles_body(skill: Skill, role: String, chosen: Bool) -> String {
+  skill_body(
+    SkillForm(skill.name, skill.name, skill.description, skill.body),
+    roles_with(skill.roles, role, chosen),
+  )
+}
+
+/// The save route; its reply is the listed skills, and empties the form.
+fn call_skills_saved(method: String, body: String) -> Effect(Msg) {
+  effect.from(fn(send) {
+    request("/skills", method, body, fn(text) { send(SkillsSaved(text)) })
+  })
+}
+
+fn roles_with(roles: List(String), role: String, chosen: Bool) -> List(String) {
+  case chosen {
+    True ->
+      case list.contains(roles, role) {
+        True -> roles
+        False -> [role, ..roles]
+      }
+    False -> list.filter(roles, fn(id) { id != role })
+  }
+}
+
+fn skills_set_role(
+  skills: List(Skill),
+  name: String,
+  role: String,
+  chosen: Bool,
+) -> List(Skill) {
+  list.map(skills, fn(skill) {
+    case skill.name == name {
+      True -> Skill(..skill, roles: roles_with(skill.roles, role, chosen))
+      False -> skill
+    }
+  })
+}
+
+/// The role-card tick route; its reply is the skills, or why it was refused.
+fn call_skill_tick(body: String) -> Effect(Msg) {
+  effect.from(fn(send) {
+    request("/skills", "POST", body, fn(text) { send(SkillTickSaved(text)) })
+  })
+}
+
+fn skills_with_ticks(
+  server: List(Skill),
+  ticks: List(skill_writes.SkillTick),
+) -> List(Skill) {
+  list.fold(ticks, server, fn(skills, tick) {
+    skills_set_role(skills, tick.name, tick.role, tick.chosen)
+  })
+}
+
+fn assign_skill(
+  model: Model,
+  name: String,
+  role: String,
+  chosen: Bool,
+) -> #(Model, Effect(Msg)) {
+  case
+    list.find(model.skills, fn(skill) { skill.name == name && skill.managed })
+  {
+    Ok(_) ->
+      start_skill_write(
+        model,
+        skill_writes.TickWrite(skill_writes.SkillTick(name, role, chosen)),
+      )
+    Error(_) -> #(model, effect.none())
+  }
+}
+
+/// Sends a skills write, or holds it until the one in flight has a reply.
+fn start_skill_write(
+  model: Model,
+  write: skill_writes.SkillWrite,
+) -> #(Model, Effect(Msg)) {
+  let sending = case model.skills_writing {
+    None -> True
+    Some(_) -> False
+  }
+  let #(writing, waiting) =
+    skill_writes.start(model.skills_writing, model.skills_waiting, write)
+  let model =
+    refresh_skills(
+      Model(..model, skills_writing: writing, skills_waiting: waiting),
+    )
+  case sending {
+    True -> #(model, skill_write_effect(model, write))
+    False -> #(model, effect.none())
+  }
+}
+
+fn skill_write_effect(
+  model: Model,
+  write: skill_writes.SkillWrite,
+) -> Effect(Msg) {
+  case write {
+    skill_writes.TickWrite(tick) ->
+      call_skill_tick(skill_tick_body(model, tick))
+    skill_writes.SaveWrite(body) -> call_skills_saved("POST", body)
+    skill_writes.DeleteWrite(name) -> delete_skill(name)
+    skill_writes.LoadWrite -> call_skills("GET", "")
+  }
+}
+
+/// Sends the next held write after a reply, or marks the writes done.
+fn resume_skill_writes(model: Model) -> #(Model, Effect(Msg)) {
+  case model.skills_writing {
+    Some(_) -> #(model, effect.none())
+    None -> {
+      let #(writing, waiting) = skill_writes.next(model.skills_waiting)
+      let model =
+        refresh_skills(
+          Model(..model, skills_writing: writing, skills_waiting: waiting),
+        )
+      case writing {
+        Some(write) -> #(model, skill_write_effect(model, write))
+        None -> #(model, effect.none())
+      }
+    }
+  }
+}
+
+/// The POST body for one role-card tick, against the server's last known skills.
+pub fn skill_tick_body(model: Model, tick: skill_writes.SkillTick) -> String {
+  case list.find(model.skills_server, fn(skill) { skill.name == tick.name }) {
+    Ok(skill) -> skill_roles_body(skill, tick.role, tick.chosen)
+    Error(_) -> ""
+  }
+}
+
+fn refresh_skills(model: Model) -> Model {
+  Model(
+    ..model,
+    skills: skills_with_ticks(
+      model.skills_server,
+      skill_writes.ticks(model.skills_writing, model.skills_waiting),
+    ),
+  )
+}
+
+fn finish_skill_write(model: Model) -> #(Model, Effect(Msg)) {
+  resume_skill_writes(refresh_skills(Model(..model, skills_writing: None)))
+}
+
+fn skills_loaded(model: Model, text: String) -> #(Model, Effect(Msg)) {
+  case json.parse(text, skills_decoder()) {
+    Ok(loaded) ->
+      finish_skill_write(Model(..model, skills_server: loaded, error: ""))
+    Error(_) -> finish_skill_write(Model(..model, error: refusal(text)))
+  }
+}
+
+fn skills_saved(model: Model, text: String) -> #(Model, Effect(Msg)) {
+  case json.parse(text, skills_decoder()) {
+    Ok(loaded) ->
+      finish_skill_write(
+        Model(
+          ..model,
+          skills_server: loaded,
+          skill_form: blank_skill_form,
+          error: "",
+        ),
+      )
+    Error(_) -> finish_skill_write(Model(..model, error: refusal(text)))
+  }
+}
+
+fn queue_skill_load(model: Model) -> #(Model, Effect(Msg)) {
+  let #(writing, waiting) =
+    skill_writes.queue_load(model.skills_writing, model.skills_waiting)
+  resume_skill_writes(refresh_skills(
+    Model(..model, skills_writing: writing, skills_waiting: waiting),
+  ))
 }

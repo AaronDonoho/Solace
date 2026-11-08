@@ -311,6 +311,9 @@ fn file_change(
 ) -> Result<(PathBuf, Option<Vec<u8>>, Option<String>), Failure> {
     use drafts::Section;
     let root = &store.root;
+    if crate::lockdown::paths::design_path(root, name) {
+        return crate::lockdown::paths::design_error(name);
+    }
     let p = reachable(root, name)?;
     not_here(root, name)?;
     let t = tier(root, v, name, None);
@@ -682,6 +685,12 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
     if from.is_empty() || to.is_empty() {
         return error("E6002", "move", "name a file or folder inside the project on both sides");
     }
+    if crate::lockdown::paths::design_path(src, &from) {
+        return crate::lockdown::paths::design_error(&from);
+    }
+    if crate::lockdown::paths::design_path(dst, &to) {
+        return crate::lockdown::paths::design_error(&to);
+    }
     let (p, q) = (reachable(src, &from)?, reachable(dst, &to)?);
     not_here(src, &from)?;
     not_here(dst, &to)?;
@@ -848,7 +857,8 @@ pub const GREP_SYNTAX: &str = concat!(
 
 /// `grep <text> [--in <path>] [--context n]`: case-insensitive search of the
 /// files Solace watches, and the protected settings. Source symbols are
-/// `find`'s; unwatched files aren't searched (D-52). The text is searched as
+/// `find`'s; `--in <file>` also searches a text file over the watch limit,
+/// and other unwatched files aren't searched (D-52). The text is searched as
 /// written, never refused (D-109); the options count only as its last words
 /// (D-119). The reply stops at a whole file within `budget`.
 pub(crate) fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
@@ -866,17 +876,22 @@ pub(crate) fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> 
     let q = query.to_lowercase();
     let mut rows = vec![];
     tree_rows(root, v, root, &mut rows)?;
-    let place = match within {
+    let (place, over_limit_file, over_limit_bytes) = match within {
         Some(p) => match grep_in(root, v, p, &mut rows)? {
-            Ok(name) => name,
+            Ok(found) => found,
             Err(not_searched) => return Ok(not_searched),
         },
-        None => "watched files".into(),
+        None => ("watched files".into(), false, None),
     };
     let graph = rows.iter().any(|(_, t, _)| t == "graph");
     let mut hits = vec![];
-    for (name, _, _) in rows.into_iter().filter(|(_, t, _)| t == "watched" || t == "protected") {
-        let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
+    for (name, _, _) in rows.into_iter().filter(|(name, t, _)| t == "watched" || t == "protected" || (over_limit_file && name == &place)) {
+        let text = if over_limit_file && name == place {
+            over_limit_bytes.as_deref().and_then(|bytes| std::str::from_utf8(bytes).ok()).map(str::to_owned)
+        } else {
+            fs::read_to_string(root.join(&name)).ok()
+        };
+        let Some(text) = text else { continue };
         hits.extend(grep_file(&name, &text, &q, context));
     }
     if hits.is_empty() {
@@ -951,23 +966,24 @@ fn grep_options(raw: &str) -> Result<(&str, Option<&str>, usize), Failure> {
 }
 
 /// Narrows `rows` to the path of `--in`, checked as `read` checks a path, and
-/// gives its name. A path that exists but isn't searched is named instead (the
+/// gives its name, whether it is an over-limit file named explicitly and, for
+/// one, its bytes. A path that exists but isn't searched is named instead (the
 /// inner `Err`); one that doesn't exist is refused.
 fn grep_in(
     root: &Path,
     v: &toml::Value,
     p: &str,
     rows: &mut Vec<(String, String, Option<String>)>,
-) -> Result<Result<String, String>, Failure> {
+) -> Result<Result<(String, bool, Option<Vec<u8>>), String>, Failure> {
     let name = file_name(Path::new(p));
     if name.is_empty() {
-        return Ok(Ok("watched files".into()));
+        return Ok(Ok(("watched files".into(), false, None)));
     }
     if Path::new(&name).components().any(|c| c.as_os_str() == ".solace") {
         return Ok(Err(format!("{name} is Solace's own files; not searched\n")));
     }
     let target = reachable(root, &name)?;
-    let t = tier(root, v, &name, None);
+    let (t, bytes) = tier_and_bytes(root, v, &mut Ignores::new(root), &name, None);
     if t == "graph" {
         return Ok(Err(format!("{name} is source held as symbols (use `find`); not searched\n")));
     }
@@ -981,13 +997,24 @@ fn grep_in(
         if !rows.iter().any(|(_, t, _)| held(t)) {
             return Ok(Err(format!("{name}/ holds no watched or protected files; not searched\n")));
         }
+        Ok(Ok((name, false, None)))
     } else {
-        if !held(&t) {
+        let over_limit = t == "unwatched (over limit)";
+        if !held(&t) && !over_limit {
             return Ok(Err(format!("{name} is {t}; not searched\n")));
         }
+        if over_limit {
+            let bytes = bytes.as_deref().unwrap_or_default();
+            if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
+                return Ok(Err(format!("{name} is unwatched (binary); not searched\n")));
+            }
+        }
         rows.retain(|(n, _, _)| *n == name);
+        if over_limit && rows.is_empty() {
+            rows.push((name.clone(), t, None));
+        }
+        Ok(Ok((name, over_limit, if over_limit { bytes } else { None })))
     }
-    Ok(Ok(name))
 }
 
 /// A file's matching lines (up to 10) with `context` lines around them, as
@@ -998,7 +1025,7 @@ fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<(String,
     // a match's indentation is kept (D-119 point 1).
     let raw: Vec<&str> = text.lines().collect();
     let lines: Vec<&str> = raw.iter().map(|l| l.trim()).collect();
-    let found: Vec<Option<usize>> = lines.iter().map(|l| l.to_lowercase().find(q)).collect();
+    let found: Vec<Option<usize>> = lines.iter().map(|l| find_lower(l, q)).collect();
     let hits: Vec<usize> = (0..lines.len()).filter(|&i| found[i].is_some()).collect();
     if hits.is_empty() {
         return None;
@@ -1071,8 +1098,8 @@ const FILE_EXTENSIONS: &[&str] =
     &["rs", "gleam", "md", "txt", "toml", "json", "js", "mjs", "ts", "py", "html", "css", "erl", "sh", "yml", "yaml", "lock", "csv"];
 
 /// A long line cut to about 200 characters around a match at byte `at`
-/// (lowercasing can shift bytes, so cuts snap to character boundaries). The
-/// flag says the line was cut at either end.
+/// (cuts snap to character boundaries). The flag says the line was cut at
+/// either end.
 fn around(line: &str, at: usize, len: usize) -> (String, bool) {
     if line.len() <= 200 {
         return (line.to_string(), false);
@@ -1131,4 +1158,22 @@ pub fn paths<'a>(a: &[&'a str]) -> Vec<&'a str> {
         return vec![];
     }
     a[1..].iter().copied().filter(|x| !x.starts_with("--")).collect()
+}
+
+/// The byte offset in `line` where its lowercased text first holds `q`.
+/// Lowercasing is done whole, as the query was, so a letter whose case depends
+/// on its neighbors (`Σ`) still matches; each original character's lowercased
+/// byte length maps the offset back to the text shown.
+fn find_lower(line: &str, q: &str) -> Option<usize> {
+    let target = line.to_lowercase().find(q)?;
+    let mut lower_at = 0;
+    let mut nearest = 0;
+    for (at, ch) in line.char_indices() {
+        if lower_at >= target {
+            return Some(at);
+        }
+        nearest = at;
+        lower_at += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    Some(nearest)
 }

@@ -1,7 +1,20 @@
 # Solace settings
 
 The Settings page, `<solace-settings>`, at `/settings` in the shell, and the
-store every page reads its settings from.
+store every page reads its settings from. Its tabs are Agents, Appearance,
+Languages and About, in that order.
+
+## Tabs
+
+Agents holds Agent behavior, Role models, Models and Skills. Appearance holds
+the Dark mode switch under a Theme heading. Languages holds the enabled
+programming languages and their switches. About holds the software version and
+the license.
+
+`/settings` shows Agents; `/settings?tab=appearance`,
+`/settings?tab=languages` and `/settings?tab=about` name the others. An unknown
+tab shows Agents. A tab change adds a history entry, so Back and Forward restore
+it. A refused change stays below the tabs and shows whichever tab is open.
 
 ## Store and pub-sub
 
@@ -30,13 +43,22 @@ another window.
 
 ## Languages
 
-The Languages section lists Gleam and Rust from `GET /languages`, each with a
-switch and whether its toolchain is installed. A switch sends `POST /languages`
+The Languages tab lists Gleam and Rust under `Enabled programming languages`
+from `GET /languages`, each with a switch and whether its toolchain is
+installed. A switch sends `POST /languages`
 with `{"id": ..., "enabled": ...}`; the reply is the new list. Both languages
 are on unless the system settings turn one off. A language turned off behaves
 as if its toolchain were missing: its projects stay readable, but `submit`,
 `check` and `test` are refused and the Workspace page says the language is
 turned off (D-22).
+
+## About
+
+The About tab reads the running program's version from `GET /about` and shows
+it as `Software version`. The server takes the version from the `solace`
+package, so it is correct in an installed copy with no source tree. The page
+carries the full Sustainable Use License 1.0 text under a License header that
+starts closed and opens to the formatted text.
 
 ## Agent behavior
 

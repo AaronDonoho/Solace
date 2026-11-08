@@ -202,8 +202,9 @@ fn tech_debt_items_are_the_sections_bullets() {
 }
 
 /// D-112: completing a task in a feature files its last review's tech debt
-/// on the feature's open Tech Debt task: made once, appended to after, and
-/// made anew once that one is complete. A cancel or a review with no section
+/// on the feature's open, unstarted Tech Debt task: made once, appended to
+/// while no run has started, and made anew once that one is complete or has an
+/// investigate, work or review run. A cancel or a review with no section
 /// files nothing.
 #[test]
 fn completing_a_task_files_its_reviews_tech_debt() {
@@ -242,7 +243,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let did = debt["id"].as_str().unwrap().to_string();
     assert_eq!(
         (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()),
-        (Some("Search"), Some("planning"), Some(fid.as_str()))
+        (Some("Search: Tech Debt"), Some("planning"), Some(fid.as_str()))
     );
     assert_eq!(debt["scope"], done["scope"]);
     let notes = texts(&debt);
@@ -253,11 +254,16 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     );
     assert!(notes[1].ends_with("`app.other`: split it"));
     assert!(texts(&done).last().unwrap().contains(&format!("Filed 2 tech-debt items from the last review on task:{did}")));
-    // A second task in the feature appends to the same Tech Debt task.
+    // An existing Tech Debt task keeps its title.
+    let mut old = task(&s.root, &did).unwrap();
+    old["title"] = json!("Search");
+    tasks::put(&s, &old).unwrap();
+    // A second task in the feature appends to the same unstarted Tech Debt task.
     let b = reviewed("B", true, "### Tech debt\n- `app.b`: one more\n");
     act(&b, "complete");
     let [debt] = debts().try_into().unwrap();
     assert_eq!(debt["id"], did.as_str());
+    assert_eq!(debt["title"].as_str(), Some("Search"));
     assert!(texts(&debt)[2].contains(&format!("task:{b}")));
     // A cancel or no section files nothing.
     act(&reviewed("D", true, two), "cancel");
@@ -269,8 +275,14 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     act(&reviewed("F", true, two), "complete");
     let open: Vec<Value> = debts().into_iter().filter(|d| d["id"] != did.as_str() && d["feature"] == fid.as_str()).collect();
     assert_eq!(open.len(), 1);
+    assert_eq!(open[0]["title"].as_str(), Some("Search: Tech Debt"));
     assert_eq!((open[0]["column"].as_str(), texts(&open[0]).len()), (Some("planning"), 2));
     assert_eq!(task(&s.root, &did).unwrap()["column"], "complete");
+    // A task with no feature is titled after itself.
+    let g = reviewed("G", false, "### Tech debt\n- `app.g`: own\n");
+    act(&g, "complete");
+    let own = debts().into_iter().find(|d| d["title"] == "G").unwrap();
+    assert_eq!((own["column"].as_str(), own["feature"].as_str(), own["milestone"].as_str()), (Some("planning"), None, None));
 }
 
 /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
@@ -486,5 +498,91 @@ fn an_assessment_label_may_be_emphasized_or_headed_on_any_line() {
     let agree =
         [json!({"kind":"message","text":"**Assessment: Looks good**"}), json!({"kind":"message","text":"## Assessment: Looks good"})];
     assert_eq!(recoverable_review(&review, true, &agree).as_deref(), Some("**Assessment: Looks good**\n\n## Assessment: Looks good"));
+}
+
+#[test]
+fn a_started_tech_debt_task_gets_a_new_one() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let act = |id: &str, action: &str| api(&s.root, "POST", &format!("/tasks/{id}/actions"), json!({"action":action})).unwrap();
+    let texts = |t: &Value| t["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    for (i, (kind, state)) in [
+        ("investigate", "ended"),
+        ("work", "ended"),
+        ("review", "ended"),
+        ("investigate", "running"),
+        ("work", "running"),
+        ("review", "running"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let feature = tasks::strategy_api(&top, "POST", &["features"], json!({"title":format!("Feature {i}")})).map_err(|e| e.1.0).unwrap();
+        let fid = feature["id"].as_str().unwrap().to_string();
+        act(&reviewed_task(&s.root, &format!("A{i}"), &fid), "complete");
+        let [debt] = debts_of(&top, &fid).try_into().unwrap();
+        let did = debt["id"].as_str().unwrap().to_string();
+        let mut started = task(&s.root, &did).unwrap();
+        started["runs"].as_array_mut().unwrap().push(json!({"id":format!("{kind}{i}"),"kind":kind,"state":state}));
+        tasks::put(&s, &started).unwrap();
+        let before = task(&s.root, &did).unwrap();
+
+        let done = act(&reviewed_task(&s.root, &format!("B{i}"), &fid), "complete");
+        let debts = debts_of(&top, &fid);
+        assert_eq!(debts.len(), 2, "{kind}/{state}: {debts:?}");
+        let fresh = debts.iter().find(|d| d["id"] != did.as_str()).unwrap();
+        assert_eq!(task(&s.root, &did).unwrap(), before, "{kind}/{state}: the started task changed");
+        assert_eq!((fresh["column"].as_str(), texts(fresh).len()), (Some("planning"), 1));
+        assert!(
+            texts(&done)
+                .last()
+                .unwrap()
+                .contains(&format!("Filed 1 tech-debt item from the last review on task:{}", fresh["id"].as_str().unwrap())),
+            "{kind}/{state}: {done:?}"
+        );
+    }
+}
+
+#[test]
+fn a_discussion_run_does_not_start_a_tech_debt_task() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
+    let fid = f["id"].as_str().unwrap().to_string();
+    let act = |id: &str, action: &str| api(&s.root, "POST", &format!("/tasks/{id}/actions"), json!({"action":action})).unwrap();
+    let a = reviewed_task(&s.root, "A", &fid);
+    act(&a, "complete");
+    let [debt] = debts_of(&top, &fid).try_into().unwrap();
+    let did = debt["id"].as_str().unwrap().to_string();
+    let mut discussed = task(&s.root, &did).unwrap();
+    discussed["runs"].as_array_mut().unwrap().push(json!({"id":"ds","kind":"discuss","state":"ended"}));
+    tasks::put(&s, &discussed).unwrap();
+
+    let b = reviewed_task(&s.root, "B", &fid);
+    let done = act(&b, "complete");
+    let debts = debts_of(&top, &fid);
+    assert_eq!(debts.len(), 1, "{debts:?}");
+    assert_eq!(debts[0]["id"], did.as_str());
+    assert_eq!(debts[0]["notes"].as_array().unwrap().len(), 2);
+    assert!(debts[0]["notes"][1]["text"].as_str().unwrap().contains(&format!("task:{b}")), "{debts:?}");
+    assert!(done["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains(&did));
+}
+
+fn reviewed_task(root: &std::path::Path, title: &str, fid: &str) -> String {
+    let id = api(root, "POST", "/tasks", json!({"title":title})).unwrap()["id"].as_str().unwrap().to_string();
+    api(root, "PATCH", &format!("/tasks/{id}"), json!({"feature":fid})).unwrap();
+    let mut t = task(root, &id).unwrap();
+    let rid = format!("rv{title}");
+    t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some(&rid), "### Tech debt\n- `app.main`: one finding\n");
+    tasks::put(&open(root).unwrap(), &t).unwrap();
+    api(root, "POST", &format!("/tasks/{id}/actions"), json!({"action":"plan"})).unwrap();
+    id
+}
+
+fn debts_of(top: &std::path::Path, fid: &str) -> Vec<Value> {
+    all_tasks(top).unwrap().into_iter().filter(|t| t["techDebt"] == true && t["feature"] == fid).collect()
 }
 

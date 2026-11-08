@@ -7,7 +7,7 @@
 //! empty.
 use crate::*;
 use crate::diagnostics::Diag;
-
+use crate::outside_copies::keep;
 /// Where a Rust `submit` block lands (D-168): the module, the symbol the text
 /// replaces, the container an added item sits in, and the module it creates
 /// when the store doesn't have it.
@@ -1246,7 +1246,7 @@ impl Store {
         let names = names.join(", ");
         let differs = format!("E0104 {rel} differs from the store in: {names}.");
         let again = format!("Run `format {module}` again after fixing it.");
-        let kept = match crate::outside::keep(&self.root, &rel, disk.as_bytes()) {
+        let kept = match keep(&self.root, &rel, disk.as_bytes()) {
             Ok(kept) => kept,
             Err(e) => return fail(format!("{differs} The current file could not be kept: {}. {again}", e.0)),
         };

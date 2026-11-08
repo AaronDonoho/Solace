@@ -15,6 +15,9 @@ use crate::failure::Failure;
 use crate::{Index, Store, Sym};
 use crate::lockdown::commands::command;
 use crate::lockdown::commands::passed;
+#[cfg(test)]
+#[path = "store_core_tests.rs"]
+mod tests;
 
 /// Ends a command's outer transaction on every path out of `run_options`: one
 /// left open by an early `?` rolls back, and the shared connection is let go,
@@ -663,5 +666,24 @@ pub(crate) struct DependentError {
 pub(crate) struct DependentCheck {
     pub(crate) message: String,
     pub(crate) baseline: Vec<(String, Vec<(String, String)>)>,
+}
+
+/// Flushes the write-ahead log into `store.db`, the file a commit copies (D-179).
+pub(crate) fn checkpoint(s: &Store) -> Result<(), Failure> {
+    checkpointed(if checkpoint_pending(s)? { 1 } else { 0 })
+}
+
+/// Whether a checkpoint finished, or stopped partway because the database was busy.
+fn checkpointed(busy: i64) -> Result<(), Failure> {
+    if busy == 0 {
+        return Ok(());
+    }
+    crate::lockdown::error("E7028", "store", "the write-ahead log is busy; store.db does not hold every change")
+}
+
+/// Whether a full checkpoint left frames unflushed because the log was busy.
+pub(crate) fn checkpoint_pending(s: &Store) -> Result<bool, Failure> {
+    let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(busy != 0)
 }
 

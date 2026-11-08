@@ -40,7 +40,8 @@ Reading
   find <text>                   case-insensitive search of all code
   grep <text> [--in <path>] [--context n]
                                 case-insensitive search of watched files and
-                                settings (not unwatched files); lines shown
+                                settings, and with `--in <file>` a text file
+                                over the watch limit; lines shown
                                 with numbers for `read --lines`. The text is
                                 searched as written, code included (`"write"
                                 =>`, `-> Result`); quotes around the whole
@@ -52,6 +53,14 @@ Reading
                                 lines around each match, marked `12-`. Up to
                                 10 lines per file; the reply stops at a whole
                                 file and says how many it left out
+  design list                   the workspace's designs, each with its id,
+                                title and tab, and any file that is not a
+                                valid design
+  design show <id> [--from <element>]
+                                one design, whole; the id may be written
+                                `design:<id>`; a reply over the limit stops at
+                                a whole element and says which `--from` reads
+                                on from
   session start [--task]        this overview again (--task: for the task in `text`;
                                 a board run's brief holds its first reply)
   session start [--scope <module>...]

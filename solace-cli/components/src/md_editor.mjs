@@ -16,7 +16,7 @@ import { replacement } from './task_api.mjs';
 
 const mono = "'IBM Plex Mono',ui-monospace,monospace";
 // What task_api.mjs's `markdown` draws as a link, and as an image (uploaded to the board).
-const linkTarget = /^(?:https?:\/\/\S+|(?:task|feature|milestone):[0-9a-f]{16})$/;
+const linkTarget = /^(?:https?:\/\/\S+|(?:task|feature|milestone|design):[0-9a-f]{16})$/;
 const imageTarget = /^\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp)$/;
 
 class ImageWidget extends WidgetType {

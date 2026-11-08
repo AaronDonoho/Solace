@@ -25,7 +25,7 @@ pub(crate) const BUDGET: usize = 32_000;
 
 // Commands by what they do. Every check that depends on the command uses these.
 /// Plain reads; with `--project`, they read another project.
-const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
+const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read", "design"];
 
 /// Only for the human, never in a board run.
 pub(crate) const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];

@@ -27,10 +27,21 @@ pub fn routes_test() {
     #("/strategy?tab=personas", frontend.Strategy("personas")),
     #("/strategy?tab=tasks", frontend.Strategy("tasks")),
     #("/strategy?tab=nope", frontend.Strategy("vision")),
-    #("/design", frontend.Design("architecture")),
-    #("/design?tab=ui-ux", frontend.Design("ui-ux")),
-    #("/design?tab=nope", frontend.Design("architecture")),
-    #("/settings", frontend.Settings),
+    #("/design", frontend.Design("architecture", "")),
+    #("/design?tab=ui-ux", frontend.Design("ui-ux", "")),
+    #("/design?tab=nope", frontend.Design("architecture", "")),
+    #(
+      "/design?design=0123456789abcdef",
+      frontend.Design("architecture", "0123456789abcdef"),
+    ),
+    #(
+      "/design?tab=ui-ux&design=fedcba9876543210",
+      frontend.Design("ui-ux", "fedcba9876543210"),
+    ),
+    #("/settings", frontend.Settings("agents")),
+    #("/settings?tab=appearance", frontend.Settings("appearance")),
+    #("/settings?tab=languages", frontend.Settings("languages")),
+    #("/settings?tab=nope", frontend.Settings("agents")),
     #("/knowledgebase", frontend.Knowledgebase),
     #("/guide", frontend.Knowledgebase),
     #("/view", Board),
@@ -68,15 +79,25 @@ pub fn page_elements_test() {
       "<solace-strategy tab=\"vision\"></solace-strategy>",
     ),
     #(
-      #(frontend.Design("architecture"), True),
-      "<solace-design tab=\"architecture\"></solace-design>",
+      #(frontend.Design("architecture", ""), True),
+      "<solace-design design tab=\"architecture\"></solace-design>",
     ),
     #(
-      #(frontend.Design("ui-ux"), False),
-      "<solace-design hidden tab=\"ui-ux\"></solace-design>",
+      #(frontend.Design("ui-ux", ""), False),
+      "<solace-design design hidden tab=\"ui-ux\"></solace-design>",
     ),
-    #(#(frontend.Settings, True), "<solace-settings></solace-settings>"),
-    #(#(frontend.Settings, False), "<solace-settings hidden></solace-settings>"),
+    #(
+      #(frontend.Design("ui-ux", "fedcba9876543210"), False),
+      "<solace-design design=\"fedcba9876543210\" hidden tab=\"ui-ux\"></solace-design>",
+    ),
+    #(
+      #(frontend.Settings("agents"), True),
+      "<solace-settings tab=\"agents\"></solace-settings>",
+    ),
+    #(
+      #(frontend.Settings("languages"), False),
+      "<solace-settings hidden tab=\"languages\"></solace-settings>",
+    ),
     #(
       #(Contracts("/p/web", ""), False),
       "<solace-contracts base=\"/p/web\" hidden task></solace-contracts>",
@@ -190,8 +211,8 @@ pub fn menu_current_test() {
     element.to_string(
       frontend.view(
         frontend.Model(
-          frontend.Design("architecture"),
-          [frontend.Design("architecture")],
+          frontend.Design("architecture", ""),
+          [frontend.Design("architecture", "")],
           frontend.no_focus,
           [],
           [],
@@ -208,8 +229,8 @@ pub fn menu_current_test() {
     element.to_string(
       frontend.view(
         frontend.Model(
-          frontend.Settings,
-          [frontend.Settings],
+          frontend.Settings("agents"),
+          [frontend.Settings("agents")],
           frontend.no_focus,
           [],
           [],
@@ -773,6 +794,10 @@ pub fn copy_markdown_of_feature_and_milestone_links_test() {
         link("task", "Fix the cache", True),
         frontend.Text(", "),
         link("feature", "Search", True),
+        frontend.Text(", "),
+        link("design", "the home", False),
+        frontend.Text(", "),
+        link("design", "Home", True),
       ]),
     ])
     == "[the plan](feature:"
@@ -782,6 +807,10 @@ pub fn copy_markdown_of_feature_and_milestone_links_test() {
     <> ", task:"
     <> id
     <> ", feature:"
+    <> id
+    <> ", [the home](design:"
+    <> id
+    <> "), design:"
     <> id
 }
 
@@ -1161,8 +1190,8 @@ pub fn a_backlog_task_link_opens_on_strategy_test() {
 pub fn a_design_tab_stays_on_design_test() {
   let model =
     frontend.Model(
-      frontend.Design("architecture"),
-      [frontend.Design("architecture")],
+      frontend.Design("architecture", ""),
+      [frontend.Design("architecture", "")],
       frontend.no_focus,
       [],
       [],
@@ -1171,17 +1200,17 @@ pub fn a_design_tab_stays_on_design_test() {
     )
   let #(model, _) =
     frontend.update(model, frontend.TabChanged("solace-design", "ui-ux"))
-  assert model.route == frontend.Design("ui-ux")
-  assert model.opened == [frontend.Design("ui-ux")]
+  assert model.route == frontend.Design("ui-ux", "")
+  assert model.opened == [frontend.Design("ui-ux", "")]
   let #(same, _) =
     frontend.update(model, frontend.TabChanged("solace-strategy", "tasks"))
-  assert same.route == frontend.Design("ui-ux")
-  assert same.opened == [frontend.Design("ui-ux")]
+  assert same.route == frontend.Design("ui-ux", "")
+  assert same.opened == [frontend.Design("ui-ux", "")]
   let #(board, _) =
     frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
   let html = element.to_string(frontend.view(board))
   assert string.contains(html, "<a href=\"/design?tab=ui-ux\">Design</a>")
-  assert frontend.path_of(frontend.Design("architecture")) == "/design"
+  assert frontend.path_of(frontend.Design("architecture", "")) == "/design"
   assert frontend.path_of(frontend.Strategy("vision")) == "/strategy"
 }
 
@@ -1198,11 +1227,131 @@ pub fn every_route_has_its_page_path_test() {
   assert frontend.path_of(frontend.Contracts("/p/web", "t1"))
     == "/p/web/contracts"
   assert frontend.path_of(frontend.Strategy("vision")) == "/strategy"
-  assert frontend.path_of(frontend.Design("ui-ux")) == "/design"
-  assert frontend.path_of(frontend.Settings) == "/settings"
+  assert frontend.path_of(frontend.Design("ui-ux", "")) == "/design"
+  assert frontend.path_of(frontend.Settings("agents")) == "/settings"
   assert frontend.path_of(frontend.Knowledgebase) == "/knowledgebase"
   assert frontend.path_of(frontend.RecordLink("task", "t1")) == "/task/t1"
   assert frontend.path_of(frontend.RecordLink("feature", "f1")) == "/feature/f1"
   assert frontend.path_of(frontend.RecordLink("milestone", "m1"))
     == "/milestone/m1"
+  assert frontend.path_of(frontend.RecordLink("design", "d1")) == "/design/d1"
+}
+
+/// A Settings tab change stays on Settings; another page's tab event changes nothing.
+pub fn a_settings_tab_stays_on_settings_test() {
+  let model =
+    frontend.Model(
+      frontend.Settings("agents"),
+      [frontend.Strategy("tasks"), frontend.Settings("agents")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(model, frontend.TabChanged("solace-settings", "languages"))
+  assert model.route == frontend.Settings("languages")
+  assert model.opened
+    == [frontend.Strategy("tasks"), frontend.Settings("languages")]
+  let #(same, _) =
+    frontend.update(model, frontend.TabChanged("solace-strategy", "tasks"))
+  assert same.route == frontend.Settings("languages")
+  assert same.opened
+    == [frontend.Strategy("tasks"), frontend.Settings("languages")]
+  let #(board, _) =
+    frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
+  let html = element.to_string(frontend.view(board))
+  assert string.contains(
+    html,
+    "<a href=\"/settings?tab=languages\">Settings</a>",
+  )
+  assert string.contains(html, "<a href=\"/strategy?tab=tasks\">Strategy</a>")
+  assert frontend.settings_path("agents") == "/settings"
+  assert frontend.settings_path("languages") == "/settings?tab=languages"
+  let #(restored, _) =
+    frontend.update(
+      board,
+      frontend.RouteChanged(frontend.Settings("appearance"), "{}"),
+    )
+  assert restored.route == frontend.Settings("appearance")
+}
+
+/// Picking a design keeps the tab and puts the design in the address; a
+/// history move restores it, and Back drops it again.
+pub fn a_design_pick_changes_the_address_test() {
+  assert frontend.design_query("architecture", "0123456789abcdef")
+    == "design=0123456789abcdef"
+  assert frontend.design_query("ui-ux", "fedcba9876543210")
+    == "tab=ui-ux&design=fedcba9876543210"
+  let cases = [
+    #(
+      frontend.Design("architecture", "0123456789abcdef"),
+      "architecture",
+      "design=0123456789abcdef",
+    ),
+    #(
+      frontend.Design("ui-ux", "fedcba9876543210"),
+      "ui-ux",
+      "tab=ui-ux&design=fedcba9876543210",
+    ),
+  ]
+  list.each(cases, fn(entry) {
+    let #(route, _, query) = entry
+    let assert Ok(uri) = uri.parse("/design?" <> query)
+    assert frontend.route(uri) == route
+  })
+  let model =
+    frontend.Model(
+      frontend.Design("architecture", ""),
+      [frontend.Design("architecture", "")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.DesignChanged("solace-design", "0123456789abcdef"),
+    )
+  assert model.route == frontend.Design("architecture", "0123456789abcdef")
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.RouteChanged(frontend.Design("architecture", ""), "{}"),
+    )
+  assert model.route == frontend.Design("architecture", "")
+}
+
+/// D-234: a design link opens the Design page on the design's tab; a missing design says so.
+pub fn a_design_link_opens_on_its_tab_test() {
+  let id = "0123456789abcdef"
+  let assert Ok(link) = uri.parse("/design/" <> id)
+  assert frontend.route(link) == frontend.RecordLink("design", id)
+  let found = "{\"id\":\"" <> id <> "\",\"title\":\"Home\",\"tab\":\"ui-ux\"}"
+  assert frontend.target("design", found) == frontend.InDesign("ui-ux")
+  assert frontend.target("design", "{\"code\":\"E7023\"}") == frontend.Missing
+  assert frontend.target("design", "{\"message\":\"down\"}") == frontend.Unknown
+  assert frontend.missing_text("design") == "Design does not exist"
+  assert frontend.failed_text("design")
+    == "Couldn't look up the design. Try again."
+  let model =
+    frontend.Model(
+      frontend.Board,
+      [frontend.Board],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.Found("design", id, found, False, frontend.Board, 0),
+    )
+  assert model.route == frontend.Design("ui-ux", id)
+  assert model.focus == frontend.Focus("solace-design", "design", "", id, 1)
 }

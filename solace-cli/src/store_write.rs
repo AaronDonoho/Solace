@@ -910,10 +910,12 @@ impl Store {
     pub(crate) fn probe(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>) -> Out {
         self.probe_with_limit(text, from, trace, module, PROBE_LIMIT)
     }
-    /// `probe --from <fn>`: the imports of its module and its body, so a
-    /// probe can start from a test's setup and use its local variables.
-    fn probe_from(&self, ix: &Index, name: &str) -> Result<(String, String), Failure> {
-        let s = &ix.syms[self.resolve(ix, name)?];
+    /// `probe --from <fn>`: the imports and same-module symbols it reaches,
+    /// then its body, so a probe can start from a test's setup and use its
+    /// local variables.
+    fn probe_from(&self, ix: &Index, name: &str, trace: &[&str]) -> Result<(String, String), Failure> {
+        let at = self.resolve(ix, name)?;
+        let s = &ix.syms[at];
         let open = crate::fn_body_start(s).filter(|_| s.kind == crate::language::Kind::Fn);
         let Some(open) = open else {
             return crate::failure::fail(format!(
@@ -928,9 +930,41 @@ impl Store {
             ));
         }
         let body = &s.text[open + 1..s.text.rfind('}').unwrap_or(s.text.len())];
+        let reached = crate::reach::closure(ix, at);
+        let traced: HashSet<usize> = trace.iter().map(|t| self.resolve(ix, t)).collect::<Result<_, _>>()?;
+        if traced.contains(&at) {
+            return crate::failure::fail(format!(
+                "E1005 {} runs inline in the probe and can't be traced; trace a helper it calls instead.",
+                s.qname()
+            ));
+        }
+        let main_clash =
+            ix.syms.iter().enumerate().find(|(i, h)| *i != at && reached.contains(i) && h.module == s.module && h.name == "main");
+        if let Some((_, main)) = main_clash {
+            return crate::failure::fail(format!(
+                "E1005 {} can't use --from: it reaches {}, which clashes with the probe's own main.",
+                s.qname(),
+                main.qname()
+            ));
+        }
+        let recursive = ix.lang.references_at(body).iter().any(|(r, _)| matches!(r, Ref::Bare(n) if n == &s.name));
+        let called_back = recursive || reached.iter().any(|&i| i != at && ix.uses[i].contains(&at));
+        if called_back && s.name == "main" {
+            return crate::failure::fail(format!("E1005 {} is a main that is called back, so it can't be a starting point.", s.qname()));
+        }
+        let helpers: String = ix
+            .syms
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| if *i == at { called_back } else { reached.contains(i) && h.module == s.module })
+            .map(|(i, h)| {
+                let text = if traced.contains(&i) { trace_wrap(h) } else { h.text.trim_end().to_string() };
+                format!("{text}\n\n")
+            })
+            .collect();
         let imports: String =
             self.header(&s.module)?.lines().filter(|l| !l.trim_start().starts_with("//")).map(|l| format!("{l}\n")).collect();
-        Ok((imports, format!("{}\n", body.trim_matches('\n'))))
+        Ok((format!("{imports}{helpers}"), format!("{}\n", body.trim_matches('\n'))))
     }
     /// The materialized module files with each traced function wrapped so
     /// that its arguments and result are echoed (D-43). Nothing is written here.
@@ -1214,14 +1248,21 @@ impl Store {
         if ix.modules.iter().any(|m| m.path == crate::cli::PROBE) {
             return crate::failure::fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
         }
-        let code = self.gleam_probe_code(&ix, &deps, text, from)?;
+        let code = self.gleam_probe_code(&ix, &deps, text, from, trace)?;
         let outcome = self.run_gleam_probe(&ix, &code, trace, limit)?;
         self.gleam_probe_reply(outcome, &code, trace, limit)
     }
 
-    fn gleam_probe_code(&self, ix: &Index, deps: &[DependencyModule], text: &str, from: Option<&str>) -> Result<String, Failure> {
+    fn gleam_probe_code(
+        &self,
+        ix: &Index,
+        deps: &[DependencyModule],
+        text: &str,
+        from: Option<&str>,
+        trace: &[&str],
+    ) -> Result<String, Failure> {
         let (prelude, setup) = match from {
-            Some(name) => self.probe_from(ix, name)?,
+            Some(name) => self.probe_from(ix, name, trace)?,
             None => (String::new(), String::new()),
         };
         // A single expression is printed: `probe` with `money.percent(7400, 5)` shows 370.

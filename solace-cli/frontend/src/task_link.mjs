@@ -1,9 +1,9 @@
-// Links in a page's shadow root, where modem's router doesn't see them: a markdown record link (D-98, D-122),
+// Links in a page's shadow root, where modem's router doesn't see them: a markdown record link (D-98, D-122, D-234),
 // the Contract view links on the board, and the contract page's Board link. A plain click is followed in-page;
 // one with a modifier key held keeps the browser's own behaviour, so it opens a new tab.
 import { watch_shadow_hosts } from './shadow_watch.mjs';
 
-const RECORD_LINK = /^\/(task|feature|milestone)\/([0-9a-f]{16})$/;
+const RECORD_LINK = /^\/(task|feature|milestone|design)\/([0-9a-f]{16})$/;
 const PAGE_LINK = /^(?:\/|(?:\/p\/[^/]+)?\/contracts)(?:\?[^#]*)?$/;
 
 export function follow_links(follow, page) {
@@ -55,7 +55,7 @@ const title = (kind, id) => {
 };
 
 function fill(root) {
-  for (const link of root.querySelectorAll('a[data-task], a[data-feature], a[data-milestone]')) {
+  for (const link of root.querySelectorAll('a[data-task], a[data-feature], a[data-milestone], a[data-design]')) {
     const found = link.getAttribute('href')?.match(RECORD_LINK);
     if (!found || link.textContent !== found[1] + ':' + found[2]) continue;
     title(found[1], found[2]).then(text => {

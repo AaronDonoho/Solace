@@ -234,6 +234,7 @@ impl Board {
         let path = url.split('?').next().unwrap_or("");
         match (method, path) {
             ("GET", "/projects") => return self.listing(),
+            ("GET", "/about") => return Ok(json!({"version": env!("CARGO_PKG_VERSION")})),
             ("GET", "/languages") => return languages(),
             ("GET", "/roles") => return Ok(crate::board::roles::api()),
             ("GET", "/agent-settings") => return crate::board::setup::agent_settings(),
@@ -245,6 +246,31 @@ impl Board {
             ("DELETE", p) if p.starts_with("/skills/") => {
                 let name = view::percent_decode(&p["/skills/".len()..]);
                 return crate::skills::remove(&self.top, &name).and_then(|_| Ok(crate::skills::api(&self.top)));
+            }
+            ("GET", "/designs") => return crate::design::list(&self.top),
+            ("GET", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/versions")).is_some() => {
+                let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/versions")).unwrap_or("");
+                return crate::design::versions(&self.top, &view::percent_decode(id));
+            }
+            ("GET", p) if p.strip_prefix("/designs/").and_then(|rest| rest.split_once("/versions/")).is_some() => {
+                let (id, number) = p.strip_prefix("/designs/").and_then(|rest| rest.split_once("/versions/")).unwrap_or(("", ""));
+                if !number.bytes().all(|b| b.is_ascii_digit()) {
+                    return err("E7001", "version must be a whole number");
+                }
+                let number = match number.parse::<u64>() {
+                    Ok(number) => number,
+                    Err(_) => return err("E7001", "version must be a whole number"),
+                };
+                return crate::design::version(&self.top, &view::percent_decode(id), number);
+            }
+            ("POST", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/restore")).is_some() => {
+                let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/restore")).unwrap_or("");
+                let number = crate::design::number(&body["version"])?;
+                return crate::design::restore(&self.top, &view::percent_decode(id), number);
+            }
+            ("GET", p) if p.starts_with("/designs/") => {
+                let id = view::percent_decode(&p["/designs/".len()..]);
+                return crate::design::show(&self.top, &id);
             }
             ("GET", "/setup") => return Ok(check()),
             ("POST", "/languages") => return crate::board::setup::save_language(&config_path(), body).and_then(|_| languages()),
@@ -402,7 +428,7 @@ pub(crate) fn error_json(e: &Failure) -> Value {
 pub(crate) fn respond_json(req: tiny_http::Request, result: Result<Value, Failure>) {
     match result {
         Ok(v) => respond(req, 200, v),
-        Err(e) => respond(req, 409, error_json(&e)),
+        Err(e) => respond(req, failure_status(&e), error_json(&e)),
     }
 }
 
@@ -490,11 +516,15 @@ impl Events {
             Err(_) => String::new(),
         };
         let runs = json!({"strategyRuns": crate::tasks::strategy_runs(top)});
+        let designs = match crate::design::listed(top) {
+            Ok(designs) => format!("id: {id}\ndata: {}\n\n", json!({"designs": designs})),
+            Err(_) => String::new(),
+        };
         // Tasks with no project (D-129) ride on the root's streams, marked so
         // the Strategy page can list them whatever their home.
         let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\n{designs}id: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -778,6 +808,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
         println!("Solace root {}: {} projects", board.top.display(), board.projects()?.len());
     }
     std::io::stdout().flush()?;
+    let mut designs = crate::design::listed(&board.top).ok();
     let watcher = board.clone();
     std::thread::spawn(move || {
         let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
@@ -789,6 +820,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if watcher.step.lock().unwrap().is_some() {
                 continue;
             }
+            crate::design::announce_change(&watcher.top, &mut designs);
             for (_, root) in watcher.projects().unwrap_or_default() {
                 // About once a second, read in code changed outside Solace (D-58).
                 if tick % 10 == 1 {
@@ -867,6 +899,13 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     Err((status, e)) => respond(req, status, error_json(&e)),
                 };
             }
+            // A design by id (D-234): a link to it asks for its title and tab.
+            if let ("GET", ["designs", "find", id]) = (req.method().as_str(), strategy.as_slice()) {
+                return match crate::design::find(&board.top, id) {
+                    Ok(v) => respond(req, 200, v),
+                    Err((status, e)) => respond(req, status, error_json(&e)),
+                };
+            }
             // Every project's build recipe, in build order (D-131).
             if let ("GET", ["build", "plan"]) = (req.method().as_str(), strategy.as_slice()) {
                 return match recipe::plan_json(&board.top) {
@@ -911,10 +950,10 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 crate::board::server::respond_events(req, reader);
                 return;
             }
-            // A link's address, `/task/{id}` (D-98), `/feature/{id}` or `/milestone/{id}`
-            // (D-122), is the shell's to resolve.
+            // A link's address, `/task/{id}` (D-98), `/feature/{id}`, `/milestone/{id}`
+            // (D-122) or `/design/{id}` (D-234), is the shell's to resolve.
             let page = url.split('?').next().unwrap_or("");
-            let record_link = ["/task/", "/feature/", "/milestone/"].iter().any(|p| page.strip_prefix(p).is_some_and(valid_id));
+            let record_link = ["/task/", "/feature/", "/milestone/", "/design/"].iter().any(|p| page.strip_prefix(p).is_some_and(valid_id));
             // The guide is the shell's Knowledgebase page (D-140): its old address sends the browser there.
             if req.method().as_str() == "GET" && page == "/guide" {
                 let _ = req.respond(
@@ -1008,12 +1047,15 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
 /// here, and `/events` when the board has several projects.
 fn root_route(path: &str, explicit: bool) -> bool {
     path == "/projects"
+        || path == "/about"
         || path == "/languages"
         || path == "/roles"
         || path == "/agent-settings"
         || path == "/role-models"
         || path == "/skills"
         || path.starts_with("/skills/")
+        || path == "/designs"
+        || path.starts_with("/designs/")
         || path == "/setup"
         || path == "/models"
         || path.starts_with("/models/")
@@ -1109,4 +1151,8 @@ fn log_event_error(reason: &str) {
     if note_event_error(&mut last, reason, std::time::Instant::now(), Duration::from_secs(60)) {
         eprintln!("events stream ended: {reason}");
     }
+}
+
+fn failure_status(e: &Failure) -> u16 {
+    if e.0.starts_with("E7023") { 404 } else { 409 }
 }

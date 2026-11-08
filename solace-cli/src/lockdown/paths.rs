@@ -391,3 +391,20 @@ fn in_one_project(root: &Path, name: &str) -> Vec<String> {
     }
     workspace::members(&top).unwrap_or_default().into_iter().filter(|d| d != "." && scope::path(&top, d).join(name).exists()).collect()
 }
+
+/// Whether `name` is the workspace root's `designs` folder or a path in it.
+pub(crate) fn design_path(root: &Path, name: &str) -> bool {
+    let top = crate::scope::top(root);
+    let place = crate::scope::dir(&top, root);
+    let folder = crate::design::DESIGNS_DIR;
+    if place.as_str() == folder {
+        return false;
+    }
+    let path = crate::file_name(&Path::new(&place).join(name));
+    path == folder || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A design file changes only through the design agent, never a file command.
+pub(crate) fn design_error<T>(name: &str) -> Result<T, Failure> {
+    error("E6002", name, "designs change through the design agent; agents can't change a design file directly")
+}

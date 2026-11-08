@@ -119,7 +119,7 @@ lists them):
   refs <name>...                what uses each symbol
   impact [name...]              what a change reaches, with its tests
   find <text>                   search all code
-  grep <text> [--in <path>]     search other files and settings
+  grep <text> [--in <path>]     search other files and settings; --in also names a text file over the watch limit
   submit                        save a patch or blocks from `text`, type-checked
   delete <name>...              remove unused symbols
   extract <name>... --to <mod>  move symbols to another module
@@ -132,6 +132,7 @@ lists them):
   read <path> [--lines a..b]    a file, or some of its lines
   write [path]                  one replacement, or no path: a patch of many edits
   move <from> <to>              move a file
+  design list | show <id>       the workspace's designs, and one whole
   work add | list | done        work records, kept across sessions
 Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's
 src/ and tests/ *.rs, are symbol-held source (`submit`, never `write`);
@@ -145,9 +146,16 @@ never `move` or `remove`; any other file, ignored or not: `read`, `write`,
 `move`, `remove`.
 
 Reviewing
-  Flag duplication and large modules, filing minor ones as tech debt.
+  Judge whether the task's goal and acceptance criteria are met.
+  Needs work only when they aren't, or there is a real bug or a hazardous
+  direction; an unlikely, harmless edge case never blocks on its own.
+  Say in a Summary when the direction is wrong or a follow-up task is warranted.
+  Flag duplication and large modules, but file minor ones as tech debt only
+  when fixing them clearly pays off; code repeated once or twice isn't tech
+  debt by itself.
   Don't allow cross-domain concerns in the same module.
-  Flag excessively long functions and dead code as tech debt.
+  Flag excessively long functions and dead code only under that bar.
+  Don't file tech debt for an unlikely, harmless edge case.
   Keep thoughts, decisions and directives out of code comments and the UI;
   keep details or decisions of implementation or development out of the UI.
 

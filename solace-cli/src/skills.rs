@@ -10,14 +10,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use serde_json::{json, Value};
 /// One skill the brief lists: its name, its one-line description, and the
-/// path to `read`. A skill with role ids belongs only to those roles; one
-/// with none belongs to every role, as skills always did.
+/// path to `read`. A skill with a `roles` key belongs only to the roles it
+/// names, and to none when it names none; one with no `roles` key belongs to
+/// every role, as skills always did.
 pub struct Skill {
     pub name: String,
     pub line: String,
     pub path: String,
     pub body: String,
     pub roles: Vec<String>,
+    /// Whether the skill file has a `roles` key.
     pub scoped: bool,
 }
 
@@ -48,12 +50,13 @@ pub fn list(root: &Path) -> Vec<Skill> {
         let (front, body) = front_matter(&text);
         let named = |k: &str| front.get(k).filter(|v| !v.is_empty()).cloned();
         let roles = roles_of(&front);
+        let scoped = front.contains_key("roles");
         out.push(Skill {
             name: named("name").unwrap_or(base_name),
             line: cap(&named("description").unwrap_or_else(|| first_line(body))),
             path,
             body: body.trim().to_string(),
-            scoped: !roles.is_empty(),
+            scoped,
             roles,
         });
     }
@@ -112,10 +115,10 @@ const ROLE_ADVICE: &str = "these skills are for this run's role; follow them";
 /// The most characters a skill saved from Settings may hold.
 const LIMIT: usize = 1000;
 
-/// A run's Skills section (D-27): `own`'s unscoped skills, one line each, and
-/// the full text of the skills assigned to `kind`'s role from every root. A
-/// skill for another role is left out, and so is an unscoped skill outside
-/// `own`, whose path would point somewhere the run can't read.
+/// A run's Skills section (D-27): `own`'s skills with no `roles` key, one line
+/// each, and the full text of the skills assigned to `kind`'s role from every
+/// root. A skill for another role is left out, and so is a skill with no key
+/// outside `own`, whose path would point somewhere the run can't read.
 pub fn section_for(roots: &[&Path], own: Option<&Path>, kind: &str) -> String {
     let role = crate::board::roles::for_run(kind);
     let mut seen: Vec<&Path> = vec![];
@@ -127,7 +130,7 @@ pub fn section_for(roots: &[&Path], own: Option<&Path>, kind: &str) -> String {
         }
         seen.push(root);
         for skill in list(root) {
-            if skill.roles.is_empty() {
+            if !skill.scoped {
                 if own == Some(*root) {
                     listed.push(format!("- {}: {} (`read {}`)", skill.name, skill.line, skill.path));
                 }
@@ -147,16 +150,24 @@ pub fn section_for(roots: &[&Path], own: Option<&Path>, kind: &str) -> String {
     out
 }
 
-/// The skills Settings manages: the single-file skills whose front matter
-/// names their roles.
+/// The skills Settings lists: every skill in the folder, whether Settings
+/// manages it, and whether it reaches every role.
 pub fn api(root: &Path) -> Value {
     let (dir, _) = location(root);
     let file_depth = dir.split('/').count() + 1;
     Value::Array(
         list(root)
             .into_iter()
-            .filter(|skill| skill.scoped && skill.path.split('/').count() == file_depth)
-            .map(|skill| json!({"name": skill.name, "description": skill.line, "body": skill.body, "roles": skill.roles}))
+            .map(|skill| {
+                json!({
+                    "name": skill.name,
+                    "description": skill.line,
+                    "body": skill.body,
+                    "roles": skill.roles,
+                    "managed": skill.scoped && skill.path.split('/').count() == file_depth,
+                    "all_roles": !skill.scoped,
+                })
+            })
             .collect(),
     )
 }
@@ -248,7 +259,8 @@ fn skill_name(value: Option<&str>) -> Result<String, Failure> {
     Ok(name.to_string())
 }
 
-/// The role ids a Settings save names, each one this Solace knows.
+/// The role ids a Settings save names, each one this Solace knows. An empty
+/// list is a skill no role receives.
 fn role_ids(value: &Value) -> Result<Vec<String>, Failure> {
     let mut out: Vec<String> = vec![];
     for id in value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::trim).filter(|id| !id.is_empty()) {
@@ -258,9 +270,6 @@ fn role_ids(value: &Value) -> Result<Vec<String>, Failure> {
         if !out.iter().any(|known| known == id) {
             out.push(id.to_string());
         }
-    }
-    if out.is_empty() {
-        return fail("Choose at least one role.");
     }
     Ok(out)
 }
@@ -278,11 +287,11 @@ fn fail<T>(message: impl std::fmt::Display) -> Result<T, Failure> {
     Err(Failure(message.to_string(), 1))
 }
 
-/// Whether a skill file is one Settings manages: its front matter gives it
-/// at least one role.
+/// Whether a skill file is one Settings manages: its front matter has a
+/// `roles` key, even when it names none.
 fn settings_skill(file: &Path) -> bool {
     fs::read_to_string(file).is_ok_and(|text| {
         let (front, _) = front_matter(&text);
-        !roles_of(&front).is_empty()
+        front.contains_key("roles")
     })
 }

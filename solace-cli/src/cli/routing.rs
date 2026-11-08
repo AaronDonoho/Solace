@@ -123,8 +123,8 @@ fn strategy_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budg
             "task" => "a strategy run replies with `strategy note`; task commands are refused",
             c if HOST.contains(&c) => "host command is unavailable in a run",
             _ => {
-                "a strategy run changes no code and only reads: strategy list | show | note, and view, inspect, \
-                 refs, find, grep, files and read (with --project <folder> for another project)"
+                "a strategy run changes no code and only reads: strategy list | show | note, design list | show, \
+                 and view, inspect, refs, find, grep, files and read (with --project <folder> for another project)"
             }
         };
         return crate::lockdown::error("E7010", command, why);
@@ -295,6 +295,7 @@ pub(crate) fn run_inner(
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["impact", names @ ..] => store.impact(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
+        ["design", rest @ ..] => crate::design::command(&crate::scope::top(root), rest, budget),
         ["delete", names @ ..] if !names.is_empty() => store.delete_all(names, budget),
         ["extract", rest @ ..] => store.extract(rest, budget),
         ["merge", rest @ ..] => store.merge(rest, budget),
@@ -312,7 +313,7 @@ pub(crate) fn run_inner(
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, \
+            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, design, submit, drafts, delete, \
              extract, merge, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
             a.join(" ")
         )),
@@ -541,11 +542,11 @@ fn settings_proposal(
     if a.first() != Some(&"write") {
         return Ok(SettingsWrite::None);
     }
-    let Some(file) =
-        a.get(1).map(|p| crate::file_name(Path::new(p))).filter(|p| settings_file(&store.root, p) || *p == "Cargo.toml")
+    let Some(file) = a.get(1).map(|p| crate::file_name(Path::new(p))).filter(|p| settings_file(&store.root, p) || *p == "Cargo.toml")
     else {
         return Ok(SettingsWrite::None);
     };
+    crate::lockdown::paths::reachable(&store.root, &file)?;
     let current = fs::read(store.root.join(&file)).unwrap_or_default();
     let proposed = edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
     if settings_file(&store.root, &file) || cargo_settings_changed(&current, &proposed) {

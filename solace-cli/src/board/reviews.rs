@@ -40,7 +40,8 @@ use crate::outside;
 use crate::extract::ahead;
 use crate::drafts;
 use rusqlite::OptionalExtension;
-
+use crate::store_core::checkpoint;
+use crate::store_core::checkpoint_pending;
 // Snapshot live rows only. Before-state rows never enter the semantic index.
 pub fn snapshot(s: &Store) -> Result<Value, Failure> {
     let mut out = json!({});
@@ -844,7 +845,7 @@ pub(crate) fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         st.db.execute("DELETE FROM board_touches WHERE task=?", [&tid])?;
         drafts::clear(st, &tid)?;
         drop_before(st, &tid)?;
-        outside::checkpoint(st)?;
+        checkpoint(st)?;
     }
     clear_reviews(s, &tid)?;
     end_runs(t, "reverted");
@@ -860,7 +861,7 @@ pub(crate) fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
         lockdown::recover(&st.root, &st, &[])?;
         outside::approve(&st, tid)?;
         drop_before(&st, tid)?;
-        match outside::checkpoint_pending(&st) {
+        match checkpoint_pending(&st) {
             Ok(false) => {}
             Ok(true) => pending.push(dir),
             Err(e) => failed.push((dir, e)),
@@ -908,12 +909,13 @@ fn last_review(t: &Value) -> Option<(String, String)> {
     last_run_note(t, "review", "reviewed")
 }
 
-/// What completing task `t` files as tech debt (D-112, D-199): its feature's
-/// open Tech Debt task (`techDebt: true`, not in a final column) with one
+/// What completing task `t` files as tech debt (D-112, D-199, D-231): its
+/// feature's open, unstarted Tech Debt task (`techDebt: true`, not in a final
+/// column, with no investigate, work or review run) with one
 /// `solace` note per finding of the last work run's summary and the last
 /// review's `### Tech debt`, naming the task and run they came from. With no
-/// open one, a new one is made in Planning of `t`'s home (its first column if
-/// it has none, D-132), with its scope, titled with just the feature's title.
+/// such task, a new one is made in Planning of `t`'s home (its first column if
+/// it has none, D-132), with its scope, titled `<feature title>: Tech Debt`.
 /// A task with no feature always gets a new one titled with just the completed
 /// task's title, with no feature or milestone. Returns the task with the
 /// counts of work-run and review items; None when neither lists tech debt.
@@ -943,7 +945,14 @@ pub(crate) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize, u
                 flow(&scope::path(top, o["home"].as_str().unwrap_or(".")))
                     .is_ok_and(|w| crate::board::task_model::column(&w, o)["final"] != true)
             };
-            let found = all_tasks(top)?.into_iter().find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o));
+            let unstarted = |o: &Value| {
+                !o["runs"]
+                    .as_array()
+                    .is_some_and(|runs| runs.iter().any(|r| matches!(r["kind"].as_str(), Some("investigate" | "work" | "review"))))
+            };
+            let found = all_tasks(top)?
+                .into_iter()
+                .find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o) && unstarted(o));
             match found {
                 Some(d) => d,
                 None => new_debt(top, t, Some(&feature))?,
@@ -1138,20 +1147,24 @@ fn review_recorded(t: &Value, rid: &str) -> Result<bool, Failure> {
 
 /// A new Tech Debt task for completed task `t`: in Planning of its home (its
 /// first column if it has none, D-132), with its scope. A `feature` names the
-/// task it serves and supplies its milestone and title; without one, it is
-/// titled after `t` and belongs to no feature or milestone.
+/// task it serves and supplies its milestone and its title followed by
+/// `: Tech Debt`; without one, it is titled after `t` and belongs to no feature
+/// or milestone.
 fn new_debt(top: &Path, t: &Value, feature: Option<&Value>) -> Result<Value, Failure> {
-    let named = feature.unwrap_or(t);
-    let title = named["title"].as_str().unwrap_or("").trim();
+    let title = match feature {
+        Some(f) => format!("{}: Tech Debt", f["title"].as_str().unwrap_or("").trim()),
+        None => t["title"].as_str().unwrap_or("").trim().to_string(),
+    };
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+    let home_dir = scope::dir(top, &home);
     let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
     let w = flow(&home)?;
     let first = planning_column(&w);
-    let mut d = new_task(title, TECH_DEBT_BODY, &first, rank);
+    let mut d = new_task(&title, TECH_DEBT_BODY, &first, rank);
     d["techDebt"] = json!(true);
     d["feature"] = t["feature"].clone();
     d["milestone"] = feature.map(|f| f["milestone"].clone()).unwrap_or(Value::Null);
-    d["scope"] = t["scope"].clone();
+    d["scope"] = json!(scope::of(t, &home_dir));
     d["home"] = t["home"].clone();
     Ok(d)
 }

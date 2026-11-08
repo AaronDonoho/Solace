@@ -985,7 +985,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   )
   use unexpected <- decode.optional_field("unexpected", False, decode.bool)
   use tech_debt <- decode.optional_field("techDebt", False, decode.bool)
-  use scope <- decode.optional_field("scope", [], decode.list(decode.string))
+  use scope <- decode.optional_field("scope", [], scope_decoder())
   use archived <- decode.optional_field(
     "archivedTime",
     False,
@@ -4627,4 +4627,16 @@ pub fn effort_for(models: List(Agent), id: String, effort: String) -> String {
     Ok(a) -> kept_effort(a, effort)
     Error(_) -> ""
   }
+}
+
+/// A task's project list; a task saved before scopes, or one whose list was
+/// stored empty, has none.
+fn scope_decoder() -> decode.Decoder(List(String)) {
+  decode.optional(decode.list(decode.string))
+  |> decode.map(fn(scope) {
+    case scope {
+      Some(projects) -> projects
+      None -> []
+    }
+  })
 }

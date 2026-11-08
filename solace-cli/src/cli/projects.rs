@@ -57,9 +57,9 @@ pub(crate) fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
             "E6007",
             command,
             if strategy_context().is_some() {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read)"
+                "`--project` only reads (view, inspect, refs, find, grep, files, read, design)"
             } else {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, \
+                "`--project` only reads (view, inspect, refs, find, grep, files, read, design) here; in a board run, \
                  it also changes the task's other projects"
             },
         );
@@ -138,6 +138,9 @@ pub(crate) fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: 
         (Some((tid, rid)), Some(own)) => Some(agent_guard(&crate::scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
         _ => None,
     };
+    if let ["design", rest @ ..] = a {
+        return crate::design::command(&root, rest, budget);
+    }
     let store = crate::Store::peek(&target)?;
     let settings = settings(&store.root)?;
     if let Some(out) = crate::lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {

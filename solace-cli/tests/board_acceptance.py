@@ -261,6 +261,8 @@ class Board(unittest.TestCase):
         t, prompt, replies = self.review(t)
         self.assertIn('Code and relevant context are unchanged', prompt)
         self.assertIn('must not turn Needs work into Looks good', prompt)
+        self.assertIn('A prior finding matters only if it still blocks under the Needs work bar', prompt)
+        self.assertIn('a new edge case that a fix exposes is mentioned', prompt)
         self.assertIn(first, replies[0])
         self.assertIn('No task entity changes', replies[0])
         baseline = t['runs'][-1]['id']
@@ -338,6 +340,8 @@ class Board(unittest.TestCase):
             t, prompt, _ = self.review(t, [{'command':'task note','text':note}])
             # Every review is asked for tech debt.
             self.assertIn('Put minor, non-blocking findings', prompt)
+            self.assertIn("Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria", prompt)
+            self.assertIn('file an item only when fixing it clearly pays off', prompt)
             # D-138: the prompt names the task's feature.
             self.assertEqual('\nFeature (the feature this task is part of; its state and body, then its latest direction):\n- Search\n- state: proposed\n' in prompt, feature)
             self.action(t, 'approve'); return self.action(t, 'complete')
@@ -345,7 +349,7 @@ class Board(unittest.TestCase):
         # A review's tech debt waits for completion, then makes the feature's Tech Debt task once.
         a = reviewed(True, 'first finding')
         [debt] = debts()
-        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search', 'planning', f['id']))
+        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search: Tech Debt', 'planning', f['id']))
         notes = self.get(debt)['notes']
         self.assertEqual(len(notes), 1)
         self.assertIn('task:'+a['id'], notes[0]['text']); self.assertIn('first finding', notes[0]['text'])
@@ -1045,6 +1049,9 @@ class Board(unittest.TestCase):
         self.assertTrue((pending/f'run-{rid}.json').exists());self.assertTrue((pending/f'command-{rid}.json').exists())
         self.assertEqual(self.rows(t['id']),[])
         self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        end=time.monotonic()+5
+        while self.rows(t['id'])!=['file:priv/a']:
+            self.assertLess(time.monotonic(),end);time.sleep(.02)
         self.assertEqual(self.rows(t['id']),['file:priv/a'])
         db=sqlite3.connect(self.root/'.solace/store.db')
         self.assertEqual(db.execute("SELECT COUNT(*) FROM board_touches WHERE task=?",[t['id']]).fetchone()[0],1)
@@ -1237,6 +1244,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        _,e=self.next_event(stream);self.assertEqual(e,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
@@ -1479,6 +1487,22 @@ class Board(unittest.TestCase):
             status,kind,_=self.raw('GET',page)
             self.assertEqual((status,kind),(200,'text/html'))
 
+    def test_a_design_link_finds_its_title_and_tab(self):  # D-234
+        (self.root/'designs').mkdir(exist_ok=True)
+        for design_id,tab in (('0123456789abcdef','ui'),('fedcba9876543210','architecture')):
+            design={'schemaVersion':1,'id':design_id,'title':'Home '+tab,'tab':tab,
+                    'elements':[{'id':'root','type':'screen','properties':{'width':'fill','height':'fill'},'children':[]}]}
+            (self.root/'designs'/(design_id+'.json')).write_text(json.dumps(design))
+        self.assertEqual(self.api('GET','/designs/find/0123456789abcdef'),{'id':'0123456789abcdef','title':'Home ui','tab':'ui-ux'})
+        self.assertEqual(self.api('GET','/designs/find/fedcba9876543210'),{'id':'fedcba9876543210','title':'Home architecture','tab':'architecture'})
+        status,_,body=self.raw('GET','/designs/find/1111111111111111')
+        self.assertEqual((status,json.loads(body)['code']),(404,'E7023'))
+        status,_,body=self.raw('GET','/designs/find/bad.id')
+        self.assertEqual((status,json.loads(body)['code']),(400,'E7001'))
+        # The link's own address loads the shell, which resolves it.
+        status,kind,_=self.raw('GET','/design/0123456789abcdef')
+        self.assertEqual((status,kind),(200,'text/html'))
+
     def test_milestones_and_features_are_root_records(self):  # D-87
         stream=self.stream()
         _,e=self.next_event(stream);self.assertIn('workflow',e)
@@ -1489,6 +1513,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        _,e=self.next_event(stream);self.assertEqual(e,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
         m=self.api('POST','/milestones',{'title':'1.0','targetDate':'2027-01-01'})
@@ -1522,6 +1547,7 @@ class Board(unittest.TestCase):
         _,personas=self.next_event(stream);self.assertEqual(personas,{'personas':[]})
         _,role_models=self.next_event(stream);self.assertIn('roleModels',role_models)
         _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
+        _,designs=self.next_event(stream);self.assertEqual(designs,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,hp=self.next_event(stream);self.assertEqual(hp,{'noProject':True,'tasks':[]})
         v=self.api('PUT','/vision',{'text':'# Why\nFor teams.','base':e['vision']['revision']})
@@ -1544,6 +1570,7 @@ class Board(unittest.TestCase):
         self.assertEqual(e,{'personas':[]})
         self.assertIn('roleModels',self.next_event(stream)[1])
         self.assertEqual(self.next_event(stream)[1],{'strategyRuns':[]})
+        self.assertEqual(self.next_event(stream)[1],{'designs':[]})
         self.assertEqual(self.next_event(stream)[1],{'noProject':True,'tasks':[]})
         p=self.api('POST','/personas',{'name':'  Ada  ','objectives':'Ship','tools':'Rust','concerns':'Risk','other':'Notes'})
         self.assertEqual((p['name'],p['objectives'],p['tools'],p['concerns'],p['other']),('Ada','Ship','Rust','Risk','Notes'))
