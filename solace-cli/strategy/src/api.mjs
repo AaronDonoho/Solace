@@ -91,14 +91,6 @@ export function drag_card(root, id, y, done) {
   globalThis.addEventListener('pointercancel', onCancel);
   globalThis.addEventListener('keydown', onKey);
 }
-// The planning panel follows its newest message (D-118): the run's end, right
-// above the pinned message box, is kept at the bottom of the panel's scroll area.
-const reach = 48;
-export function near_end(body) {
-  const end = body?.querySelector?.('.plan-end');
-  if (!end) return true;
-  return end.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom < reach;
-}
 export function scroll_plan(root) {
   const body = root?.querySelector?.('.plan-body');
   const end = body?.querySelector('.plan-end');
@@ -127,10 +119,6 @@ export function reveal_card(root, kind, id, tries = 20) {
 }
 // The shadow root before the page has rendered: the editor's tools do nothing yet.
 export function no_root() { return null; }
-// A task's closedTime, in seconds, as the reader's local date and time.
-export function clock(seconds) {
-  return new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-}
 // The two lines of a date column: its date, then its time.
 export function clock_date(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { dateStyle: 'medium' });

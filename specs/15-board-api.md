@@ -1,6 +1,6 @@
 # Spec 15: Task Board
 
-**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25, D-87, D-88, D-100, D-93, D-98, D-99, D-112, D-113, D-114, D-130 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25, D-87, D-88, D-100, D-93, D-98, D-99, D-112, D-113, D-114, D-130, D-240 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 Humans direct agents through tasks on a board. Solace owns each task's state, starts and stops agents, and enforces the workflow. A board only shows tasks and passes on what the human asks for. The API is the smallest one a Solace-compatible board needs. Solace ships a default board built only on this API; any other board, or an adapter for one, can replace it.
 
@@ -77,6 +77,19 @@ A **strategy run** is an agent planning with the human on the Strategy page. It 
 | `questions` | As a task's `questions`, each with a `proposal` (§6) and `time`: when it was asked, set by the server (D-118; none on a question saved before) |
 
 Its scope is every task, feature and milestone, the vision and every persona; it reads code in any project and changes none. Every change it proposes waits for the human's approval.
+
+### Design runs (D-240)
+
+A **design run** is an agent working out a design with the human on the Design page. It is a workspace run like a strategy run: it belongs to no task, and each is one JSON file at `<root>/.solace/design/runs/<id>.json`, written atomically by the task server alone, with ids assigned as for tasks.
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `model`, `effort?`, `state`, `started`, `ended?`, `outcome?`, `log` | As a task's run (§1 `runs`); `kind` is always `design`, `outcome` is `planned` or `stopped` |
+| `context` | The whole Design page: `{kind: "page"}` |
+| `notes` | As a strategy run's: the human's messages, the agent's replies, and `solace` notes |
+| `questions` | As a strategy run's; a design proposal's `proposal` holds element operations and the design it changes (D-241) |
+
+One design run is open at a time. Its scope is every design, the vision and every persona; it reads code in any project and changes none. A design is reference material and an element is its primitive. It proposes element operations with `design propose` (D-241); a proposal is a question for the human, and nothing is saved until one is accepted; an accept saves it through the design save path as a version sourced from the run (D-243).
 
 ## 2. Workflow configuration
 
@@ -180,7 +193,7 @@ Two rules hold for every workflow:
 | `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Saves the answer and continues the same waiting run once all questions are answered, unless paused; the answers go straight to the waiting agent, and no workflow action is involved (D-88). For a settings question, `Approve` writes `proposed` if `solace.toml` still equals `base` and is valid; otherwise the answer records that it was not applied |
 | `GET /agent-settings` | The machine-wide agent behavior settings, `{involvement, detail, asking}` (§6) |
 | `POST /agent-settings` `{key, value}` | Saves one agent behavior choice; the reply is the new settings. An unknown key or value is `E7001`, and every other system setting stays as it is (D-215) |
-| `GET /roles` | The agent roles, each with its stable id, display name, purpose and the run kinds it covers (§6, D-220) |
+| `GET /roles` | The agent roles, each with its stable id, display name, purpose and the run kinds it covers (§6, D-220, D-239) |
 | `GET /role-models` | The model each agent role uses, as `[{role, name, default}]`; a missing choice or a stored value that isn't text is empty |
 | `POST /role-models` `{role, default}` | Saves one agent role's default model; the reply is the updated array. An unknown role or a non-text default is `E7001`; every other system setting stays as it is, but the role's old backup is removed. Unknown model ids are kept |
 | `GET /models` | The models this Solace install knows, each with `agent`, `efforts` (the efforts an action may choose; empty for custom runners), `available` and, when unavailable, `reason` (§6) |
@@ -247,7 +260,7 @@ At the root only.
 
 | Request | Effect |
 | --- | --- |
-| `GET /build/plan` | Every project's build recipe, in build order: `[{project, source, after, outputs, steps: [{name, run, timeout, command?}]}]`. `source` is `declared` (its `solace.toml` `[build]`) or `default` (from its files); a project with neither is left out. A `command` step's `run` is that command's. An invalid recipe, an `after` naming no project, or a cycle is 409 with `E6020` |
+| `GET /build/plan` | Every project's build recipe, in build order: `[{project, source, after, outputs, stale, steps: [{name, run, timeout, command?}]}]`. `source` is `declared` (its `solace.toml` `[build]`) or `default` (from its files); a project with neither is left out. `stale` is null when current, else the reason: a missing or unreadable output fingerprint, an output that does not match it, or a source part changed since it was written (D-242). A `command` step's `run` is that command's. An invalid recipe, an `after` naming no project, or a cycle is 409 with `E6020` |
 
 ### Strategy runs (D-93)
 
@@ -264,6 +277,21 @@ These answer at the root only.
 | `POST /strategy/runs/{rid}/stop` | Kills its agent and ends it with outcome `stopped`, with the same transcript note |
 
 **Events.** The root's `/events` sends `{strategyRun}` in full after every change, with no `project` field, on the root task log. A new connection's replay sends `{strategyRuns: [...]}` (the list `GET /strategy/runs` returns) after `{personas}`.
+
+### Design runs (D-240)
+
+These answer at the root only.
+
+| Request | Effect |
+| --- | --- |
+| `GET /design/runs` | All design runs, without `notes` |
+| `GET /design/runs/{rid}` | One run in full, plus `transcript` as `GET /tasks/{id}/runs/{rid}` gives it |
+| `POST /design/runs` `{model?, effort?, text, context}` | Starts a run; `text` is required (`E7001`) and is its first note. `context` is `{kind: "page"}` or absent; any other context is refused (`E7001`). A request naming no model uses the Designer role's model (`role_models.designer.default`); with none there it is `E7001`. Refused while a design run is open (`E7003`), or for an unavailable model (`E7011`) |
+| `POST /design/runs/{rid}/notes` `{text}` | The human's next message: the waiting agent gets it. Refused once the run has ended (`E7003`) |
+| `POST /design/runs/{rid}/end` | Ends the open run with outcome `planned` (`E7003` if ended); its notes become one transcript note, as `end_discussion` does (§2) |
+| `POST /design/runs/{rid}/stop` | Kills its agent and ends it with outcome `stopped`, with the same transcript note |
+
+**Events.** The root's `/events` sends `{designRun}` in full after every change, with no `project` field, on the root task log. A new connection's replay sends `{designRuns: [...]}` (the list `GET /design/runs` returns) after `{strategyRuns}`.
 
 `solace serve` also serves the default board at `/` and a guide for humans as the shell's Knowledgebase page at `/knowledgebase`; `/guide` redirects there (D-140). The Workspace page, where existing code is migrated, is at `/workspace`; its old address `/migrate` still serves the shell, which replaces it with `/workspace` (D-146).
 
@@ -356,6 +384,7 @@ When a task reaches a final column, the records of the state before it are dropp
   - `strategy note`: the agent's reply; it waits for the human's next note, as a discussion's `task note` does (§2), and a plain-text reply is its turn (D-76);
   - `strategy task|feature|milestone [<id>]` with the fields in `text` as JSON (an id edits that record, none creates one), and `strategy vision` with the new text in `text`: a **proposal**. The fields are those of `POST`/`PATCH` in §4 (D-105): a task `title, body, feature, milestone, dependsOn`, and `scope` only to create, where every folder must be a project of the workspace (D-129): one that isn't is refused when the proposal is sent, before the human is asked (`E7001`), naming the folder and the workspace's projects; a feature `title, body, milestone, state`; a milestone `title, body, targetDate, state`; `rank` only to edit. Any other field is refused (`E7001`), naming it and those the kind takes; the brief and `help strategy` list them. It is checked as the request would be, then becomes a question on the run with options Approve and Reject, and for a new task with no `feature` also Approve to Planning, and `proposal: {kind, id?, fields, base?, reopens?, before?}`, and the agent waits. `base` is the vision's revision when proposed. `before` is the record's current value of each field the proposal names, as the request's values are; for `strategy vision`, the vision's text under `text` (D-115). A create carries none, and Approve ignores `before`. The human sees only what changes: an edit shows the fields that differ from `before`, a short one as `old → new` with a record id by its title and the `body` as a line diff in its order — the lines the two bodies share anywhere, found as a longest-common-subsequence match, shown in place with one line of context on each side of a change and each run of other unchanged lines collapsed to one muted line, removed lines tinted for deletion, added lines tinted for addition, no line struck through, lines compared with their surrounding space removed and blank lines left out, so a body differing only in those is unchanged — with a toggle to the new body as Markdown; a proposal with nothing to change, the vision included, says "No change" (D-116). A create, and a proposal saved without `before`, show every field (D-115), a vision its text as Markdown. `reopens` lists the `complete` or `canceled` feature and milestone a task proposal links to; Approve also sets them `upcoming`. Approve applies the proposal as the request would be applied, with the same refusals (`E7003`, `E7004`, `E7023`–`E7027`); a refused apply changes nothing and the answer says why. Approve to Planning does the same for a new task with no `feature`, but creates it in `planning` of its home project (its first column when the workflow has none, D-132), and its answer is `Approved and applied: created task:<id> (Planning)`. Approve still creates the task in Backlog. Reject changes nothing. Each answer adds a `solace` note to the run, and an applied task proposal adds one to the task, naming the run. The agent gets the answer, with the new record's id for a create. Like `task ask`, a proposal must be the only command in its call (`E7017`).
   - Waiting doesn't count toward the timeout. A strategy command outside a strategy run is refused (`E7001`).
+- A **design run** (D-240) is started from the Design page (§4), not by an action and never on a task. Its context is the whole Design page, and one design run is open at a time. It uses the Designer role's model when the request names none, and the designer's skills. Its brief is short: the Designer role text (a design is reference material, the element is the primitive, and a change reaches a design only through a proposal the human accepts), the vision, every persona, and the 10 most recent decision titles from `DECISIONS.md`. Its commands are `design list`, `design show`, `design note`, `design wait` and `design propose` (D-241). `design propose [<id>]` takes `operations` as a JSON object in `text`, plus `title` and `tab` when creating a design; each operation adds, removes, moves or sets a property on an element, and the result is applied to a copy and checked with `design.validate` (`E7033`, naming the element). The proposal becomes a question on the run with `proposal: {kind:"design", id?, title?, tab?, operations, base?}`, options Approve and Reject, and the agent waits; a run keeps at most one unanswered proposal per design. Accepting a design proposal checks it again and saves it through the design save path with the run as the version's source; a newest version that differs from the proposal's `base` refuses the accept (`E7026`) and writes nothing, so the agent proposes again. Rejecting writes nothing, and an ended run's proposal can't be answered (D-243). A plain-text reply is its turn, as a strategy run's is, and waiting doesn't count toward the timeout.
 - A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
 - **Pause and continuation:** answering a paused run saves the answers without continuing it; `resume` continues it once all questions are answered. Answer submission never starts a new agent, replaces a run, grants a stamp or reverts work. Answering continues the waiting run directly, in any column and any workflow (D-88). Repeated answer submissions do not start another run.
 - **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.

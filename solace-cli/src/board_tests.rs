@@ -2782,7 +2782,7 @@ fn roles_api_serves_the_role_set_and_run_kinds() {
     let roles = board.projects_api("GET", "/roles", &json!({})).unwrap();
     let listed = roles.as_array().unwrap();
     let ids: Vec<&str> = listed.iter().map(|role| role["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["strategist", "investigator", "worker", "reviewer", "coordinator"]);
+    assert_eq!(ids, ["strategist", "investigator", "worker", "reviewer", "coordinator", "designer"]);
     for (kind, id) in [
         ("strategy", "strategist"),
         ("investigate", "investigator"),
@@ -2790,6 +2790,7 @@ fn roles_api_serves_the_role_set_and_run_kinds() {
         ("work", "worker"),
         ("new_work", "worker"),
         ("review", "reviewer"),
+        ("design", "designer"),
     ] {
         let found = listed.iter().find(|role| role["runs"].as_array().unwrap().iter().any(|run| run.as_str() == Some(kind)));
         assert_eq!(found.map(|role| role["id"].as_str().unwrap()), Some(id), "{kind}");
@@ -2918,7 +2919,7 @@ fn role_models_api_round_trips_and_falls_back() {
         let board = event_board(root.to_path_buf());
         let empty = board.projects_api("GET", "/role-models", &json!({})).unwrap();
         let listed = empty.as_array().unwrap();
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 6);
         assert!(listed.iter().all(|role| role["default"] == "" && role.get("backup").is_none()));
         assert_eq!(listed.iter().find(|role| role["role"] == "worker").unwrap()["name"], "Worker");
         let saved = board.projects_api("POST", "/role-models", &json!({"role": "worker", "default": "cc"})).unwrap();
@@ -2946,7 +2947,7 @@ fn role_models_api_round_trips_and_falls_back() {
         .unwrap();
         let broken = board.projects_api("GET", "/role-models", &json!({})).unwrap();
         let listed = broken.as_array().unwrap();
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 6);
         let worker = listed.iter().find(|role| role["role"] == "worker").unwrap();
         assert_eq!(worker["default"].as_str(), Some(""));
         assert!(worker.get("backup").is_none());
@@ -2959,6 +2960,14 @@ fn role_models_api_round_trips_and_falls_back() {
         let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(v["role_models"]["worker"]["default"].as_str(), Some("new"));
         assert!(v["role_models"]["worker"].get("backup").is_none(), "an old backup is removed on save");
+        let saved = board.projects_api("POST", "/role-models", &json!({"role": "designer", "default": "cc-design"})).unwrap();
+        let designer = saved.as_array().unwrap().iter().find(|role| role["role"] == "designer").unwrap();
+        assert_eq!(designer["default"].as_str(), Some("cc-design"));
+        let reloaded = board.projects_api("GET", "/role-models", &json!({})).unwrap();
+        let designer = reloaded.as_array().unwrap().iter().find(|role| role["role"] == "designer").unwrap();
+        assert_eq!(designer["default"], "cc-design");
+        let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(v["role_models"]["designer"]["default"].as_str(), Some("cc-design"));
     });
 }
 
@@ -3112,5 +3121,48 @@ fn design_reads_work_in_every_run_kind() {
         let args: Vec<String> = command.split(' ').map(String::from).collect();
         let out = crate::cli::routing::with_root(&p.root, || crate::cli::projects::read_project(".", &args, 4000)).unwrap();
         assert!(out.contains(id), "{command}: {out}");
+    }
+}
+
+/// D-240: a design brief is short and carries the Designer role text, the
+/// vision, personas, recent decisions and the designer's skills, with no
+/// command the run can't use yet.
+#[test]
+fn a_design_brief_holds_the_design_and_the_workspace() {
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n"),
+    ]);
+    let top = scope::top(&p.root);
+    std::fs::create_dir_all(top.join(".solace/strategy")).unwrap();
+    std::fs::write(top.join(".solace/strategy/vision.md"), "A calm, clear app.\n").unwrap();
+    std::fs::write(
+        top.join(".solace/strategy/personas.json"),
+        concat!(r#"{"personas":[{"name":"Ada","objectives":"Ship it.","tools":"","concerns":"","other":""}],"#, r#""retired":[]}"#),
+    )
+    .unwrap();
+    std::fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\n## Notes\n").unwrap();
+    let run = json!({"context":{"kind":"page"},"notes":[{"author":"human","text":"Make a login screen"}]});
+    let brief = crate::board::strategy::design_brief(&top, &run, "engineer", "standard", "balanced");
+    assert!(brief.contains(crate::board::strategy::DESIGN_ROLE), "{brief}");
+    for text in ["A calm, clear app.", "Ada\n  Objectives: Ship it.", "- D-1 First thing", "Layout and color.", "Make a login screen"] {
+        assert!(brief.contains(text), "{text}: {brief}");
+    }
+    for guidance in [
+        "reference material",
+        "element is the primitive",
+        "proposal the human accepts",
+        "An Approve answer means the design was saved",
+        "a refusal means the design changed after you proposed it",
+        "a Reject answer means nothing was saved",
+    ] {
+        assert!(brief.contains(guidance), "{guidance}: {brief}");
+    }
+    // The brief names only the commands the run can use.
+    for word in ["strategy note", "strategy task", "strategy vision", "submit", "`test`", "session start", "task ask"] {
+        assert!(!brief.contains(word), "{word}: {brief}");
+    }
+    for word in ["design note", "design wait", "design propose", "`design list`", "`strategy list`", "`strategy show"] {
+        assert!(brief.contains(word), "{word}: {brief}");
     }
 }

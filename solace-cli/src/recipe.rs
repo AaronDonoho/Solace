@@ -1,12 +1,11 @@
 //! Build recipes (D-131): how each project builds, declared in its
 //! `solace.toml` `[build]` or taken from the files it has, and the order the
 //! workspace builds them in.
-//! A passing `run` of a recipe's last step records what it built (D-166), so
-//! `build plan` judges staleness by contents, not file times.
+//! A recipe's output carries a committed fingerprint beside it (D-242): the hash of the
+//! output and of each source part. `build plan` judges staleness only by that fingerprint.
 
 use super::*;
 use std::path::{Component, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 use serde_json::json;
@@ -16,11 +15,7 @@ const TIMEOUT: i64 = 120;
 
 /// What a project's outputs are built from (D-159): its sources, and the manifests whose
 /// contents reach the build.
-const SOURCES: [&str; 4] = ["src", "gleam.toml", "package.json", "bun.lock"];
-
-/// A source newer than an output by less than this counts as the same build: `git checkout`
-/// writes files milliseconds apart, while an edit that needs a rebuild comes seconds later.
-const FRESH: Duration = Duration::from_secs(5);
+const SOURCES: [&str; 5] = ["src", "gleam.toml", "package.json", "bun.lock", "manifest.toml"];
 
 /// One step of a recipe: what it runs, and the command it reuses, if any.
 #[derive(Debug, Clone, PartialEq)]
@@ -354,17 +349,6 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// The newest modification time at `path`, a file or a folder tree.
-fn newest(path: &Path) -> Option<SystemTime> {
-    let own = fs::metadata(path).and_then(|m| m.modified()).ok();
-    // A symlink counts by its target's time and isn't followed: one inside `src` pointing up the
-    // tree would recurse until the stack overflows.
-    let entry = |e: fs::DirEntry| {
-        if e.file_type().is_ok_and(|t| t.is_symlink()) { fs::metadata(e.path()).and_then(|m| m.modified()).ok() } else { newest(&e.path()) }
-    };
-    fs::read_dir(path).into_iter().flatten().flatten().filter_map(entry).chain(own).max()
-}
-
 /// The projects whose files the project at `root` builds from: itself, and each path
 /// dependency its `gleam.toml` lists.
 fn built_from(root: &Path) -> Vec<PathBuf> {
@@ -374,43 +358,9 @@ fn built_from(root: &Path) -> Vec<PathBuf> {
     [lexical(root)].into_iter().chain(paths.map(|p| lexical(&root.join(p)))).collect()
 }
 
-/// The recipe whose last step is `command`, when it names outputs (D-166): a passing `run` of
-/// that command records what it built.
-fn recording(top: &Path, project: &str, command: &str) -> Result<Option<Recipe>, Failure> {
-    let Some(r) = of(top, project)? else { return Ok(None) };
-    Ok((!r.outputs.is_empty() && r.steps.last().and_then(|s| s.command.as_deref()) == Some(command)).then_some(r))
-}
-
-/// Each source part of the project at `root`, and its hash now (D-166).
-fn source_hashes(top: &Path, root: &Path) -> Value {
+/// Each source part of the project at `root`, and its hash now (D-242).
+pub(crate) fn source_hashes(top: &Path, root: &Path) -> Value {
     Value::Object(source_parts(top, root).into_iter().map(|(name, part)| (name, json!(part_hash(&part)))).collect())
-}
-
-/// D-166: what a recording build's `sources` hold, hashed now. The caller takes it before the
-/// command runs, so a source the build itself changes isn't recorded as built. `None` when this
-/// run records nothing.
-pub fn built_sources(top: &Path, project: &str, command: &str) -> Result<Option<Value>, Failure> {
-    if recording(top, project, command)?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(source_hashes(top, &scope::path(top, project))))
-}
-
-/// D-166: a passing `run` of a recipe's last step `command` records what it built in the project's
-/// `.solace/built.json`: the hash of each output now, and of each source part as `sources` held it.
-/// A source touched without changing, or a file added later, is then judged by contents, not times.
-pub fn record_built(top: &Path, project: &str, command: &str, sources: Value) -> Result<(), Failure> {
-    let Some(r) = recording(top, project, command)? else { return Ok(()) };
-    let root = scope::path(top, project);
-    let mut outputs = serde_json::Map::new();
-    for o in &r.outputs {
-        // An output the command didn't make leaves the file-time rule in charge.
-        let Ok(bytes) = fs::read(root.join(o)) else { return Ok(()) };
-        outputs.insert(o.clone(), json!(sha256(bytes)));
-    }
-    fs::create_dir_all(root.join(".solace"))?;
-    fs::write(root.join(".solace/built.json"), json!({"command": command, "outputs": outputs, "sources": sources}).to_string())?;
-    Ok(())
 }
 
 /// The source parts of the project at `root` (D-159): its own and its path dependencies'
@@ -428,7 +378,7 @@ fn source_parts(top: &Path, root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// The files below `path`, by relative name and contents; a symlink counts as the file it names
-/// and isn't followed into a folder, as in `newest`.
+/// and isn't followed into a folder.
 fn fingerprints(path: &Path, rel: &Path, out: &mut Vec<(String, Vec<u8>)>) {
     match fs::read_dir(path) {
         Ok(read) => {
@@ -452,7 +402,7 @@ fn fingerprints(path: &Path, rel: &Path, out: &mut Vec<(String, Vec<u8>)>) {
     }
 }
 
-/// The hash of a source part (D-166): the names and contents of its files, sorted.
+/// The hash of a source part (D-242): the names and contents of its files, sorted.
 fn part_hash(path: &Path) -> String {
     let mut files = vec![];
     fingerprints(path, Path::new(""), &mut files);
@@ -467,52 +417,63 @@ fn part_hash(path: &Path) -> String {
     sha256(blob)
 }
 
-/// D-166: what the recorded build says changed since it ran. `None` when there is no record or an
-/// output isn't the recorded one (it was rebuilt some other way): the caller falls back to file
-/// times. `Some(None)` means the record applies and nothing changed.
-fn recorded_change(root: &Path, r: &Recipe, parts: &[(String, PathBuf)]) -> Option<Option<String>> {
-    let record: Value = jsonx::read_opt(&root.join(".solace/built.json"))?;
-    // The record is for the last step as it was: a recipe that now names another command
-    // says nothing about this build.
-    if record["command"].as_str() != r.steps.last().and_then(|s| s.command.as_deref()) {
-        return None;
-    }
-    for o in &r.outputs {
-        let bytes = fs::read(root.join(o)).ok()?;
-        if record["outputs"][o.as_str()].as_str() != Some(sha256(bytes).as_str()) {
-            return None;
-        }
-    }
-    let changed: Vec<String> = parts
-        .iter()
-        .filter(|(name, part)| record["sources"][name.as_str()].as_str() != Some(part_hash(part).as_str()))
-        .map(|(name, _)| name.clone())
-        .collect();
-    Some((!changed.is_empty()).then(|| format!("{} changed since {} was built", changed.join(", "), r.outputs.join(", "))))
-}
-
-/// Why a recipe's outputs need its steps run (D-159, D-166): one is missing, or a source of the
-/// project or of a path dependency changed since it was built. `None` when they are current or
-/// the recipe names no outputs.
+/// Why a recipe's outputs need its steps run (D-242): one has no fingerprint, or its fingerprint
+/// or source parts changed. `None` when they are current or the recipe names no outputs.
 fn stale(top: &Path, r: &Recipe) -> Option<String> {
     let root = scope::path(top, &r.project);
-    let mut built: Option<SystemTime> = None;
-    for o in &r.outputs {
-        match fs::metadata(root.join(o)).and_then(|m| m.modified()) {
-            Ok(t) => built = Some(built.map_or(t, |b| b.min(t))),
-            Err(_) => return Some(format!("{o} is missing")),
+    let parts = source_parts(top, &root);
+    let sources = source_hashes(top, &root);
+    for output in &r.outputs {
+        if let Some(change) = fingerprint_change(&root, output, &parts, &sources) {
+            return Some(change);
         }
     }
-    let built = built?;
-    let parts = source_parts(top, &root);
-    if let Some(change) = recorded_change(&root, r, &parts) {
-        return change;
-    }
-    let changed: Vec<String> =
-        parts.iter().filter(|(_, part)| newest(part).is_some_and(|t| t > built + FRESH)).map(|(name, _)| name.clone()).collect();
-    (!changed.is_empty()).then(|| format!("{} changed after {} was built", changed.join(", "), r.outputs.join(", ")))
+    None
 }
 
 #[cfg(test)]
 #[path = "recipe_tests.rs"]
 mod tests;
+
+/// Why an output needs its steps run (D-242): its fingerprint is missing or unreadable, the output
+/// changed, or a source part changed since the fingerprint was written. `None` when it is current.
+fn fingerprint_change(root: &Path, output: &str, parts: &[(String, PathBuf)], sources: &Value) -> Option<String> {
+    let name = format!("{output}.fingerprint");
+    let bytes = match fs::read(root.join(&name)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(format!("{name} is missing")),
+        Err(_) => return Some(format!("{name} can't be read")),
+    };
+    let Ok(record) = serde_json::from_slice::<Value>(&bytes) else { return Some(format!("{name} can't be read")) };
+    let Ok(output_bytes) = fs::read(root.join(output)) else { return Some(format!("{output} is missing")) };
+    if record["output"].as_str() != Some(sha256(output_bytes).as_str()) {
+        return Some(format!("{output} does not match {name}"));
+    }
+    let changed: Vec<String> = parts
+        .iter()
+        .filter(|(source, _)| record["sources"][source.as_str()] != sources[source.as_str()])
+        .map(|(source, _)| source.clone())
+        .collect();
+    (!changed.is_empty()).then(|| format!("{} changed since {output} was built", changed.join(", ")))
+}
+
+/// The outputs of a recipe whose last step runs `command`, when a passing `run` can record them.
+pub(crate) fn last_step_outputs(v: &toml::Value, command: &str) -> Option<Vec<String>> {
+    check(v).ok()?;
+    let build = v.get("build")?;
+    let last = build.get("steps")?.as_array()?.last()?;
+    (last.get("command").and_then(|c| c.as_str()) == Some(command))
+        .then(|| argv(build.get("outputs")))
+        .filter(|outputs| !outputs.is_empty())
+}
+
+/// Records each output's hash and the sources hashed before its step ran (D-166, D-242).
+pub(crate) fn write_fingerprints(root: &Path, outputs: &[String], sources: &Value) -> Result<(), Failure> {
+    for output in outputs {
+        let Ok(bytes) = fs::read(root.join(output)) else { continue };
+        let record = json!({"output": sha256(bytes), "sources": sources});
+        let name = format!("{output}.fingerprint");
+        crate::fsx::write_atomic(&root.join(name), format!("{}\n", serde_json::to_string_pretty(&record).unwrap()))?;
+    }
+    Ok(())
+}

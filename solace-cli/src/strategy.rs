@@ -21,41 +21,9 @@ use crate::board::setup::system;
 use crate::board::setup::chosen_model;
 use crate::board::runs::REJECTED;
 use crate::board::runs::failed_step_line;
-use crate::board::roles::STRATEGY_RUN;
-/// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
-/// conversation, in a folder beside the run's log, removed after.
+/// Runs strategy run `rid`'s agent until it exits.
 pub(crate) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
-    let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-    if run["state"] == "ended" {
-        return Ok(());
-    }
-    let config = system()?;
-    let m = chosen_model(&config, &run)?;
-    let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
-    let log = PathBuf::from(run["log"].as_str().unwrap_or(""));
-    let dir = log.with_extension("");
-    fs::create_dir_all(&dir)?;
-    let involvement = super::setup::involvement(&config);
-    let detail = super::setup::detail(&config);
-    let asking = super::setup::asking(&config);
-    let prompt = strategy_brief(top, &run, involvement, detail, asking);
-    super::delivery::mark_strategy_brief(top, &run)?;
-    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY_RUN, rid], timeout);
-    let supervised = launched.and_then(|mut child| {
-        supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
-    });
-    let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
-    // A strategy agent that replied in plain text took its turn: its reply
-    // answers like a finished run, so it clears a mark the same way.
-    let outcome = match &supervised {
-        Err(Failure(_, REPLIED)) => Some("planned".to_string()),
-        _ => outcome,
-    };
-    agents::after_run(&m, &log, run["started"].as_u64().unwrap_or(0), outcome.as_deref());
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    supervised.map(drop)
+    workspace_process(top, rid, strategy_brief)
 }
 /// A strategy run's role (Spec 15 §6).
 pub(super) const STRATEGY_ROLE: &str = concat!(
@@ -155,24 +123,7 @@ pub(super) fn strategy_brief(top: &Path, run: &Value, involvement: &str, detail:
     // The workspace's skills (D-27): role skills in full, the rest listed.
     out += &skills::section_for(&[top], own.then_some(top), "strategy");
     out += &format!("A proposed task's `scope` takes only these project folders: {}.\n", projects.join(", "));
-    let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
-    let titles: Vec<String> =
-        decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
-    if !titles.is_empty() {
-        let how = if own {
-            "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one"
-        } else {
-            "titles only: the file is in no project, so this run can't read it"
-        };
-        // The most recent only, so the brief stays short as decisions accumulate.
-        let earlier = titles.len().saturating_sub(RECENT_DECISIONS);
-        let rest = match earlier {
-            0 => String::new(),
-            n if own => format!("\n… {n} earlier decisions: `grep D-` lists them."),
-            n => format!("\n… {n} earlier decisions not shown."),
-        };
-        out += &format!("\nRecent decisions (titles from DECISIONS.md; {how}):\n{}{rest}\n", titles[earlier..].join("\n"));
-    }
+    out += &recent_decisions(top, own);
     let notes: Vec<String> = run["notes"]
         .as_array()
         .map(|ns| {
@@ -455,23 +406,7 @@ fn number_list(numbers: &[u64]) -> String {
 /// Waits until strategy run `rid`'s agent may act, taking no project lock: an
 /// ended run runs nothing, and while it waits for the human only `strategy` passes.
 pub fn strategy_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
-    loop {
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return err("E7003", "run ended");
-        }
-        if run["state"] == "waiting" && a.first() != Some(&"strategy") {
-            if !tasks::serving(top) {
-                return err("E7003", "the run waits for the human and no board server is running; stop now");
-            }
-            if crate::board::delivery::pending_strategy_reply(&run) {
-                return err("E7003", "the human replied; call `strategy wait` to receive it");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        return Ok(());
-    }
+    run_guard(top, rid, a, "strategy")
 }
 /// `strategy list | show | note` in strategy run `rid`, which `strategy_guard` let act.
 pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
@@ -589,24 +524,7 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
 /// Holds a strategy run's reply until the human writes again or ends the run,
 /// as `wait_discussion` does. Waiting doesn't count toward the timeout.
 pub(crate) fn wait_strategy(top: &Path, rid: &str, limit: Option<Duration>) -> Out {
-    let started = std::time::Instant::now();
-    loop {
-        std::thread::sleep(Duration::from_millis(50));
-        // No server, so the human can't reply: return rather than wait forever.
-        if !tasks::serving(top) {
-            return err("E7003", "the board server stopped while waiting");
-        }
-        if limit.is_some_and(|limit| started.elapsed() > limit) {
-            return Ok(super::delivery::WAIT_AGAIN.into());
-        }
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
-        }
-        if let Some(reply) = super::delivery::claim_strategy_reply(top, rid)? {
-            return Ok(reply);
-        }
-    }
+    wait_run(top, rid, limit, "strategy")
 }
 
 #[cfg(test)]
@@ -734,15 +652,148 @@ fn run_header(run: &Value) -> String {
     format!("{} {} {} {}", field("id"), field("kind"), field("model"), outcome)
 }
 
-/// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
-/// is its turn: a fresh agent, briefed with every note, takes the next one.
 pub(super) fn start_strategy(top: PathBuf, rid: String) {
+    start_workspace_agent(top, rid, strategy_brief);
+}
+
+/// A design run's role (Spec 15 §6, D-240).
+pub(super) const DESIGN_ROLE: &str = concat!(
+    "Work out a design with the human on the Design page: the interface the project should have. ",
+    "A design is reference material, not code: you read it and reason about it. ",
+    "The element is the primitive: a design is screens and the elements in them, not files, modules or symbols. ",
+    "You change a design only through a proposal the human accepts; a proposal is never applied by itself. ",
+    "An Approve answer means the design was saved and names its version; a refusal means the design changed after you proposed it, ",
+    "so propose it again; a Reject answer means nothing was saved. ",
+    "Ground what you propose in the designs, code and decisions you read, and say plainly what is uncertain ",
+    "rather than filling it in. ",
+    "When something is missing, make the smallest grounded assumption, name it in one line, and ask only when ",
+    "the choice changes what the human will see or risks real loss. ",
+    "Keep what the human asked for separate from what you recommend; if you propose a specific solution, ",
+    "say plainly that it is merely a cursory suggestion, not a prescription, and the human decides. ",
+    "Don't make measurement, investigation or another step a precondition unless the human asked for it. ",
+    "Keep replies conversational: use plain language, and explain any term a non-specialist may not know. ",
+    "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read`, ",
+    "designs with `design list` and `design show <id>`, ",
+    "and the plan and vision with `strategy list` and `strategy show <task|feature|milestone> <id>...` ",
+    "(a task's notes with `strategy show note`, its run log with `strategy show run`); ",
+    "add `--project <folder>` for a project below the root. ",
+    "Propose a change with `design propose [<id>]`: the id of the design to change, or none to create one, ",
+    "and the operations as a JSON object in `text`; it is alone in its call and waits for the human's answer, as `design note` does. ",
+    "Cite code by name (`lockdown.dispatch`), not `file:line`: line numbers move. ",
+    "Name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
+    "written bare and never inside backticks: a bare reference renders as a link with the record's title. ",
+    "The human's message is the last note. ",
+    "Reply with `design note`: `command` is just `design note`, and the whole reply goes in `text`, ",
+    "in short Markdown: lead with the answer, then only what the human needs to act on. ",
+    "The call waits and returns the human's next message, which may already be waiting; ",
+    "`design wait` keeps waiting when a call returns at its limit. ",
+    "Text outside `design note` shows only in this run's live transcript on the page. ",
+    "Keep replying until a call says the run has ended, then stop.",
+);
+
+/// The most recent decision titles for a workspace brief, and how to read the rest.
+fn recent_decisions(top: &Path, own: bool) -> String {
+    let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
+    let titles: Vec<String> =
+        decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
+    if titles.is_empty() {
+        return String::new();
+    }
+    let how = if own {
+        "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one"
+    } else {
+        "titles only: the file is in no project, so this run can't read it"
+    };
+    // The most recent only, so the brief stays short as decisions accumulate.
+    let earlier = titles.len().saturating_sub(RECENT_DECISIONS);
+    let rest = match earlier {
+        0 => String::new(),
+        n if own => format!("\n… {n} earlier decisions: `grep D-` lists them."),
+        n => format!("\n… {n} earlier decisions not shown."),
+    };
+    format!("\nRecent decisions (titles from DECISIONS.md; {how}):\n{}{rest}\n", titles[earlier..].join("\n"))
+}
+
+/// A design run's prompt: its role, the vision, personas, decision titles and notes.
+/// Kept short, and it names only the commands the run can use (D-240).
+pub(super) fn design_brief(top: &Path, run: &Value, _involvement: &str, _detail: &str, _asking: &str) -> String {
+    let mut out = format!(
+        concat!(
+            "You are designing with the human on this project's Design page. ",
+            "You work only through the Solace tool: there is no shell and no file access.\n{}\n",
+        ),
+        DESIGN_ROLE
+    );
+    out += "\nThis run is about the whole Design page: it can read and propose changes to any design.\n";
+    let vision = tasks::vision(top)["text"].as_str().unwrap_or("").trim().to_string();
+    if !vision.is_empty() {
+        out += &format!("\nVision:\n{vision}\n");
+    }
+    out += &super::briefs::personas_section(top);
+    let own = workspace::members(top).unwrap_or_default().iter().any(|p| p == ".");
+    out += &recent_decisions(top, own);
+    // The workspace's skills (D-27), through the designer role's kind.
+    out += &skills::section_for(&[top], own.then_some(top), "design");
+    let notes: Vec<String> = run["notes"]
+        .as_array()
+        .map(|ns| {
+            ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect()
+        })
+        .unwrap_or_default();
+    if !notes.is_empty() {
+        out += &format!("\nNotes so far:\n{}\n", notes.join("\n"));
+    }
+    out
+}
+
+type Brief = fn(&Path, &Value, &str, &str, &str) -> String;
+
+/// Runs workspace run `rid`'s agent with `brief` until it exits. It always
+/// starts a fresh conversation, in a folder beside the run's log, removed after.
+fn workspace_process(top: &Path, rid: &str, brief: Brief) -> Result<(), Failure> {
+    let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown run {rid}")) };
+    if run["state"] == "ended" {
+        return Ok(());
+    }
+    let config = system()?;
+    let m = chosen_model(&config, &run)?;
+    let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
+    let log = PathBuf::from(run["log"].as_str().unwrap_or(""));
+    let dir = log.with_extension("");
+    fs::create_dir_all(&dir)?;
+    let involvement = super::setup::involvement(&config);
+    let detail = super::setup::detail(&config);
+    let asking = super::setup::asking(&config);
+    let prompt = brief(top, &run, involvement, detail, asking);
+    super::delivery::mark_strategy_brief(top, &run)?;
+    let kind = run["kind"].as_str().unwrap_or(crate::board::roles::STRATEGY_RUN);
+    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [kind, rid], timeout);
+    let supervised = launched.and_then(|mut child| {
+        supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
+    });
+    let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
+    // An agent that replied in plain text took its turn: its reply answers like
+    // a finished run, so it clears a mark the same way.
+    let outcome = match &supervised {
+        Err(Failure(_, REPLIED)) => Some("planned".to_string()),
+        _ => outcome,
+    };
+    agents::after_run(&m, &log, run["started"].as_u64().unwrap_or(0), outcome.as_deref());
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    supervised.map(drop)
+}
+
+/// Launches a workspace run's agent on its own thread. A plain-text reply is
+/// its turn: a fresh agent, briefed with every note, takes the next one.
+fn start_workspace_agent(top: PathBuf, rid: String, brief: Brief) {
     std::thread::spawn(move || {
         let result = (|| {
-            let mut result = strategy_process(&top, &rid);
+            let mut result = workspace_process(&top, &rid, brief);
             while let Err(Failure(_, REPLIED)) = result {
                 wait_strategy(&top, &rid, None)?;
-                result = strategy_process(&top, &rid);
+                result = workspace_process(&top, &rid, brief);
             }
             result
         })();
@@ -750,4 +801,123 @@ pub(super) fn start_strategy(top: PathBuf, rid: String) {
             let _ = Watch::Strategy(&top).fail(&rid, &e.0);
         }
     });
+}
+
+/// Launches design run `rid`'s agent (D-240) on its own thread.
+pub(super) fn start_design(top: PathBuf, rid: String) {
+    start_workspace_agent(top, rid, design_brief);
+}
+
+/// Waits until design run `rid`'s agent may act, taking no project lock.
+pub(crate) fn design_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    run_guard(top, rid, a, "design")
+}
+
+fn run_guard(top: &Path, rid: &str, a: &[&str], kind: &str) -> Result<(), Failure> {
+    loop {
+        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown {kind} run {rid}")) };
+        if run["state"] == "ended" {
+            return err("E7003", "run ended");
+        }
+        if run["state"] == "waiting" && a.first() != Some(&kind) {
+            if !tasks::serving(top) {
+                return err("E7003", "the run waits for the human and no board server is running; stop now");
+            }
+            if crate::board::delivery::pending_strategy_reply(&run) {
+                return err("E7003", format!("the human replied; call `{kind} wait` to receive it"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return Ok(());
+    }
+}
+
+/// Holds a design run's reply until the human writes again or ends the run.
+pub(crate) fn wait_design(top: &Path, rid: &str, limit: Option<Duration>) -> Out {
+    wait_run(top, rid, limit, "design")
+}
+
+fn wait_run(top: &Path, rid: &str, limit: Option<Duration>, kind: &str) -> Out {
+    let started = std::time::Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        // No server, so the human can't reply: return rather than wait forever.
+        if !tasks::serving(top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
+        if limit.is_some_and(|limit| started.elapsed() > limit) {
+            return Ok(if kind == "strategy" {
+                super::delivery::WAIT_AGAIN.into()
+            } else {
+                format!("Still waiting for the human. Call `{kind} wait` to keep waiting; it sends nothing.\n")
+            });
+        }
+        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown {kind} run {rid}")) };
+        if run["state"] == "ended" {
+            return Ok(format!("The {kind} run has ended. Stop now, without further calls.\n"));
+        }
+        if let Some(reply) = super::delivery::claim_strategy_reply(top, rid)? {
+            return Ok(reply);
+        }
+    }
+}
+
+/// `design note | wait | propose` in design run `rid`, which `design_guard` let act.
+pub(crate) fn design_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out) -> Out {
+    match a {
+        ["design", "note", rest @ ..] => {
+            if rest.first().is_some_and(|w| w.starts_with("--")) {
+                return err(
+                    "E7015",
+                    "nothing was sent. Resend with `command` set to just `design note` and the whole reply in the `text` argument",
+                );
+            }
+            let text = if rest.is_empty() { input()? } else { rest.join(" ") };
+            if text.trim().is_empty() {
+                return err("E7001", "design note needs the reply in `text`");
+            }
+            // The agent sends the task server a message; the run waits for the human.
+            let sent = tasks::send(top, json!({"kind":"strategy_note","run":rid,"text":text}))?;
+            if !tasks::applied(top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(top, &sent) {
+                return err("E7001", REJECTED);
+            }
+            wait_design(top, rid, Some(super::delivery::wait_limit()))
+        }
+        ["design", "propose", rest @ ..] => {
+            if rest.first().is_some_and(|w| w.starts_with("--")) {
+                return err(
+                    "E7015",
+                    concat!(
+                        "nothing was sent. Resend with `command` set to just `design propose` ",
+                        "(and the id to change) and the operations in the `text` argument",
+                    ),
+                );
+            }
+            let id = match rest {
+                [] => None,
+                [only] => Some(only.strip_prefix("design:").unwrap_or(*only)),
+                _ => return usage("design propose [<id>] with the operations as JSON in `text`"),
+            };
+            let text = input()?;
+            if text.trim().is_empty() {
+                return err("E7001", "design propose needs the operations in `text`");
+            }
+            // Checked now as the copy would be; applied only when the human accepts.
+            let question = tasks::strategy::design_proposal(top, rid, id, &text)?;
+            let sent = tasks::send(top, json!({"kind":"strategy_propose","run":rid,"question":question}))?;
+            if !tasks::applied(top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(top, &sent) {
+                return err("E7001", REJECTED);
+            }
+            wait_design(top, rid, Some(super::delivery::wait_limit()))
+        }
+        ["design", "wait"] => wait_design(top, rid, Some(super::delivery::wait_limit())),
+        _ => usage("design note, with the reply in `text` | design wait | design propose [<id>], with the operations in `text`"),
+    }
 }

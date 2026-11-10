@@ -244,7 +244,7 @@ fn a_server_end_line_lands_in_the_strategy_run_log() {
     let line = "solace mcp: stdin read failed: stream did not contain valid UTF-8";
     let ids = strategy_ids(Some(STRATEGY_RUN.into()), Some("s1".into()));
     assert_eq!(ids, Some((STRATEGY_RUN.into(), "s1".into())));
-    record_server_end_for(&root, ids, line);
+    record_line_for(&root, ids, line);
     assert_eq!(std::fs::read_to_string(server_end_log(&log)).unwrap(), format!("{line}\n"));
 }
 
@@ -537,5 +537,23 @@ fn a_launch_names_its_timeout_for_the_agents_wait() {
     child.wait().unwrap();
     let env = std::fs::read_to_string(&log).unwrap();
     assert!(env.lines().any(|line| line == "SOLACE_LAUNCH_TIMEOUT_SECS=7200"), "{env}");
+}
+
+/// A note line lands in the run log the board reads as plain text, not an error.
+#[test]
+fn a_note_line_is_quiet_in_the_transcript() {
+    let root = testing::Scratch::new();
+    let log = root.join("run.jsonl");
+    std::fs::write(&log, "").unwrap();
+    std::fs::create_dir_all(root.join(".solace/tasks")).unwrap();
+    let t = json!({
+        "id":"t1","column":"backlog","home":".","createdTime":1,"closedTime":null,
+        "runs":[{"id":"r1","kind":"work","state":"running","log":log.to_string_lossy().to_string()}],
+    });
+    std::fs::write(root.join(".solace/tasks/t1.json"), t.to_string()).unwrap();
+    let line = "included unfinished changes from task \"Board drag fix\" in solace-cli/board";
+    crate::cli::with_root(&root, || with_context("t1", "r1", || record_note(line)));
+    assert_eq!(std::fs::read_to_string(server_end_log(&log)).unwrap(), format!("note\t{line}\n"));
+    assert_eq!(transcript(&log), [json!({"kind":"usage","text":line})]);
 }
 

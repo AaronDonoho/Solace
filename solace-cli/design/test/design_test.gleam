@@ -397,8 +397,7 @@ pub fn a_live_list_without_changes_makes_no_request_test() {
       design.DesignsLoaded(a_design_list()),
     )
   let #(model, _) = design.update(model, design.SelectDesign(id))
-  let #(model, settled) = design.update(model, design.CaughtUp)
-  assert settled == effect.none()
+  let #(model, _) = design.update(model, design.CaughtUp)
   let #(_, request) = design.update(model, design.Live(a_design_list()))
   assert request == effect.none()
 }

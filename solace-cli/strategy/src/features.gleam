@@ -11,7 +11,8 @@ import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
-import plan
+import plan_panel
+import plan_setup
 import solace_task
 
 /// A feature as the Features tab shows it (D-87). Only `id` is required.
@@ -218,7 +219,7 @@ fn feature_view(
             html.text(feature.state),
           ]),
           case planning {
-            True -> plan.marker()
+            True -> plan_panel.marker(plan_setup.settings().labels)
             False -> element.none()
           },
           html.text(" "),

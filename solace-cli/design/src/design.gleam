@@ -1,3 +1,4 @@
+import changes
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -11,6 +12,8 @@ import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
+import panel
+import plan_panel
 import render
 import solace_task
 
@@ -46,6 +49,12 @@ pub type Model {
     viewed: Option(Viewed),
     /// The screen the click-through preview shows, if previewing.
     preview: Option(String),
+    /// Whether the canvas shows an open proposal rather than the saved design.
+    view_proposal: Bool,
+    /// Whether the proposal's change outlines show.
+    show_changes: Bool,
+    /// The agent panel's state, shared by both tabs.
+    panel: panel.Model,
   )
 }
 
@@ -78,6 +87,14 @@ pub type Msg {
   ExitPreview
   /// A click in the preview, with the element's id.
   PreviewClick(String)
+  /// Shows the open proposal instead of the saved design.
+  ShowProposed
+  /// Shows the saved design while a proposal is open.
+  ShowCurrent
+  /// Shows or hides the proposal's change outlines.
+  ToggleChanges
+  /// A message for the agent panel.
+  Panel(panel.Msg)
 }
 
 pub fn tabs() -> List(Tab) {
@@ -206,22 +223,99 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Preview -> start_preview(model)
     ExitPreview -> #(Model(..model, preview: None), effect.none())
     PreviewClick(id) -> preview_click(model, id)
-    Connected -> start(Model(..model, connected: True))
-    Disconnected -> #(Model(..stop(model), connected: False), effect.none())
+    ShowProposed -> #(Model(..model, view_proposal: True), effect.none())
+    ShowCurrent -> #(Model(..model, view_proposal: False), effect.none())
+    ToggleChanges -> #(
+      Model(..model, show_changes: !model.show_changes),
+      effect.none(),
+    )
+    Connected -> {
+      let #(model, fx) =
+        start(
+          Model(..model, connected: True, panel: panel.connect(model.panel)),
+        )
+      let #(state, panel_fx) = panel.resume(model.panel)
+      #(
+        Model(..model, panel: state),
+        effect.batch([
+          fx,
+          effect.map(panel_fx, Panel),
+          effect.before_paint(fn(send, root) {
+            send(Panel(panel.Attached(root)))
+          }),
+        ]),
+      )
+    }
+    Disconnected -> #(
+      Model(
+        ..stop(model),
+        connected: False,
+        panel: panel.disconnected(model.panel),
+      ),
+      effect.none(),
+    )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
     Live(text) if !model.caught_up -> #(
       Model(..model, replay: [text, ..model.replay]),
       effect.none(),
     )
     Live(text) -> {
+      let before = model.panel
       let updated = apply(model, text)
-      let request = case updated.designs == model.designs {
-        True -> effect.none()
-        False -> reload(updated)
+      let answered = proposal_answered(model, updated)
+      let updated = case answered {
+        True -> Model(..updated, drawing: None)
+        False -> updated
       }
-      #(updated, request)
+      let #(after, panel_fx) = panel.follow(before, updated.panel)
+      let follows = case panel.shown(before), panel.shown(after) {
+        Some(a), Some(b) -> a.id == b.id && a.state != b.state
+        _, _ -> False
+      }
+      let attention = panel.needs_attention(before.runs, after.runs)
+      let effects =
+        list.flatten([
+          case updated.designs == model.designs && !answered {
+            True -> []
+            False -> [reload(updated)]
+          },
+          case follows {
+            True -> [effect.map(panel_fx, Panel)]
+            False -> []
+          },
+          case attention {
+            True -> [event.emit("attention", json.null())]
+            False -> []
+          },
+          case panel.models_event(text) {
+            True -> [effect.map(panel.refresh_models(after), Panel)]
+            False -> []
+          },
+        ])
+      let model = Model(..updated, panel: after)
+      let fx = case effects {
+        [] -> effect.none()
+        [one] -> one
+        many -> effect.batch(many)
+      }
+      #(model, fx)
     }
-    CaughtUp -> settle(model)
+    CaughtUp -> {
+      let #(model, fx) = settle(model)
+      let #(state, panel_fx) = panel.resume(model.panel)
+      #(
+        Model(..model, panel: state),
+        effect.batch([
+          fx,
+          effect.map(panel_fx, Panel),
+          effect.map(panel.load_models(state), Panel),
+        ]),
+      )
+    }
+    Panel(msg) -> {
+      let #(state, fx) = panel.update(model.panel, msg)
+      #(Model(..model, panel: state), effect.map(fx, Panel))
+    }
   }
 }
 
@@ -251,6 +345,7 @@ pub fn view(model: Model) -> Element(Msg) {
         )
       }),
     ),
+    element.map(panel.view(model.panel), Panel),
     ..list.map(tabs(), fn(tab) {
       html.section(
         [
@@ -300,9 +395,11 @@ const view_styles =
   solace_task.control_styles
   <> solace_task.tab_styles
   <> render.outline_styles
-  <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec}
-.design{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:flex;flex-direction:column}
-.design>[role=tabpanel]{flex:1;min-height:0;overflow:auto;padding:var(--space-6)}
+  <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--ok-text:#1a6b30}
+.design{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
+.design>.tabs{grid-column:1/-1}
+.design>.plan{grid-column:2;grid-row:2}
+.design>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto;padding:var(--space-6)}
 .design>[role=tabpanel][hidden]{display:none}
 @media (max-width:900px){.design{display:block;height:auto;overflow:visible}.design>[role=tabpanel]{overflow:visible}}
 .design-body{display:flex;gap:var(--space-4);height:100%;min-height:0}
@@ -328,9 +425,13 @@ const view_styles =
 .design-version-note{color:var(--soft)}
 .design-restore{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
 .design-preview{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
+.design-choice{padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);cursor:pointer}
+.design-choice[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
 @media (max-width:900px){.design-body{flex-direction:column;height:auto}.design-list{flex:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:0 0 var(--space-3)}.design-screens{height:60vh}}
 "
+  <> solace_task.editor_styles
+  <> plan_panel.styles
 
 pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
@@ -389,6 +490,9 @@ pub fn new(tab: Tab) -> Model {
     [],
     None,
     None,
+    True,
+    True,
+    panel.new(),
   )
 }
 
@@ -437,23 +541,44 @@ fn loaded(model: Model, text: String) -> Model {
 }
 
 fn apply(model: Model, text: String) -> Model {
-  case json.parse(text, designs_decoder()) {
+  let model = case json.parse(text, designs_decoder()) {
     Ok(designs) ->
       refresh_open(Model(..model, designs: designs, loading: False, error: ""))
     Error(_) -> model
   }
+  Model(..model, panel: panel.live(model.panel, text))
 }
 
 fn settle(model: Model) -> #(Model, Effect(Msg)) {
   let designs = model.designs
+  let runs = model.panel.runs
+  let before = model
   let model = Model(..model, caught_up: True, loading: False)
   let model =
     list.fold(list.reverse(model.replay), Model(..model, replay: []), apply)
-  let request = case model.designs == designs {
-    True -> effect.none()
-    False -> reload(model)
+  let answered = proposal_answered(before, model)
+  let model = case answered {
+    True -> Model(..model, drawing: None)
+    False -> model
   }
-  #(model, request)
+  let attention = panel.needs_attention(runs, model.panel.runs)
+  let effects =
+    list.flatten([
+      case model.designs == designs && !answered {
+        True -> []
+        False -> [reload(model)]
+      },
+      case attention {
+        True -> [event.emit("attention", json.null())]
+        False -> []
+      },
+    ])
+  let fx = case effects {
+    [] -> effect.none()
+    [one] -> one
+    many -> effect.batch(many)
+  }
+  #(model, fx)
 }
 
 fn error(text: String) -> String {
@@ -571,7 +696,17 @@ fn load(model: Model) -> Effect(Msg) {
 
 fn reload(model: Model) -> Effect(Msg) {
   case open_design(model) {
-    Some(_) -> load(model)
+    Some(design) ->
+      case list.contains(model.expanded, design.id) {
+        False -> load(model)
+        True ->
+          effect.batch([
+            load(model),
+            get("/designs/" <> design.id <> "/versions", fn(text) {
+              HistoryLoaded(design.id, text)
+            }),
+          ])
+      }
     None -> effect.none()
   }
 }
@@ -585,7 +720,7 @@ fn canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
         None ->
           case open_design(model) {
             Some(design) -> current_canvas(model, design)
-            None -> []
+            None -> create_canvas(model, tab)
           }
       }
   }
@@ -1041,23 +1176,44 @@ fn design_row(model: Model, design: Design) -> Element(Msg) {
 }
 
 fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
+  let proposal = proposal_for(model, design.id)
+  let showing = case proposal {
+    Some(_) -> model.view_proposal
+    None -> False
+  }
+  let title = case proposal, showing {
+    Some(proposed), True -> proposed.title
+    _, _ -> design.title
+  }
+  let controls = case proposal {
+    Some(_) -> proposal_controls(model, True)
+    None -> []
+  }
   [
     html.div([attribute.class("design-heading")], [
-      html.h2([], [html.text(design.title)]),
+      html.h2([], [html.text(title)]),
       case design.tab, model.drawing {
         UiUx, Some(_) -> preview_button(model)
         _, _ -> element.none()
       },
+      ..controls
     ]),
     case design.tab {
       Architecture -> element.none()
       UiUx ->
-        case model.drawing {
-          Some(drawing) -> screens(model, drawing)
-          None ->
-            case model.design_error {
-              "" -> element.none()
-              message -> html.p([attribute.role("alert")], [html.text(message)])
+        case proposal, showing {
+          Some(proposed), True -> proposed_drawing(model, proposed)
+          _, _ ->
+            case model.drawing {
+              Some(drawing) -> screens(model, drawing)
+              None ->
+                case model.design_error {
+                  "" -> element.none()
+                  message ->
+                    html.p([attribute.role("alert")], [
+                      html.text(message),
+                    ])
+                }
             }
         }
     },
@@ -1158,4 +1314,140 @@ fn all_screens(drawing: render.Design) -> Element(Msg) {
     [attribute.class("design-screens")],
     list.map(drawing.elements, render.draw),
   )
+}
+
+fn proposal_for(model: Model, id: String) -> Option(render.Design) {
+  case
+    list.find(model.panel.proposals, fn(proposed) { proposed.design.id == id })
+  {
+    Ok(proposed) -> Some(proposed.design)
+    Error(_) -> None
+  }
+}
+
+fn create_proposal(model: Model, tab: Tab) -> Option(render.Design) {
+  let name = case tab {
+    UiUx -> "ui"
+    Architecture -> "architecture"
+  }
+  case
+    list.find(model.panel.proposals, fn(proposed) {
+      proposed.tab == name
+      && !list.any(model.designs, fn(design) { design.id == proposed.design.id })
+    })
+  {
+    Ok(proposed) -> Some(proposed.design)
+    Error(_) -> None
+  }
+}
+
+fn proposed_drawing(model: Model, proposed: render.Design) -> Element(Msg) {
+  case model.show_changes, model.drawing {
+    True, Some(current) ->
+      marked_screens(model, changes.mark(current, proposed))
+    _, _ -> screens(model, proposed)
+  }
+}
+
+fn marked_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
+  case model.preview {
+    Some(id) ->
+      case render.screen(marked.design, id) {
+        Some(screen) ->
+          html.div([attribute.class("design-screens")], [
+            render.draw_preview(screen, PreviewClick),
+          ])
+        None -> marked_all_screens(marked)
+      }
+    None -> marked_all_screens(marked)
+  }
+}
+
+fn marked_all_screens(marked: changes.Marked) -> Element(Msg) {
+  html.div(
+    [attribute.class("design-screens")],
+    list.map(marked.design.elements, fn(node) {
+      render.draw_marked(node, marked.marks)
+    }),
+  )
+}
+
+fn proposal_controls(model: Model, choices: Bool) -> List(Element(Msg)) {
+  let switch = case choices {
+    True -> [
+      html.button(
+        [
+          attribute.class("design-choice"),
+          attribute.attribute("aria-pressed", bool_text(model.view_proposal)),
+          event.on_click(ShowProposed),
+        ],
+        [html.text("Proposed")],
+      ),
+      html.button(
+        [
+          attribute.class("design-choice"),
+          attribute.attribute("aria-pressed", bool_text(!model.view_proposal)),
+          event.on_click(ShowCurrent),
+        ],
+        [html.text("Current")],
+      ),
+    ]
+    False -> []
+  }
+  let label = case model.show_changes {
+    True -> "Hide changes"
+    False -> "Show changes"
+  }
+  list.append(switch, [
+    html.button(
+      [
+        attribute.class("design-choice"),
+        attribute.attribute("aria-pressed", bool_text(model.show_changes)),
+        attribute.attribute("aria-label", label),
+        attribute.attribute("title", label),
+        event.on_click(ToggleChanges),
+      ],
+      [html.text("🔍")],
+    ),
+  ])
+}
+
+fn bool_text(value: Bool) -> String {
+  case value {
+    True -> "true"
+    False -> "false"
+  }
+}
+
+fn create_canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
+  case create_proposal(model, tab) {
+    None -> []
+    Some(proposed) -> [
+      html.div([attribute.class("design-heading")], [
+        html.h2([], [html.text(proposed.title)]),
+        ..proposal_controls(model, False)
+      ]),
+      case tab {
+        Architecture -> element.none()
+        UiUx ->
+          case model.show_changes {
+            True -> marked_all_screens(changes.all_added(proposed))
+            False -> all_screens(proposed)
+          }
+      },
+    ]
+  }
+}
+
+/// Whether answering a proposal took it off the open design's canvas, so the
+/// saved design has to be fetched again rather than the old drawing kept.
+fn proposal_answered(before: Model, after: Model) -> Bool {
+  case before.open {
+    "" -> False
+    id ->
+      case proposal_for(before, id), proposal_for(after, id) {
+        Some(_), None -> True
+        _, _ -> False
+      }
+  }
 }

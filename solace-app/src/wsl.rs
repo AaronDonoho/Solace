@@ -66,9 +66,8 @@ fn wsl() -> Command {
 
 /// `argv` as the distro's `solace-desktop` command, run in the distro.
 fn desktop(argv: &[&str]) -> Command {
-    let mut cmd = wsl();
-    cmd.args(["-d", DISTRO, "--exec", "solace-desktop"])
-        .args(argv);
+    let mut cmd = in_distro(wsl());
+    cmd.args(["--exec", "solace-desktop"]).args(argv);
     cmd
 }
 
@@ -151,12 +150,7 @@ pub(crate) fn install() -> Result<(), String> {
 pub(crate) fn import(tar: &Path, local_app_data: &Path) -> Result<(), String> {
     let disk = local_app_data.join(DISK_FOLDER);
     fs::create_dir_all(&disk).map_err(|e| format!("couldn't create {}: {e}", disk.display()))?;
-    let mut cmd = wsl();
-    cmd.args(["--import", DISTRO])
-        .arg(&disk)
-        .arg(tar)
-        .args(["--version", "2"]);
-    let out = cmd
+    let out = import_command(tar, &disk)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("couldn't start wsl.exe: {e}"))?;
@@ -213,15 +207,8 @@ pub(crate) fn free_port(port: u16) -> u16 {
 /// Opens a terminal in the distro's home folder, where agents and tools are
 /// installed and signed in to.
 pub(crate) fn open_terminal() -> Result<(), String> {
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-d", DISTRO, "--cd", "~"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        cmd.creation_flags(CREATE_NEW_CONSOLE);
-    }
-    cmd.spawn()
+    terminal()
+        .spawn()
         .map(|_| ())
         .map_err(|e| format!("couldn't open a terminal: {e}"))
 }
@@ -242,10 +229,14 @@ if ($p.ExitCode -ne 0) {
 exit $p.ExitCode"#;
 
 /// The text of a tool's output. `wsl.exe` prints UTF-16LE when it ignores
-/// `WSL_UTF8` (older versions). UTF-8 text never holds a NUL byte, so one
-/// means UTF-16LE; an odd last byte is dropped.
+/// `WSL_UTF8` (older versions). A byte order mark, a NUL byte, or text that
+/// isn't valid UTF-8 means UTF-16LE; UTF-16LE CJK can hold no NUL. An odd last
+/// byte is dropped.
 fn decoded(bytes: &[u8]) -> String {
-    if !bytes.contains(&0) {
+    if !bytes.contains(&0)
+        && !bytes.starts_with(&[0xff, 0xfe])
+        && std::str::from_utf8(bytes).is_ok()
+    {
         return String::from_utf8_lossy(bytes).into_owned();
     }
     let units: Vec<u16> = bytes
@@ -254,4 +245,33 @@ fn decoded(bytes: &[u8]) -> String {
         .collect();
     let text = String::from_utf16_lossy(&units);
     text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
+}
+
+/// `tar` imported from `disk` as the distro, as WSL 2.
+fn import_command(tar: &Path, disk: &Path) -> Command {
+    let mut cmd = wsl();
+    cmd.args(["--import", DISTRO])
+        .arg(disk)
+        .arg(tar)
+        .args(["--version", "2"]);
+    cmd
+}
+
+/// `cmd` aimed at the distro.
+fn in_distro(mut cmd: Command) -> Command {
+    cmd.args(["-d", DISTRO]);
+    cmd
+}
+
+/// `wsl.exe` opening a terminal in the distro's home folder.
+fn terminal() -> Command {
+    let mut cmd = in_distro(Command::new("wsl.exe"));
+    cmd.args(["--cd", "~"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    cmd
 }

@@ -70,7 +70,7 @@ pub(crate) fn start(app: AppHandle) {
                 &snapshots,
                 woke,
                 Instant::now(),
-                |root, port| restart(&server, root, port, crate::start_server),
+                |root, port| restart(&server, root, port, crate::sidecar::start_server),
                 |root, port| follow(&app, root, port),
                 |root, port| reload(&app, root, port),
             ) {
@@ -92,10 +92,10 @@ fn check(snapshot: &WorkspaceSnapshot) -> Check {
     match snapshot.child {
         ChildState::Missing => Check::Missing,
         ChildState::Exited(status) => Check::Exited(status),
-        ChildState::Running => match crate::health(snapshot.port) {
-            crate::Health::Healthy => Check::Healthy,
-            crate::Health::Busy => Check::Busy,
-            crate::Health::Unanswered => Check::Unanswered,
+        ChildState::Running => match crate::sidecar::health(snapshot.port) {
+            crate::sidecar::Health::Healthy => Check::Healthy,
+            crate::sidecar::Health::Busy => Check::Busy,
+            crate::sidecar::Health::Unanswered => Check::Unanswered,
         },
     }
 }
@@ -107,12 +107,12 @@ fn restart(
     start: impl FnOnce(&Path, u16) -> Result<(std::process::Child, u16), String>,
 ) -> Result<u16, String> {
     match workspaces::take_workspace_child(server, root) {
-        Ok(child) => crate::stop(child),
+        Ok(child) => crate::sidecar::stop(child),
         Err(why) => return Err(why.to_string()),
     }
     match start(root, port) {
         Ok((child, port)) => {
-            crate::stop(workspaces::set_workspace_server(
+            crate::sidecar::stop(workspaces::set_workspace_server(
                 server,
                 root,
                 Some(child),
@@ -501,7 +501,7 @@ fn exit_status() -> std::process::ExitStatus {
 #[test]
 fn a_busy_server_on_a_wake_is_reported() {
     let mut busy = snapshot(ChildState::Running);
-    busy.port = crate::serve_routes(|_| "503 Service Unavailable", 1);
+    busy.port = crate::sidecar::serve_routes(|_| "503 Service Unavailable", 1);
     let mut tracked = Tracked::default();
     let mut reloaded = false;
     let done = tick_one(

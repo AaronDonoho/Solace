@@ -9,7 +9,6 @@ use crate::unique_id;
 use crate::failure::Failure;
 use crate::tasks::server::op;
 use crate::tasks::store::records;
-use crate::tasks::store::stored_records;
 use crate::tasks::store::record;
 use crate::tasks::store::mark_start;
 use crate::tasks::store::put_record;
@@ -293,24 +292,21 @@ fn write_vision(top: &Path, text: &str) -> Result<Value, Failure> {
 /// Every strategy run (D-93), oldest first, without its notes: the list
 /// `GET /strategy/runs` returns and a new connection's replay sends.
 pub fn strategy_runs(top: &Path) -> Vec<Value> {
-    let mut out = stored_records(top, "runs");
-    for r in out.iter_mut().filter_map(Value::as_object_mut) {
-        r.remove("notes");
-    }
-    out.sort_by(|a, b| a["started"].as_u64().cmp(&b["started"].as_u64()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
-    out
+    runs_list(top, STRATEGY_RUN)
 }
 
-/// Writes a strategy run and logs it in full as a root event: no project.
+/// Writes a workspace run and logs it in full as a root event: no project.
 pub(crate) fn put_run(top: &Path, run: &Value) -> Result<(), Failure> {
-    jsonx::replace_pretty(&strategy_dir(top, "runs"), &format!("{}.json", run["id"].as_str().unwrap_or("")), run)?;
-    log(top, "", &json!({"strategyRun": run}));
+    let kind = run["kind"].as_str().unwrap_or(STRATEGY_RUN);
+    jsonx::replace_pretty(&run_dir(top, kind), &format!("{}.json", run["id"].as_str().unwrap_or("")), run)?;
+    let event = if kind == crate::board::roles::DESIGN_RUN { json!({"designRun": run}) } else { json!({"strategyRun": run}) };
+    log(top, "", &event);
     Ok(())
 }
 
-/// One strategy run as its file holds it, if there is one.
+/// One workspace run as its file holds it, strategy or design, if there is one.
 pub(crate) fn strategy_run(top: &Path, rid: &str) -> Option<Value> {
-    record(top, "runs", rid)
+    run_record(top, STRATEGY_RUN, rid).or_else(|| run_record(top, crate::board::roles::DESIGN_RUN, rid))
 }
 
 /// Changes strategy run `rid` with `f`, read and written as one operation.
@@ -321,24 +317,26 @@ pub(crate) fn update_run<R: Send + 'static>(
 ) -> Result<R, Failure> {
     let (root, rid) = (top.to_path_buf(), rid.to_string());
     op(top, move || {
-        let Some(mut run) = record(&root, "runs", &rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+        let Some(mut run) = strategy_run(&root, &rid) else { return board::err("E7023", format!("unknown run {rid}")) };
         let out = f(&mut run)?;
         put_run(&root, &run)?;
         Ok(out)
     })
 }
 
-/// Ends the strategy runs a previous server left going: their agents are gone.
+/// Ends the workspace runs a previous server left going: their agents are gone.
 pub fn end_strategy_runs(top: &Path) -> Result<(), Failure> {
-    for run in stored_records(top, "runs").into_iter().filter(|r| r["state"] != "ended") {
-        let rid = run["id"].as_str().unwrap_or("").to_string();
-        update_run(top, &rid.clone(), move |r| {
-            if r["state"] != "ended" {
-                note(r, "solace", Some(&rid), "the Solace server restarted while an agent was working");
-                end_strategy(r, "stopped");
-            }
-            Ok(())
-        })?;
+    for kind in [STRATEGY_RUN, crate::board::roles::DESIGN_RUN] {
+        for run in run_records(top, kind).into_iter().filter(|r| r["state"] != "ended") {
+            let rid = run["id"].as_str().unwrap_or("").to_string();
+            update_run(top, &rid.clone(), move |r| {
+                if r["state"] != "ended" {
+                    note(r, "solace", Some(&rid), "the Solace server restarted while an agent was working");
+                    end_strategy(r, "stopped");
+                }
+                Ok(())
+            })?;
+        }
     }
     Ok(())
 }
@@ -368,35 +366,25 @@ pub fn strategy_runs_api(top: &Path, method: &str, parts: &[&str], body: Value) 
 type System = fn() -> Result<Value, Failure>;
 
 pub(crate) fn runs_api(top: &Path, method: &str, parts: &[&str], body: Value, system: System) -> Result<Value, (u16, Failure)> {
-    match (method, parts) {
-        ("GET", []) => return Ok(json!(strategy_runs(top))),
-        ("GET", [rid]) => {
-            let Some(mut run) = record(top, "runs", rid) else {
-                return board::err("E7023", format!("unknown strategy run {rid}")).map_err(|e| (404, e));
-            };
-            run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
-            return Ok(run);
-        }
-        _ => {}
-    }
-    let (root, method) = (top.to_path_buf(), method.to_string());
-    let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
-    op(top, move || {
-        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let mut status = 409;
-        Ok(change_run(&root, &method, &parts, &body, system, &mut status).map_err(|e| (status, e)))
-    })
-    .map_err(|e| (409, e))?
+    family_runs_api(top, method, parts, body, system, STRATEGY_FAMILY)
 }
 
-fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: System, status: &mut u16) -> Result<Value, Failure> {
+fn change_run(
+    top: &Path,
+    method: &str,
+    parts: &[&str],
+    req: &Value,
+    system: System,
+    family: Family,
+    status: &mut u16,
+) -> Result<Value, Failure> {
     if method == "POST" && parts.is_empty() {
-        return start_run(top, req, system, status);
+        return start_run(top, req, system, family, status);
     }
     let rid = parts.first().copied().unwrap_or("");
-    let Some(mut run) = record(top, "runs", rid) else {
+    let Some(mut run) = run_record(top, family.kind, rid) else {
         *status = 404;
-        return board::err("E7023", format!("unknown strategy run {rid}"));
+        return board::err("E7023", format!("unknown {} run {rid}", family.kind));
     };
     let open = run["state"] != "ended";
     match (method, &parts[1..]) {
@@ -406,7 +394,7 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
                 return board::err("E7001", "a note needs text");
             };
             if !open {
-                return board::err("E7003", "the strategy run has ended");
+                return board::err("E7003", format!("the {} run has ended", family.kind));
             }
             note(&mut run, "human", Some(rid), text);
         }
@@ -430,10 +418,18 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
                 return board::err("E7003", "the question is already answered");
             }
             if !open {
-                return board::err("E7003", "the strategy run has ended");
+                return board::err("E7003", format!("the {} run has ended", family.kind));
             }
             let mut answer = answer.to_string();
-            if !q["proposal"].is_null() {
+            if q["proposal"]["kind"] == "design" {
+                answer = if chosen && answer == "Approve" {
+                    apply_design_proposal(top, rid, &q["proposal"]).unwrap_or_else(|e| format!("Not applied: {}", e.0))
+                } else if chosen {
+                    "Rejected; the design was not changed".into()
+                } else {
+                    format!("Not applied; the human answered: {answer}")
+                };
+            } else if !q["proposal"].is_null() {
                 if chosen && matches!(answer.as_str(), "Approve" | "Approve to Planning") {
                     let column = if answer == "Approve to Planning" { Column::Planning } else { Column::First };
                     answer = apply_proposal(top, rid, &q["proposal"], column).unwrap_or_else(|e| format!("Not applied: {}", e.0));
@@ -449,7 +445,7 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
         }
         ("POST", ["end" | "stop"]) => {
             if !open {
-                return board::err("E7003", "the strategy run has ended");
+                return board::err("E7003", format!("the {} run has ended", family.kind));
             }
             end_strategy(&mut run, if parts[1] == "end" { "planned" } else { "stopped" });
         }
@@ -459,39 +455,47 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
     Ok(run)
 }
 
-/// Starts a strategy run: its first message is its first note. One open run per
-/// context; a context names the page, or a feature or milestone that exists. A
-/// task context is refused: a strategy run is never started on a task (D-202).
-fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Result<Value, Failure> {
+/// Starts a workspace run: its first message is its first note. One open run per
+/// context; a strategy context names the page, or a feature or milestone that
+/// exists. A design run is always the whole Design page (D-240). A task context
+/// is refused: a workspace run is never started on a task (D-202).
+fn start_run(top: &Path, req: &Value, system: System, family: Family, status: &mut u16) -> Result<Value, Failure> {
     *status = 400;
     let Some(text) = req["text"].as_str().filter(|t| !t.trim().is_empty()) else {
-        return board::err("E7001", "a strategy run starts with a message");
+        return board::err("E7001", format!("a {} run starts with a message", family.kind));
     };
     let c = &req["context"];
-    let context = match (c["kind"].as_str(), c["id"].as_str()) {
-        (Some("page"), _) => json!({"kind": "page"}),
-        (Some("task"), _) => return board::err("E7001", "a strategy run starts on the page, not a task"),
-        (Some(kind @ ("feature" | "milestone")), Some(id)) => {
-            if record(top, &format!("{kind}s"), id).is_none() {
-                return board::err("E7023", format!("unknown {kind} {id}"));
-            }
-            json!({"kind": kind, "id": id})
+    let context = if family.kind == crate::board::roles::DESIGN_RUN {
+        match c["kind"].as_str() {
+            None | Some("page") => json!({"kind": "page"}),
+            _ => return board::err("E7001", "a design run is about the whole Design page, not a task, feature or milestone"),
         }
-        _ => return board::err("E7001", "context must be {kind: page} or {kind: task|feature|milestone, id}"),
+    } else {
+        match (c["kind"].as_str(), c["id"].as_str()) {
+            (Some("page"), _) => json!({"kind": "page"}),
+            (Some("task"), _) => return board::err("E7001", "a strategy run starts on the page, not a task"),
+            (Some(kind @ ("feature" | "milestone")), Some(id)) => {
+                if record(top, &format!("{kind}s"), id).is_none() {
+                    return board::err("E7023", format!("unknown {kind} {id}"));
+                }
+                json!({"kind": kind, "id": id})
+            }
+            _ => return board::err("E7001", "context must be {kind: page} or {kind: task|feature|milestone, id}"),
+        }
     };
-    let m = chosen_model(&system()?, req).map_err(|e| {
+    let m = family_model(&system()?, req, family).map_err(|e| {
         if e.0.starts_with("E7011") {
             *status = 409;
         }
         e
     })?;
     *status = 409;
-    if let Some(open) = stored_records(top, "runs").iter().find(|r| r["state"] != "ended" && on_page(&r["context"]) == context) {
-        return board::err("E7003", format!("strategy run {} on this context is open", open["id"].as_str().unwrap_or("")));
+    if let Some(open) = run_records(top, family.kind).iter().find(|r| r["state"] != "ended" && on_page(&r["context"]) == context) {
+        return board::err("E7003", format!("{} run {} on this context is open", family.kind, open["id"].as_str().unwrap_or("")));
     }
     let id = unique_id();
-    let log = strategy_dir(top, "runs").join(format!("{id}.jsonl"));
-    let mut run = json!({"id": id, "kind": STRATEGY_RUN, "model": m["id"],
+    let log = run_dir(top, family.kind).join(format!("{id}.jsonl"));
+    let mut run = json!({"id": id, "kind": family.kind, "model": m["id"],
         "effort": m["effort"], "state": "running", "started": now(),
         "log": log, "context": context, "notes": [], "questions": []});
     note(&mut run, "human", Some(&id), text);
@@ -932,4 +936,210 @@ pub fn personas_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Re
 
 fn persona_damaged() -> Failure {
     Failure("E7030 the personas file is unreadable; it was left as it is".into(), 1)
+}
+
+/// Which workspace runs a route serves (D-240): strategy runs (D-93) or design runs.
+#[derive(Clone, Copy)]
+pub(crate) struct Family {
+    pub kind: &'static str,
+    pub role: Option<&'static str>,
+}
+
+pub(crate) const STRATEGY_FAMILY: Family = Family { kind: STRATEGY_RUN, role: None };
+
+pub(crate) const DESIGN_FAMILY: Family = Family { kind: crate::board::roles::DESIGN_RUN, role: Some("designer") };
+
+/// Where `kind`'s workspace runs are kept: strategy runs beside the plan (D-93),
+/// design runs in their own folder (D-240).
+fn run_dir(top: &Path, kind: &str) -> PathBuf {
+    if kind == crate::board::roles::DESIGN_RUN { top.join(".solace/design/runs") } else { strategy_dir(top, "runs") }
+}
+
+/// One workspace run of `kind`, if there is one.
+fn run_record(top: &Path, kind: &str, rid: &str) -> Option<Value> {
+    if !crate::board::task_model::valid_id(rid) {
+        return None;
+    }
+    let path = run_dir(top, kind).join(format!("{rid}.json"));
+    Some(super::store::stored(kind, jsonx::read_opt(&path)?, &path))
+}
+
+/// Every workspace run file of `kind`, in no order; an unreadable one is skipped.
+fn run_records(top: &Path, kind: &str) -> Vec<Value> {
+    let mut out = vec![];
+    let Ok(entries) = fs::read_dir(run_dir(top, kind)) else { return out };
+    for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
+        if let Some(v) = jsonx::read_opt(&p) {
+            out.push(super::store::stored(kind, v, &p));
+        }
+    }
+    out
+}
+
+/// Every workspace run of `kind`, oldest first, without its notes: the list a
+/// `GET` returns and a new connection's replay sends.
+fn runs_list(top: &Path, kind: &str) -> Vec<Value> {
+    let mut out = run_records(top, kind);
+    for r in out.iter_mut().filter_map(Value::as_object_mut) {
+        r.remove("notes");
+    }
+    out.sort_by(|a, b| a["started"].as_u64().cmp(&b["started"].as_u64()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+    out
+}
+
+/// The model a run starts on: the request's, or the family role's default (D-240).
+fn family_model(config: &Value, req: &Value, family: Family) -> Result<Value, Failure> {
+    if req["model"].as_str().is_some() {
+        return chosen_model(config, req);
+    }
+    let Some(role) = family.role else { return chosen_model(config, req) };
+    let mut body = req.clone();
+    body["model"] = config["role_models"][role]["default"].clone();
+    chosen_model(config, &body)
+}
+
+/// A workspace run route (D-240): `family` picks the store and the run kind.
+fn family_runs_api(top: &Path, method: &str, parts: &[&str], body: Value, system: System, family: Family) -> Result<Value, (u16, Failure)> {
+    match (method, parts) {
+        ("GET", []) => return Ok(json!(runs_list(top, family.kind))),
+        ("GET", [rid]) => {
+            let Some(mut run) = run_record(top, family.kind, rid) else {
+                return board::err("E7023", format!("unknown {} run {rid}", family.kind)).map_err(|e| (404, e));
+            };
+            run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
+            return Ok(run);
+        }
+        _ => {}
+    }
+    let (root, method) = (top.to_path_buf(), method.to_string());
+    let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+    op(top, move || {
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let mut status = 409;
+        Ok(change_run(&root, &method, &parts, &body, system, family, &mut status).map_err(|e| (status, e)))
+    })
+    .map_err(|e| (409, e))?
+}
+
+/// `/design/runs...` over the family machinery, with the system config injected.
+pub(crate) fn design_runs_with(top: &Path, method: &str, parts: &[&str], body: Value, system: System) -> Result<Value, (u16, Failure)> {
+    family_runs_api(top, method, parts, body, system, DESIGN_FAMILY)
+}
+
+/// `/design/runs...` (D-240), at the root only; `parts` are those after `runs`.
+pub fn design_runs_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, (u16, Failure)> {
+    design_runs_with(top, method, parts, body, system)
+}
+
+/// Every design run (D-240), oldest first, without its notes.
+pub fn design_runs(top: &Path) -> Vec<Value> {
+    runs_list(top, crate::board::roles::DESIGN_RUN)
+}
+
+/// A design run's proposal (D-241) as the question its agent waits on: the
+/// operations are applied to a copy and checked, writing nothing. `id` edits
+/// that design; none creates one. A run keeps at most one open proposal per design.
+pub(crate) fn design_proposal(top: &Path, rid: &str, id: Option<&str>, text: &str) -> Result<Value, Failure> {
+    let request = match serde_json::from_str::<Value>(text) {
+        Ok(value) if value.is_object() => value,
+        _ => return board::err("E7001", "the proposal's operations go in `text`, as a JSON object"),
+    };
+    let operations = request
+        .get("operations")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| Failure("E7001 a design proposal needs `operations` as a list: add, remove, move or set".into(), 1))?;
+    let allowed: &[&str] = if id.is_some() { &["operations"] } else { &["title", "tab", "operations"] };
+    if let Some(key) = request.as_object().into_iter().flat_map(|object| object.keys()).find(|key| !allowed.contains(&key.as_str())) {
+        let edit = if id.is_some() { " that edits" } else { "" };
+        return board::err("E7001", format!("a design proposal{edit} takes {}; not `{key}`", allowed.join(", ")));
+    }
+    let Some(run) = strategy_run(top, rid) else {
+        return board::err("E7023", format!("unknown design run {rid}"));
+    };
+    let open = run["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|q| q["answer"].is_null() && q["proposal"]["kind"] == "design" && q["proposal"]["id"].as_str() == id);
+    if open {
+        let why = if id.is_some() { "this design already has an open proposal" } else { "an open proposal already creates a design" };
+        return board::err("E7003", why);
+    }
+    let (base, title, tab, mut design) = match id {
+        Some(id) => {
+            let current = crate::design::show(top, id)?;
+            let base =
+                crate::design::versions(top, id)?.as_array().and_then(|versions| versions.first()).map(|version| version["number"].clone());
+            (base, None, None, current)
+        }
+        None => {
+            let title =
+                request["title"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `title`".into(), 1))?.to_string();
+            let tab = request["tab"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `tab`".into(), 1))?.to_string();
+            let design = json!({
+                "schemaVersion": crate::design::SCHEMA_VERSION,
+                "id": unique_id(),
+                "title": title,
+                "tab": tab,
+                "elements": []
+            });
+            (None, Some(title), Some(tab), design)
+        }
+    };
+    crate::design::apply(&mut design, &operations)?;
+    crate::design::validate(&design)?;
+    let mut proposal = json!({"kind": "design", "operations": operations, "design": design});
+    match id {
+        Some(id) => {
+            proposal["id"] = json!(id);
+            if let Some(base) = base {
+                proposal["base"] = base;
+            }
+        }
+        None => {
+            proposal["title"] = json!(title.unwrap_or_default());
+            proposal["tab"] = json!(tab.unwrap_or_default());
+        }
+    }
+    let what = match id {
+        Some(id) => {
+            format!("Change design {id}\n\n```json\n{}\n```", serde_json::to_string_pretty(&proposal["operations"]).unwrap())
+        }
+        None => format!(
+            "Create design \"{}\"\n\n```json\n{}\n```",
+            proposal["title"].as_str().unwrap_or(""),
+            serde_json::to_string_pretty(&proposal["operations"]).unwrap()
+        ),
+    };
+    Ok(json!({"id": unique_id(), "text": what, "options": ["Approve", "Reject"], "proposal": proposal, "answer": null}))
+}
+
+/// Applies design run `rid`'s approved proposal `p` through the design save
+/// path, with the run as the version's source, and answers what happened. A
+/// design whose newest version differs from the proposal's base is refused, so
+/// an accept never overwrites a change made after the proposal.
+fn apply_design_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
+    let design = &p["design"];
+    let id = design["id"].as_str().unwrap_or_default();
+    let created = p.get("id").is_none();
+    let previous = if created { None } else { Some(crate::design::versions(top, id)?) };
+    if let Some(versions) = &previous {
+        let newest = versions.as_array().and_then(|v| v.first()).map(|v| v["number"].clone());
+        let stale = if p["base"].is_null() { newest.is_some() } else { newest.as_ref() != Some(&p["base"]) };
+        if stale {
+            return board::err("E7026", "the design changed since the proposal; propose it again");
+        }
+    }
+    crate::design::save(top, design, crate::design::Source::DesignRun(rid))?;
+    let version = crate::design::versions(top, id)?.as_array().and_then(|v| v.first()).map(|v| v["number"].clone());
+    let before = previous.as_ref().and_then(|v| v.as_array()).and_then(|v| v.first()).map(|v| v["number"].clone());
+    if !created && version == before {
+        return Ok("Approved; the design was already as proposed".into());
+    }
+    let created = if created { format!(": created design:{id}") } else { String::new() };
+    Ok(match version {
+        Some(number) => format!("Approved and saved version {number}{created}"),
+        None => format!("Approved and saved{created}"),
+    })
 }

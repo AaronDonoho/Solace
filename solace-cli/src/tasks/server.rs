@@ -9,7 +9,6 @@ use std::fs;
 use crate::now;
 use crate::unique_id;
 use crate::failure::Failure;
-use crate::tasks::store::record;
 use crate::tasks::store::write;
 use crate::tasks::strategy::put_run;
 use crate::tasks::store::recover;
@@ -322,7 +321,9 @@ pub(crate) fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
     if m["kind"] == "delivery" {
         if m["target"] == "strategy" {
             let rid = m["run"].as_str().unwrap_or("");
-            let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+            let Some(mut run) = crate::tasks::strategy::strategy_run(top, rid) else {
+                return board::err("E7023", format!("unknown run {rid}"));
+            };
             if run["inbox"].as_str().is_some_and(|last| last == id) {
                 return Ok(None);
             }
@@ -355,7 +356,9 @@ pub(crate) fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
     // whose next note or answer sets the run going again.
     if let Some(kind @ ("strategy_note" | "strategy_propose")) = m["kind"].as_str() {
         let rid = m["run"].as_str().unwrap_or("");
-        let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+        let Some(mut run) = crate::tasks::strategy::strategy_run(top, rid) else {
+            return board::err("E7023", format!("unknown run {rid}"));
+        };
         if run["inbox"].as_str().is_some_and(|last| last == id) {
             return Ok(None);
         }

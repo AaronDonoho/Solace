@@ -395,3 +395,25 @@ fn design_version_routes_refuse_an_address_without_an_id() {
     assert!(plus.0.starts_with("E7001"), "{}", plus.0);
 }
 
+/// D-240: a new connection's replay carries design runs on their own, so the
+/// Strategy page never sees them.
+#[test]
+fn design_runs_replay_apart_from_strategy_runs() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = crate::scope::top(&p.root);
+    std::fs::create_dir_all(top.join(".solace/design/runs")).unwrap();
+    std::fs::write(
+        top.join(".solace/design/runs/d1.json"),
+        json!({"id":"d1","kind":"design","state":"running","context":{"kind":"page"},"notes":[]}).to_string(),
+    )
+    .unwrap();
+    let board = std::sync::Arc::new(Board::new(p.root.clone(), 0));
+    let events = Events::new(board, None, Some("{\"tasks\":0}"));
+    let state = events.strategy_state();
+    let data: Vec<Value> = state.lines().filter_map(|line| line.strip_prefix("data: ")).map(|d| serde_json::from_str(d).unwrap()).collect();
+    let runs = data.iter().find_map(|event| event.get("designRuns").cloned()).unwrap_or_else(|| panic!("no designRuns in {state}"));
+    assert_eq!(runs[0]["id"], "d1", "{state}");
+    let strategy = data.iter().find_map(|event| event.get("strategyRuns").cloned()).unwrap_or_else(|| panic!("no strategyRuns in {state}"));
+    assert_eq!(strategy, json!([]), "{state}");
+}
+

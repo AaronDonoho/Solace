@@ -1244,6 +1244,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        _,e=self.next_event(stream);self.assertEqual(e,{'designRuns':[]})
         _,e=self.next_event(stream);self.assertEqual(e,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1513,6 +1514,7 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(stream);self.assertIn('roleModels',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        _,e=self.next_event(stream);self.assertEqual(e,{'designRuns':[]})
         _,e=self.next_event(stream);self.assertEqual(e,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
@@ -1547,6 +1549,7 @@ class Board(unittest.TestCase):
         _,personas=self.next_event(stream);self.assertEqual(personas,{'personas':[]})
         _,role_models=self.next_event(stream);self.assertIn('roleModels',role_models)
         _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
+        _,design_runs=self.next_event(stream);self.assertEqual(design_runs,{'designRuns':[]})
         _,designs=self.next_event(stream);self.assertEqual(designs,{'designs':[]})
         # D-129: the tasks with no project follow the runs, marked.
         _,hp=self.next_event(stream);self.assertEqual(hp,{'noProject':True,'tasks':[]})
@@ -1570,6 +1573,7 @@ class Board(unittest.TestCase):
         self.assertEqual(e,{'personas':[]})
         self.assertIn('roleModels',self.next_event(stream)[1])
         self.assertEqual(self.next_event(stream)[1],{'strategyRuns':[]})
+        self.assertEqual(self.next_event(stream)[1],{'designRuns':[]})
         self.assertEqual(self.next_event(stream)[1],{'designs':[]})
         self.assertEqual(self.next_event(stream)[1],{'noProject':True,'tasks':[]})
         p=self.api('POST','/personas',{'name':'  Ada  ','objectives':'Ship','tools':'Rust','concerns':'Risk','other':'Notes'})
@@ -1603,6 +1607,13 @@ class Board(unittest.TestCase):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
             value=self.api('GET',f'/strategy/runs/{rid}')
+            if predicate(value):return value
+            time.sleep(.03)
+        self.fail('timed out: '+json.dumps(value))
+    def wait_design_run(self,rid,predicate,timeout=10):
+        end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            value=self.api('GET',f'/design/runs/{rid}')
             if predicate(value):return value
             time.sleep(.03)
         self.fail('timed out: '+json.dumps(value))
@@ -1710,6 +1721,85 @@ class Board(unittest.TestCase):
         _,e=self.next_event(fresh);self.assertEqual(e,{'personas':[]})
         _,e=self.next_event(fresh);self.assertIn('roleModels',e)
         _,e=self.next_event(fresh);self.assertEqual(e,{'strategyRuns':listed})
+
+    def test_design_runs_read_reply_and_refuse_changes(self):  # D-96, D-240
+        (self.root/'designs').mkdir(exist_ok=True)
+        design_id='0123456789abcdef'
+        design={'schemaVersion':1,'id':design_id,'title':'Home','tab':'architecture','elements':[]}
+        (self.root/'designs'/(design_id+'.json')).write_text(json.dumps(design))
+        (self.root/'DECISIONS.md').write_text('# Decisions\n## D-1 First thing\n')
+        (self.root/'plain/.solace').mkdir(parents=True)
+        sqlite3.connect(self.root/'plain/.solace/store.db').close()
+        (self.root/'solace.toml').write_text('unwatched=["priv/gen/"]\nprojects=["plain"]\n')
+        t=self.create()
+        steps=[{'command':'strategy list'},{'command':f"strategy show task {t['id']}"},
+               {'command':'view cli.HOST'},{'command':'read DECISIONS.md'},
+               {'command':'design list'},{'command':f'design show {design_id}'},
+               {'command':'read ../outside'},
+               {'command':'view app.one --project . --draft 1'},
+               {'command':'view app.one --project plain'},
+               {'command':'submit app.one','text':'pub fn one() { 9 }'},
+               {'command':f"strategy task {t['id']}",'text':json.dumps({'title':'Changed'})},
+               {'command':'task note hello'},
+               {'command':'design note','text':'A calm design'}]
+        rid=self.api('POST','/design/runs',{'model':'fake','text':json.dumps(steps)})['id']
+        run=self.wait_design_run(rid,lambda r:r['state']=='waiting')
+        self.assertEqual([(n['author'],n['text']) for n in run['notes'][1:]],[('agent','A calm design')])
+        out=self.replies(rid)
+        self.assertIn(t['id'],out[0]);self.assertIn('Vision:',out[0])
+        self.assertEqual(json.loads(out[1])['record']['id'],t['id'])
+        self.assertIn('cli',out[2])
+        self.assertIn('Decisions',out[3])
+        self.assertIn(design_id,out[4])
+        self.assertIn(design_id,out[5]);self.assertIn('Home',out[5])
+        self.assertTrue(out[6].startswith('E6006'),out[6])
+        self.assertTrue(out[7].startswith('E6007'),out[7])
+        self.assertTrue(out[8].startswith('E6013'),out[8]);self.assertIn('files, grep and read',out[8])
+        for r in out[6:9]:
+            self.assertNotIn('task ask',r);self.assertNotIn('write and run',r);self.assertNotIn('in a board run',r)
+        for r in out[9:12]:
+            self.assertTrue(r.startswith('E7010'),r)
+            self.assertNotIn('task ask',r);self.assertNotIn('strategy wait',r)
+        # The tool a design run's agent sees names only what it can do.
+        env={**self.env,'SOLACE_TASK':'design','SOLACE_RUN':rid}
+        p=subprocess.run([BIN,'mcp'],cwd=self.root,env=env,text=True,capture_output=True,input=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'})+'\n')
+        tool=json.dumps(json.loads(p.stdout)['result']['tools'][0])
+        self.assertIn('design note',tool);self.assertIn('design propose',tool);self.assertIn('strategy list',tool)
+        for word in ['task ask','submit','`test`','session start','work add','strategy note','strategy task']:
+            self.assertNotIn(word,tool)
+        prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()
+        self.assertIn('Reply with `design note`',prompt)
+        self.assertIn('design propose',prompt)
+        role=prompt.split('\n\nNotes so far:')[0]
+        for word in ['submit','`test`','session start','task ask','strategy note']:
+            self.assertNotIn(word,role)
+        # The human's next note reaches the waiting agent, which replies again.
+        self.api('POST',f'/design/runs/{rid}/notes',{'text':'Make it calm'})
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline and 'The human replied:\n\nMake it calm\n' not in self.replies(rid):time.sleep(.05)
+        self.assertIn('The human replied:\n\nMake it calm\n',self.replies(rid))
+        self.api('POST',f'/design/runs/{rid}/end')
+
+    def test_a_design_proposal_is_accepted_and_listed(self):  # D-243
+        # The human asks for a Home screen; the fake agent proposes it and waits.
+        operations=[{'op':'add','index':0,'element':{'id':'root','type':'screen','properties':{'width':'fill','height':'fill'}}}]
+        steps=[{'command':'design propose','text':json.dumps({'title':'Home','tab':'ui','operations':operations})}]
+        rid=self.api('POST','/design/runs',{'model':'fake','text':json.dumps(steps)})['id']
+        run=self.wait_design_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==1)
+        q=run['questions'][0]
+        design_id=q['proposal']['design']['id']
+        self.assertEqual((q['options'],q['proposal']['design']['title'],q['proposal']['design']['elements'][0]['id']),(['Approve','Reject'],'Home','root'))
+        self.assertEqual(self.api('GET','/designs')['designs'],[])
+        answered=self.api('POST',f'/design/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
+        self.assertEqual(answered['questions'][0]['answer'],'Approved and saved version 1: created design:'+design_id)
+        self.assertEqual([(d['id'],d['title'],d['tab']) for d in self.api('GET','/designs')['designs']],[(design_id,'Home','ui')])
+        self.assertEqual(self.api('GET','/designs/'+design_id)['elements'][0]['id'],'root')
+        versions=self.api('GET',f'/designs/{design_id}/versions')
+        self.assertEqual([(v['number'],v['source']) for v in versions],[(1,{'kind':'run','id':rid})])
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline and not self.replies(rid):time.sleep(.05)
+        self.assertIn('Approved and saved version 1',self.replies(rid)[0])
+        self.api('POST',f'/design/runs/{rid}/end')
 
     def test_strategy_proposals_wait_for_approval(self):  # D-93, A19
         f=self.api('POST','/features',{'title':'Done F','state':'complete'})

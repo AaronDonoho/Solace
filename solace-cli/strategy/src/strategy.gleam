@@ -21,7 +21,8 @@ import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
 import personas
-import plan
+import plan_panel
+import plan_setup
 import roadmap
 import solace_task
 import text_order
@@ -142,7 +143,7 @@ pub type Model {
     new_task_request: String,
     new_task_error: String,
     /// The root's strategy runs (D-93), oldest first.
-    runs: List(plan.Run),
+    runs: List(plan_panel.Run),
     /// The run shown in the planning panel, "" for none.
     plan_open: String,
     plan_collapsed: Bool,
@@ -556,7 +557,7 @@ const view_styles =
   <> solace_task.table_styles
   <> narrow_styles
   <> solace_task.editor_styles
-  <> plan.styles
+  <> plan_panel.styles
 
 pub fn register() -> Result(Nil, lustre.Error) {
   // The open task's details are `<solace-task>`, registered once per page.
@@ -700,8 +701,8 @@ pub fn new(tab: Tab) -> Model {
     runs: [],
     plan_open: "",
     plan_collapsed: False,
-    plan_width: plan.default_width,
-    plan_text: plan.load_draft(),
+    plan_width: plan_panel.default_width,
+    plan_text: plan_panel.load_draft(plan_setup.settings()),
     plan_clearing: None,
     plan_sending: False,
     plan_error: "",
@@ -867,13 +868,13 @@ fn records(model: Model, text: String) -> Result(Model, Nil) {
   })
   // The list holds no notes: a run's stay until the run comes in full.
   |> result.lazy_or(fn() {
-    at(text, "strategyRuns", decode.list(plan.decoder()))
+    at(text, "strategyRuns", decode.list(plan_panel.decoder()))
     |> result.map(fn(rs) {
       Model(
         ..model,
         runs: list.map(rs, fn(r) {
           case list.find(model.runs, fn(old) { old.id == r.id }) {
-            Ok(old) -> plan.Run(..r, notes: old.notes)
+            Ok(old) -> plan_panel.Run(..r, notes: old.notes)
             Error(_) -> r
           }
         }),
@@ -881,7 +882,7 @@ fn records(model: Model, text: String) -> Result(Model, Nil) {
     })
   })
   |> result.lazy_or(fn() {
-    at(text, "strategyRun", plan.decoder())
+    at(text, "strategyRun", plan_panel.decoder())
     |> result.map(fn(r) {
       Model(..model, runs: keep(model.runs, r, fn(r) { r.id }))
     })
@@ -1342,8 +1343,8 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
             html.text(row.title),
           ],
         ),
-        case list.contains(plan.open_ids(model.runs, "task"), row.id) {
-          True -> plan.marker()
+        case list.contains(plan_panel.open_ids(model.runs, "task"), row.id) {
+          True -> plan_panel.marker(plan_setup.settings().labels)
           False -> element.none()
         },
         // A single project's table has no Project column: the row says it here.
@@ -1659,7 +1660,7 @@ fn features_view(model: Model) -> List(Element(Msg)) {
           on_project: TaskProject,
           on_add: AddTask,
         ),
-        plan.open_ids(model.runs, "feature"),
+        plan_panel.open_ids(model.runs, "feature"),
       ),
     ),
     feature_band(model, editor),
@@ -1741,7 +1742,7 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
       on_depends_open: OpenDepends,
       on_depends_query: DependsQuery,
     ),
-    plan.open_ids(model.runs, "milestone"),
+    plan_panel.open_ids(model.runs, "milestone"),
   )
 }
 
@@ -1766,7 +1767,7 @@ fn after(ms: Int, callback: fn() -> Nil) -> Nil
 const refresh_ms = 1500
 
 /// The run shown in the planning panel.
-fn plan_shown(model: Model) -> Option(plan.Run) {
+fn plan_shown(model: Model) -> Option(plan_panel.Run) {
   list.find(model.runs, fn(r) { r.id == model.plan_open })
   |> option.from_result
 }
@@ -1825,7 +1826,11 @@ fn plan_fetch(model: Model, rid: String) -> #(Model, Effect(Msg)) {
 }
 
 fn plan_get(model: Model, poll: Int, rid: String) -> Effect(Msg) {
-  get(model, "/strategy/runs/" <> rid, PlanLoaded(poll, rid, _))
+  get(model, plan_panel.run_path(plan_setup.settings(), rid), PlanLoaded(
+    poll,
+    rid,
+    _,
+  ))
 }
 
 /// A live change of the shown run's state fetches its transcript again,
@@ -1839,16 +1844,17 @@ fn plan_follow(old: Model, new: Model) -> #(Model, Effect(Msg)) {
 
 /// The planning panel, docked beside every tab (D-93 point 7).
 fn plan_view(model: Model) -> Element(Msg) {
-  plan.view(
+  plan_panel.view(
     model.prefix,
-    plan.Panel(
+    plan_setup.settings(),
+    plan_panel.Panel(
       runs: model.runs,
-      context: plan.page,
+      context: plan_panel.page,
       shown: plan_shown(model),
       entries: model.plan_entries,
       collapsed: model.plan_collapsed,
       width: model.plan_width,
-      max_width: plan.max_width(window_width()),
+      max_width: plan_panel.max_width(window_width()),
       text: model.plan_text,
       sending: model.plan_sending,
       error: model.plan_error,
@@ -1908,8 +1914,8 @@ const width_key = "solace-strategy-plan-width"
 fn stored_width() -> Int {
   load(width_key)
   |> int.parse
-  |> result.unwrap(plan.default_width)
-  |> plan.clamp(window_width())
+  |> result.unwrap(plan_panel.default_width)
+  |> plan_panel.clamp(window_width())
 }
 
 fn store_width(width: Int) -> Effect(Msg) {
@@ -1932,7 +1938,7 @@ fn drag(x: Int, width: Int, move: fn(Int) -> Nil, done: fn() -> Nil) -> Nil
 /// Whether a live change of the strategy runs needs the human, which flags the
 /// Strategy tab while another page shows (the host hears `attention`): a run
 /// went waiting, so its agent replied, or a run asked a new proposal.
-pub fn needs_attention(old: List(plan.Run), new: List(plan.Run)) -> Bool {
+pub fn needs_attention(old: List(plan_panel.Run), new: List(plan_panel.Run)) -> Bool {
   list.any(new, fn(r) {
     case list.find(old, fn(o) { o.id == r.id }) {
       Ok(o) ->
@@ -1965,7 +1971,7 @@ fn plan_track(
   let grew = list.length(new.plan_entries) > list.length(old.plan_entries)
   case plan_shown(old), plan_shown(new) {
     Some(a), Some(b) if a.id == b.id && !new.plan_jump ->
-      case plan.size(b) > plan.size(a), new.plan_at_bottom {
+      case plan_panel.size(b) > plan_panel.size(a), new.plan_at_bottom {
         True, True -> #(new, effect.batch([fx, plan_scroll()]))
         True, False -> #(Model(..new, plan_new: True), fx)
         False, True if grew -> #(new, effect.batch([fx, plan_scroll()]))
@@ -2887,7 +2893,7 @@ fn stored_feature_title(model: Model, id: String) -> String {
 const shell_styles =
   ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
 .strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
-.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}.strategy>[role=tabpanel][hidden]{display:none}
+.strategy>.plan{grid-column:2;grid-row:2}.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}.strategy>[role=tabpanel][hidden]{display:none}
 @media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
 [role=tabpanel]{padding:var(--space-6)}
 [role=tabpanel] p{color:var(--soft);margin:8px 0}
@@ -4538,7 +4544,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       ))
     PlanWidth(width) ->
       Some(#(
-        Model(..model, plan_width: plan.clamp(width, window_width())),
+        Model(..model, plan_width: plan_panel.clamp(width, window_width())),
         effect.none(),
       ))
     PlanWidthDone -> Some(#(model, store_width(model.plan_width)))
@@ -4547,18 +4553,18 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       let window = window_width()
       let width =
         case key {
-          "ArrowLeft" -> model.plan_width + plan.key_step
-          "ArrowRight" -> model.plan_width - plan.key_step
-          "Home" -> plan.min_width
-          "End" -> plan.max_width(window)
+          "ArrowLeft" -> model.plan_width + plan_panel.key_step
+          "ArrowRight" -> model.plan_width - plan_panel.key_step
+          "Home" -> plan_panel.min_width
+          "End" -> plan_panel.max_width(window)
           _ -> model.plan_width
         }
-        |> plan.clamp(window)
+        |> plan_panel.clamp(window)
       Some(#(Model(..model, plan_width: width), store_width(width)))
     }
     // The message box grows with its text by itself (`<solace-md-editor>`).
     PlanText(text) -> {
-      plan.save_draft(text)
+      plan_panel.save_draft(plan_setup.settings(), text)
       Some(#(Model(..model, plan_text: text), effect.none()))
     }
     PlanFormat(before, after) ->
@@ -4568,7 +4574,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
           send(
             PlanText(solace_task.wrap(
               model.root,
-              plan.text_id,
+              plan_setup.settings().text_id,
               model.plan_text,
               before,
               after,
@@ -4583,7 +4589,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
           send(
             PlanText(solace_task.block(
               model.root,
-              plan.text_id,
+              plan_setup.settings().text_id,
               model.plan_text,
               kind,
             )),
@@ -4685,12 +4691,12 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         _ ->
           plan_send(
             model,
-            "/strategy/runs",
-            plan.start_body(
+            plan_panel.runs_path(plan_setup.settings()),
+            plan_panel.start_body(
               model.plan_model,
               model.plan_effort,
               model.plan_text,
-              plan.page,
+              plan_panel.page,
             ),
             True,
           )
@@ -4700,7 +4706,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         Some(run), text if text != "" && run.state != "ended" ->
           plan_send(
             model,
-            "/strategy/runs/" <> run.id <> "/notes",
+            plan_panel.run_path(plan_setup.settings(), run.id) <> "/notes",
             json.object([#("text", json.string(model.plan_text))]),
             True,
           )
@@ -4711,7 +4717,9 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         Some(run) ->
           plan_send(
             model,
-            "/strategy/runs/" <> run.id <> "/questions/" <> qid,
+            plan_panel.run_path(plan_setup.settings(), run.id)
+              <> "/questions/"
+              <> qid,
             json.object([#("option", json.string(option))]),
             False,
           )
@@ -4722,8 +4730,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
         Some(run) ->
           plan_send(
             model,
-            "/strategy/runs/"
-              <> run.id
+            plan_panel.run_path(plan_setup.settings(), run.id)
               <> case msg {
               EndPlan -> "/end"
               _ -> "/stop"
@@ -4768,7 +4775,7 @@ fn plan_reply_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
   case msg {
     // The reply's run is shown, and its transcript fetched again.
     PlanReplied(clears, text) ->
-      Some(case json.parse(text, plan.decoder()) {
+      Some(case json.parse(text, plan_panel.decoder()) {
         Ok(run) -> {
           let sent_text = case model.plan_clearing {
             Some(sent_text) -> sent_text
@@ -4776,7 +4783,7 @@ fn plan_reply_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
           }
           let clear_text = clears && model.plan_text == sent_text
           case clear_text {
-            True -> plan.clear_draft()
+            True -> plan_panel.clear_draft(plan_setup.settings())
             False -> Nil
           }
           plan_track(
@@ -4814,7 +4821,7 @@ fn plan_reply_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       if poll == model.plan_poll && rid == model.plan_open
     -> {
       let decoder = {
-        use run <- decode.then(plan.decoder())
+        use run <- decode.then(plan_panel.decoder())
         use entries <- decode.field(
           "transcript",
           decode.list(solace_task.entry_decoder()),

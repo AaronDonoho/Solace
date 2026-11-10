@@ -1098,3 +1098,155 @@ fn a_link_must_name_a_screen() {
     }]);
     refusal(&d, &["element \"go\"", "navigates_to", "must name a screen"]);
 }
+
+#[test]
+fn add_puts_an_element_at_its_parent_and_index() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[json!({
+            "op":"add",
+            "parent":"root",
+            "index":1,
+            "element":{"id":"note","type":"text","properties":{"width":"hug","height":"hug","text":"Note"}}
+        })],
+    )
+    .unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"][1]["id"], "note");
+    let mut d = design();
+    apply(&mut d, &[json!({"op":"add","index":1,"element":{"id":"side","type":"screen","properties":{"width":"fill","height":"fill"}}})])
+        .unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][1]["id"], "side");
+}
+
+#[test]
+fn remove_takes_an_element_with_its_children() {
+    let mut d = design();
+    apply(&mut d, &[json!({"op":"remove","id":"heading"})]).unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"], json!([]));
+}
+
+#[test]
+fn move_takes_an_element_to_another_parent_and_index() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[
+            json!({
+                "op":"add",
+                "parent":"root",
+                "index":1,
+                "element":{
+                    "id":"row",
+                    "type":"row",
+                    "properties":{"width":"fill","height":"hug","gap":8,"padding":0,"align":"start","justify":"start"}
+                }
+            }),
+            json!({"op":"move","id":"heading","parent":"row","index":0}),
+        ],
+    )
+    .unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"][0]["id"], "row");
+    assert_eq!(d["elements"][0]["children"][0]["children"][0]["id"], "heading");
+}
+
+#[test]
+fn set_changes_a_property_and_style_and_null_removes() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[
+            json!({"op":"set","id":"heading","field":"properties","property":"text","value":"Welcome"}),
+            json!({"op":"set","id":"heading","field":"properties","property":"action","value":"go"}),
+            json!({"op":"set","id":"heading","field":"style","property":"fill","value":"primary"}),
+        ],
+    )
+    .unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"][0]["properties"]["text"], "Welcome");
+    assert_eq!(d["elements"][0]["children"][0]["style"]["fill"], "primary");
+    apply(
+        &mut d,
+        &[
+            json!({"op":"set","id":"heading","field":"properties","property":"action","value":null}),
+            json!({"op":"set","id":"heading","field":"style","property":"fill","value":null}),
+        ],
+    )
+    .unwrap();
+    validate(&d).unwrap();
+    assert!(d["elements"][0]["children"][0]["properties"].get("action").is_none());
+    assert_eq!(d["elements"][0]["children"][0]["style"], json!({}));
+}
+
+#[test]
+fn an_operation_on_a_missing_element_is_refused() {
+    let mut d = design();
+    let before = d.clone();
+    let e = apply(&mut d, &[json!({"op":"remove","id":"gone"})]).unwrap_err();
+    assert!(e.0.starts_with("E7033") && e.0.contains("gone"), "{}", e.0);
+    assert_eq!(d, before);
+    for parent in ["root", "heading"] {
+        let e = apply(&mut d, &[json!({"op":"move","id":"root","parent":parent,"index":0})]).unwrap_err();
+        assert!(e.0.starts_with("E7033") && e.0.contains("root"), "{parent}: {}", e.0);
+    }
+}
+
+#[test]
+fn an_add_or_move_index_outside_the_children_is_refused() {
+    let mut d = design();
+    let before = d.clone();
+    let e = apply(
+        &mut d,
+        &[json!({
+            "op":"add",
+            "parent":"root",
+            "index":9,
+            "element":{"id":"note","type":"text","properties":{"width":"hug","height":"hug","text":"Note"}}
+        })],
+    )
+    .unwrap_err();
+    assert_eq!(e.0, "E7001 invalid operation: add index 9 is outside 1 children");
+    let e = apply(&mut d, &[json!({"op":"move","id":"heading","index":9})]).unwrap_err();
+    assert_eq!(e.0, "E7001 invalid operation: move index 9 is outside 1 children");
+    assert_eq!(d, before);
+}
+
+#[test]
+fn an_add_element_must_be_an_object() {
+    let mut d = design();
+    let before = d.clone();
+    let e = apply(&mut d, &[json!({"op":"add","index":0,"element":"text"})]).unwrap_err();
+    assert_eq!(e.0, "E7001 invalid operation: add's `element` must be a JSON object");
+    assert_eq!(d, before);
+}
+
+#[test]
+fn an_element_cannot_move_inside_itself() {
+    let mut d = design();
+    let before = d.clone();
+    let e = apply(&mut d, &[json!({"op":"move","id":"root","parent":"root","index":0})]).unwrap_err();
+    assert_eq!(e.0, "E7033 invalid design: element \"root\" can't move inside itself");
+    assert_eq!(d, before);
+}
+
+#[test]
+fn a_set_names_a_known_field_and_clears_a_missing_style() {
+    let mut d = design();
+    let e = apply(&mut d, &[json!({"op":"set","id":"heading","field":"width","property":"fill","value":"primary"})]).unwrap_err();
+    assert_eq!(e.0, "E7001 invalid operation: set field must be \"properties\" or \"style\", not \"width\"");
+    apply(&mut d, &[json!({"op":"set","id":"heading","field":"style","property":"fill","value":null})]).unwrap();
+    assert!(d["elements"][0]["children"][0].get("style").is_none());
+}
+
+#[test]
+fn an_unknown_operation_is_refused() {
+    let mut d = design();
+    let before = d.clone();
+    let e = apply(&mut d, &[json!({"op":"paint"})]).unwrap_err();
+    assert_eq!(e.0, "E7001 invalid operation: unknown operation \"paint\"");
+    assert_eq!(d, before);
+}

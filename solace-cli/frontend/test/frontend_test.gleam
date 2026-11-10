@@ -261,11 +261,11 @@ pub fn menu_current_test() {
 
 pub fn starts_on_the_board_outside_a_browser_test() {
   let #(model, _effect) = frontend.init(Nil)
-  // The board and Strategy are open from the start, hidden, to hear of what needs attention.
+  // The board, Strategy and Design are open from the start, hidden, to hear of what needs attention.
   assert model
     == frontend.Model(
       Board,
-      [Board, frontend.Strategy("vision")],
+      [Board, frontend.Strategy("vision"), frontend.Design("architecture", "")],
       frontend.no_focus,
       [],
       [],
@@ -1354,4 +1354,18 @@ pub fn a_design_link_opens_on_its_tab_test() {
     )
   assert model.route == frontend.Design("ui-ux", id)
   assert model.focus == frontend.Focus("solace-design", "design", "", id, 1)
+}
+
+/// The Design page is open at load, so its reply flags the menu tab as
+/// Strategy's does.
+pub fn a_hidden_design_page_flags_its_tab_test() {
+  let #(model, _) = frontend.init(Nil)
+  let #(flagged, _) =
+    frontend.update(model, frontend.Attention("solace-design"))
+  assert flagged.attention == ["solace-design"]
+  let html = element.to_string(frontend.view(flagged))
+  assert string.contains(
+    html,
+    "<a class=\"attention\" href=\"/design\">Design<span class=\"attention-note\"> (needs attention)</span></a>",
+  )
 }

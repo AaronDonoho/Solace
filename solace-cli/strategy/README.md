@@ -193,8 +193,9 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
 
 ## Planning panel
 
-A strategy run (D-93): an agent plans with the human. The panel is one component, `src/plan.gleam`, docked
-beside every tab (after the tablist, outside the tab panels), so it stays open across tab switches. **Hide**
+A strategy run (D-93): an agent plans with the human. The panel is the components project's `plan_panel`, docked
+beside every tab by this page (after the tablist, outside the tab panels), so it stays open across tab switches.
+`src/plan_setup.gleam` gives it Strategy's words, page draft and `/strategy/runs` address. **Hide**
 collapses it to one line: the shown run's state and model, or whether a run is open on the selection.
 
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
@@ -220,7 +221,7 @@ collapses it to one line: the shown run's state and model, or whether a run is o
   the window. The width is kept in `localStorage` as `solace-strategy-plan-width`, stored when a drag ends or a
   key is pressed, and read when the page loads; without storage the panel is 380px.
 - **Context.** Start plans the task open on the Tasks tab, else the whole project (`{kind: "page"}`). The panel
-  says which: "Planning Context: Whole Project", or "Planning Context: task *title*" (feature and milestone the
+  says which: "Plan context: Whole Project", or "Plan context: task *title*" (feature and milestone the
   same way). A context with an open run offers **Open it** instead of Start (the server allows one, `E7003`).
 - **Draft.** The message box has one draft for the page, not one per task, feature or milestone. Switching
   selection keeps what was typed. A successful Start or Send clears it only when the text is unchanged since

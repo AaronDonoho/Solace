@@ -69,7 +69,11 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
             ),
         );
     }
-    let use_ = if board::strategy_context().is_some() { "files, grep and read" } else { "files, grep, read, write and run" };
+    let use_ = if board::strategy_context().is_some() || crate::board::runs::design_context().is_some() {
+        "files, grep and read"
+    } else {
+        "files, grep, read, write and run"
+    };
     // D-121: Rust and Python files are read by item.
     let files = if matches!(command, "view" | "inspect" | "refs") {
         "; a .rs or .py file: `view <file>` lists its items, `view <file>::<name>` shows one"
@@ -432,32 +436,16 @@ pub fn dispatch(
                 )?;
             }
             store.materialize(&store.index()?)?;
-            // D-166: the sources are hashed before the command runs, so a source the build itself
-            // changes isn't recorded as built. A recipe that can't be read doesn't refuse the run:
-            // recording is a note, never a gate, like a record write that fails.
-            let (record, unread) = if a[0] == "run" {
-                let top = scope::top(root);
-                let dir = scope::dir(&top, root);
-                match recipe::built_sources(&top, &dir, a[1]) {
-                    Ok(sources) => (sources.map(|sources| (top, dir, sources)), None),
-                    Err(e) => (None, Some(e.0)),
-                }
-            } else {
-                (None, None)
-            };
-            let mut out = command(root, &argv, timeout, budget, a[0] != "format", a[0] == "build" && language::is_rust(root))?;
+            let fingerprint = (a[0] == "run")
+                .then(|| recipe::last_step_outputs(v, a.get(1).copied().unwrap_or("")))
+                .flatten()
+                .map(|outputs| (outputs, recipe::source_hashes(&scope::top(root), root)));
+            let out = command(root, &argv, timeout, budget, a[0] != "format", a[0] == "build" && language::is_rust(root))?;
             if !passed(&out) {
                 return fail(out);
             }
-            if let Some(why) = unread {
-                out.push_str(&format!("\nnote: could not record what it built ({}); `build plan` uses file times\n", why.trim()));
-            }
-            // D-166: a passing declared command that is a recipe's last step records what it built.
-            if let Some((top, dir, sources)) = record {
-                if let Err(e) = recipe::record_built(&top, &dir, a[1], sources) {
-                    // The build passed: a record that can't be written leaves the plan on file times.
-                    out.push_str(&format!("\nnote: could not record what it built ({}); `build plan` uses file times\n", e.0.trim()));
-                }
+            if let Some((outputs, sources)) = fingerprint {
+                recipe::write_fingerprints(root, &outputs, &sources)?;
             }
             Ok(out)
         })());
@@ -1133,59 +1121,6 @@ mod tests {
         assert!(!passed(&err.0) && passed("exit code: 0 (0.0s)\n"));
     }
 
-    /// D-166: a passing `run` of a recipe's last step records what it built; a failing one
-    /// records nothing.
-    #[test]
-    fn a_passing_run_records_what_the_recipe_built() {
-        let recipe = |run: &str| {
-            format!(
-                concat!(
-                    "[commands]\nbuild-release = {{ run = [\"sh\", \"-c\", \"{}\"] }}\n",
-                    "[build]\noutputs = [\"priv/app.js\"]\n",
-                    "steps = [{{ name = \"release\", command = \"build-release\" }}]\n"
-                ),
-                run
-            )
-        };
-        let dir = Scratch::new()
-            .with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
-        let p = dir.import();
-        let record = p.root.join(".solace/built.json");
-        let failing = recipe("echo no >&2; exit 1");
-        fs::write(p.root.join("solace.toml"), &failing).unwrap();
-        let v: toml::Value = failing.parse().unwrap();
-        assert!(call(&p, &v, &["run", "build-release"], "", None).unwrap_err().0.starts_with("exit code: 1"));
-        assert!(!record.exists(), "a failing run records nothing");
-        let passing = recipe("mkdir -p priv && echo built > priv/app.js");
-        fs::write(p.root.join("solace.toml"), &passing).unwrap();
-        let v: toml::Value = passing.parse().unwrap();
-        call(&p, &v, &["run", "build-release"], "", None).unwrap();
-        let text = fs::read_to_string(&record).unwrap();
-        assert!(text.contains("priv/app.js") && text.contains("src"), "{text}");
-    }
-
-    /// D-166: a passing `run` stays passed when the record can't be written; `build plan` then
-    /// falls back to file times.
-    #[test]
-    fn a_run_that_cannot_record_what_it_built_still_passes() {
-        let recipe = concat!(
-            "[commands]\nbuild-release = { run = [\"sh\", \"-c\", ",
-            "\"mkdir -p priv && echo built > priv/app.js\"] }\n",
-            "[build]\noutputs = [\"priv/app.js\"]\n",
-            "steps = [{ name = \"release\", command = \"build-release\" }]\n"
-        );
-        let dir = Scratch::new()
-            .with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
-        let p = dir.import();
-        fs::write(p.root.join("solace.toml"), recipe).unwrap();
-        // A folder where the record goes makes the write fail, not the build.
-        fs::create_dir_all(p.root.join(".solace/built.json")).unwrap();
-        let v: toml::Value = recipe.parse().unwrap();
-        let out = call(&p, &v, &["run", "build-release"], "", None).unwrap();
-        assert!(out.starts_with("exit code: 0 (") && out.contains("could not record"), "{out}");
-        assert!(p.root.join("priv/app.js").is_file());
-    }
-
     #[test]
     fn a4_new_watched_file_and_size() {
         let (s, v) = fixture();
@@ -1678,16 +1613,6 @@ mod tests {
         let e = call(&s, &v, &["run", "nope"], "", None).unwrap_err();
         assert!(e.0.contains("E6010") && e.0.contains("smoke"));
         assert!(call(&s, &v, &["run", "smoke"], "", None).unwrap_err().0.contains("E6012"));
-    }
-    /// A `run` whose recipe can't be read still runs: the record is skipped with
-    /// a note, not a refusal (D-166).
-    #[test]
-    fn a_run_with_an_unreadable_recipe_still_runs() {
-        let (s, _) = fixture();
-        fs::write(s.root.join("solace.toml"), "unwatched=1\n").unwrap();
-        let v: toml::Value = "[commands]\nsmoke={run=[\"true\"]}".parse().unwrap();
-        let out = call(&s, &v, &["run", "smoke"], "", None).unwrap();
-        assert!(out.contains("could not record what it built") && out.contains("E6020"), "{out}");
     }
     #[test]
     fn a10_agent_config_golden() {

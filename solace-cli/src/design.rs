@@ -801,3 +801,175 @@ fn check_text_size(value: &Value) -> Result<(), String> {
         },
     }
 }
+
+/// Applies design `operations` to `design` in place, one element at a time (D-241).
+pub(crate) fn apply(design: &mut Value, operations: &[Value]) -> Result<(), Failure> {
+    for operation in operations {
+        apply_operation(design, operation)?;
+    }
+    Ok(())
+}
+
+fn apply_operation(design: &mut Value, operation: &Value) -> Result<(), Failure> {
+    let op = operation.as_object().ok_or_else(|| operation_error("each operation must be a JSON object"))?;
+    let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| operation_error("an operation needs an `op`"))?;
+    let root = design["elements"].as_array_mut().ok_or_else(|| invalid("design has no list of elements"))?;
+    match kind {
+        "add" => add_element(root, op),
+        "remove" => remove_element(root, op),
+        "move" => move_element(root, op),
+        "set" => set_property(root, op),
+        other => Err(operation_error(format!("unknown operation {other:?}"))),
+    }
+}
+
+fn operation_error(why: impl std::fmt::Display) -> Failure {
+    Failure(format!("E7001 invalid operation: {why}"), 1)
+}
+
+fn element_id<'a>(operation: &'a Map<String, Value>) -> Result<&'a str, Failure> {
+    operation.get("id").and_then(Value::as_str).ok_or_else(|| operation_error("the operation needs an element `id`"))
+}
+
+fn parent_id(operation: &Map<String, Value>) -> Result<Option<&str>, Failure> {
+    match operation.get("parent") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) => Ok(Some(id)),
+        Some(_) => Err(operation_error("`parent` must be an element id or null")),
+    }
+}
+
+fn index_of(operation: &Map<String, Value>) -> Result<usize, Failure> {
+    operation
+        .get("index")
+        .and_then(Value::as_u64)
+        .map(|index| index as usize)
+        .ok_or_else(|| operation_error("the operation needs a whole-number `index`"))
+}
+
+fn element_path(elements: &[Value], id: &str) -> Option<Vec<usize>> {
+    for (index, element) in elements.iter().enumerate() {
+        if element["id"].as_str() == Some(id) {
+            return Some(vec![index]);
+        }
+        if let Some(children) = element["children"].as_array() {
+            if let Some(mut path) = element_path(children, id) {
+                path.insert(0, index);
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn children_mut<'a>(elements: &'a mut Vec<Value>, parent: &[usize]) -> Result<&'a mut Vec<Value>, Failure> {
+    if parent.is_empty() {
+        return Ok(elements);
+    }
+    let mut element = &mut elements[parent[0]];
+    for &index in &parent[1..] {
+        element = &mut element["children"].as_array_mut().ok_or_else(|| invalid("an element lost its children"))?[index];
+    }
+    let object = element.as_object_mut().ok_or_else(|| invalid("an element is not an object"))?;
+    if !object.contains_key("children") {
+        object.insert("children".to_string(), serde_json::json!([]));
+    }
+    object.get_mut("children").and_then(Value::as_array_mut).ok_or_else(|| invalid("an element's children must be a list"))
+}
+
+fn element_at_mut<'a>(elements: &'a mut Vec<Value>, path: &[usize]) -> Result<&'a mut Value, Failure> {
+    let Some((first, rest)) = path.split_first() else {
+        return Err(invalid("an element is missing"));
+    };
+    let mut element = elements.get_mut(*first).ok_or_else(|| invalid("an element is missing"))?;
+    for &index in rest {
+        element = &mut element["children"].as_array_mut().ok_or_else(|| invalid("an element lost its children"))?[index];
+    }
+    Ok(element)
+}
+
+fn add_element(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
+    let element = op.get("element").cloned().ok_or_else(|| operation_error("add needs an `element`"))?;
+    if !element.is_object() {
+        return Err(operation_error("add's `element` must be a JSON object"));
+    }
+    let index = index_of(op)?;
+    let parent = parent_id(op)?;
+    let parent_path = match parent {
+        Some(id) => element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?,
+        None => Vec::new(),
+    };
+    let list = children_mut(root, &parent_path)?;
+    if index > list.len() {
+        return Err(operation_error(format!("add index {index} is outside {} children", list.len())));
+    }
+    list.insert(index, element);
+    Ok(())
+}
+
+fn remove_element(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
+    let id = element_id(op)?;
+    let path = element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
+    let (last, parent_path) = path.split_last().ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
+    children_mut(root, parent_path)?.remove(*last);
+    Ok(())
+}
+
+fn move_element(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
+    let id = element_id(op)?;
+    let index = index_of(op)?;
+    let parent = parent_id(op)?;
+    let path = element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
+    if let Some(parent_id) = parent {
+        let target = element_path(root, parent_id).ok_or_else(|| invalid(format!("element {parent_id:?} does not exist")))?;
+        if target.starts_with(&path) {
+            return Err(invalid(format!("element {id:?} can't move inside itself")));
+        }
+    }
+    let (last, parent_path) = path.split_last().ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
+    let element = children_mut(root, parent_path)?.remove(*last);
+    let target_path = match parent {
+        Some(id) => element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?,
+        None => Vec::new(),
+    };
+    let length = children_mut(root, &target_path)?.len();
+    if index > length {
+        children_mut(root, parent_path)?.insert(*last, element);
+        return Err(operation_error(format!("move index {index} is outside {length} children")));
+    }
+    let list = children_mut(root, &target_path)?;
+    list.insert(index, element);
+    Ok(())
+}
+
+fn set_property(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
+    let id = element_id(op)?;
+    let field = op.get("field").and_then(Value::as_str).ok_or_else(|| operation_error("set needs a `field`"))?;
+    let property = op.get("property").and_then(Value::as_str).ok_or_else(|| operation_error("set needs a `property`"))?;
+    let value = op.get("value").ok_or_else(|| operation_error("set needs a `value`"))?;
+    let path = element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
+    let element = element_at_mut(root, &path)?;
+    let object = match field {
+        "properties" => element
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid(format!("element {id:?} has no properties")))?,
+        "style" => {
+            let element = element.as_object_mut().ok_or_else(|| invalid(format!("element {id:?} is not an object")))?;
+            if element.get("style").is_none() {
+                if value.is_null() {
+                    return Ok(());
+                }
+                element.insert("style".to_string(), serde_json::json!({}));
+            }
+            element["style"].as_object_mut().ok_or_else(|| invalid(format!("element {id:?} style must be an object")))?
+        }
+        other => return Err(operation_error(format!("set field must be \"properties\" or \"style\", not {other:?}"))),
+    };
+    if value.is_null() {
+        object.remove(property);
+    } else {
+        object.insert(property.to_string(), value.clone());
+    }
+    Ok(())
+}

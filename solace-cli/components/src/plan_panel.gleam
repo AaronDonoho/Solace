@@ -1,9 +1,9 @@
-//// The planning panel (D-93 point 7): one component docked beside every tab.
-//// It starts a strategy run on what is selected, shows a run's conversation,
+//// A panel a page docks beside its content to plan with an agent (D-93 point
+//// 7). It starts a run on the page's context, shows its conversation,
 //// proposals and transcript with a message box, and lists the past runs on
-//// the same record to reopen. The page keeps the state; this draws it.
+//// the same context to reopen. The page keeps the state and supplies its
+//// words, draft and run address; this draws it.
 
-import form_draft
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
@@ -42,7 +42,7 @@ pub type Question {
   )
 }
 
-/// A strategy run (D-93). The list the stream replays holds no notes.
+/// A run (D-93). The list the stream replays holds no notes.
 pub type Run {
   Run(
     id: String,
@@ -63,7 +63,7 @@ pub type Run {
   )
 }
 
-@external(javascript, "./api.mjs", "clock")
+@external(javascript, "./plan_api.mjs", "clock")
 fn clock(seconds: Int) -> String
 
 pub fn context_decoder() -> decode.Decoder(Context) {
@@ -103,7 +103,7 @@ fn question_decoder() -> decode.Decoder(Question) {
   decode.success(Question(id, text, options, answer, proposal, time, after))
 }
 
-/// A run in `GET /strategy/runs...`, a reply or the stream.
+/// A run in the page's run list, a reply or the stream.
 pub fn decoder() -> decode.Decoder(Run) {
   let text = fn(name, next) {
     decode.optional_field(
@@ -166,8 +166,8 @@ pub fn context_json(context: Context) -> json.Json {
   }
 }
 
-/// The body of `POST /strategy/runs`: `text` is the first message. With no
-/// model chosen the server takes its default.
+/// The body of a run's start: `text` is the first message. With no model
+/// chosen the server takes its default.
 pub fn start_body(
   model: String,
   effort: String,
@@ -216,17 +216,6 @@ pub fn past(runs: List(Run), context: Context) -> List(Run) {
   })
 }
 
-/// The badge on a task row, feature or milestone with an open run.
-pub fn marker() -> Element(msg) {
-  html.span(
-    [
-      attribute.class("planning"),
-      attribute.title(solace_task.ui_label("plan_marker")),
-    ],
-    [html.text(solace_task.ui_label("plan"))],
-  )
-}
-
 /// What a run is doing, or how it ended, and the one label of the model its
 /// agent used.
 pub fn state_text(run: Run, models: List(solace_task.Agent)) -> String {
@@ -248,7 +237,7 @@ pub fn state_text(run: Run, models: List(solace_task.Agent)) -> String {
 pub type Panel(msg) {
   Panel(
     runs: List(Run),
-    /// What Start plans: the whole page (D-202).
+    /// What Start plans.
     context: Context,
     shown: Option(Run),
     entries: List(solace_task.Entry),
@@ -301,82 +290,26 @@ pub type Panel(msg) {
   )
 }
 
-/// The message box's textarea.
-pub const text_id = "plan-text"
-
-pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
-  html.aside(
-    [
-      attribute.class(case p.collapsed {
-        True -> "plan collapsed"
-        False -> "plan"
-      }),
-      attribute.attribute("aria-label", solace_task.ui_label("plan")),
-      attribute.id("plan"),
-      attribute.style("--plan-width", int.to_string(p.width) <> "px"),
-    ],
-    [
-      case p.collapsed {
-        True -> element.none()
-        False -> resize_handle(p)
-      },
-      html.header([], [
-        html.h2([], [html.text(solace_task.ui_label("plan"))]),
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.class("edit"),
-            attribute.attribute("aria-expanded", case p.collapsed {
-              True -> "false"
-              False -> "true"
-            }),
-            event.on_click(p.on_collapse),
-          ],
-          [
-            html.text(case p.collapsed {
-              True -> solace_task.ui_label("show")
-              False -> solace_task.ui_label("hide")
-            }),
-          ],
-        ),
-      ]),
-      case p.collapsed {
-        True -> element.none()
-        False -> bar(p)
-      },
-      case p.collapsed {
-        True ->
-          html.p([attribute.class("plan-summary")], [html.text(summary(p))])
-        False ->
-          html.div(
-            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
-            body(base, p),
-          )
-      },
-      case p.collapsed {
-        True -> element.none()
-        False -> compose(base, p)
-      },
-    ],
-  )
-}
-
 /// The collapsed panel's one line.
-fn summary(p: Panel(msg)) -> String {
+fn summary(settings: Settings, p: Panel(msg)) -> String {
   case p.shown, open_on(p.runs, p.context) {
     Some(run), _ -> state_text(run, p.models)
-    None, Some(_) -> "A run on this is open"
+    None, Some(_) -> settings.labels.run_open
     None, None -> "No run open"
   }
 }
 
-fn context_view(context: Context, name: fn(String, String) -> String) {
+fn context_view(
+  labels: Labels,
+  context: Context,
+  name: fn(String, String) -> String,
+) {
   case context.kind {
     "page" -> [
-      html.text(solace_task.ui_label("plan_context") <> ": Whole Project"),
+      html.text(labels.context <> ": " <> labels.whole),
     ]
     kind -> [
-      html.text(solace_task.ui_label("plan_context") <> ": " <> kind <> " "),
+      html.text(labels.context <> ": " <> kind <> " "),
       html.em([], [
         html.text(case name(kind, context.id) {
           "" -> context.id
@@ -389,10 +322,10 @@ fn context_view(context: Context, name: fn(String, String) -> String) {
 
 /// The conversation, between the run bar and the message box: the only part
 /// of the panel that scrolls.
-fn body(base: String, p: Panel(msg)) -> List(Element(msg)) {
+fn body(base: String, settings: Settings, p: Panel(msg)) -> List(Element(msg)) {
   case p.shown {
-    Some(run) -> run_view(base, p, run)
-    None -> start_view(p)
+    Some(run) -> run_view(base, settings, p, run)
+    None -> start_view(settings, p)
   }
 }
 
@@ -412,7 +345,12 @@ fn small(label: String, disabled: Bool, msg: msg) -> Element(msg) {
 /// notes and proposals in the order they happened (D-118). The newest message
 /// sits at the run's end, right above the message box. An ended run's
 /// proposals can't be answered.
-fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
+fn run_view(
+  base: String,
+  settings: Settings,
+  p: Panel(msg),
+  run: Run,
+) -> List(Element(msg)) {
   let open = run.state != "ended"
   list.flatten([
     case p.entries {
@@ -472,7 +410,7 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
               attribute.class("plan-new"),
               event.on_click(p.on_newest),
             ],
-            [html.text("New message ↓")],
+            [html.text(settings.labels.new_message)],
           )
         False -> element.none()
       },
@@ -483,10 +421,10 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
 
 /// Nothing shown: the open run on the context to open, or a hint that the
 /// message box below starts a run.
-fn start_view(p: Panel(msg)) -> List(Element(msg)) {
+fn start_view(settings: Settings, p: Panel(msg)) -> List(Element(msg)) {
   case open_on(p.runs, p.context) {
     Some(run) -> [
-      html.p([], [html.text(solace_task.ui_label("plan_open_here"))]),
+      html.p([], [html.text(settings.labels.open_here)]),
       small(solace_task.ui_label("open_run"), False, p.on_show(run.id)),
     ]
     // Nothing open: the box below starts the run, and its Start button says so.
@@ -548,7 +486,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
 
 /// The panel's look; colors come from the page's custom properties.
 pub const styles =
-  ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:var(--space-3) var(--space-4) 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:var(--space-3)}
+  ".plan{position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:var(--space-3) var(--space-4) 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:var(--space-3)}
 .plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 calc(-1 * var(--space-4));padding:0 var(--space-4) var(--space-3)}
 .plan-bar{border-bottom:1px solid var(--edge);padding:0 0 var(--space-2);margin-bottom:var(--space-1)}.plan-bar .plan-context{margin:var(--space-1) 0}.plan-bar select{"
   <> solace_task.small_control
@@ -603,14 +541,14 @@ const resize_keys = ["ArrowLeft", "ArrowRight", "Home", "End"]
 
 /// The panel's left edge, a separator that sets its width: dragged, or with
 /// the arrow keys, Home and End while focused. Left widens the panel.
-fn resize_handle(p: Panel(msg)) -> Element(msg) {
+fn resize_handle(settings: Settings, p: Panel(msg)) -> Element(msg) {
   html.div(
     [
       attribute.class("plan-resize"),
       attribute.role("separator"),
       attribute.attribute("aria-orientation", "vertical"),
-      attribute.attribute("aria-label", "Resize the planning panel"),
-      attribute.attribute("aria-controls", "plan"),
+      attribute.attribute("aria-label", settings.labels.resize),
+      attribute.attribute("aria-controls", settings.id),
       attribute.attribute("aria-valuenow", int.to_string(p.width)),
       attribute.attribute("aria-valuemin", int.to_string(min_width)),
       attribute.attribute("aria-valuemax", int.to_string(p.max_width)),
@@ -696,7 +634,7 @@ fn scrolled(p: Panel(msg)) -> decode.Decoder(msg) {
   }
 }
 
-@external(javascript, "./api.mjs", "near_end")
+@external(javascript, "./plan_api.mjs", "near_end")
 fn near_end(body: dynamic.Dynamic) -> Bool
 
 /// The run New run shows: the open run on `context`, since the server allows
@@ -711,7 +649,7 @@ pub fn new_run(runs: List(Run), context: Context) -> String {
 /// The run bar, pinned above the conversation: what the shown run is on (else
 /// what a new run would plan), its state and model, End and Stop while it is
 /// open, the Earlier runs on the same record, newest first, and New run.
-fn bar(p: Panel(msg)) -> Element(msg) {
+fn bar(settings: Settings, p: Panel(msg)) -> Element(msg) {
   let current = case p.shown {
     Some(run) -> run.id
     None -> ""
@@ -726,12 +664,15 @@ fn bar(p: Panel(msg)) -> Element(msg) {
       state_text(run, p.models),
     )
     Some(run), _ -> #("state", state_text(run, p.models))
-    None, Some(_) -> #("state", "A run on this is open")
+    None, Some(_) -> #("state", settings.labels.run_open)
     None, None -> #("state", "No run open")
   }
   let target = new_run(p.runs, p.context)
   html.div([attribute.class("plan-bar")], [
-    html.p([attribute.class("plan-context")], context_view(context, p.name)),
+    html.p(
+      [attribute.class("plan-context")],
+      context_view(settings.labels, context, p.name),
+    ),
     html.div(
       [attribute.class("plan-meta")],
       list.flatten([
@@ -749,7 +690,7 @@ fn bar(p: Panel(msg)) -> Element(msg) {
             html.select(
               [
                 attribute.class("plan-earlier"),
-                attribute.attribute("aria-label", "Earlier runs"),
+                attribute.attribute("aria-label", settings.labels.earlier),
                 event.on_input(p.on_show),
               ],
               [
@@ -759,7 +700,7 @@ fn bar(p: Panel(msg)) -> Element(msg) {
                     attribute.disabled(True),
                     attribute.selected(current == ""),
                   ],
-                  "Earlier runs",
+                  settings.labels.earlier,
                 ),
                 ..list.map(runs, fn(run) {
                   html.option(
@@ -796,7 +737,7 @@ fn bar(p: Panel(msg)) -> Element(msg) {
 /// the shown open run the action is Send and sends a message; with nothing
 /// shown and no open run on the context, the model choice sits above it and
 /// the action is Start, which starts a run. Otherwise there is none.
-fn compose(base: String, p: Panel(msg)) -> Element(msg) {
+fn compose(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
   let box = fn(label, send, choice, text) {
     html.div(
       [attribute.class("plan-compose"), event.on("keydown", send_key(send))],
@@ -804,7 +745,7 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
         choice,
         solace_task.editor(
           solace_task.EditorConfig(
-            id: text_id,
+            id: settings.text_id,
             task: "",
             base: base,
             label: label,
@@ -851,29 +792,6 @@ fn send_key(send: msg) -> decode.Decoder(msg) {
   }
 }
 
-/// The planning draft belongs to the page, whatever is selected.
-pub const draft_owner = "page:"
-
-/// The storage key of the page's planning draft.
-pub fn draft_key() -> String {
-  form_draft.key(text_id, draft_owner)
-}
-
-/// The page's saved message, "" when there is none.
-pub fn load_draft() -> String {
-  form_draft.load(text_id, draft_owner)
-}
-
-/// Removes the page's saved message.
-pub fn clear_draft() -> Nil {
-  form_draft.clear(text_id, draft_owner)
-}
-
-/// Saves the page's message as it is typed.
-pub fn save_draft(text: String) -> Nil {
-  form_draft.save(text_id, draft_owner, text)
-}
-
 /// `context` with a task read as the page, whose runs a saved task run joins
 /// (D-202).
 fn on_page(context: Context) -> Context {
@@ -881,4 +799,133 @@ fn on_page(context: Context) -> Context {
     "task" -> page
     _ -> context
   }
+}
+
+/// The panel a page docks beside its content.
+pub fn view(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
+  html.aside(
+    [
+      attribute.class(case p.collapsed {
+        True -> "plan collapsed"
+        False -> "plan"
+      }),
+      attribute.attribute("aria-label", settings.labels.title),
+      attribute.id(settings.id),
+      attribute.style("--plan-width", int.to_string(p.width) <> "px"),
+    ],
+    [
+      case p.collapsed {
+        True -> element.none()
+        False -> resize_handle(settings, p)
+      },
+      html.header([], [
+        html.h2([], [html.text(settings.labels.title)]),
+        html.button(
+          [
+            attribute.type_("button"),
+            attribute.class("edit"),
+            attribute.attribute("aria-expanded", case p.collapsed {
+              True -> "false"
+              False -> "true"
+            }),
+            event.on_click(p.on_collapse),
+          ],
+          [
+            html.text(case p.collapsed {
+              True -> solace_task.ui_label("show")
+              False -> solace_task.ui_label("hide")
+            }),
+          ],
+        ),
+      ]),
+      case p.collapsed {
+        True -> element.none()
+        False -> bar(settings, p)
+      },
+      case p.collapsed {
+        True ->
+          html.p([attribute.class("plan-summary")], [
+            html.text(summary(settings, p)),
+          ])
+        False ->
+          html.div(
+            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
+            body(base, settings, p),
+          )
+      },
+      case p.collapsed {
+        True -> element.none()
+        False -> compose(base, settings, p)
+      },
+    ],
+  )
+}
+
+/// The marker a page puts beside a record whose run is open.
+pub fn marker(labels: Labels) -> Element(msg) {
+  html.span(
+    [
+      attribute.class("planning"),
+      attribute.title(labels.marker_title),
+    ],
+    [html.text(labels.marker)],
+  )
+}
+
+/// The storage key of `settings`'s draft.
+pub fn draft_key(settings: Settings) -> String {
+  solace_task.draft_key(settings.text_id, settings.draft_owner)
+}
+
+/// The draft saved for `settings`, "" when there is none.
+pub fn load_draft(settings: Settings) -> String {
+  solace_task.draft_load(settings.text_id, settings.draft_owner)
+}
+
+/// Removes `settings`'s draft.
+pub fn clear_draft(settings: Settings) -> Nil {
+  solace_task.draft_clear(settings.text_id, settings.draft_owner)
+}
+
+/// Saves `settings`'s draft, removing it when the text is blank.
+pub fn save_draft(settings: Settings, text: String) -> Nil {
+  solace_task.draft_save(settings.text_id, settings.draft_owner, text)
+}
+
+/// How a page uses the panel: its id, where its runs are asked for, the
+/// message box's editor and draft, and the words the page gives it.
+pub type Settings {
+  Settings(
+    id: String,
+    address: String,
+    text_id: String,
+    draft_owner: String,
+    labels: Labels,
+  )
+}
+
+/// The words a page gives the panel.
+pub type Labels {
+  Labels(
+    title: String,
+    context: String,
+    whole: String,
+    open_here: String,
+    marker: String,
+    marker_title: String,
+    run_open: String,
+    resize: String,
+    earlier: String,
+    new_message: String,
+  )
+}
+
+/// Where a page's runs are started, listed and fetched.
+pub fn runs_path(settings: Settings) -> String {
+  settings.address
+}
+
+/// One run of a page's runs.
+pub fn run_path(settings: Settings, id: String) -> String {
+  settings.address <> "/" <> id
 }

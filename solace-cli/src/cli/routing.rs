@@ -409,6 +409,9 @@ enum SettingsWrite {
 }
 
 fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Result<Option<Out>, Failure> {
+    if let Some(rid) = crate::board::runs::design_context() {
+        return Ok(Some(design_run(&rid, args, input, budget)));
+    }
     if let Some(rid) = strategy_context() {
         return Ok(Some(strategy_run(&rid, args, input, budget)));
     }
@@ -652,4 +655,41 @@ pub(crate) fn inspect_options<'a>(args: &[&'a str]) -> Result<(Vec<&'a str>, Opt
         }
     }
     Ok((names, lines))
+}
+
+/// A command in design run `rid` (D-240): plain reads of any project under the
+/// root, taking no project lock. Every other command is refused (`E7010`);
+/// the run's own commands are `design note`, `design wait` and `design propose`.
+fn design_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    let strategy_read = command == "strategy" && matches!(a.get(1).copied(), Some("list" | "show"));
+    if !READS.contains(&command) && !strategy_read {
+        let why = match command {
+            "task" => "a design run is not a task; task commands are refused",
+            "strategy" => "a design run reads the plan with `strategy list` and `strategy show`; other strategy commands are refused",
+            c if HOST.contains(&c) => "host command is unavailable in a run",
+            _ => {
+                "a design run reads code, designs and the plan; reply with `design note` or propose \
+                 with `design propose <id>` (add `--project <folder>` for another project)"
+            }
+        };
+        return crate::lockdown::error("E7010", command, why);
+    }
+    let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
+    crate::board::design_guard(&top, rid, &a)?;
+    if command == "strategy" {
+        return crate::board::strategy_command(&top, rid, &a, input, budget);
+    }
+    if command == "design" && matches!(a.get(1).copied(), Some("note" | "wait" | "propose")) {
+        return crate::board::design_command(&top, rid, &a, input);
+    }
+    // A read, in the root's project or with `--project` in another.
+    match a.iter().position(|x| *x == "--project") {
+        Some(i) => {
+            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
+            read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
+        }
+        None => read_project(".", args, budget),
+    }
 }

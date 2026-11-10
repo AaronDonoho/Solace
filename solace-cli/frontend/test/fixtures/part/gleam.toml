@@ -1,0 +1,6 @@
+[dependencies]
+inline = { path = "inline" }
+# path = "commented"
+
+[dependencies.table]
+path = "table"

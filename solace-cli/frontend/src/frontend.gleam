@@ -182,13 +182,18 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     RecordLink(kind, id) -> #(Board, find(kind, id, True, Board, 0))
     _ -> #(initial, effect.none())
   }
-  // The board and Strategy are open from the start, hidden, so they hear of
-  // what needs the human and can flag their tab.
+  // The board, Strategy and Design are open from the start, hidden, so they
+  // hear of what needs the human and can flag their tab.
   let strategy_page = case initial {
     Strategy(tab) -> Strategy(tab)
     _ -> Strategy(strategy.tab_name(strategy.Vision))
   }
-  let opened = [shown] |> open(Board) |> open(strategy_page)
+  let design_page = case initial {
+    Design(tab, open) -> Design(tab, open)
+    _ -> Design(design.tab_name(design.Architecture), "")
+  }
+  let opened =
+    [shown] |> open(Board) |> open(strategy_page) |> open(design_page)
   #(
     Model(
       route: shown,

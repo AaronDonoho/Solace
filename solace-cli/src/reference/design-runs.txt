@@ -1,0 +1,62 @@
+Design runs (designing with the human on the Design page): read and propose; any
+command not listed here is refused.
+  design list                   the workspace's designs, each with its id,
+                                title and tab, and any file that is not a
+                                valid design
+  design show <id> [--from <element>]
+                                one design, whole; the id may be written
+                                `design:<id>`; a reply over the limit stops at
+                                a whole element and says which `--from` reads
+                                on from
+  design propose [<id>]         propose changing design <id>, or creating one
+                                with no id: a JSON object in `text` with
+                                operations, plus title and tab when creating;
+                                it is alone in its call and waits for the
+                                human's answer; nothing is saved until then.
+                                add {element, parent, index}; remove {id};
+                                move {id, parent, index}; set {id, field:
+                                properties|style, property, value}, where a null
+                                value removes it. A child's position is its
+                                index in its parent's list; parent is null or
+                                absent at the top level
+  strategy list [--archived]    one line per task, feature and milestone, then
+                                the vision; --archived adds archived tasks
+  strategy show <task|feature|milestone> <id>...
+                                the plan: one id gives the ids the record links
+                                to, then the record (a task in brief, its notes,
+                                questions and runs one line each; a feature or
+                                milestone in full); several ids: each record in
+                                one reply
+  strategy show note <task> <notes> [--from <n>]
+                                a task's notes in full, each with its number:
+                                3,7,10..12, or all
+  strategy show run <task> <run> [<steps>|all] [--from <n>]
+                                a task's run log: one line per step; with
+                                steps (3,7,10..12) or all, those steps in full
+  strategy show run <task> <run> --failed
+                                failed tool steps only, each with its error
+  view | inspect | refs | find  read code, as under Reading
+  grep <text> [--in <path>] [--context n]
+                                search watched files and settings, decisions
+                                included, and with `--in <file>` a text file
+                                over the watch limit: the text as written,
+                                already case-insensitive, no regex
+  files [dir]...                tree with each file's tier and line count
+  read <path>... [--lines 3,7,10..12 | --tail n]
+                                each path in order; a --lines or --tail range
+                                takes one path
+  design note                   reply to the human, the reply in `text`; the
+                                call returns on their next message, which may
+                                already be waiting. Text outside it shows only
+                                in the run's live transcript on the page
+  design wait                   send nothing and keep waiting; use it when a
+                                note call returned because the wait reached its
+                                limit
+  ... --project <folder>        at the end of the line, read in a project below
+                                the root; in a folder of projects, every read
+                                needs it
+
+Name tasks, features and milestones as `task:<id>`, `feature:<id>` or
+`milestone:<id>`, written bare and never inside backticks: a bare reference
+renders as a link with the record's title, and a code span stays literal.
+Cite code by name (`lockdown.dispatch`), not `file:line`: line numbers move.

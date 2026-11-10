@@ -197,38 +197,9 @@ fn touch(path: &Path, t: std::time::SystemTime) {
     fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
 }
 
-/// D-159: `build plan` marks a declared output out of date when it is missing, or when a source
-/// of its project or of a path dependency changed more than 5 s after it was built.
-#[test]
-fn the_plan_marks_outputs_older_than_their_sources() {
-    let top = Scratch::new().with(&[
-        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
-        ("a/solace.toml", "[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", run = [\"x\"] }]\n"),
-        ("a/gleam.toml", "name = \"a\"\n[dependencies]\nb = { path = \"../b\" }\n"),
-        ("a/src/a.gleam", ""),
-        ("a/priv/app.js", ""),
-        ("b/src/b.gleam", ""),
-    ]);
-    let now = std::time::SystemTime::now();
-    let built = now + std::time::Duration::from_secs(60);
-    touch(&top.join("a/priv/app.js"), built);
-    let marked = || plan_text(&top).unwrap().lines().find(|l| l.contains("out of date")).map(String::from);
-    assert_eq!(marked(), None);
-    assert_eq!(plan_json(&top).unwrap()[0]["stale"], Value::Null);
-    touch(&top.join("b/src/b.gleam"), built + std::time::Duration::from_secs(4));
-    assert_eq!(marked(), None, "within 5 s is the same build");
-    touch(&top.join("b/src/b.gleam"), built + std::time::Duration::from_secs(60));
-    assert_eq!(marked().as_deref(), Some("   out of date: b/src changed after priv/app.js was built: run step `release`"));
-    assert_eq!(plan_json(&top).unwrap()[0]["stale"], "b/src changed after priv/app.js was built");
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
-    assert!(marked().unwrap().contains("a/src, b/src changed"));
-    fs::remove_file(top.join("a/priv/app.js")).unwrap();
-    assert_eq!(marked().as_deref(), Some("   out of date: priv/app.js is missing: run step `release`"));
-}
-
 /// A root of `a` and `b` where `a` builds `priv/app.js` from `b` through the declared command
-/// `build-release`, its output stamped at `built`.
-fn record_fixture() -> (Scratch, std::time::SystemTime) {
+/// `build-release`.
+fn record_fixture() -> Scratch {
     let top = Scratch::new().with(&[
         ("solace.toml", "projects = [\"a\", \"b\"]\n"),
         (
@@ -244,17 +215,14 @@ fn record_fixture() -> (Scratch, std::time::SystemTime) {
         ("a/priv/app.js", ""),
         ("b/src/b.gleam", ""),
     ]);
-    let built = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-    touch(&top.join("a/priv/app.js"), built);
-    (top, built)
+    top
 }
 
-/// `record_fixture` with `build-release` recorded, as a passing `run` records it.
-fn recorded() -> (Scratch, std::time::SystemTime) {
-    let (top, built) = record_fixture();
-    let sources = built_sources(&top, "a", "build-release").unwrap().unwrap();
-    record_built(&top, "a", "build-release", sources).unwrap();
-    (top, built)
+/// `record_fixture` with a fingerprint matching its output.
+fn recorded() -> Scratch {
+    let top = record_fixture();
+    write_fingerprint(&top, "a", "priv/app.js");
+    top
 }
 
 /// The `out of date` line of the plan, if any.
@@ -262,92 +230,151 @@ fn out_of_date(top: &Path) -> Option<String> {
     plan_text(top).unwrap().lines().find(|l| l.contains("out of date")).map(String::from)
 }
 
-/// D-166: a recorded build judges sources by contents, so touching one without changing it is
-/// not a change.
+fn write_fingerprint(top: &Path, project: &str, output: &str) {
+    let root = scope::path(top, project);
+    write_fingerprint_with(top, project, output, source_hashes(top, &root));
+}
+
+fn write_fingerprint_with(top: &Path, project: &str, output: &str, sources: Value) {
+    let root = scope::path(top, project);
+    let hash = sha256(fs::read(root.join(output)).unwrap());
+    fs::write(root.join(format!("{output}.fingerprint")), json!({"output": hash, "sources": sources}).to_string()).unwrap();
+}
+
+/// A matching fingerprint is fresh whatever the files' times say, as after a checkout.
 #[test]
-fn a_recorded_build_ignores_a_touched_source() {
-    let (top, built) = recorded();
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
+fn a_matching_fingerprint_is_fresh() {
+    let top = recorded();
+    let now = std::time::SystemTime::now();
+    touch(&top.join("a/priv/app.js"), now - std::time::Duration::from_secs(60));
+    touch(&top.join("b/src/b.gleam"), now + std::time::Duration::from_secs(60));
     assert_eq!(out_of_date(&top), None);
     assert_eq!(plan_json(&top).unwrap()[0]["stale"], Value::Null);
 }
 
-/// D-166: a source whose contents changed since the record is named.
+/// A source part whose contents changed since the fingerprint is named.
 #[test]
-fn a_recorded_build_names_a_changed_source() {
-    let (top, built) = recorded();
-    fs::write(top.join("a/src/a.gleam"), "// changed\n").unwrap();
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
-    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: a/src changed since priv/app.js was built: run step `release`"));
-    assert_eq!(plan_json(&top).unwrap()[0]["stale"], "a/src changed since priv/app.js was built");
+fn a_changed_input_is_stale() {
+    let top = recorded();
+    fs::write(top.join("b/src/b.gleam"), "// changed\n").unwrap();
+    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: b/src changed since priv/app.js was built: run step `release`"));
+    assert_eq!(plan_json(&top).unwrap()[0]["stale"], "b/src changed since priv/app.js was built");
 }
 
-/// D-166: a file added after the build, a `package.json`, is named: its part's hash changed.
+/// D-242: a missing fingerprint is named, rather than judged by file times.
 #[test]
-fn a_recorded_build_names_a_new_manifest() {
-    let (top, _) = recorded();
-    fs::write(top.join("a/package.json"), "{}").unwrap();
+fn a_missing_fingerprint_is_reported() {
+    let top = record_fixture();
+    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: priv/app.js.fingerprint is missing: run step `release`"));
+}
+
+/// D-242: an unreadable fingerprint is named, rather than judged by file times.
+#[test]
+fn an_unreadable_fingerprint_is_reported() {
+    let top = record_fixture();
+    fs::write(top.join("a/priv/app.js.fingerprint"), "not json").unwrap();
+    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: priv/app.js.fingerprint can't be read: run step `release`"));
+}
+
+/// D-242: an output whose hash differs from its fingerprint is stale.
+#[test]
+fn a_changed_output_is_stale() {
+    let top = recorded();
+    fs::write(top.join("a/priv/app.js"), "// rebuilt elsewhere\n").unwrap();
     assert_eq!(
         out_of_date(&top).as_deref(),
-        Some("   out of date: a/package.json changed since priv/app.js was built: run step `release`")
+        Some("   out of date: priv/app.js does not match priv/app.js.fingerprint: run step `release`")
     );
 }
 
-/// D-166: when an output changed since the record, the plan falls back to file times.
+/// D-242: an output missing beside its fingerprint is stale.
 #[test]
-fn a_changed_output_falls_back_to_file_times() {
-    let (top, built) = recorded();
-    fs::write(top.join("a/priv/app.js"), "// rebuilt\n").unwrap();
-    touch(&top.join("a/priv/app.js"), built);
-    fs::write(top.join("a/src/a.gleam"), "// changed\n").unwrap();
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
-    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: a/src changed after priv/app.js was built: run step `release`"));
+fn a_missing_output_is_reported() {
+    let top = recorded();
+    fs::remove_file(top.join("a/priv/app.js")).unwrap();
+    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: priv/app.js is missing: run step `release`"));
 }
 
-/// D-166: the sources are hashed before the command runs, so a source the build itself changes
-/// isn't recorded as built.
+/// D-159: `manifest.toml` is an input part too.
+#[test]
+fn a_new_manifest_is_named() {
+    let top = recorded();
+    fs::write(top.join("a/manifest.toml"), "# dependencies\n").unwrap();
+    assert_eq!(
+        out_of_date(&top).as_deref(),
+        Some("   out of date: a/manifest.toml changed since priv/app.js was built: run step `release`")
+    );
+}
+
+/// D-242: the fingerprint's sources are hashed before the build, so a source the build itself
+/// changes is not counted as built.
 #[test]
 fn a_source_changed_during_the_build_is_not_recorded_as_built() {
-    let (top, built) = record_fixture();
-    let sources = built_sources(&top, "a", "build-release").unwrap().unwrap();
+    let top = record_fixture();
+    let sources = source_hashes(&top, &top.join("a"));
     fs::write(top.join("a/src/a.gleam"), "// written during the build\n").unwrap();
-    record_built(&top, "a", "build-release", sources).unwrap();
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
+    write_fingerprint_with(&top, "a", "priv/app.js", sources);
     assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: a/src changed since priv/app.js was built: run step `release`"));
-}
-
-/// D-166: only a recipe's last step command records; another command, or a project with no
-/// recipe, hashes nothing.
-#[test]
-fn only_the_recording_command_hashes_its_sources() {
-    let (top, _) = record_fixture();
-    assert!(built_sources(&top, "a", "other").unwrap().is_none());
-    assert!(built_sources(&top, "b", "build-release").unwrap().is_none());
-    assert!(built_sources(&top, "a", "build-release").unwrap().is_some());
-}
-
-/// D-166: a record made for a step's old command says nothing once the recipe names another one.
-#[test]
-fn a_record_for_a_changed_command_falls_back_to_file_times() {
-    let (top, built) = recorded();
-    fs::write(
-        top.join("a/solace.toml"),
-        concat!(
-            "[commands]\nbuild-release = { run = [\"x\"] }\nother = { run = [\"y\"] }\n",
-            "[build]\noutputs = [\"priv/app.js\"]\n",
-            "steps = [{ name = \"release\", command = \"other\" }]\n"
-        ),
-    )
-    .unwrap();
-    fs::write(top.join("a/src/a.gleam"), "// changed\n").unwrap();
-    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
-    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: a/src changed after priv/app.js was built: run step `release`"));
 }
 
 /// A symlinked folder inside a source folder that points back up the tree ends the walk.
 #[test]
-fn newest_does_not_follow_a_symlinked_folder() {
+fn fingerprints_does_not_follow_a_symlinked_folder() {
     let top = Scratch::new().with(&[("src/a.gleam", "")]);
     std::os::unix::fs::symlink(top.join("src"), top.join("src/up")).unwrap();
-    assert!(newest(&top.join("src")).is_some());
+    assert_eq!(part_hash(&top.join("src")).len(), 64);
+}
+
+/// A passing last-step run writes the fingerprint that makes its outputs current.
+#[test]
+fn a_passing_last_step_records_its_output_fingerprint() {
+    let project = Scratch::new()
+        .with(&[
+            ("gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n"),
+            ("src/main.gleam", "pub fn main() { 1 }\n"),
+            ("priv/app.js", "built\n"),
+            (
+                "solace.toml",
+                concat!(
+                    "[commands]\nbuild-release = { run = [\"cargo\", \"--version\"] }\n",
+                    "[build]\noutputs = [\"priv/app.js\"]\n",
+                    "steps = [{ name = \"release\", command = \"build-release\" }]\n"
+                ),
+            ),
+        ])
+        .import();
+    let v = crate::lockdown::settings(&project.store.root).unwrap();
+    let top = crate::scope::top(&project.store.root);
+    assert!(plan_json(&top).unwrap()[0]["stale"].is_string());
+    let out = crate::lockdown::dispatch(&project.store, &v, &["run", "build-release"], &mut || Ok(String::new()), None, 1000).unwrap();
+    assert!(out.is_ok(), "{}", out.err().unwrap().0);
+    assert_eq!(plan_json(&top).unwrap()[0]["stale"], Value::Null);
+}
+
+fn part_fixture() -> Scratch {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/test/fixtures/part");
+    let scratch = Scratch::new();
+    for name in ["gleam.toml", "file.txt", "nested/file.txt"] {
+        let to = scratch.join(name);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(source.join(name), &to).unwrap();
+    }
+    std::os::unix::fs::symlink("file.txt", scratch.join("link.txt")).unwrap();
+    scratch
+}
+
+/// The bundle's JavaScript hasher and the plan's Rust hasher agree on the shared fixture.
+#[test]
+fn the_shared_part_fixture_hashes_the_same_in_the_bundle() {
+    assert_eq!(part_hash(&part_fixture()), "ae8589fc75d5d3f357cd2e90b5077723d43c84a1012965f0ab63408f978bee1b");
+}
+
+/// The Rust side sees table-style path dependencies; the bundle's reader must too.
+#[test]
+fn a_table_style_dependency_is_a_source_part() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/test/fixtures/part");
+    let names: Vec<String> = source_parts(&fixture, &fixture).into_iter().map(|(name, _)| name).collect();
+    assert!(names.contains(&"inline/src".to_string()), "{names:?}");
+    assert!(names.contains(&"table/src".to_string()), "{names:?}");
+    assert!(!names.iter().any(|name| name.starts_with("commented/")), "{names:?}");
 }

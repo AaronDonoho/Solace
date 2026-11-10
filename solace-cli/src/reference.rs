@@ -16,6 +16,7 @@ pub(crate) const REFERENCE: &str = concat!(
     include_str!("reference/work.txt"),
     include_str!("reference/task-runs.txt"),
     include_str!("reference/strategy-runs.txt"),
+    include_str!("reference/design-runs.txt"),
     include_str!("reference/host.txt"),
 );
 
@@ -26,9 +27,13 @@ pub(crate) fn agent_reference(in_task: bool) -> String {
     let (workflow, rest) = REFERENCE.split_once("\nCommands in full").unwrap();
     let (_, rest) = rest.split_once("\nTask runs").unwrap();
     let (task, rest) = rest.split_once("\nStrategy runs").unwrap();
-    let (strategy, _host) = rest.split_once("\nHost commands").unwrap();
+    let (strategy, rest) = rest.split_once("\nDesign runs").unwrap();
+    let (design, _host) = rest.split_once("\nHost commands").unwrap();
     if in_task {
         format!("{workflow}\nTask runs{task}")
+    } else if crate::board::runs::design_context().is_some() {
+        // Nothing here changes code or proposes a task, so the workflow is left out.
+        format!("Design runs{design}\nRun `help` for the read commands' options.\n")
     } else if strategy_context().is_some() {
         // The workflow is for changing code, which a strategy run never does.
         format!("Strategy runs{strategy}\nRun `help` for the read commands' options.\n")
@@ -83,21 +88,26 @@ pub(crate) fn next_call(call: &str, strategy: bool) -> String {
 /// its entry — a row indented by exactly two naming it (D-46 point 4, as
 /// amended by D-144); with no entry, the run's command names.
 pub(crate) fn agent_help(topic: Option<&str>) -> String {
-    agent_help_for(topic, context().is_some(), strategy_context().is_some())
+    agent_help_for(topic, context().is_some(), strategy_context().is_some(), crate::board::runs::design_context().is_some())
 }
 
-/// `agent_help` with the run's mode given, so a test can read a strategy run's help.
-pub(crate) fn agent_help_for(topic: Option<&str>, in_task: bool, strategy_run: bool) -> String {
+/// `agent_help` with the run's mode given, so a test can read a run's help.
+pub(crate) fn agent_help_for(topic: Option<&str>, in_task: bool, strategy_run: bool, design_run: bool) -> String {
     let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
     let (full, _host) = full.split_once("\nHost commands").unwrap();
     let (general, runs) = full.split_once("\nTask runs").unwrap();
-    let (task, strategy) = runs.split_once("\nStrategy runs").unwrap();
+    let (task, runs) = runs.split_once("\nStrategy runs").unwrap();
+    let (strategy, design) = runs.split_once("\nDesign runs").unwrap();
     let full = if in_task {
         format!("{general}\nTask runs{task}")
     } else if strategy_run {
         // Only what a strategy run may do: the reads, and its own commands.
         let reading = general.split("\n\n").next().unwrap_or("");
         format!("{reading}\n\nStrategy runs{strategy}")
+    } else if design_run {
+        // Only what a design run may do: the reads, and its own commands.
+        let reading = general.split("\n\n").next().unwrap_or("");
+        format!("{reading}\n\nDesign runs{design}")
     } else {
         general.to_string()
     };
@@ -111,6 +121,13 @@ pub(crate) fn agent_help_for(topic: Option<&str>, in_task: bool, strategy_run: b
         let hits = paragraphs_naming(&worker, topic);
         if !hits.is_empty() {
             return format!("Worker command: a strategy run can't run it.\n\n{}\n", hits.join("\n\n"));
+        }
+    }
+    if design_run {
+        let worker = format!("{general}\nTask runs{task}\nStrategy runs{strategy}");
+        let hits = paragraphs_naming(&worker, topic);
+        if !hits.is_empty() {
+            return format!("A design run can't run it.\n\n{}\n", hits.join("\n\n"));
         }
     }
     let mut list: Vec<&str> = vec![];

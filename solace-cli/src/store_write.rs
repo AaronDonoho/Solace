@@ -1063,6 +1063,10 @@ impl Store {
             Some(project) => project.roots.iter().map(PathBuf::as_path).collect(),
             None => vec![self.root.as_path()],
         };
+        let reach_projects: HashSet<String> = {
+            let top = crate::scope::top(&self.root);
+            roots.iter().map(|root| crate::scope::dir(&top, root)).collect()
+        };
         let revisions: Vec<String> = reach_ix.syms.iter().map(|s| crate::revision(&s.text)).collect();
         let target_positions: Vec<usize> = targets
             .map(|targets| {
@@ -1082,6 +1086,7 @@ impl Store {
             .collect::<Result<_, _>>()?;
         let (mut run, mut hashes) = (vec![], HashMap::new());
         let mut reached = HashSet::new();
+        let mut ran = HashSet::new();
         for &t in &tests {
             let at = own_start + t;
             let reach = crate::reach::closure(reach_ix, at);
@@ -1098,6 +1103,7 @@ impl Store {
             // a test other code calls can't be made private
             if due || reach_ix.uses.iter().enumerate().any(|(j, u)| j != at && u.contains(&at)) {
                 run.push(t);
+                ran.extend(reach.iter().copied());
             }
             hashes.insert(t, hash);
             reached.extend(reach);
@@ -1121,7 +1127,9 @@ impl Store {
             // gleeunit fails when it finds no tests; type-check instead
             let errors: Vec<String> = self.check_all(&ix)?.into_iter().filter(|d| d.error).map(|d| d.text).collect();
             if !errors.is_empty() {
-                return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+                let mut text = format!("Tests did not compile:\n\n{}", errors.join("\n\n"));
+                text += &self.unfinished_lines(reach_ix, &reach_projects, None);
+                return crate::failure::fail(text);
             }
             return Ok(head + &also + &untested + &next);
         }
@@ -1160,7 +1168,9 @@ impl Store {
         };
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         if !errors.is_empty() {
-            return crate::failure::fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+            let mut text = format!("Tests did not compile:\n\n{}", errors.join("\n\n"));
+            text += &self.unfinished_lines(reach_ix, &reach_projects, None);
+            return crate::failure::fail(text);
         }
         let failed = if rust { crate::language::cargo::failures(&output) } else { self.lang().failures(&output) };
         // Record results only from a run that finished; passes only when every
@@ -1170,7 +1180,9 @@ impl Store {
             let (passed, count) = crate::language::cargo::totals(&output);
             if !ok && passed + count == 0 {
                 // cargo stopped before the tests ran: its own words say why.
-                return crate::failure::fail(format!("Tests did not run.\n\n{}", output.trim()));
+                let mut text = format!("Tests did not run.\n\n{}", output.trim());
+                text += &self.unfinished_lines(reach_ix, &reach_projects, None);
+                return crate::failure::fail(text);
             }
             ok || count == failed.len()
         } else {
@@ -1216,6 +1228,7 @@ impl Store {
             }
         }
         out += &also;
+        out += &self.unfinished_lines(reach_ix, &reach_projects, Some(&ran));
         if ok { Ok(out + &untested + &next) } else { crate::failure::fail(out) }
     }
 
@@ -1339,6 +1352,24 @@ impl Store {
             out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
         }
         if ok { Ok(out) } else { crate::failure::fail(out) }
+    }
+
+    /// Other unfinished tasks whose changes this project's test run included,
+    /// as reply lines, also recorded quietly in the task's run log. `None`
+    /// means a compile failure or a run that did not start, whose reach is the
+    /// whole crate.
+    fn unfinished_lines(&self, ix: &Index, projects: &HashSet<String>, reached: Option<&HashSet<usize>>) -> String {
+        let lines = match reached {
+            Some(reached) => crate::board::unfinished::included(self, ix, reached, projects),
+            None => crate::board::unfinished::compile_failure(self),
+        };
+        let mut out = String::new();
+        for line in lines {
+            crate::board::runs::record_note(&line);
+            out += &line;
+            out.push('\n');
+        }
+        out
     }
 }
 

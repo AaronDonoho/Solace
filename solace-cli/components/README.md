@@ -30,7 +30,7 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
   in to an agent, unless every model is held: then it says so, lists each reason below, and the ⟳ button
   rechecks every model, clearing the holds a run left except a usage limit whose reset has not come.
-  Strategy's plan panel uses both; `model_styles` is their look. When the model offers efforts, the
+  The planning panel uses both; `model_styles` is their look. When the model offers efforts, the
   effort choice is a segmented control of native radios with an inline "Effort" label: one rectangular
   segment per effort in the agent's order, with short labels (Low, Med, High, X-Hi, Max) and the full
   name in `title`. It is one shared control, `solace_task.effort_pick`, with rem-wide segments that do
@@ -110,10 +110,19 @@ hide elsewhere, so the text saved is exactly what was typed.
   loaded by a dynamic import, so this project's tests never need it. The pages that bundle it, the
   shell (`solace-cli/frontend`) and the board, install the `@codemirror/*` packages.
 
+## Planning panel
+
+`plan_panel` is the panel a page docks beside its content to plan with an agent (D-93 point 7). It starts a run
+on the page's context, shows its conversation, proposals and transcript with a message box, and lists the runs
+on the same context to reopen. A page supplies `plan_panel.Settings`: the panel's id, the address its runs are
+asked for, the message box's editor and draft, and the words it shows. `view` draws it, the draft
+helpers keep its message, and `runs_path`/`run_path` name its runs. The Strategy page's `plan_setup` is one such
+page.
+
 ## Proposal display
 
-`solace_task.proposal_view` shows a strategy run's proposal (D-93, Spec 15 §6) in human terms, for the
-Strategy page's planning panel: "Create task *Index*", "Change feature *Search*" with *Search* linking
+`solace_task.proposal_view` shows a strategy run's proposal (D-93, Spec 15 §6) in human terms, for a
+page's planning panel: "Create task *Index*", "Change feature *Search*" with *Search* linking
 the record, or "Replace the vision", then a line for each record Approve also sets back to `upcoming`,
 the question's options until it is answered and the answer after. An edit shows only the fields that
 change (D-115): a short one as `old → new`, a record id by its title, and the body as full `Old:` and

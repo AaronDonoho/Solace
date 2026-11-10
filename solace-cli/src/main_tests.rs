@@ -1234,20 +1234,20 @@ fn a_rust_format_repairs_a_broken_file_from_the_store() {
 /// ignore the `|` inside placeholders and option lists.
 #[test]
 fn strategy_help_shows_worker_commands_and_clean_command_names() {
-    let missing = agent_help_for(Some("nosuch"), false, true);
+    let missing = agent_help_for(Some("nosuch"), false, true, false);
     assert!(missing.starts_with("No command `nosuch`"), "{missing}");
     for bad in ["milestone>", "all]", "--tail"] {
         assert!(!missing.contains(bad), "{bad}: {missing}");
     }
-    let submit = agent_help_for(Some("submit"), false, true);
+    let submit = agent_help_for(Some("submit"), false, true, false);
     assert!(submit.starts_with("Worker command: a strategy run can't run it."), "{submit}");
     assert!(submit.contains("submit <name> --replace [--all]") && submit.contains("draft"), "{submit}");
     assert!(!submit.contains("probe --from"), "{submit}");
-    let feature = agent_help_for(Some("feature"), false, true);
+    let feature = agent_help_for(Some("feature"), false, true, false);
     assert!(feature.contains("strategy task|feature|milestone"), "{feature}");
-    let strategy = agent_help_for(Some("strategy"), false, true);
+    let strategy = agent_help_for(Some("strategy"), false, true, false);
     assert!(strategy.contains("strategy show run <task> <run> --failed"), "{strategy}");
-    let host = agent_help_for(Some("create"), false, true);
+    let host = agent_help_for(Some("create"), false, true, false);
     assert!(host.starts_with("No command `create`"), "{host}");
 }
 
@@ -1947,7 +1947,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "f8c63357ad87e35085b013eac3cb9e6cc6c097ba51476564b6176dd3e48b54ad");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "25084f455b58d1963e2a72aa0c78efd003291a41543c931470d5b46555a6d5c2");
 }
 
 #[test]
@@ -2891,4 +2891,224 @@ fn a_gleam_probe_stops_at_its_run_limit() {
     let err = store.probe_with_limit(code, None, &[], None, 2).unwrap_err().0;
     assert!(err.contains("ran out of run time") && err.contains("2s"), "{err}");
     assert!(!store.root.join("test/solace_probe.gleam").exists());
+}
+
+#[test]
+fn design_help_shows_only_design_commands() {
+    let full = agent_help_for(None, false, false, true);
+    assert!(full.contains("Design runs") && full.contains("design note") && full.contains("strategy list"), "{full}");
+    for word in ["task ask", "submit", "`test`", "work add", "strategy note", "strategy task", "strategy vision"] {
+        assert!(!full.contains(word), "{word}: {full}");
+    }
+    let submit = agent_help_for(Some("submit"), false, false, true);
+    assert!(submit.starts_with("A design run can't run it."), "{submit}");
+    let note = agent_help_for(Some("design"), false, false, true);
+    assert!(note.contains("design note") && !note.contains("strategy note"), "{note}");
+}
+
+/// A submit reaches its task when a scope update briefly replaces the task file.
+#[test]
+fn a_submit_waits_out_a_task_file_rewrite() {
+    let root = column_workspace();
+    let (_home, tid) = column_task(&root, &["components", "frontend"]);
+    let path = crate::board::store_dir(&root).join(format!("{tid}.json"));
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let (gone, removed) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        std::fs::remove_file(&path).unwrap();
+        gone.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(path, saved).unwrap();
+    });
+    removed.recv().unwrap();
+    let frontend = root.join("frontend");
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Update: knowledgebase.known_columns\n",
+        "@@\n",
+        "-  [solace_task.Column(\"a\")]\n",
+        "+  [solace_task.Column(\"b\")]\n",
+        "*** End Patch"
+    );
+    let out = with_root(&frontend, || {
+        with_context(&tid, "run", || run_options(&["submit".to_string()], &mut || Ok(patch.to_string()), None, 100_000, &[]))
+    });
+    writer.join().unwrap();
+    let out = out.unwrap();
+    assert!(out.contains("Saved knowledgebase.known_columns"), "{out}");
+    let store = Store::at(&frontend).unwrap();
+    let shown = store.view(&["knowledgebase.known_columns"], false, 10_000).unwrap();
+    assert!(shown.contains("Column(\"b\")"), "{shown}");
+}
+
+/// A test run says which other unfinished tasks' changes it included, on a
+/// pass and a failure, and only when a test that ran can reach them (D-110).
+#[test]
+fn a_test_run_names_the_unfinished_changes_it_included() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("src/calc.gleam", "pub fn columns() -> Int {\n  1\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n"),
+        (
+            "test/calc_test.gleam",
+            concat!(
+                "import calc\n\n",
+                "pub fn columns_test() {\n  assert calc.columns() == 1\n}\n\n",
+                "pub fn sub_test() {\n  assert calc.sub(3, 1) == 2\n}\n",
+            ),
+        ),
+    ]);
+    fake_gleam(&root);
+    let store = root.import();
+    let dir = crate::board::task_model::store_dir(&crate::scope::top(&store.root));
+    fs::create_dir_all(&dir).unwrap();
+    let log = store.root.join(".solace/run.log");
+    fs::write(&log, "").unwrap();
+    let put = |id: &str, title: &str, column: &str, running: bool| {
+        let runs =
+            if running { json!([{"id":"run","kind":"work","state":"running","log":log.to_string_lossy().to_string()}]) } else { json!([]) };
+        let t = json!({
+            "id":id,"title":title,"body":"","home":".","column":column,"rank":1.,
+            "scope":["."],"dependsOn":[],"runs":runs,"notes":[],"questions":[],"links":[],
+            "closedTime":null,"archivedTime":null,
+        });
+        fs::write(dir.join(format!("{id}.json")), t.to_string()).unwrap();
+    };
+    put("t", "Running task", "assigned", true);
+    put("u", "Reached change", "assigned", false);
+    put("v", "Unreached change", "assigned", false);
+    put("w", "Finished change", "complete", false);
+    put("x", "Canceled change", "cancelled", false);
+    let ix = store.index().unwrap();
+    let id = |name: &str| ix.syms.iter().find(|s| s.name == name).unwrap().id.clone();
+    let touch = |task: &str, entity: String| {
+        store
+            .db
+            .execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", rusqlite::params![task, entity, "run", entity])
+            .unwrap();
+    };
+    touch("t", format!("symbol:{}", id("columns")));
+    touch("u", format!("symbol:{}", id("columns")));
+    touch("v", format!("symbol:{}", id("sub")));
+    touch("w", format!("symbol:{}", id("columns")));
+    touch("x", format!("symbol:{}", id("columns")));
+    let line = "included unfinished changes from task \"Reached change\" in .";
+    crate::language::with_tool_path(&[store.root.join("bin")], || {
+        let out = with_root(&store.root, || with_context("t", "run", || store.test(&["calc.columns"]))).unwrap();
+        assert!(out.contains(line), "{out}");
+        for absent in ["Unreached change", "Finished change", "Canceled change", "Running task"] {
+            assert!(!out.contains(absent), "{absent} in {out}");
+        }
+        assert_eq!(crate::board::runs::transcript(&log).last().unwrap(), &json!({"kind":"usage","text":line}));
+        fs::write(store.root.join(".fail_columns"), "").unwrap();
+        let err = with_root(&store.root, || with_context("t", "run", || store.test(&["calc.columns"]).unwrap_err().0));
+        assert!(err.contains(line), "{err}");
+        assert_eq!(crate::board::runs::transcript(&log).last().unwrap(), &json!({"kind":"usage","text":line}));
+    });
+}
+
+/// A test that runs in a dependent project names that project's unfinished
+/// changes too, and records the line on the running task's log.
+#[test]
+fn a_dependent_test_run_names_the_unfinished_changes_it_included() {
+    if !cfg!(unix) {
+        return;
+    }
+    let root = column_workspace_with(&[(
+        "frontend/test/frontend_test.gleam",
+        "import knowledgebase\n\npub fn known_test() {\n  let _ = knowledgebase.known_columns()\n}\n",
+    )]);
+    fake_gleam(&root);
+    let components = Store::at(&root.join("components")).unwrap();
+    let frontend = Store::at(&root.join("frontend")).unwrap();
+    let dir = crate::board::task_model::store_dir(&crate::scope::top(&root));
+    fs::create_dir_all(&dir).unwrap();
+    let log = root.join(".solace/run.log");
+    fs::write(&log, "").unwrap();
+    let put = |id: &str, title: &str, home: &str, running: bool| {
+        let runs =
+            if running { json!([{"id":"run","kind":"work","state":"running","log":log.to_string_lossy().to_string()}]) } else { json!([]) };
+        let t = json!({
+            "id":id,"title":title,"body":"","home":home,"column":"assigned","rank":1.,
+            "scope":[home],"dependsOn":[],"runs":runs,"notes":[],"questions":[],"links":[],
+            "closedTime":null,"archivedTime":null,
+        });
+        fs::write(dir.join(format!("{id}.json")), t.to_string()).unwrap();
+    };
+    put("t", "Running task", "components", true);
+    put("u", "Frontend change", "frontend", false);
+    put("v", "Components change", "components", false);
+    let ix = frontend.index().unwrap();
+    let id = ix.syms.iter().find(|s| s.name == "known_columns").unwrap().id.clone();
+    frontend
+        .db
+        .execute(
+            "INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)",
+            rusqlite::params!["u", format!("symbol:{id}"), "run", format!("symbol:{id}")],
+        )
+        .unwrap();
+    let ix = components.index().unwrap();
+    let column = ix.syms.iter().find(|s| s.name == "Column").unwrap().id.clone();
+    components
+        .db
+        .execute(
+            "INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)",
+            rusqlite::params!["v", format!("symbol:{column}"), "run", format!("symbol:{column}")],
+        )
+        .unwrap();
+    let line = "included unfinished changes from task \"Frontend change\" in frontend";
+    let dependency = "included unfinished changes from task \"Components change\" in components";
+    crate::language::with_tool_path(&[root.join("bin")], || {
+        let out = with_root(&root, || with_context("t", "run", || components.test(&[]))).unwrap();
+        assert!(out.contains("== In frontend =="), "{out}");
+        assert!(out.contains(line), "{out}");
+        assert!(out.contains(dependency), "{out}");
+        let entries = crate::board::runs::transcript(&log);
+        assert!(entries.iter().any(|e| e == &json!({"kind":"usage","text":line})), "{entries:?}");
+        assert!(entries.iter().any(|e| e == &json!({"kind":"usage","text":dependency})), "{entries:?}");
+    });
+}
+
+/// A compile failure may come from anywhere in the crate, so the reply names
+/// every unfinished task with a crate change, not only one a test reaches.
+#[test]
+fn a_compile_failure_names_the_unfinished_crate_changes() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project(
+        "use foo_not_a_dep::Bar;\n\npub fn one() -> i32 {\n    1\n}\n\n#[test]\nfn it_works() {\n    assert_eq!(one(), 1);\n}\n",
+    );
+    let dir = crate::board::task_model::store_dir(&crate::scope::top(&root));
+    fs::create_dir_all(&dir).unwrap();
+    let log = root.join(".solace/run.log");
+    fs::write(&log, "").unwrap();
+    let put = |id: &str, title: &str, column: &str, running: bool| {
+        let runs =
+            if running { json!([{"id":"run","kind":"work","state":"running","log":log.to_string_lossy().to_string()}]) } else { json!([]) };
+        let t = json!({
+            "id":id,"title":title,"body":"","home":".","column":column,"rank":1.,
+            "scope":["."],"dependsOn":[],"runs":runs,"notes":[],"questions":[],"links":[],
+            "closedTime":null,"archivedTime":null,
+        });
+        fs::write(dir.join(format!("{id}.json")), t.to_string()).unwrap();
+    };
+    put("t", "Running task", "assigned", true);
+    put("u", "Crate change", "assigned", false);
+    put("v", "Doc change", "assigned", false);
+    for (task, file) in [("t", "Cargo.toml"), ("u", "Cargo.toml"), ("v", "README.md")] {
+        store
+            .db
+            .execute(
+                "INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![task, format!("file:{file}"), "run", file],
+            )
+            .unwrap();
+    }
+    let line = "included unfinished changes from task \"Crate change\" in .";
+    let err = with_root(&root, || with_context("t", "run", || store.test(&["--all"]).unwrap_err().0));
+    assert!(err.contains(line), "{err}");
+    assert!(!err.contains("Doc change") && !err.contains("Running task"), "{err}");
+    assert!(crate::board::runs::transcript(&log).iter().any(|e| e == &json!({"kind":"usage","text":line})));
 }

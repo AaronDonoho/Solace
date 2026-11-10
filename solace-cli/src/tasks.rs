@@ -2441,4 +2441,356 @@ mod tests {
         }
         assert!(root_events(&root).is_empty());
     }
+
+    /// D-240: a design run starts on the Designer role's model, waits for a
+    /// message, takes one, and ends. It is a workspace run, never a strategy run.
+    #[test]
+    fn a_design_run_starts_waits_takes_a_message_and_ends() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let run = call("POST", &[], json!({"text":"Design a login page"})).unwrap();
+        assert_eq!(
+            (run["kind"].as_str(), run["state"].as_str(), &run["context"]),
+            (Some(crate::board::roles::DESIGN_RUN), Some("running"), &json!({"kind":"page"}))
+        );
+        assert_eq!(run["model"], "fake", "the Designer role's model");
+        assert_eq!((run["notes"][0]["author"].as_str(), run["notes"][0]["text"].as_str()), (Some("human"), Some("Design a login page")));
+        let rid = run["id"].as_str().unwrap();
+        let e = call("POST", &[], json!({"text":"Again"})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{}", e.1.0);
+        // Waiting is where a turn ends; the human's next message reaches it.
+        super::strategy::update_run(&root, rid, |r| {
+            r["state"] = json!("waiting");
+            Ok(())
+        })
+        .unwrap();
+        let noted = call("POST", &[rid, "notes"], json!({"text":"Make it calm"})).unwrap();
+        assert_eq!(noted["notes"].as_array().unwrap().len(), 2);
+        let ended = call("POST", &[rid, "end"], json!({})).unwrap();
+        assert_eq!((ended["state"].as_str(), ended["outcome"].as_str()), (Some("ended"), Some("planned")));
+        assert_eq!(ended["notes"][0]["author"], "solace", "its notes become one transcript note");
+        assert_eq!(super::strategy::design_runs(&root).len(), 1);
+        assert_eq!(super::strategy::design_runs(&root)[0].get("notes"), None);
+        assert!(strategy_runs(&root).is_empty(), "a design run is never a strategy run");
+        assert_eq!(call("GET", &[rid], json!({})).unwrap()["id"], rid);
+        assert_eq!(runs_api(&root, "GET", &[rid], json!({}), models).unwrap_err().0, 404);
+        // Once ended, another design run may start, but a strategy context is refused.
+        call("POST", &[], json!({"text":"Later"})).unwrap();
+        let e = call("POST", &[], json!({"text":"On a feature","context":{"kind":"feature","id":"f"}})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7001")), (400, true), "{}", e.1.0);
+    }
+
+    /// D-240: the server hands a human's next message to a design run the same
+    /// way it does a strategy run, and the run records what it was handed.
+    #[test]
+    fn a_design_run_takes_a_delivered_message() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let run = call("POST", &[], json!({"text":"Design a login page"})).unwrap();
+        let rid = run["id"].as_str().unwrap().to_string();
+        super::strategy::update_run(&root, &rid, |r| {
+            r["state"] = json!("waiting");
+            Ok(())
+        })
+        .unwrap();
+        let noted = call("POST", &[rid.as_str(), "notes"], json!({"text":"Make it calm"})).unwrap();
+        let note = noted["notes"].as_array().unwrap().last().unwrap().clone();
+        let key = crate::board::briefs::note_fingerprint(&note);
+        let m =
+            json!({"id":"d1","kind":"delivery","target":"strategy","run":rid,"wake":true,"claim":"c1","notes":[key.clone()],"answers":[]});
+        apply(&root, &m).unwrap();
+        let after = super::strategy::strategy_run(&root, &rid).unwrap();
+        assert_eq!((after["state"].as_str(), after["notes_seen"][key.as_str()].as_str()), (Some("running"), Some("c1")));
+        assert!(strategy_runs(&root).is_empty(), "a delivered message never makes the design a strategy run");
+    }
+
+    /// D-241: a design proposal is applied to a copy, checked, and kept open on
+    /// the run; the run's read route returns it, and nothing is saved.
+    #[test]
+    fn design_proposals_wait_on_the_run_and_leave_the_design_alone() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let run = call("POST", &[], json!({"text":"Design it"})).unwrap();
+        let rid = run["id"].as_str().unwrap().to_string();
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"},
+                "children": [{
+                    "id": "heading",
+                    "type": "text",
+                    "properties": {"width": "hug", "height": "hug", "text": "Home"}
+                }]
+            }]
+        });
+        std::fs::create_dir_all(root.join("designs")).unwrap();
+        std::fs::write(root.join("designs").join(format!("{id}.json")), original.to_string()).unwrap();
+        let operations = json!([
+            {"op":"set","id":"heading","field":"properties","property":"text","value":"Welcome"},
+            {
+                "op":"add",
+                "parent":"root",
+                "index":1,
+                "element":{"id":"note","type":"text","properties":{"width":"hug","height":"hug","text":"Note"}}
+            }
+        ]);
+        let question = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":operations}).to_string()).unwrap();
+        assert_eq!(question["proposal"]["kind"], "design");
+        assert_eq!(question["proposal"]["id"], id);
+        assert_eq!(question["proposal"]["operations"], operations);
+        let mut expected = original.clone();
+        crate::design::apply(&mut expected, operations.as_array().unwrap()).unwrap();
+        assert_eq!(question["proposal"]["design"], expected, "the proposal keeps the design it would save");
+        assert!(question["answer"].is_null());
+        let qid = question["id"].as_str().unwrap().to_string();
+        apply(&root, &json!({"id":"dp1","kind":"strategy_propose","run":rid,"question":question})).unwrap();
+        let read = call("GET", &[rid.as_str()], json!({})).unwrap();
+        assert_eq!(read["state"], "waiting");
+        assert_eq!(read["questions"].as_array().unwrap().len(), 1);
+        assert_eq!(read["questions"][0]["proposal"]["kind"], "design");
+        assert!(read["questions"][0]["answer"].is_null());
+        assert_eq!(crate::design::show(&root, id).unwrap(), original, "nothing is saved");
+        assert_eq!(crate::design::versions(&root, id).unwrap(), json!([]));
+        // Approve saves the proposed design, with the run as its version's
+        // source, and the answer names the version.
+        let answered = call("POST", &[rid.as_str(), "questions", qid.as_str()], json!({"option":"Approve"})).unwrap();
+        let said = answered["questions"][0]["answer"].as_str().unwrap();
+        assert_eq!(said, "Approved and saved version 2");
+        assert_eq!(crate::design::show(&root, id).unwrap(), expected);
+        let versions = crate::design::versions(&root, id).unwrap();
+        assert_eq!(versions[0]["number"].as_u64(), Some(2));
+        assert_eq!(versions[0]["source"]["kind"], "run");
+        assert_eq!(versions[0]["source"]["id"].as_str(), Some(rid.as_str()));
+        assert_eq!(versions[1]["source"], json!({"kind":"repo"}), "the design from before the proposal is kept");
+        assert!(answered["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains(said));
+        // A run keeps at most one open proposal per design.
+        let again = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":[]}).to_string()).unwrap();
+        apply(&root, &json!({"id":"dp2","kind":"strategy_propose","run":rid,"question":again})).unwrap();
+        let e = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":[]}).to_string()).unwrap_err();
+        assert!(e.0.starts_with("E7003"), "{}", e.0);
+    }
+
+    /// D-241: creating a design is a proposal too; the server assigns its id,
+    /// and nothing reaches `designs/` until the human accepts.
+    #[test]
+    fn a_new_design_proposal_waits_without_saving() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let rid = call("POST", &[], json!({"text":"Design it"})).unwrap()["id"].as_str().unwrap().to_string();
+        let request = json!({
+            "title": "Login",
+            "tab": "ui",
+            "operations": [{"op":"add","index":0,"element":{"id":"root","type":"screen","properties":{"width":"fill","height":"fill"}}}]
+        });
+        let question = super::strategy::design_proposal(&root, &rid, None, &request.to_string()).unwrap();
+        assert_eq!(question["proposal"]["kind"], "design");
+        assert_eq!(question["proposal"]["title"], "Login");
+        assert_eq!(question["proposal"]["tab"], "ui");
+        assert!(question["proposal"].get("id").is_none(), "the id belongs to the later accept");
+        assert_eq!(crate::design::list(&root).unwrap()["designs"], json!([]));
+        let missing = json!({"tab": "ui", "operations": []});
+        let e = super::strategy::design_proposal(&root, &rid, None, &missing.to_string()).unwrap_err();
+        assert!(e.0.contains("E7001") && e.0.contains("title"), "{}", e.0);
+        // Approve creates the design under the id it got when proposed; it
+        // shows in the list with its first version sourced from the run.
+        let qid = question["id"].as_str().unwrap().to_string();
+        apply(&root, &json!({"id":"dp1","kind":"strategy_propose","run":rid.clone(),"question":question})).unwrap();
+        let answered = call("POST", &[rid.as_str(), "questions", &qid], json!({"option":"Approve"})).unwrap();
+        let said = answered["questions"][0]["answer"].as_str().unwrap();
+        assert!(said.starts_with("Approved and saved version 1: created design:"), "{said}");
+        let designs = crate::design::list(&root).unwrap()["designs"].clone();
+        assert_eq!(designs.as_array().unwrap().len(), 1);
+        assert_eq!(designs[0]["title"], "Login");
+        let id = designs[0]["id"].as_str().unwrap();
+        let versions = crate::design::versions(&root, id).unwrap();
+        assert_eq!(versions[0]["number"], 1);
+        assert_eq!(versions[0]["source"]["kind"], "run");
+        assert_eq!(versions[0]["source"]["id"].as_str(), Some(rid.as_str()));
+    }
+
+    /// D-241: an invalid result is refused with the element named, before the
+    /// human sees it, and neither the design nor its versions change.
+    #[test]
+    fn an_invalid_design_proposal_changes_nothing() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let rid = call("POST", &[], json!({"text":"Design it"})).unwrap()["id"].as_str().unwrap().to_string();
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"}
+            }]
+        });
+        std::fs::create_dir_all(root.join("designs")).unwrap();
+        std::fs::write(root.join("designs").join(format!("{id}.json")), original.to_string()).unwrap();
+        let broken = json!({"operations":[
+            {"op":"add","parent":"root","index":0,"element":{"id":"broken","type":"text","properties":{"height":"hug","text":"x"}}}
+        ]});
+        let e = super::strategy::design_proposal(&root, &rid, Some(id), &broken.to_string()).unwrap_err();
+        assert!(e.0.starts_with("E7033") && e.0.contains("broken"), "{}", e.0);
+        assert_eq!(crate::design::show(&root, id).unwrap(), original);
+        assert_eq!(crate::design::versions(&root, id).unwrap(), json!([]));
+        let e = super::strategy::design_proposal(&root, &rid, Some("fedcba9876543210"), &json!({"operations":[]}).to_string()).unwrap_err();
+        assert!(e.0.starts_with("E7023"), "{}", e.0);
+    }
+
+    fn design_run(root: &Path) -> String {
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        super::strategy::design_runs_with(root, "POST", &[], json!({"text":"Design it"}), config).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The human's answer to design question `qid`: the answer stored, and the run's last note.
+    fn design_answer(root: &Path, rid: &str, qid: &str, option: &str) -> (String, String) {
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let run = super::strategy::design_runs_with(root, "POST", &[rid, "questions", qid], json!({"option": option}), config).unwrap();
+        let q = run["questions"].as_array().unwrap().iter().find(|q| q["id"] == qid).unwrap();
+        let note = run["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string();
+        (q["answer"].as_str().unwrap().to_string(), note)
+    }
+
+    /// D-243: Reject writes nothing; the saved design and its versions stay as they were.
+    #[test]
+    fn a_rejected_design_proposal_writes_nothing() {
+        let root = root();
+        let rid = design_run(&root);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"}
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        let operations = json!([{"op":"set","id":"root","field":"properties","property":"width","value":"hug"}]);
+        let question = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":operations}).to_string()).unwrap();
+        let qid = question["id"].as_str().unwrap().to_string();
+        apply(&root, &json!({"id":"dp1","kind":"strategy_propose","run":rid.clone(),"question":question})).unwrap();
+        let (said, note) = design_answer(&root, &rid, &qid, "Reject");
+        assert_eq!(said, "Rejected; the design was not changed");
+        assert!(note.contains(&said), "{note}");
+        assert_eq!(crate::design::show(&root, id).unwrap(), original);
+        assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 1);
+    }
+
+    /// D-243: an accept refuses a design that changed after the proposal, writes
+    /// nothing, and tells the agent to propose again.
+    #[test]
+    fn a_stale_design_proposal_is_refused() {
+        let root = root();
+        let rid = design_run(&root);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"}
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        let operations = json!([{"op":"set","id":"root","field":"properties","property":"width","value":"hug"}]);
+        let question = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":operations}).to_string()).unwrap();
+        let mut changed = original.clone();
+        changed["title"] = json!("Homepage");
+        crate::design::save(&root, &changed, crate::design::Source::Human).unwrap();
+        let qid = question["id"].as_str().unwrap().to_string();
+        apply(&root, &json!({"id":"dp1","kind":"strategy_propose","run":rid.clone(),"question":question})).unwrap();
+        let (said, note) = design_answer(&root, &rid, &qid, "Approve");
+        assert!(said.starts_with("Not applied: E7026"), "{said}");
+        assert!(said.contains("propose it again"), "{said}");
+        assert!(note.contains(&said), "{note}");
+        assert_eq!(crate::design::show(&root, id).unwrap(), changed);
+        assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 2);
+    }
+
+    /// D-243: approving a proposal that matches the saved design adds no
+    /// version and says so rather than naming the older one.
+    #[test]
+    fn an_unchanged_design_proposal_saves_no_version() {
+        let root = root();
+        let rid = design_run(&root);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"}
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        let question = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations":[]}).to_string()).unwrap();
+        let qid = question["id"].as_str().unwrap().to_string();
+        apply(&root, &json!({"id":"dp1","kind":"strategy_propose","run":rid.clone(),"question":question})).unwrap();
+        let (said, note) = design_answer(&root, &rid, &qid, "Approve");
+        assert_eq!(said, "Approved; the design was already as proposed");
+        assert!(note.contains(&said), "{note}");
+        assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 1);
+    }
 }

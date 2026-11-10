@@ -15,7 +15,8 @@ import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
-import plan
+import plan_panel
+import plan_setup
 import solace_task
 
 /// A task as the Roadmap tab shows it, from any project.
@@ -361,7 +362,7 @@ fn milestone_view(
               html.text(milestone.state),
             ]),
             case shown.planning {
-              True -> plan.marker()
+              True -> plan_panel.marker(plan_setup.settings().labels)
               False -> element.none()
             },
             case milestone.target_date {

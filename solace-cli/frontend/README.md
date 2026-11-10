@@ -77,8 +77,9 @@ while a page scrolls, above the pages' layers and below the find bar and
 toasts. Each app owns its styles and lifecycle.
 A page's `attention` event (D-107) flags its menu tab, unless it is the page
 shown: the tab flashes (lit without motion under reduced motion) and reads
-"(needs attention)" to screen readers until the page is shown. The board and
-Strategy are open from the start, hidden, so they hear of what needs attention.
+"(needs attention)" to screen readers until the page is shown. The board,
+Strategy and Design are open from the start, hidden, so they hear of what needs
+attention.
 The shell owns the document font, base styles, menu and page-level drag rule.
 
 The theme is chosen on the Settings page (Dark mode). `index.html` applies the
@@ -92,19 +93,19 @@ while reads still work and changes, checks and tests are refused.
 
 ## Build
 
-`solace-cli/build.rs` runs this project's `build-release` command as part of
-`cargo build`, so `priv/app.js` is rebuilt when the frontend or one of its
-pages changes. To build it by hand, run from solace-cli/frontend, with the
-sibling board, components, contracts, migration, strategy, settings and
-design projects present:
+The frontend's one bundle command is `bun bundle.mjs`, run from
+solace-cli/frontend with the sibling board, components, contracts, migration,
+strategy, settings and design projects present. It writes `priv/app.js` and
+`priv/app.js.fingerprint`; both are committed. The root `bundle` command, this
+project's `bundle` and `build-release` commands, and the desktop app's
+pre-build command all run it. `build plan` marks the bundle out of date from
+that fingerprint, so a fresh clone and a branch switch keep the same answer.
 
 ```sh
-bun install
-gleam build --target javascript
-bun build src/main.mjs --outfile priv/app.js --minify --target browser
+bun bundle.mjs
 ```
 
-In Solace, use run install, then run build-release. The frontend needs its own
+In Solace, use run bundle. The frontend needs its own
 @dagrejs/dagre dependency because the contract view's JavaScript FFI is copied
 into the frontend build tree. The `@codemirror/*` packages are there for the
 same reason: they are the markdown editor, `<solace-md-editor>`, in
@@ -126,8 +127,8 @@ The server task must serve this index.html at /, /workspace, /migrate, /contract
 /design, /settings, /knowledgebase, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
 priv/app.js at /app.js, all on port 3030.
 
-priv/app.js is generated, not source: `cargo build` builds it through this
-project's `build-release` command before embedding it. The server must keep
+priv/app.js is generated, not source: run `bun bundle.mjs` (or
+`cargo tauri build`, which always remakes it) before `cargo build` embeds it. The server must keep
 serving the board's fonts at /fonts/sans-400.woff2, /fonts/sans-700.woff2 and
 /fonts/mono-400.woff2, redirect /guide to /knowledgebase, and preserve JSON and SSE
 routes, including /migration.

@@ -28,9 +28,10 @@ prompt = sys.stdin.read()
 # The prompt is plain text for a model; this stand-in reads its steps from the task file.
 store = next(d / '.solace/tasks' for d in [Path.cwd(), *Path.cwd().parents] if (d / '.solace/tasks').is_dir())
 rid = os.environ['SOLACE_RUN']
-if os.environ['SOLACE_TASK'] == 'strategy':
-    # A strategy run (D-93) has no task: its steps are its first note.
-    run = json.loads((store.parent / 'strategy/runs' / (rid + '.json')).read_text())
+if os.environ['SOLACE_TASK'] in ('strategy', 'design'):
+    # A strategy or design run has no task: its steps are its first note.
+    kind = os.environ['SOLACE_TASK']
+    run = json.loads((store.parent / kind / 'runs' / (rid + '.json')).read_text())
     steps = json.loads(run['notes'][0]['text'])
 else:
     task = json.loads((store / (os.environ['SOLACE_TASK'] + '.json')).read_text())

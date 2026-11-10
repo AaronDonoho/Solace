@@ -15,6 +15,16 @@ import lustre/event
 
 pub const outline_styles =
   ".design-element{outline:1px dotted currentColor;outline-offset:-1px}"
+  <> ".design-change-added,.design-change-removed,.design-change-changed,.design-change-moved,.design-change-both{position:relative}"
+  <> ".design-change-added{outline:2px solid #1a6b30;outline-offset:-2px}"
+  <> ".design-change-removed{outline:2px solid #b3261e;outline-offset:-2px;opacity:.5}"
+  <> ".design-change-changed,.design-change-moved,.design-change-both{outline:2px solid #174f78;outline-offset:-2px}"
+  <> ".design-change-added::after,.design-change-removed::after,.design-change-changed::after,.design-change-moved::after,.design-change-both::after{position:absolute;top:0;right:0;padding:0 4px;font:11px/1.4 system-ui,sans-serif;color:#fff;z-index:1}"
+  <> ".design-change-added::after{content:'Added';background:#1a6b30}"
+  <> ".design-change-removed::after{content:'Removed';background:#b3261e}"
+  <> ".design-change-changed::after{content:'Changed';background:#174f78}"
+  <> ".design-change-moved::after{content:'Moved';background:#174f78}"
+  <> ".design-change-both::after{content:'Changed, moved';background:#174f78}"
 
 pub type Design {
   Design(
@@ -119,6 +129,7 @@ fn draw_node(
   parent_width: DrawnSize,
   parent_height: DrawnSize,
   on_click: Option(fn(String) -> message),
+  marks: Dict(String, Change),
 ) -> Element(message) {
   let kind = node.kind
   let #(width, height) = drawn_sizes(kind, parent, parent_width, parent_height)
@@ -126,8 +137,12 @@ fn draw_node(
     Some(handle) -> [event.stop_propagation(event.on_click(handle(node.id)))]
     None -> []
   }
+  let class = case dict.get(marks, node.id) {
+    Ok(change) -> "design-element " <> change_class(change)
+    Error(_) -> "design-element"
+  }
   let attributes = [
-    attribute.class("design-element"),
+    attribute.class(class),
     attribute.data("design-id", node.id),
     attribute.styles(
       list.flatten([
@@ -159,7 +174,15 @@ fn draw_node(
       html.div(
         attributes,
         list.map(node.children, fn(child) {
-          draw_node(theme, child, child_axis(kind), width, height, on_click)
+          draw_node(
+            theme,
+            child,
+            child_axis(kind),
+            width,
+            height,
+            on_click,
+            marks,
+          )
         }),
       )
   }
@@ -674,7 +697,7 @@ pub fn theme_radius(theme: Theme, name: String) -> Float {
 }
 
 pub fn draw_with(theme: Theme, node: Node) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill, None)
+  draw_node(theme, node, Down, DrawnFill, DrawnFill, None, dict.new())
 }
 
 fn spacing_value(theme: Theme, value: SpacingValue) -> Float {
@@ -919,7 +942,7 @@ pub fn draw_preview_with(
   node: Node,
   on_click: fn(String) -> message,
 ) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill, Some(on_click))
+  draw_node(theme, node, Down, DrawnFill, DrawnFill, Some(on_click), dict.new())
 }
 
 /// The first top-level screen in a design.
@@ -986,4 +1009,40 @@ fn inherit_links(
   list.fold(node.children, links, fn(links, child) {
     inherit_links(child, link, own, links)
   })
+}
+
+/// How a proposed design differs from the saved one.
+pub type Change {
+  Added
+  Removed
+  Changed
+  Moved
+  ChangedAndMoved
+}
+
+/// Draw one element with its change marked.
+pub fn draw_marked(
+  node: Node,
+  marks: Dict(String, Change),
+) -> Element(message) {
+  draw_marked_with(default_theme(), node, marks)
+}
+
+/// Draw one element with `theme` and its change marked.
+pub fn draw_marked_with(
+  theme: Theme,
+  node: Node,
+  marks: Dict(String, Change),
+) -> Element(message) {
+  draw_node(theme, node, Down, DrawnFill, DrawnFill, None, marks)
+}
+
+fn change_class(change: Change) -> String {
+  case change {
+    Added -> "design-change-added"
+    Removed -> "design-change-removed"
+    Changed -> "design-change-changed"
+    Moved -> "design-change-moved"
+    ChangedAndMoved -> "design-change-both"
+  }
 }

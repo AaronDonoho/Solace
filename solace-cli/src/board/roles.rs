@@ -13,7 +13,7 @@ pub(crate) struct Role {
 }
 
 /// Every role, in the order Settings and the board show it.
-pub(crate) const ROLES: [Role; 5] = [
+pub(crate) const ROLES: [Role; 6] = [
     Role {
         id: "strategist",
         name: "Strategist",
@@ -41,6 +41,12 @@ pub(crate) const ROLES: [Role; 5] = [
         name: "Coordinator",
         purpose: "Coordinates several agents and checks their combined changes. It starts no run yet.",
         runs: &[],
+    },
+    Role {
+        id: "designer",
+        name: "Designer",
+        purpose: "Works out a design with the human, proposing changes for them to accept.",
+        runs: &[DESIGN_RUN],
     },
 ];
 
@@ -75,16 +81,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_role_set_is_the_five_canonical_roles() {
-        let ids: Vec<&str> = ROLES.iter().map(|role| role.id).collect();
-        assert_eq!(ids, ["strategist", "investigator", "worker", "reviewer", "coordinator"]);
-        for role in &ROLES {
-            assert!(!role.name.is_empty(), "{} has no name", role.id);
-            assert!(!role.purpose.is_empty(), "{} has no purpose", role.id);
-        }
-    }
-
-    #[test]
     fn each_run_kind_belongs_to_exactly_one_role() {
         let expected = [
             (STRATEGY_RUN, "strategist"),
@@ -93,6 +89,7 @@ mod tests {
             ("work", "worker"),
             ("new_work", "worker"),
             ("review", "reviewer"),
+            (DESIGN_RUN, "designer"),
         ];
         for (kind, id) in expected {
             assert_eq!(for_run(kind).map(|role| role.id), Some(id), "{kind}");
@@ -123,7 +120,20 @@ mod tests {
         assert!(from_json(&json!({"id": "unknown"})).is_none());
         assert!(from_json(&json!({})).is_none());
     }
+
+    #[test]
+    fn the_role_set_is_the_six_canonical_roles() {
+        let ids: Vec<&str> = ROLES.iter().map(|role| role.id).collect();
+        assert_eq!(ids, ["strategist", "investigator", "worker", "reviewer", "coordinator", "designer"]);
+        for role in &ROLES {
+            assert!(!role.name.is_empty(), "{} has no name", role.id);
+            assert!(!role.purpose.is_empty(), "{} has no purpose", role.id);
+        }
+    }
 }
 
 /// The strategist's run kind: strategy runs record it and map back through `for_run`.
 pub(crate) const STRATEGY_RUN: &str = "strategy";
+
+/// The designer's run kind: design runs record it and map back through `for_run`.
+pub(crate) const DESIGN_RUN: &str = "design";

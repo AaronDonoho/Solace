@@ -25,10 +25,10 @@ fn code_is_told_from_commands() {
 
 #[test]
 fn a_question_is_told_from_a_command() {
-    for line in ["task ask What next?", "strategy vision Add a page"] {
+    for line in ["task ask What next?", "strategy vision Add a page", "design propose 0123456789abcdef"] {
         assert!(crate::cli::is_question(line), "{line}");
     }
-    for line in ["view app.main", "probe --from tests.one"] {
+    for line in ["view app.main", "probe --from tests.one", "design note A calm design"] {
         assert!(!crate::cli::is_question(line), "{line}");
     }
 }

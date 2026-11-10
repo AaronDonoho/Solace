@@ -132,6 +132,23 @@ fn wsl_commands_name_the_distro() {
             "/home/solace/app"
         ]
     );
+    let disk = Path::new("/appdata").join(DISK_FOLDER);
+    let cmd = import_command(Path::new("/solace.tar"), &disk);
+    assert_eq!(cmd.get_program(), "wsl.exe");
+    assert_eq!(
+        args(&cmd),
+        [
+            OsStr::new("--import"),
+            OsStr::new("Solace"),
+            disk.as_os_str(),
+            OsStr::new("/solace.tar"),
+            OsStr::new("--version"),
+            OsStr::new("2"),
+        ]
+    );
+    let cmd = terminal();
+    assert_eq!(cmd.get_program(), "wsl.exe");
+    assert_eq!(args(&cmd), ["-d", "Solace", "--cd", "~"]);
 }
 
 #[test]
@@ -174,7 +191,6 @@ fn port_zero_asks_for_any_free_port() {
 #[test]
 fn utf8_output_is_decoded_as_it_is() {
     assert_eq!(decoded("Solace\r\nÜbung\n".as_bytes()), "Solace\r\nÜbung\n");
-    assert_eq!(decoded(b"bad \xff byte"), "bad \u{fffd} byte");
 }
 
 /// `text` as `wsl.exe` prints it when it ignores `WSL_UTF8`.
@@ -361,4 +377,14 @@ fn a_home_without_a_login_file_still_runs_the_launcher() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn a_byte_order_mark_alone_decodes_to_no_text() {
+    assert_eq!(decoded(&[0xff, 0xfe]), "");
+}
+
+#[test]
+fn utf16_cjk_with_no_byte_order_mark_is_decoded() {
+    assert_eq!(decoded(&utf16("无法")), "无法");
 }

@@ -14,6 +14,39 @@ use crate::board::runs::strategy_context;
 /// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
 /// and plans (D-93), so it is told only those commands.
 pub(crate) fn tool_schema() -> Value {
+    if crate::board::runs::design_context().is_some() {
+        return json!({
+            "name": "solace",
+            "description": concat!(
+                "Read this project's code, designs and plan with the human; this run changes no code. ",
+                "A design change is a proposal for the human to accept. ",
+                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`, `design list` and `design show <id>`, ",
+                "the plan and vision with `strategy list` and `strategy show <task|feature|milestone> <id>...` ",
+                "(a task's notes with `strategy show note`, its run log with `strategy show run`), ",
+                "and decisions with `grep` or `read` of `DECISIONS.md` ",
+                "(`--project <folder>` for a project below the root); propose a design change with ",
+                "`design propose [<id>]`, alone in its call; reply with `design note`, ",
+                "and keep waiting with `design wait`. Several reads go in one call, one per line, and run in order."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": concat!(
+                            "One or more commands, one per line, e.g. `design show <id>` ",
+                            "or `view app.main --project <folder>`"
+                        )
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The reply for `design note`; a `design propose`'s operations as a JSON object"
+                    }
+                },
+                "required": ["command"]
+            }
+        });
+    }
     if strategy_context().is_some() {
         return json!({
             "name": "solace",

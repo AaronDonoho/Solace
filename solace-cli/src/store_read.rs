@@ -66,7 +66,7 @@ impl Store {
     /// call to send, where the agent plans its reads (D-145). `tid` is the
     /// board run's task; the open work records are capped (D-151).
     fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>, reference: bool) -> Out {
-        let next = crate::reference::next_call(call, strategy_context().is_some());
+        let next = crate::reference::next_call(call, strategy_context().is_some() || crate::board::runs::design_context().is_some());
         let (status, work) = self.status_within(crate::cli::WORK_CAP)?;
         let reference = if reference { format!("\n{}", crate::reference::agent_reference(tid.is_some())) } else { String::new() };
         Ok(format!("{status}{}{}{reference}{next}", self.work_context(ix, &work)?, self.other_projects(tid)))

@@ -826,7 +826,9 @@ pub fn transcript(log: &Path) -> Vec<Value> {
         }
     }
     for line in ends.lines() {
-        if !line.trim().is_empty() {
+        if let Some(text) = line.strip_prefix(NOTE) {
+            out.push(json!({"kind":"usage","text":text}));
+        } else if !line.trim().is_empty() {
             out.push(json!({"kind":"error","text":line,"source":SERVER}));
         }
     }
@@ -900,10 +902,10 @@ fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::p
     {
         return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
     }
-    // A discussion or strategy agent that replied in plain text and exited
+    // A discussion, strategy or design agent that replied in plain text and exited
     // cleanly has taken its turn: the reply is its note, and the run waits.
     let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
-    if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && !blocked && !reply.is_empty() {
+    if matches!(r["kind"].as_str(), Some("discuss" | "strategy" | "design")) && status.success() && !blocked && !reply.is_empty() {
         watch.reply(rid, reply.to_string())?;
         return Err(Failure("discussion reply".into(), REPLIED));
     }
@@ -1026,7 +1028,7 @@ pub fn context() -> Option<(String, String)> {
 
 /// The task run's ids: both of them, and the task is not a strategy run's.
 pub(super) fn task_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
-    Some((task.filter(|t| t != STRATEGY_RUN)?, run?))
+    Some((task.filter(|t| t != STRATEGY_RUN && t != crate::board::roles::DESIGN_RUN)?, run?))
 }
 
 /// A strategy run's id, from its agent's environment.
@@ -1380,14 +1382,16 @@ fn command_copy(command: &str) -> (&str, usize) {
 /// where the harness keeps the server's stderr to itself, the log is the only
 /// place the board sees why the server ended. Best effort.
 pub(crate) fn record_server_end(line: &str) {
-    let root = Store::root().ok().or_else(|| env::current_dir().ok()).unwrap_or_default();
-    let ids = context().or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)));
-    record_server_end_for(&root, ids, line);
+    record_line(line);
 }
 
 /// Appends `line` to task or strategy run `rid`'s log, when the run has one.
 fn append_to_run_log(root: &Path, tid: &str, rid: &str, line: &str) {
-    let run = if tid == STRATEGY_RUN { tasks::strategy::strategy_run(&scope::top(root), rid) } else { run_record(root, tid, rid) };
+    let run = if tid == STRATEGY_RUN || tid == crate::board::roles::DESIGN_RUN {
+        tasks::strategy::strategy_run(&scope::top(root), rid)
+    } else {
+        run_record(root, tid, rid)
+    };
     let Some(path) = run.as_ref().and_then(|r| r["log"].as_str()) else { return };
     if let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(server_end_log(Path::new(path))) {
         let _ = writeln!(log, "{line}");
@@ -1400,8 +1404,8 @@ fn server_end_log(log: &Path) -> PathBuf {
     log.with_extension("server-end")
 }
 
-/// Records a server-end line for the run `ids` names, if any.
-fn record_server_end_for(root: &Path, ids: Option<(String, String)>, line: &str) {
+/// Records a line for the run `ids` names, if any; a `NOTE`-prefixed line is plain text.
+fn record_line_for(root: &Path, ids: Option<(String, String)>, line: &str) {
     let Some((tid, rid)) = ids else { return };
     append_to_run_log(root, &tid, &rid, line);
 }
@@ -1522,4 +1526,31 @@ fn baseline_has(base: &[Value], e: &crate::store_core::DependentError) -> bool {
 pub(crate) fn has_blocking_agent_error(entries: &[Value]) -> bool {
     let last_message = entries.iter().rposition(|e| e["kind"] == "message");
     entries.iter().enumerate().any(|(i, e)| is_agent_error(e) && (e["fatal"] == true || last_message.is_none_or(|last| i > last)))
+}
+
+/// A design run's id, from its agent's environment.
+pub fn design_context() -> Option<String> {
+    design_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok()).map(|(_, rid)| rid)
+}
+
+/// A design run's task and run ids from an agent's environment values.
+fn design_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
+    Some((task.filter(|t| t == crate::board::roles::DESIGN_RUN)?, run?))
+}
+
+/// Marks a line in the server-end log as a quiet note, not an error.
+const NOTE: &str = "note\t";
+
+/// Appends a note the board shows as plain text, unlike a server end.
+pub(crate) fn record_note(line: &str) {
+    record_line(&format!("{NOTE}{line}"));
+}
+
+/// Writes `line` beside the run's log.
+fn record_line(line: &str) {
+    let root = Store::root().ok().or_else(|| env::current_dir().ok()).unwrap_or_default();
+    let ids = context()
+        .or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)))
+        .or_else(|| design_context().map(|rid| (crate::board::roles::DESIGN_RUN.into(), rid)));
+    record_line_for(&root, ids, line);
 }

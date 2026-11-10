@@ -54,9 +54,10 @@ pub fn tasks_in(top: &Path, dir: &str) -> Result<Vec<(PathBuf, Value)>, Failure>
     Ok(out)
 }
 
-/// A task's home, found from any project in its scope.
+/// A task's home, found from any project in its scope, waiting out a task file
+/// rewrite while the task server saves a scope update.
 pub fn home(project: &Path, tid: &str) -> Result<PathBuf, Failure> {
-    task_in(project, tid).map(|(home, _)| home)
+    retry_task(|| task_in(project, tid)).map(|(home, _)| home)
 }
 
 /// The projects the board run's task may change, found from `project`, any

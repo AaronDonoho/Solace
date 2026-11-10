@@ -57,7 +57,7 @@ fn take_pending(run: &Value, notes: &[Value], rid: Option<&str>) -> Option<Pendi
 /// Hands over every human note and answered proposal the run has not seen, once,
 /// and wakes a waiting run. Every open proposal's answer is handed over.
 pub(crate) fn claim_strategy_reply(top: &Path, rid: &str) -> Result<Option<String>, Failure> {
-    let Some(run) = tasks::strategy_run(top, rid) else { return crate::board::err("E7023", format!("unknown strategy run {rid}")) };
+    let Some(run) = tasks::strategy_run(top, rid) else { return crate::board::err("E7023", format!("unknown run {rid}")) };
     if run["state"] == "ended" {
         return Ok(None);
     }

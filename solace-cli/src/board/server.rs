@@ -516,6 +516,7 @@ impl Events {
             Err(_) => String::new(),
         };
         let runs = json!({"strategyRuns": crate::tasks::strategy_runs(top)});
+        let design_runs = json!({"designRuns": crate::tasks::strategy::design_runs(top)});
         let designs = match crate::design::listed(top) {
             Ok(designs) => format!("id: {id}\ndata: {}\n\n", json!({"designs": designs})),
             Err(_) => String::new(),
@@ -524,7 +525,7 @@ impl Events {
         // the Strategy page can list them whatever their home.
         let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\n{designs}id: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}id: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -914,11 +915,21 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 };
             }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
-            if matches!(strategy[0], "milestones" | "features" | "personas") || strategy == ["vision"] || runs {
+            let design_runs = strategy.len() >= 2 && strategy[..2] == ["design", "runs"];
+            if matches!(strategy[0], "milestones" | "features" | "personas") || strategy == ["vision"] || runs || design_runs {
                 let result = match read_body(&mut req, BODY_LIMIT) {
                     Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| match strategy[0] {
                         "vision" => tasks::vision_api(&board.top, req.method().as_str(), v),
                         "personas" => tasks::personas_api(&board.top, req.method().as_str(), &strategy[1..], v),
+                        "design" => {
+                            let started = req.method().as_str() == "POST" && strategy.len() == 2;
+                            tasks::strategy::design_runs_api(&board.top, req.method().as_str(), &strategy[2..], v).inspect(|run| {
+                                // A new run's agent starts now.
+                                if started {
+                                    crate::board::strategy::start_design(board.top.clone(), run["id"].as_str().unwrap_or("").to_string());
+                                }
+                            })
+                        }
                         "strategy" => {
                             let started = req.method().as_str() == "POST" && strategy.len() == 2;
                             tasks::strategy_runs_api(&board.top, req.method().as_str(), &strategy[2..], v).inspect(|run| {

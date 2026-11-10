@@ -75,6 +75,7 @@ fn the_skills_key_overrides_the_default_folder() {
 fn role_skills_reach_only_their_role_in_full() {
     let root = Scratch::new().with(&[
         ("skills/review.md", "---\nname: review\ndescription: Review UI.\nroles: reviewer\n---\nCheck contrast.\n"),
+        ("skills/design.md", "---\nname: design\ndescription: Design UI.\nroles: designer\n---\nKeep layouts simple.\n"),
         ("skills/work.md", "---\nname: work\ndescription: Work style.\nroles: worker, reviewer\n---\nKeep it small.\n"),
         ("skills/folder/SKILL.md", "---\nname: folder\ndescription: A folder skill.\nroles: reviewer\n---\nFolder rules.\n"),
         ("skills/general.md", "General rules\nKeep it simple.\n"),
@@ -89,12 +90,15 @@ fn role_skills_reach_only_their_role_in_full() {
     assert!(work.contains("### work") && !work.contains("### review") && !work.contains("Check contrast."), "{work}");
     assert!(work.contains("- general: General rules"), "{work}");
     assert!(!work.contains("Nothing."), "{work}");
+    let design = section_for(&[&root], Some(&root), "design");
+    assert!(design.contains("### design") && design.contains("Keep layouts simple."), "{design}");
+    assert!(!design.contains("### work") && !design.contains("### review"), "{design}");
     let investigation = section_for(&[&root], Some(&root), "investigate");
     assert!(!investigation.contains("### work") && !investigation.contains("### review"), "{investigation}");
     assert!(investigation.contains("- general: General rules"), "{investigation}");
     let api = api(&root);
     let listed = api.as_array().unwrap();
-    assert_eq!(listed.len(), 5, "every skill is listed: {api}");
+    assert_eq!(listed.len(), 6, "every skill is listed: {api}");
     let skill = |name: &str| listed.iter().find(|skill| skill["name"] == name).unwrap();
     assert_eq!(skill("review")["managed"], json!(true), "{api}");
     assert_eq!(skill("review")["all_roles"], json!(false), "{api}");

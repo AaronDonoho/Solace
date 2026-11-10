@@ -8,7 +8,8 @@ import gleam/result
 import gleam/string
 import gleeunit
 import lustre/element
-import plan
+import plan_panel
+import plan_setup
 import roadmap
 import solace_task
 import strategy
@@ -711,16 +712,16 @@ fn planned() -> strategy.Model {
 /// page's open run (D-202).
 pub fn start_takes_its_context_from_the_selection_test() {
   let model = step(planned(), strategy.Open(".", "t1"))
-  assert json.to_string(plan.start_body("fake", "", "Plan it", plan.page))
+  assert json.to_string(plan_panel.start_body("fake", "", "Plan it", plan_panel.page))
     == "{\"model\":\"fake\",\"text\":\"Plan it\",\"context\":{\"kind\":\"page\"}}"
-  assert json.to_string(plan.start_body("", "high", "Go", plan.page))
+  assert json.to_string(plan_panel.start_body("", "high", "Go", plan_panel.page))
     == "{\"effort\":\"high\",\"text\":\"Go\",\"context\":{\"kind\":\"page\"}}"
   // The task's open run is the page's open run: New run shows it, and the
   // panel offers it instead of a start form.
   let shown = element.to_string(strategy.view(model))
   assert string.contains(shown, solace_task.ui_label("plan_open_here"))
   assert !string.contains(shown, "id=\"plan-text\"")
-  assert plan.new_run(model.runs, plan.page) == "r1"
+  assert plan_panel.new_run(model.runs, plan_panel.page) == "r1"
 }
 
 /// A task row, a feature and a milestone with an open run show a marker; it
@@ -731,7 +732,7 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   let markers = fn(model) {
     list.length(string.split(page(model), ">Plan</span>")) - 1
   }
-  assert plan.open_ids(model.runs, "task") == ["t1"]
+  assert plan_panel.open_ids(model.runs, "task") == ["t1"]
   assert markers(model) == 3
   let marker =
     "<span class=\"planning\" title=\""
@@ -767,7 +768,7 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
         ),
       ),
     )
-  assert plan.open_ids(ended.runs, "task") == []
+  assert plan_panel.open_ids(ended.runs, "task") == []
   assert markers(ended) == 1
   assert string.contains(
     page(ended),
@@ -808,7 +809,7 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   let page = shown(model)
   assert string.contains(page, solace_task.ui_label("plan_open_here"))
   assert !string.contains(page, "id=\"plan-text\"")
-  assert list.map(plan.past(model.runs, plan.page), fn(r) { r.id })
+  assert list.map(plan_panel.past(model.runs, plan_panel.page), fn(r) { r.id })
     == ["r4", "r1", "r0"]
   let assert Ok(#(_, after)) = string.split_once(page, "Earlier runs")
   assert string.contains(after, "Waiting for you · fake")
@@ -1011,11 +1012,11 @@ pub fn a_completed_task_reaches_its_detail_test() {
 /// The panel's width: a separator on its left edge, kept between the
 /// minimum and the window's bound; Left widens it. Collapsed, no handle.
 pub fn the_panel_is_resized_within_its_bounds_test() {
-  assert plan.clamp(100, 1000) == 280
-  assert plan.clamp(900, 1000) == 600
-  assert plan.clamp(500, 1000) == 500
-  assert plan.clamp(500, 0) == 500
-  assert plan.max_width(300) == 280
+  assert plan_panel.clamp(100, 1000) == 280
+  assert plan_panel.clamp(900, 1000) == 600
+  assert plan_panel.clamp(500, 1000) == 500
+  assert plan_panel.clamp(500, 0) == 500
+  assert plan_panel.max_width(300) == 280
   let model = planned()
   assert model.plan_width == 380
   let html = element.to_string(strategy.view(model))
@@ -1078,7 +1079,7 @@ pub fn a_task_link_opens_its_task_on_the_tasks_tab_test() {
 /// the human; an answer, a run starting, or nothing new does not.
 pub fn attention_when_a_run_replies_or_proposes_test() {
   let run = fn(state, questions) {
-    plan.Run(
+    plan_panel.Run(
       id: "r1",
       model: "m",
       effort: "",
@@ -1086,14 +1087,14 @@ pub fn attention_when_a_run_replies_or_proposes_test() {
       started: 1,
       ended: 0,
       outcome: "",
-      context: plan.page,
+      context: plan_panel.page,
       notes: [],
       questions: questions,
       used: "",
     )
   }
   let ask = fn(id, answer) {
-    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None, 0, -1)
+    plan_panel.Question(id, "Add a task?", ["Yes", "No"], answer, None, 0, -1)
   }
   assert strategy.needs_attention([run("running", [])], [run("waiting", [])])
   assert !strategy.needs_attention([run("waiting", [])], [run("waiting", [])])
@@ -2437,7 +2438,7 @@ pub fn a_plan_run_names_the_model_it_used_test() {
       ),
     )
   let run = fn(used) {
-    plan.Run(
+    plan_panel.Run(
       id: "r1",
       model: "claude-opus",
       effort: "",
@@ -2445,20 +2446,20 @@ pub fn a_plan_run_names_the_model_it_used_test() {
       started: 1,
       ended: 2,
       outcome: "planned",
-      context: plan.page,
+      context: plan_panel.page,
       notes: [],
       questions: [],
       used: used,
     )
   }
-  assert plan.state_text(run(""), model.models)
+  assert plan_panel.state_text(run(""), model.models)
     == "Ended: planned · Opus (latest)"
-  assert plan.state_text(run("claude-opus-5-5"), model.models)
+  assert plan_panel.state_text(run("claude-opus-5-5"), model.models)
     == "Ended: planned · Opus 5.5"
-  assert plan.state_text(run("unknown"), model.models)
+  assert plan_panel.state_text(run("unknown"), model.models)
     == "Ended: planned · unknown"
   assert !string.contains(
-    plan.state_text(run("claude-opus-5-5"), model.models),
+    plan_panel.state_text(run("claude-opus-5-5"), model.models),
     "claude-opus",
   )
   let renamed =
@@ -2468,7 +2469,7 @@ pub fn a_plan_run_names_the_model_it_used_test() {
         "[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus Renamed\"}]",
       ),
     )
-  assert plan.state_text(run("claude-opus-5-5"), renamed.models)
+  assert plan_panel.state_text(run("claude-opus-5-5"), renamed.models)
     == "Ended: planned · Opus Renamed"
 }
 
@@ -4058,7 +4059,8 @@ pub fn each_form_saves_and_clears_its_description_draft_test() {
 /// keeps the text, and a successful start clears only what it sent.
 pub fn the_plan_draft_belongs_to_the_page_test() {
   install_drafts()
-  assert plan.draft_key() == "solace-draft:plan-text:page:"
+  assert plan_panel.draft_key(plan_setup.settings())
+    == "solace-draft:plan-text:page:"
   let page = step(workspace(), strategy.PlanText("Page message"))
   assert solace_task.draft_load("plan-text", "page:") == "Page message"
   let task =

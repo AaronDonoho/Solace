@@ -1497,3 +1497,39 @@ Amends D-230 points 1 and 4 (Aaron, board task "ui: click-through preview", 2026
 1. Rows, columns, text, headings, buttons and image placeholders may take `action`, a name, and `navigates_to`, the id of a top-level screen in the same design. Screens and text inputs take neither. A `navigates_to` that names no top-level screen, including one that names another element, is refused with `E7033`, naming the element.
 2. `action` is stored in the design and changes nothing when clicked. In preview, clicking an element follows its `navigates_to`. Preview starts at the first screen and is left by Exit preview, which returns to the stacked screens; only the current design is previewed, not a history version.
 Why: a design can be clicked through like an interactive mockup without adding screen states or mock data.
+
+## D-239 The Designer is the sixth agent role
+Amends D-220 points 1 and 2 and Spec 15 §4 (Aaron, board task "agent: Designer role", 2026-11-09). Part of the design agent feature.
+1. Solace has six roles: `strategist`, `investigator`, `worker`, `reviewer`, `coordinator` and `designer`. The designer works out a design with the human, proposing changes for them to accept. Its run kind is `design`.
+2. Each run kind still belongs to one role: `design` to the designer, beside the existing kinds. No run starts a design run yet.
+Why: the Design page needs its own agent, with its own model and skills set in Settings like every other role.
+
+## D-240 Design runs work with the human on the Design page
+Amends D-239 point 2 and Spec 15 §1, §4 and §6 (Aaron, board task "agent: design run and briefing", 2026-11-09). Part of the design agent feature.
+1. A design run is a workspace run like a strategy run (D-93): it belongs to no task, and each is one JSON file at `<root>/.solace/design/runs/<id>.json`, written atomically by the task server alone. It starts with the human's first message, waits for their next message, and ends `planned` or `stopped`. One design run is open at a time.
+2. Its context is the whole Design page, so one conversation can read and later propose changes to any design. It uses the Designer role's model when the request names none, and the designer's skills.
+3. Its brief is short: the Designer role text (a design is reference material, the element is the primitive, and a change reaches a design only through a proposal the human accepts), the vision, every persona, and the 10 most recent decision titles from `DECISIONS.md`. It names no command the run can't use yet.
+4. A design run never appears on the board or in the Strategy page's runs. The root's events send `{designRun}` in full and a new connection's replay sends `{designRuns: [...]}`.
+Why: the Design page needs its own agent conversation, separate from planning and from every task, before proposals and its commands arrive.
+
+## D-241 A design proposal is a list of element operations
+Amends D-240 point 2 and Spec 15 §1 and §6 (board task "agent: propose a design change", 2026-11-09). Part of the design agent feature.
+1. A design run proposes with `design propose [<id>]`: an existing design's id to change it, or none to create one. The request is a JSON object in `text` with `operations`, plus `title` and `tab` only when creating. Any other field is refused (`E7001`).
+2. An operation is one of: `{"op":"add","element":{…},"parent":<id|null>,"index":<n>}`, the element whole at that place in the parent's children list; `{"op":"remove","id":"<element>"}`, the element and its children; `{"op":"move","id":"<element>","parent":<id|null>,"index":<n>}`, at that place in the destination's children list; or `{"op":"set","id":"<element>","field":"properties"|"style","property":"<name>","value":<value>}`, with a null value removing it. A child's position is its place in its parent's list (D-230 point 1); a null or absent `parent` is the top level. Moving an element inside itself or one of its children is refused. An operation on an element id the design doesn't have is refused (`E7033`, naming it).
+3. The operations are applied to a copy, in order, and the result is checked with `design.validate` (`E7033`, naming the element). Nothing is saved by the proposal. A new design's id is assigned when the proposal is made.
+4. The proposal is a question on the run with `proposal: {kind:"design", id?, title?, tab?, operations, base?}`, options Approve and Reject, and `time` and `after` as a strategy proposal's. `base` is the design's newest version number when it has one, so a later accept can tell the design changed. A run has at most one unanswered design proposal per design, and at most one for creating a design. Answering a design proposal comes with a later feature; until then the question route refuses an answer.
+Why: a design changes only by the human accepting a proposal, and the same element operations will serve direct editing.
+
+## D-242 A committed fingerprint decides whether the pages' bundle is stale
+Amends D-159 point 4, D-163 and D-166 points 2 and 3 (Aaron, board task "build: bundle fingerprint beside app.js", 2026-11-10). Part of the build: bundles never go stale feature.
+1. The frontend's `bundle.mjs` is the one bundle command: its `[build]` release step, its own `bundle`, the root `bundle`, and `cargo tauri build`'s pre-build command all run it. It writes `priv/app.js` and the committed `priv/app.js.fingerprint` beside it, holding the output hash and the hashes of its inputs taken before the build. `cargo tauri build` always remakes the pages. The root `bundle` command is not allowed in reviews, because it writes project files (D-161).
+2. Inputs stay the frontend's own and its `gleam.toml` path dependencies' `src`, `gleam.toml`, `package.json`, `bun.lock` and `manifest.toml`. Tool versions are not hashed.
+3. `build plan` and `GET /build/plan` judge an output only by its fingerprint. A missing or unreadable fingerprint, an output that does not match it, or a changed input is reported with the step to run; file times no longer decide this output.
+Why: the bundle's freshness must survive a fresh clone, another PC, a checkout and a branch switch, and a record kept inside Solace's ignored store could not.
+
+## D-243 A human accepts or rejects a design proposal
+Amends D-241 point 4 and Spec 15 §1 and §6 (Aaron, board task "agent: accept or reject a proposal", 2026-11-10). Part of the design agent feature.
+1. Answering a design proposal goes through the question route as a strategy proposal's does. Approve checks the proposed design again and saves it through the design save path, with the run as its version's source; a new design keeps the id it got when proposed and gets its first version. The answer says it was saved and names the version.
+2. A design that changed since the proposal is not overwritten: an accept whose design has a newest version different from the proposal's `base` is refused (`E7026`), writes nothing, and tells the agent to propose again. A design with no version when proposed is refused if it has one now.
+3. Reject writes nothing. An ended run's proposal can't be answered.
+Why: a proposal is accepted or rejected as a whole, and an accepted change must not lose a change made after it was proposed.
