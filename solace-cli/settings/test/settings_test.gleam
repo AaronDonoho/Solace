@@ -537,11 +537,17 @@ pub fn role_models_load_save_test() {
       settings.Assignment("reviewer", "gone"),
     ]
   let page = element.to_string(settings.view(loaded))
-  assert string.contains(page, "Role models</h2>")
-  assert string.contains(page, "Choose the model each role starts with")
+  assert string.contains(page, "Roles</h2>")
+  assert string.contains(page, "Choose the default model for each role")
+  assert !string.contains(page, "Choose the model each role starts with")
+  assert !string.contains(page, ">Model</label>")
+  assert string.contains(page, "aria-label=\"Model for Worker\"")
+  assert string.contains(page, "Edit Skills")
+  assert string.contains(page, "href=\"#skills\"")
+  assert string.contains(page, ">Define skills</a>")
+  assert settings.update(loaded, settings.ShowSkills).0 == loaded
   assert string.contains(page, "Worker")
   assert string.contains(page, "Reviewer")
-  assert string.contains(page, "Model")
   assert string.contains(page, "Command Code")
   assert string.contains(page, "Opus")
   assert !string.contains(page, "Command Code (deepseek)")
@@ -609,6 +615,10 @@ pub fn tabs_show_their_own_sections_test() {
     let assert [before, _] = string.split(page, ">" <> label <> "</button>")
     string.length(before)
   }
+  let section = fn(label) {
+    let assert [before, _] = string.split(page, ">" <> label <> "</h2>")
+    string.length(before)
+  }
   assert int.compare(position("Agents"), position("Appearance"))
     == int.compare(0, 1)
   assert int.compare(position("Appearance"), position("Languages"))
@@ -619,8 +629,12 @@ pub fn tabs_show_their_own_sections_test() {
     string.split(page, "<div aria-labelledby=\"tab-")
   assert string.contains(agents, "id=\"panel-agents\"")
   assert !string.contains(agents, " hidden")
+  assert int.compare(section("Agent behavior"), section("Models"))
+    == int.compare(0, 1)
+  assert int.compare(section("Models"), section("Roles")) == int.compare(0, 1)
+  assert int.compare(section("Roles"), section("Skills")) == int.compare(0, 1)
   assert string.contains(agents, "Agent behavior</h2>")
-  assert string.contains(agents, "Role models</h2>")
+  assert string.contains(agents, "Roles</h2>")
   assert string.contains(agents, "Models</h2>")
   assert string.contains(agents, "Skills</h2>")
   assert !string.contains(agents, "Dark mode")
@@ -640,7 +654,7 @@ pub fn tabs_show_their_own_sections_test() {
   assert string.contains(appearance, "Dark mode")
   absent(appearance, [
     "Agent behavior</h2>",
-    "Role models</h2>",
+    "Roles</h2>",
     "Models</h2>",
     "Skills</h2>",
     "Enabled programming languages</h2>",
@@ -651,7 +665,7 @@ pub fn tabs_show_their_own_sections_test() {
   assert string.contains(languages, "Enabled programming languages</h2>")
   absent(languages, [
     "Agent behavior</h2>",
-    "Role models</h2>",
+    "Roles</h2>",
     "Models</h2>",
     "Skills</h2>",
     "Theme</h2>",
@@ -665,7 +679,7 @@ pub fn tabs_show_their_own_sections_test() {
   assert string.contains(about, "Sustainable Use License 1.0")
   absent(about, [
     "Agent behavior</h2>",
-    "Role models</h2>",
+    "Roles</h2>",
     "Models</h2>",
     "Skills</h2>",
     "Theme</h2>",
@@ -799,6 +813,8 @@ pub fn skills_assign_from_a_role_card_test() {
     ).0
   let page = element.to_string(settings.view(loaded))
   assert string.contains(page, "role-skill")
+  assert string.contains(page, "Edit Skills")
+  assert !string.contains(page, "Define skills")
   assert string.contains(page, "value=\"house-review\"")
   assert string.contains(page, "value=\"general\"")
   assert string.contains(page, "disabled")

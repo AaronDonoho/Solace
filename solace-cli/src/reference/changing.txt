@@ -126,6 +126,8 @@ both are lines of the patch, prefixes included) patches and
 retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it.
 A failed retry keeps the replacement: the next `old` must match the draft as
 it is now (`view --draft <id>`).
+If the fix belongs in another symbol, submit that change on its own first,
+then retry this draft as it is.
 A draft left behind blocks `task done` in a work run, which lists each draft
 with the `view --draft <id>`, retry and `drafts drop <id>` calls for it; add
 `--project <folder>` for a draft in another of the task's projects. Dropping a

@@ -44,6 +44,8 @@ pub type Model {
     expanded: List(String),
     histories: List(History),
     viewed: Option(Viewed),
+    /// The screen the click-through preview shows, if previewing.
+    preview: Option(String),
   )
 }
 
@@ -70,6 +72,12 @@ pub type Msg {
   VersionLoaded(String, Int, String)
   Restore(String, Int)
   Restored(String, Int, String)
+  /// Starts the click-through preview at the first screen.
+  Preview
+  /// Leaves the preview and shows every screen again.
+  ExitPreview
+  /// A click in the preview, with the element's id.
+  PreviewClick(String)
 }
 
 pub fn tabs() -> List(Tab) {
@@ -133,6 +141,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         expanded: [],
         histories: [],
         viewed: None,
+        preview: None,
       ),
       event.emit("tab", json.string(tab_name(tab))),
     )
@@ -146,6 +155,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           expanded: [],
           histories: [],
           viewed: None,
+          preview: None,
         )
       #(model, load(model))
     }
@@ -159,6 +169,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           design_error: "",
           restore_error: "",
           viewed: None,
+          preview: None,
         )
       #(model, load(model))
     }
@@ -171,6 +182,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           design_error: "",
           restore_error: "",
           viewed: None,
+          preview: None,
         )
       #(
         model,
@@ -191,6 +203,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     Restore(id, number) -> restore(model, id, number)
     Restored(id, number, text) -> restored(model, id, number, text)
+    Preview -> start_preview(model)
+    ExitPreview -> #(Model(..model, preview: None), effect.none())
+    PreviewClick(id) -> preview_click(model, id)
     Connected -> start(Model(..model, connected: True))
     Disconnected -> #(Model(..stop(model), connected: False), effect.none())
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
@@ -312,6 +327,7 @@ const view_styles =
 .design-heading h2{margin:0}
 .design-version-note{color:var(--soft)}
 .design-restore{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
+.design-preview{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
 @media (max-width:900px){.design-body{flex-direction:column;height:auto}.design-list{flex:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:0 0 var(--space-3)}.design-screens{height:60vh}}
 "
@@ -371,6 +387,7 @@ pub fn new(tab: Tab) -> Model {
     [],
     [],
     [],
+    None,
     None,
   )
 }
@@ -511,7 +528,14 @@ fn refresh_open(model: Model) -> Model {
     )
   case open_design(model) {
     Some(_) -> model
-    None -> Model(..model, drawing: None, design_error: "", viewed: None)
+    None ->
+      Model(
+        ..model,
+        drawing: None,
+        design_error: "",
+        viewed: None,
+        preview: None,
+      )
   }
 }
 
@@ -519,9 +543,20 @@ fn load_design(model: Model, id: String, text: String) -> Model {
   case id == model.open {
     True ->
       case render.decode(text) {
-        Ok(drawing) -> Model(..model, drawing: Some(drawing), design_error: "")
+        Ok(drawing) ->
+          Model(
+            ..model,
+            drawing: Some(drawing),
+            design_error: "",
+            preview: keep_preview(model.preview, drawing),
+          )
         Error(_) ->
-          Model(..model, drawing: None, design_error: load_failure(text))
+          Model(
+            ..model,
+            drawing: None,
+            design_error: load_failure(text),
+            preview: None,
+          )
       }
     False -> model
   }
@@ -780,6 +815,7 @@ fn view_version(
       design_error: "",
       restore_error: "",
       viewed: Some(Viewed(id, number, None, "")),
+      preview: None,
     )
   let open_requests = case changed {
     True -> [event.emit("design", json.string(id)), load(model)]
@@ -1006,16 +1042,18 @@ fn design_row(model: Model, design: Design) -> Element(Msg) {
 
 fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
   [
-    html.h2([], [html.text(design.title)]),
+    html.div([attribute.class("design-heading")], [
+      html.h2([], [html.text(design.title)]),
+      case design.tab, model.drawing {
+        UiUx, Some(_) -> preview_button(model)
+        _, _ -> element.none()
+      },
+    ]),
     case design.tab {
       Architecture -> element.none()
       UiUx ->
         case model.drawing {
-          Some(drawing) ->
-            html.div(
-              [attribute.class("design-screens")],
-              list.map(drawing.elements, render.draw),
-            )
+          Some(drawing) -> screens(model, drawing)
           None ->
             case model.design_error {
               "" -> element.none()
@@ -1045,5 +1083,79 @@ fn clear_history_error(model: Model) -> Model {
         _ -> History(..history, error: "")
       }
     }),
+  )
+}
+
+fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
+  case model.drawing {
+    Some(drawing) ->
+      case render.first_screen(drawing) {
+        Some(screen) -> #(
+          Model(..model, preview: Some(screen.id)),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
+      }
+    None -> #(model, effect.none())
+  }
+}
+
+fn preview_click(model: Model, id: String) -> #(Model, Effect(Msg)) {
+  case model.preview, model.drawing {
+    Some(_), Some(drawing) ->
+      case render.link_target(drawing, id) {
+        Some(target) -> #(Model(..model, preview: Some(target)), effect.none())
+        None -> #(model, effect.none())
+      }
+    _, _ -> #(model, effect.none())
+  }
+}
+
+fn keep_preview(
+  preview: Option(String),
+  drawing: render.Design,
+) -> Option(String) {
+  case preview {
+    Some(id) ->
+      case render.screen(drawing, id) {
+        Some(_) -> Some(id)
+        None -> None
+      }
+    None -> None
+  }
+}
+
+fn preview_button(model: Model) -> Element(Msg) {
+  case model.preview {
+    Some(_) ->
+      html.button(
+        [attribute.class("design-preview"), event.on_click(ExitPreview)],
+        [html.text("Exit preview")],
+      )
+    None ->
+      html.button([attribute.class("design-preview"), event.on_click(Preview)], [
+        html.text("Preview"),
+      ])
+  }
+}
+
+fn screens(model: Model, drawing: render.Design) -> Element(Msg) {
+  case model.preview {
+    Some(id) ->
+      case render.screen(drawing, id) {
+        Some(screen) ->
+          html.div([attribute.class("design-screens")], [
+            render.draw_preview(screen, PreviewClick),
+          ])
+        None -> all_screens(drawing)
+      }
+    None -> all_screens(drawing)
+  }
+}
+
+fn all_screens(drawing: render.Design) -> Element(Msg) {
+  html.div(
+    [attribute.class("design-screens")],
+    list.map(drawing.elements, render.draw),
   )
 }

@@ -24,10 +24,16 @@ pub(crate) enum ValueKind {
     Spacing,
     /// `fill`, `hug`, or a fixed positive number.
     Size,
+    /// A color token name, or a `#rgb` or `#rrggbb` hex color.
+    Color,
+    /// A text-size token name, or a positive number.
+    TextSize,
     /// Any JSON text.
     Text,
     /// A heading level: the whole number 1, 2 or 3.
     Level,
+    /// The id of a top-level screen in the same design.
+    Screen,
 }
 
 /// An element type and the properties it accepts.
@@ -42,7 +48,7 @@ pub(crate) struct ElementType {
 
 /// Every element type a design may use. Later tasks extend this table.
 pub(crate) const ELEMENT_TYPES: &[(&str, ElementType)] = &[
-    ("screen", CONTAINER),
+    ("screen", SCREEN),
     ("row", CONTAINER),
     ("column", CONTAINER),
     ("text", TEXT),
@@ -54,7 +60,7 @@ pub(crate) const ELEMENT_TYPES: &[(&str, ElementType)] = &[
 
 const DESIGN_KEYS: &[&str] = &["schemaVersion", "id", "title", "tab", "elements"];
 
-const ELEMENT_KEYS: &[&str] = &["id", "type", "properties", "children"];
+const ELEMENT_KEYS: &[&str] = &["id", "type", "properties", "style", "children"];
 
 /// Checks that `design` is a valid design (D-230).
 pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
@@ -76,9 +82,14 @@ pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
     if tab == "ui" && elements.is_empty() {
         return Err(invalid("a ui design needs at least one screen"));
     }
+    let screens: HashSet<String> = elements
+        .iter()
+        .filter(|element| element.get("type").and_then(Value::as_str) == Some("screen"))
+        .filter_map(|element| element.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
     let mut ids = HashSet::new();
     for element in elements {
-        let (id, ty) = validate_element(element, &mut ids, true)?;
+        let (id, ty) = validate_element(element, &mut ids, &screens, true)?;
         if tab == "ui" && ty != "screen" {
             return Err(invalid(format!("element {id:?} at the top level of a ui design must be a screen")));
         }
@@ -86,7 +97,12 @@ pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
     Ok(())
 }
 
-fn validate_element<'a>(value: &'a Value, ids: &mut HashSet<String>, top_level: bool) -> Result<(&'a str, &'a str), Failure> {
+fn validate_element<'a>(
+    value: &'a Value,
+    ids: &mut HashSet<String>,
+    screens: &HashSet<String>,
+    top_level: bool,
+) -> Result<(&'a str, &'a str), Failure> {
     let object = value.as_object().ok_or_else(|| invalid("an element must be a JSON object"))?;
     let id = text(object, "id", "an element")?;
     let at = format!("element {id:?}");
@@ -108,10 +124,25 @@ fn validate_element<'a>(value: &'a Value, ids: &mut HashSet<String>, top_level: 
             return Err(invalid(format!("{at} has unknown property {name:?}")));
         };
         values.check(value).map_err(|why| invalid(format!("{at} property {name:?} {why}")))?;
+        if let ValueKind::Screen = values {
+            let target = value.as_str().unwrap_or_default();
+            if !screens.contains(target) {
+                return Err(invalid(format!("{at} property {name:?} names no screen {target:?}")));
+            }
+        }
     }
     for name in kind.required {
         if !properties.contains_key(*name) {
             return Err(invalid(format!("{at} needs property {name:?}")));
+        }
+    }
+    if let Some(style) = object.get("style") {
+        let style = style.as_object().ok_or_else(|| invalid(format!("{at} style must be an object")))?;
+        for (name, value) in style {
+            let Some((_, kind)) = STYLE_PROPERTIES.iter().find(|(property, _)| *property == name) else {
+                return Err(invalid(format!("{at} has unknown style {name:?}")));
+            };
+            kind.check(value).map_err(|why| invalid(format!("{at} style {name:?} {why}")))?;
         }
     }
     if let Some(children) = object.get("children") {
@@ -120,7 +151,7 @@ fn validate_element<'a>(value: &'a Value, ids: &mut HashSet<String>, top_level: 
         }
         let children = children.as_array().ok_or_else(|| invalid(format!("{at} children must be a list")))?;
         for child in children {
-            validate_element(child, ids, false)?;
+            validate_element(child, ids, screens, false)?;
         }
     }
     Ok((id, ty))
@@ -144,6 +175,8 @@ impl ValueKind {
                 },
             },
             ValueKind::Size => check_size(value),
+            ValueKind::Color => check_color(value),
+            ValueKind::TextSize => check_text_size(value),
             ValueKind::Text => match value.as_str() {
                 Some(_) => Ok(()),
                 None => Err("must be text".to_owned()),
@@ -152,6 +185,10 @@ impl ValueKind {
                 Some(1..=3) => Ok(()),
                 Some(_) => Err("must be 1, 2 or 3".to_owned()),
                 None => Err("must be a whole number from 1 to 3".to_owned()),
+            },
+            ValueKind::Screen => match value.as_str() {
+                Some(_) => Ok(()),
+                None => Err("must name a screen".to_owned()),
             },
         }
     }
@@ -308,6 +345,9 @@ const CONTAINER: ElementType = ElementType {
         ("padding", ValueKind::Spacing),
         ("align", ValueKind::OneOf(ALIGN)),
         ("justify", ValueKind::OneOf(JUSTIFY)),
+        ("variant", ValueKind::OneOf(CONTAINER_VARIANTS)),
+        ("action", ValueKind::Text),
+        ("navigates_to", ValueKind::Screen),
     ],
     required: &["width", "height"],
 };
@@ -319,6 +359,9 @@ const TEXT: ElementType = ElementType {
         ("height", ValueKind::Size),
         ("align", ValueKind::OneOf(TEXT_ALIGN)),
         ("text", ValueKind::Text),
+        ("variant", ValueKind::OneOf(TEXT_VARIANTS)),
+        ("action", ValueKind::Text),
+        ("navigates_to", ValueKind::Screen),
     ],
     required: &["width", "height"],
 };
@@ -526,13 +569,22 @@ const HEADING: ElementType = ElementType {
         ("align", ValueKind::OneOf(TEXT_ALIGN)),
         ("text", ValueKind::Text),
         ("level", ValueKind::Level),
+        ("action", ValueKind::Text),
+        ("navigates_to", ValueKind::Screen),
     ],
     required: &["width", "height", "text", "level"],
 };
 
 const BUTTON: ElementType = ElementType {
     children: false,
-    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("label", ValueKind::Text)],
+    properties: &[
+        ("width", ValueKind::Size),
+        ("height", ValueKind::Size),
+        ("label", ValueKind::Text),
+        ("variant", ValueKind::OneOf(BUTTON_VARIANTS)),
+        ("action", ValueKind::Text),
+        ("navigates_to", ValueKind::Screen),
+    ],
     required: &["width", "height", "label"],
 };
 
@@ -544,7 +596,13 @@ const TEXT_INPUT: ElementType = ElementType {
 
 const IMAGE_PLACEHOLDER: ElementType = ElementType {
     children: false,
-    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("label", ValueKind::Text)],
+    properties: &[
+        ("width", ValueKind::Size),
+        ("height", ValueKind::Size),
+        ("label", ValueKind::Text),
+        ("action", ValueKind::Text),
+        ("navigates_to", ValueKind::Screen),
+    ],
     required: &["width", "height", "label"],
 };
 
@@ -681,4 +739,65 @@ fn cut_reply(text: String, budget: usize, why: &str) -> String {
     let mut out = format!("{}{note}", &text[..cut]);
     out.truncate(out.floor_char_boundary(budget));
     out
+}
+
+const SCREEN: ElementType = ElementType {
+    children: true,
+    properties: &[
+        ("width", ValueKind::Size),
+        ("height", ValueKind::Size),
+        ("gap", ValueKind::Spacing),
+        ("padding", ValueKind::Spacing),
+        ("align", ValueKind::OneOf(ALIGN)),
+        ("justify", ValueKind::OneOf(JUSTIFY)),
+    ],
+    required: &["width", "height"],
+};
+
+const BUTTON_VARIANTS: &[&str] = &["primary", "secondary", "ghost"];
+
+const TEXT_VARIANTS: &[&str] = &["body", "muted", "small"];
+
+const CONTAINER_VARIANTS: &[&str] = &["plain", "card"];
+
+/// The color tokens a style override may name.
+const COLOR_TOKENS: &[&str] = &["background", "surface", "text", "muted", "primary", "on_primary", "border"];
+
+/// The text-size tokens a style override may name.
+const TEXT_SIZE_TOKENS: &[&str] = &["small", "body", "h3", "h2", "h1"];
+
+/// The closed set of per-element style overrides and the kind of value each takes.
+const STYLE_PROPERTIES: &[(&str, ValueKind)] = &[
+    ("fill", ValueKind::Color),
+    ("border", ValueKind::Color),
+    ("text_color", ValueKind::Color),
+    ("size", ValueKind::TextSize),
+    ("padding", ValueKind::Spacing),
+];
+
+fn is_hex_color(text: &str) -> bool {
+    let Some(digits) = text.strip_prefix('#') else {
+        return false;
+    };
+    (digits.len() == 3 || digits.len() == 6) && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn check_color(value: &Value) -> Result<(), String> {
+    match value.as_str() {
+        Some(text) if COLOR_TOKENS.contains(&text) || is_hex_color(text) => Ok(()),
+        Some(text) => Err(format!("has value {text:?}; expected one of {} or a hex color such as #fff", COLOR_TOKENS.join(", "))),
+        None => Err(format!("must be a color token ({}) or a hex color such as #fff or #ffffff", COLOR_TOKENS.join(", "))),
+    }
+}
+
+fn check_text_size(value: &Value) -> Result<(), String> {
+    match value.as_str() {
+        Some(text) if TEXT_SIZE_TOKENS.contains(&text) => Ok(()),
+        Some(text) => Err(format!("has value {text:?}; expected one of {} or a positive number", TEXT_SIZE_TOKENS.join(", "))),
+        None => match value.as_f64() {
+            Some(number) if number > 0.0 => Ok(()),
+            Some(_) => Err("must be a positive number".to_owned()),
+            None => Err(format!("must be a text size token ({}) or a positive number", TEXT_SIZE_TOKENS.join(", "))),
+        },
+    }
 }

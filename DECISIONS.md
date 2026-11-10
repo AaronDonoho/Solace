@@ -1472,7 +1472,7 @@ Amends D-122 and Spec 15 §4 (Aaron, board task "design: design:<id> links", 202
 Why: designs are reference material that tasks cite, so they need the same link form as tasks, features and milestones.
 
 ## D-235 Designs draw from one default theme of tokens
-Amends D-230 points 3 and 8 (Aaron, board task "ui: default theme of tokens", 2026-11-07). Part of the design: page and records feature.
+Amends D-230 points 3 and 8 (Aaron, board task "ui: default theme of tokens", 2026-11-07). Part of the UI/UX tab feature.
 1. The default theme has colors `background`, `surface`, `text`, `muted`, `primary`, `on_primary` and `border`; spacing `none` 0, `xs` 4, `sm` 8, `md` 16, `lg` 24, `xl` 32 pixels; text sizes `small` 14, `body` 16, `h3` 20, `h2` 24, `h1` 32 pixels; and radii `none` 0, `sm` 4, `md` 8 pixels. The renderer holds the default values; designs never store a token's value.
 2. `gap` and `padding` take a spacing token name or a non-negative number. An unknown token is refused with `E7033`, naming the element.
 3. Built-in components draw from the theme: text and headings use the text color and their size, buttons use `primary` and `on_primary` with the `sm` radius, inputs use `surface` and `border` with the `sm` radius, image placeholders use `muted`, and a screen uses `background`.
@@ -1484,3 +1484,16 @@ Amends D-112, D-199, and Spec 15 §6 and A20 (Aaron, board task "reviews: judge 
 2. A wrong direction or a warranted follow-up task is said plainly in a `### Summary` after the assessment label, at every involvement level. On a later review, a prior finding matters only if it still meets the **Needs work** bar, and a new edge case that a fix exposes is mentioned without blocking.
 3. Tech debt is filed only when fixing it clearly pays off: code repeated once or twice isn't tech debt by itself, an abstraction must clearly pay for itself, and an unlikely, harmless edge case is never tech debt.
 Why: task:6959fbee975aa9bc stayed in **Needs work** for 9 review rounds over a minor tech-debt item, so reviews were overengineering and blocking on cases that could not meaningfully harm the result.
+
+## D-237 One element can override its component's look
+Amends D-230 point 2 and D-235 (Aaron, board task "ui: per-element styling", 2026-11-08). Part of the UI/UX tab feature.
+1. An element may hold one `style` object beside `properties`. Its keys are closed to `fill`, `border`, `text_color`, `size` and `padding`, and every element type accepts all five. An unknown style key is refused with `E7033`, naming the element.
+2. `fill`, `border` and `text_color` take a color token (`background`, `surface`, `text`, `muted`, `primary`, `on_primary`, `border`) or a hex color in `#rgb` or `#rrggbb` form. `size` means text size and takes a text-size token (`small`, `body`, `h3`, `h2`, `h1`) or a positive number of pixels. `padding` takes a spacing token or a non-negative number of pixels, as `gap` does.
+3. The renderer draws overrides after the component's styles and its variant: `fill` sets the background, `border` a 1px solid line in that color, `text_color` the text color, `size` the font size, and `padding` the padding. A missing `style` changes nothing. A value outside these forms is refused with `E7033`, naming the element.
+Why: one element can differ from its component's normal look without opening the design to free-form style text.
+
+## D-238 A design can link screens for a click-through preview
+Amends D-230 points 1 and 4 (Aaron, board task "ui: click-through preview", 2026-11-08). Part of the UI/UX tab feature.
+1. Rows, columns, text, headings, buttons and image placeholders may take `action`, a name, and `navigates_to`, the id of a top-level screen in the same design. Screens and text inputs take neither. A `navigates_to` that names no top-level screen, including one that names another element, is refused with `E7033`, naming the element.
+2. `action` is stored in the design and changes nothing when clicked. In preview, clicking an element follows its `navigates_to`. Preview starts at the first screen and is left by Exit preview, which returns to the stacked screens; only the current design is previewed, not a history version.
+Why: a design can be clicked through like an interactive mockup without adding screen states or mock data.

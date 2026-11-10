@@ -1,3 +1,4 @@
+import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
@@ -135,6 +136,8 @@ pub type Msg {
   DeleteSkill(String)
   /// Empties the skill form.
   CancelSkill
+  /// Shows the Skills section on the Agents tab.
+  ShowSkills
   /// Turns a language on or off in the system settings.
   ToggleLanguage(String, Bool)
   /// Saves one agent behavior choice in the system settings.
@@ -298,6 +301,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, skill_form: blank_skill_form, error: ""),
       effect.none(),
     )
+    ShowSkills -> #(
+      model,
+      effect.after_paint(fn(_, root) { scroll_into_view(root, "#skills") }),
+    )
     LanguagesLoaded(text) ->
       case json.parse(text, languages_decoder()) {
         Ok(languages) -> #(Model(..model, languages:, error: ""), effect.none())
@@ -453,8 +460,8 @@ pub fn view(model: Model) -> Element(Msg) {
         case tab {
           Agents -> [
             behavior_section(model),
-            role_models_section(model),
             models_section(model),
+            role_models_section(model),
             skills_section(model),
           ]
           Appearance -> [appearance_section(model.dark)]
@@ -522,6 +529,7 @@ const view_styles =
 .choice-help{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:2;width:max-content;max-width:min(18rem,80vw);padding:6px 10px;border:1px solid var(--edge);background:var(--paper);color:var(--ink);font-size:13px;font-weight:400;line-height:1.4;white-space:normal}
 .choice-stop:last-child .choice-help{left:auto;right:0}
 .choice-stop:hover .choice-help,.choice-stop:focus-within .choice-help{display:block}
+.role-skills{margin-top:8px}.role-skills>summary{cursor:pointer}.role-skills .skill-roles{margin:8px 0 0}
 .role-models{margin-top:8px}.role-model{margin:14px 0}.role-model-picks{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));max-width:640px}
 .role-model .field{max-width:none}
 .field{display:grid;gap:4px;margin:8px 0;max-width:480px}
@@ -1121,11 +1129,6 @@ fn skill_body(f: SkillForm, roles: List(String)) -> String {
 pub fn skills_section(model: Model) -> Element(Msg) {
   html.section([attribute.attribute("aria-labelledby", "skills")], [
     html.h2([attribute.id("skills")], [html.text("Skills")]),
-    html.p([], [
-      html.text(
-        "Instructions for agents. A skill saved here applies to every project in this workspace.",
-      ),
-    ]),
     case model.skills {
       [] -> html.p([], [html.text("No skills yet.")])
       skills ->
@@ -1139,14 +1142,26 @@ pub fn skills_section(model: Model) -> Element(Msg) {
 }
 
 fn role_skills(model: Model, role: Role) -> Element(Msg) {
-  case model.skills {
-    [] -> element.none()
-    skills ->
-      html.div(
-        [attribute.class("skill-roles")],
-        list.map(skills, fn(skill) { skill_role_choice(skill, role) }),
-      )
-  }
+  html.details([attribute.class("role-skills")], [
+    html.summary([], [html.text("Edit Skills")]),
+    case model.skills {
+      [] ->
+        html.p([], [
+          html.a(
+            [
+              attribute.href("#skills"),
+              event.on_click(ShowSkills) |> event.prevent_default,
+            ],
+            [html.text("Define skills")],
+          ),
+        ])
+      skills ->
+        html.div(
+          [attribute.class("skill-roles")],
+          list.map(skills, fn(skill) { skill_role_choice(skill, role) }),
+        )
+    },
+  ])
 }
 
 fn skill_row(skill: Skill) -> Element(Msg) {
@@ -1297,14 +1312,12 @@ fn call_role_models(method: String, body: String) -> Effect(Msg) {
   })
 }
 
-/// The model each role starts with.
+/// The default model for each role.
 pub fn role_models_section(model: Model) -> Element(Msg) {
   html.section([attribute.attribute("aria-labelledby", "role-models")], [
-    html.h2([attribute.id("role-models")], [html.text("Role models")]),
+    html.h2([attribute.id("role-models")], [html.text("Roles")]),
     html.p([], [
-      html.text(
-        "Choose the model each role starts with. With None, pick one on each task.",
-      ),
+      html.text("Choose the default model for each role"),
     ]),
     case model.models {
       [] ->
@@ -1343,11 +1356,11 @@ fn role_model_pick(
   role: Role,
   assignment: Assignment,
 ) -> Element(Msg) {
-  html.label([attribute.class("field")], [
-    html.text("Model"),
+  html.div([attribute.class("field")], [
     html.select(
       [
         attribute.name("role-" <> role.id <> "-model"),
+        attribute.attribute("aria-label", "Model for " <> role.name),
         event.on_change(fn(choice) { ChooseRoleModel(role.id, choice) }),
       ],
       model_options(models, assignment.default),
@@ -1738,3 +1751,6 @@ fn queue_skill_load(model: Model) -> #(Model, Effect(Msg)) {
     Model(..model, skills_writing: writing, skills_waiting: waiting),
   ))
 }
+
+@external(javascript, "./api.mjs", "scroll_into_view")
+fn scroll_into_view(root: dynamic.Dynamic, selector: String) -> Nil

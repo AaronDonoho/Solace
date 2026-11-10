@@ -12,6 +12,9 @@ Two kinds of drift the UI polish pass kept finding:
   the other way — "Cancelled" for Canceled, "Needs Review" for Review — is a
   fault: the board never shows that spelling, so what a test checks and what a
   person reads drifts from what ships.
+- The design's spacing tokens. `SPACING_TOKENS` in the Rust validator names
+  them, and the renderer's default theme gives each a value in Gleam. A name in
+  one and not the other is a fault.
 Usage: spacing_parity.py [path ...]
 With paths, only those files are checked for labels; the token check always
 reads its own files. Exit 0 when they agree; exit 1 with one line per fault.
@@ -25,6 +28,8 @@ README = CLI.parent/'README.md'
 BOARD = CLI/'src/default-board.toml'
 TOKENS = CLI/'components/src/solace_task.gleam'
 HTML = CLI/'frontend/index.html'
+DESIGN_RUST = CLI/'src/design.rs'
+RENDER = CLI/'design/src/render.gleam'
 SKIP = {'target', 'node_modules', '.solace', 'build', 'dist'}
 
 SHARED = ('--space-', '--control-', '--pad-', '--tab-')
@@ -93,6 +98,25 @@ def token_faults():
     out += [f'{rel(HTML)}: {n} is in the shell, not in spacing_styles' for n in have if n not in want]
     return out
 
+def design_token_faults():
+    """One line per spacing token the design validator and the default theme differ on."""
+    rust = DESIGN_RUST.read_text(encoding='utf-8')
+    gleam = RENDER.read_text(encoding='utf-8')
+    found = re.search(r'const SPACING_TOKENS[^=]*=\s*&\[(.*?)\];', rust, re.S)
+    if not found: return [f'{rel(DESIGN_RUST)}: no SPACING_TOKENS list']
+    declared = re.findall(r'"([^"]+)"', found.group(1))
+    theme = re.search(r'pub fn default_theme\(\).*?Theme\((.*?)\n  \)', gleam, re.S)
+    if not theme: return [f'{rel(RENDER)}: no default theme']
+    lists = re.findall(r'dict\.from_list\(\[(.*?)\]\)', theme.group(1), re.S)
+    if len(lists) < 2: return [f'{rel(RENDER)}: no spacing tokens in the default theme']
+    drawn = re.findall(r'#\("([^"]+)"', lists[1])
+    out = []
+    for name in declared:
+        if name not in drawn:
+            out.append(f'{rel(RENDER)}: spacing "{name}" is in SPACING_TOKENS, not the default theme')
+    out += [f'{rel(DESIGN_RUST)}: spacing "{name}" is in the default theme, not SPACING_TOKENS' for name in drawn if name not in declared]
+    return out
+
 def label_faults(paths, board):
     """One line per label that drifts from the board's spelling of its column."""
     drift_names = drift(board, final_columns())
@@ -123,7 +147,7 @@ def checked(args):
 
 def main():
     if not BOARD.exists(): sys.exit(f'no {rel(BOARD)}')
-    faults = token_faults() + label_faults(checked(sys.argv[1:]), labels())
+    faults = token_faults() + design_token_faults() + label_faults(checked(sys.argv[1:]), labels())
     for fault in faults: print(fault)
     sys.exit(1 if faults else 0)
 

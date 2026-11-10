@@ -1,5 +1,6 @@
 import { test, expect } from 'bun:test';
 import * as store from '../src/store.mjs';
+import * as api from '../src/api.mjs';
 
 // A browser without a DOM: a document and a window that carry events, and
 // storage kept in a map.
@@ -101,4 +102,15 @@ test('the store survives missing or throwing storage, and no document', () => {
   } finally {
     original ? Object.defineProperty(globalThis, 'localStorage', original) : delete globalThis.localStorage;
   }
+});
+
+test('the skills link scrolls the page\'s own Skills section into view', () => {
+  const calls = [];
+  const root = {
+    querySelector: selector => ({ scrollIntoView: options => calls.push([selector, options]) }),
+  };
+  api.scroll_into_view(root, '#skills');
+  expect(calls).toEqual([['#skills', { block: 'start' }]]);
+  expect(() => api.scroll_into_view(undefined, '#skills')).not.toThrow();
+  expect(() => api.scroll_into_view({ querySelector: () => null }, '#skills')).not.toThrow();
 });

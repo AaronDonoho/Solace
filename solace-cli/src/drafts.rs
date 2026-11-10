@@ -145,7 +145,8 @@ pub const RESEND: &str = "Send the corrected patch again, whole, as `text`.";
 /// patch is resent. It says whether `old` is patch text or merged code and
 /// gives a short example. The kind is read at the message's end, where a quoted
 /// patch line can't reach it. A replacement kept in a refused retry says the
-/// draft holds it.
+/// draft holds it. A submit whose fix belongs in another symbol says to submit
+/// that change first.
 pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: bool, patch: bool, replaced: bool) -> String {
     let (noun, plural, nothing) =
         if cmd == "write" { ("line", "lines", "Nothing was written.") } else { ("block", "blocks", "Nothing was saved.") };
@@ -178,6 +179,11 @@ pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: boo
             ),
             noun, cmd, id, flag, form
         )
+    };
+    let fix = if cmd == "submit" {
+        format!("{fix} If the fix is in another symbol, submit that change on its own first, then retry this draft.")
+    } else {
+        fix
     };
     let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}{flag}`. List: `drafts{flag}`. Drop: `drafts drop {id}{flag}`.");
     let kept = if replaced {
@@ -294,7 +300,7 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
                     if hunks.is_empty() {
                         hunks.push((None, vec![], n));
                     }
-                    hunks.last_mut().unwrap().1.push(if l.is_empty() { " ".into() } else { l.to_string() });
+                    hunks.last_mut().unwrap().1.push(l.to_string());
                 }
             }
         }
@@ -302,6 +308,20 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
     }
     if sections.is_empty() {
         return Err(whole(bad(format!("the patch has no {kinds} section."))));
+    }
+    // a blank line at the end of a hunk separates it from what follows; it isn't context (D-204)
+    for (kind, _, _, hunks) in &mut sections {
+        for (_, hunk, _) in hunks.iter_mut() {
+            while hunk.last().is_some_and(String::is_empty) {
+                hunk.pop();
+            }
+            for line in hunk.iter_mut().filter(|line| line.is_empty()) {
+                *line = " ".into();
+            }
+        }
+        if *kind == Section::Update {
+            hunks.retain(|(at, hunk, _)| at.is_some() || !hunk.is_empty());
+        }
     }
     Ok(sections)
 }
@@ -348,6 +368,7 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
         };
         let Some((k, loose)) = at_k else {
             let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
+            let ambiguous = !at_end && loose_ambiguous(&old, lines);
             // the first hunk line the target doesn't have exactly (trailing space aside): the line at fault
             let at_fault = old.iter().filter(|l| !l.trim().is_empty()).find(|l| !lines.iter().any(|x| x.trim_end() == l.trim_end()));
             // a line that is only part of one longer line: patch lines are whole lines (D-120)
@@ -394,7 +415,17 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
                 (Some(p), [_]) => p,
                 _ => at_fault.map(|l| l.trim()).unwrap_or(first.trim()),
             };
-            let msg = if part.is_none() && shifted.is_none() && !first.trim().is_empty() {
+            let msg = if ambiguous {
+                format!(
+                    concat!(
+                        "these lines fit in several places once leading space is ignored: `{}`{}; ",
+                        "copy their leading space exactly from `{}`, or add a line that tells them apart.",
+                    ),
+                    first.trim(),
+                    more,
+                    show
+                )
+            } else if part.is_none() && shifted.is_none() && !first.trim().is_empty() {
                 let blank = old.iter().any(|l| l.trim().is_empty()) && !lines.iter().any(|x| x.trim_end().is_empty());
                 format!(
                     "these lines aren't adjacent in the file: `{}`{more}; copy them in order from `{show}`.{}",
@@ -756,9 +787,17 @@ mod tests {
             .unwrap_err()
             .0;
         assert!(e.contains("these lines weren't found: `x = 1`") && e.contains("`x = 1` is only part of a longer line"), "{e}");
-        // the search goes outward from where the hunk line belongs: an occurrence 2 lines before it beats one 3 lines after it
+        // a hunk that fits in two places says so, rather than naming one occurrence's leading space
         let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n+y\n*** End Patch\n").unwrap_err().0;
-        assert!(e.contains("`x` is line 2 with 2 leading spaces"), "{e}");
+        assert!(e.contains("these lines fit in several places once leading space is ignored: `x`") && !e.contains("@@"), "{e}");
+        // with the target's indentation the hunk applies, to the second `x`
+        let applied = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-  x\n+  y\n*** End Patch\n").unwrap();
+        assert!(applied.contains("  let d = 4\n  y\n}") && applied.matches("  x\n").count() == 1, "{applied}");
+        // a misindented line in a multi-line hunk that fits loosely nowhere: the hint names its nearer occurrence
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let b\n-x\n-let d = 4\n+  y\n+  let d = 5\n*** End Patch\n")
+            .unwrap_err()
+            .0;
+        assert!(e.contains("`x` is line 7 with 2 leading spaces") && !e.contains("`x` is line 2"), "{e}");
         // Each refusal says where in the patch it is; a prefix error quotes the line before.
         let bare = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n+  1\n}\n*** End Patch\n";
         let e = patch_blocks(&s, bare).unwrap_err().0;
@@ -1469,7 +1508,7 @@ mod tests {
 
         let twice = board_project(&[("src/app.gleam", "pub fn main() {\n  let a = 1\n  let a = 1\n}\n")]);
         let e = patch_blocks(&twice, "*** Begin Patch\n*** Update: app.main\n-let a = 1\n+let a = 2\n*** End Patch\n").unwrap_err().0;
-        assert!(e.contains("E0108") && e.contains("`let a = 1`") && e.contains("leading space"), "{e}");
+        assert!(e.contains("E0108") && e.contains("`let a = 1`") && e.contains("fit in several places"), "{e}");
     }
 
     /// A save whose hunk matched through indentation says so (D-204).
@@ -1671,6 +1710,46 @@ mod tests {
         let e = patch_blocks(&s, patch).unwrap_err().0;
         assert!(e.contains("submit --imports app"), "{e}");
         assert!(!e.contains("use `delete <name>`"), "{e}");
+    }
+
+    #[test]
+    fn retry_advice_says_a_fix_in_another_symbol_comes_first() {
+        let submit = retry_advice("E0001", "d1", "submit", "", false, true, false);
+        assert!(
+            submit.contains("If the fix is in another symbol, submit that change on its own first, then retry this draft."),
+            "{submit}"
+        );
+        let write = retry_advice("E0001", "d1", "write", "", false, true, false);
+        assert!(!write.contains("another symbol"), "{write}");
+        let whole = retry_advice(&format!("E0108. {RESEND}"), "d1", "submit", "", false, true, false);
+        assert!(!whole.contains("another symbol"), "{whole}");
+    }
+
+    /// A blank line at the end of a hunk separates it from what follows, so a
+    /// patch is not refused for a blank the target doesn't have there.
+    #[test]
+    fn trailing_blank_lines_are_not_context() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n}\n")]);
+        let patch = concat!(
+            "*** Begin Patch\n*** Update: app.main\n",
+            "@@\n-  let x = 1\n+  let x = 2\n\n",
+            "@@\n-}\n+  y\n+}\n",
+            "*** End Patch\n",
+        );
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("let x = 2") && blocks.contains("  y"), "{blocks}");
+        let parsed = crate::drafts::sections("*** Begin Patch\n*** Update File: notes\n@@\n-one\n+1\n\n*** End Patch\n", true).unwrap();
+        let hunks = &parsed[0].3;
+        assert_eq!(hunks[0].1, vec!["-one".to_string(), "+1".to_string()]);
+        let leading = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n\n@@\n-  let x = 1\n+  let x = 3\n*** End Patch\n").unwrap();
+        assert!(leading.contains("let x = 3"), "{leading}");
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("the patch changes nothing"), "{e}");
+        // an empty Add is still refused as defining nothing, not as a panic
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Add: app.x\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("defines no function"), "{e}");
+        let parsed = crate::drafts::sections("*** Begin Patch\n*** Add File: notes.txt\n*** End Patch\n", true).unwrap();
+        assert_eq!(crate::drafts::file_text("notes.txt", "", parsed[0].0, parsed[0].3.clone()).unwrap(), Some(String::new()));
     }
 }
 
@@ -2340,7 +2419,7 @@ pub fn status(current: bool) -> &'static str {
 /// The one start position where every hunk line matches with space at both
 /// ends ignored, if there is exactly one (D-204).
 fn loose_match(old: &[&str], lines: &[String]) -> Option<(usize, bool)> {
-    let mut starts = (0..=lines.len().checked_sub(old.len())?).filter(|&k| old.iter().zip(&lines[k..]).all(|(o, l)| o.trim() == l.trim()));
+    let mut starts = (0..=lines.len().checked_sub(old.len())?).filter(|&k| loose_fits(old, lines, k));
     let k = starts.next()?;
     starts.next().is_none().then_some((k, true))
 }
@@ -2614,3 +2693,14 @@ fn unit_texts(lines: &[String]) -> Vec<String> {
 }
 
 const SEP: &str = "\u{0}";
+
+/// Whether every hunk line matches the target at `k` with space at both ends ignored (D-204).
+fn loose_fits(old: &[&str], lines: &[String], k: usize) -> bool {
+    old.iter().zip(&lines[k..]).all(|(o, l)| o.trim() == l.trim())
+}
+
+/// Whether a hunk's lines match with space at both ends ignored in two or more places (D-204).
+fn loose_ambiguous(old: &[&str], lines: &[String]) -> bool {
+    let Some(room) = lines.len().checked_sub(old.len()) else { return false };
+    (0..=room).filter(|&k| loose_fits(old, lines, k)).take(2).count() > 1
+}

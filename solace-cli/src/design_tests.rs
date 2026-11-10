@@ -939,3 +939,162 @@ fn a_large_element_stays_within_the_reply_limit() {
     assert!(last.len() <= 400, "{} bytes", last.len());
     assert!(last.contains("too large to show whole"), "{last}");
 }
+
+#[test]
+fn each_component_variant_is_accepted() {
+    for (ty, variants) in
+        [("button", BUTTON_VARIANTS), ("text", TEXT_VARIANTS), ("row", CONTAINER_VARIANTS), ("column", CONTAINER_VARIANTS)]
+    {
+        for variant in variants {
+            let mut properties = default_properties(ty);
+            if ty == "row" || ty == "column" {
+                properties["width"] = json!("hug");
+                properties["height"] = json!("hug");
+            }
+            properties["variant"] = json!(variant);
+            let mut d = design();
+            d["elements"][0]["children"] = json!([{
+                "id": "part",
+                "type": ty,
+                "properties": properties,
+            }]);
+            validate(&d).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_unknown_component_variant_is_refused() {
+    for (ty, variants) in [("button", BUTTON_VARIANTS), ("text", TEXT_VARIANTS), ("row", CONTAINER_VARIANTS)] {
+        let mut d = design();
+        d["elements"][0]["children"] = json!([{
+            "id": "part",
+            "type": ty,
+            "properties": {"width": "hug", "height": "hug", "variant": "fancy"},
+        }]);
+        refusal(&d, &["part", "variant", "fancy", variants[0]]);
+    }
+}
+
+#[test]
+fn a_variant_is_refused_on_a_type_without_one() {
+    for ty in ["heading", "text_input", "image_placeholder"] {
+        let mut d = design();
+        d["elements"][0]["children"][0]["type"] = json!(ty);
+        d["elements"][0]["children"][0]["properties"] = json!({"width": "hug", "height": "hug", "variant": "card"});
+        refusal(&d, &["heading", "unknown property", "variant"]);
+    }
+    let mut d = design();
+    d["elements"][0]["properties"]["variant"] = json!("card");
+    refusal(&d, &["root", "unknown property", "variant"]);
+}
+
+#[test]
+fn style_overrides_take_a_token_or_a_literal() {
+    let mut d = design();
+    d["elements"][0]["children"][0]["style"] = json!({
+        "fill": "surface",
+        "border": "primary",
+        "text_color": "muted",
+        "size": "h2",
+        "padding": "md",
+    });
+    validate(&d).unwrap();
+    d["elements"][0]["children"][0]["style"] = json!({
+        "fill": "#fff",
+        "border": "#cc3333",
+        "text_color": "#00FF00",
+        "size": 18,
+        "padding": 4,
+    });
+    validate(&d).unwrap();
+    let mut d = design();
+    d["elements"][0]["style"] = json!({"padding": 0, "size": 8});
+    validate(&d).unwrap();
+}
+
+#[test]
+fn a_badly_formed_style_literal_is_refused() {
+    for (name, value) in [
+        ("fill", json!("red")),
+        ("border", json!("#12")),
+        ("text_color", json!("#gggggg")),
+        ("size", json!(-4)),
+        ("size", json!(0)),
+        ("size", json!("huge")),
+        ("padding", json!(-1)),
+        ("padding", json!(true)),
+    ] {
+        let mut d = design();
+        d["elements"][0]["children"][0]["style"] = json!({ (name): value });
+        refusal(&d, &["heading", "style", name]);
+    }
+}
+
+#[test]
+fn an_unknown_style_property_is_refused() {
+    let mut d = design();
+    d["elements"][0]["children"][0]["style"] = json!({"weight": 1});
+    refusal(&d, &["heading", "unknown style", "weight"]);
+}
+
+#[test]
+fn a_style_must_be_an_object() {
+    let mut d = design();
+    d["elements"][0]["children"][0]["style"] = json!(["fill"]);
+    refusal(&d, &["heading", "style must be an object"]);
+}
+
+#[test]
+fn a_link_to_a_screen_validates() {
+    let mut d = design();
+    d["elements"].as_array_mut().unwrap().push(json!({
+        "id": "side",
+        "type": "screen",
+        "properties": {"width": "fill", "height": "fill"},
+    }));
+    d["elements"][0]["children"] = json!([{
+        "id": "go",
+        "type": "button",
+        "properties": {
+            "width": "hug",
+            "height": "hug",
+            "label": "Next",
+            "action": "save",
+            "navigates_to": "side",
+        },
+    }]);
+    validate(&d).unwrap();
+}
+
+#[test]
+fn a_link_to_a_missing_screen_is_refused() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "go",
+        "type": "button",
+        "properties": {"width": "hug", "height": "hug", "label": "Next", "navigates_to": "ghost"},
+    }]);
+    refusal(&d, &["element \"go\"", "navigates_to", "ghost"]);
+}
+
+#[test]
+fn a_link_to_a_non_screen_is_refused() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([
+        {"id": "heading", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Home"}},
+        {"id": "go", "type": "button", "properties": {"width": "hug", "height": "hug", "label": "Next", "navigates_to": "heading"}},
+    ]);
+    refusal(&d, &["element \"go\"", "navigates_to", "heading"]);
+}
+
+#[test]
+fn a_link_must_name_a_screen() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "go",
+        "type": "button",
+        "properties": {"width": "hug", "height": "hug", "label": "Next", "navigates_to": 5},
+    }]);
+    refusal(&d, &["element \"go\"", "navigates_to", "must name a screen"]);
+}

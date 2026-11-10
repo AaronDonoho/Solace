@@ -6,19 +6,27 @@ import gleam/dynamic/decode
 import gleam/float
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
+import lustre/event
 
 pub const outline_styles =
   ".design-element{outline:1px dotted currentColor;outline-offset:-1px}"
 
 pub type Design {
-  Design(id: String, title: String, elements: List(Node))
+  Design(
+    id: String,
+    title: String,
+    elements: List(Node),
+    links: Dict(String, String),
+  )
 }
 
 pub type Node {
-  Node(id: String, kind: Kind, children: List(Node))
+  Node(id: String, kind: Kind, children: List(Node), overrides: Overrides)
 }
 
 pub type Kind {
@@ -40,11 +48,18 @@ pub type Container {
     padding: SpacingValue,
     align: Align,
     justify: Justify,
+    variant: ContainerVariant,
   )
 }
 
 pub type TextProperties {
-  TextProperties(width: Size, height: Size, align: TextAlign, content: String)
+  TextProperties(
+    width: Size,
+    height: Size,
+    align: TextAlign,
+    content: String,
+    variant: TextVariant,
+  )
 }
 
 pub type Size {
@@ -103,18 +118,27 @@ fn draw_node(
   parent: ParentAxis,
   parent_width: DrawnSize,
   parent_height: DrawnSize,
+  on_click: Option(fn(String) -> message),
 ) -> Element(message) {
-  let #(width, height) =
-    drawn_sizes(node.kind, parent, parent_width, parent_height)
+  let kind = node.kind
+  let #(width, height) = drawn_sizes(kind, parent, parent_width, parent_height)
+  let click = case on_click {
+    Some(handle) -> [event.stop_propagation(event.on_click(handle(node.id)))]
+    None -> []
+  }
   let attributes = [
     attribute.class("design-element"),
     attribute.data("design-id", node.id),
-    attribute.styles(list.append(
-      size_styles(node, parent, width, height),
-      kind_styles(theme, node.kind),
-    )),
+    attribute.styles(
+      list.flatten([
+        size_styles(node, parent, width, height),
+        kind_styles(theme, kind),
+        overrides_styles(theme, node.overrides),
+      ]),
+    ),
+    ..click
   ]
-  case node.kind {
+  case kind {
     Text(text) -> html.div(attributes, [html.text(text.content)])
     Heading(heading) ->
       case heading.level {
@@ -135,7 +159,7 @@ fn draw_node(
       html.div(
         attributes,
         list.map(node.children, fn(child) {
-          draw_node(theme, child, child_axis(node.kind), width, height)
+          draw_node(theme, child, child_axis(kind), width, height, on_click)
         }),
       )
   }
@@ -228,13 +252,7 @@ fn kind_styles(theme: Theme, kind: Kind) -> List(#(String, String)) {
       )
     Row(container) -> container_styles(theme, container, "row")
     Column(container) -> container_styles(theme, container, "column")
-    Text(text) -> [
-      #("display", "block"),
-      #("box-sizing", "border-box"),
-      #("text-align", text_align(text.align)),
-      #("color", theme_color(theme, "text")),
-      #("font-size", px(theme_text_size(theme, "body"))),
-    ]
+    Text(text) -> text_styles(theme, text)
     Heading(heading) -> [
       #("display", "block"),
       #("box-sizing", "border-box"),
@@ -242,15 +260,7 @@ fn kind_styles(theme: Theme, kind: Kind) -> List(#(String, String)) {
       #("color", theme_color(theme, "text")),
       #("font-size", px(theme_text_size(theme, heading_token(heading.level)))),
     ]
-    Button(_) -> [
-      #("display", "inline-flex"),
-      #("box-sizing", "border-box"),
-      #("align-items", "center"),
-      #("justify-content", "center"),
-      #("background", theme_color(theme, "primary")),
-      #("color", theme_color(theme, "on_primary")),
-      #("border-radius", px(theme_radius(theme, "sm"))),
-    ]
+    Button(button) -> button_styles(theme, button)
     TextInput(_) -> [
       #("box-sizing", "border-box"),
       #("background", theme_color(theme, "surface")),
@@ -273,15 +283,18 @@ fn container_styles(
   container: Container,
   direction: String,
 ) -> List(#(String, String)) {
-  [
-    #("display", "flex"),
-    #("flex-direction", direction),
-    #("box-sizing", "border-box"),
-    #("gap", px(spacing_value(theme, container.gap))),
-    #("padding", px(spacing_value(theme, container.padding))),
-    #("align-items", align(container.align)),
-    #("justify-content", justify(container.justify)),
-  ]
+  list.append(
+    [
+      #("display", "flex"),
+      #("flex-direction", direction),
+      #("box-sizing", "border-box"),
+      #("gap", px(spacing_value(theme, container.gap))),
+      #("padding", px(spacing_value(theme, container.padding))),
+      #("align-items", align(container.align)),
+      #("justify-content", justify(container.justify)),
+    ],
+    container_variant_styles(theme, container.variant),
+  )
 }
 
 fn align(value: Align) -> String {
@@ -319,10 +332,15 @@ pub fn design_decoder() -> decode.Decoder(Design) {
   use id <- decode.field("id", decode.string)
   use title <- decode.field("title", decode.string)
   use elements <- decode.field("elements", decode.list(node_decoder()))
-  decode.success(Design(id, title, elements))
+  decode.success(Design(
+    id,
+    title,
+    list.map(elements, fn(element) { element.0 }),
+    links_of(elements),
+  ))
 }
 
-fn node_decoder() -> decode.Decoder(Node) {
+fn node_decoder() -> decode.Decoder(#(Node, List(#(String, String)))) {
   decode.recursive(fn() {
     use id <- decode.field("id", decode.string)
     use ty <- decode.field("type", decode.string)
@@ -331,8 +349,20 @@ fn node_decoder() -> decode.Decoder(Node) {
       [],
       decode.list(node_decoder()),
     )
+    use style <- decode.optional_field(
+      "style",
+      no_overrides(),
+      overrides_decoder(),
+    )
+    use navigates_to <- decode.field("properties", navigates_to_decoder())
+    let nodes = list.map(children, fn(element) { element.0 })
+    let links = list.flatten(list.map(children, fn(element) { element.1 }))
+    let links = case navigates_to {
+      "" -> links
+      target -> [#(id, target), ..links]
+    }
     decode.then(kind_decoder(ty), fn(kind) {
-      decode.success(Node(id, kind, children))
+      decode.success(#(Node(id, kind, nodes, style), links))
     })
   })
 }
@@ -373,7 +403,7 @@ fn kind_decoder(ty: String) -> decode.Decoder(Kind) {
       })
     _ ->
       decode.failure(
-        Text(TextProperties(Fill, Fill, TextLeft, "")),
+        Text(TextProperties(Fill, Fill, TextLeft, "", Body)),
         "known element type",
       )
   }
@@ -394,7 +424,12 @@ fn container_decoder() -> decode.Decoder(Container) {
     JustifyStart,
     justify_decoder(),
   )
-  decode.success(Container(width, height, gap, padding, align, justify))
+  use variant <- decode.optional_field(
+    "variant",
+    Plain,
+    container_variant_decoder(),
+  )
+  decode.success(Container(width, height, gap, padding, align, justify, variant))
 }
 
 fn text_decoder() -> decode.Decoder(TextProperties) {
@@ -402,7 +437,8 @@ fn text_decoder() -> decode.Decoder(TextProperties) {
   use height <- decode.field("height", size_decoder())
   use align <- decode.optional_field("align", TextLeft, text_align_decoder())
   use content <- decode.optional_field("text", "", decode.string)
-  decode.success(TextProperties(width, height, align, content))
+  use variant <- decode.optional_field("variant", Body, text_variant_decoder())
+  decode.success(TextProperties(width, height, align, content, variant))
 }
 
 fn size_decoder() -> decode.Decoder(Size) {
@@ -510,7 +546,12 @@ pub type HeadingProperties {
 }
 
 pub type ButtonProperties {
-  ButtonProperties(width: Size, height: Size, label: String)
+  ButtonProperties(
+    width: Size,
+    height: Size,
+    label: String,
+    variant: ButtonVariant,
+  )
 }
 
 pub type InputProperties {
@@ -534,7 +575,12 @@ fn button_decoder() -> decode.Decoder(ButtonProperties) {
   use width <- decode.field("width", size_decoder())
   use height <- decode.field("height", size_decoder())
   use label <- decode.field("label", decode.string)
-  decode.success(ButtonProperties(width, height, label))
+  use variant <- decode.optional_field(
+    "variant",
+    Primary,
+    button_variant_decoder(),
+  )
+  decode.success(ButtonProperties(width, height, label, variant))
 }
 
 fn input_decoder() -> decode.Decoder(InputProperties) {
@@ -628,7 +674,7 @@ pub fn theme_radius(theme: Theme, name: String) -> Float {
 }
 
 pub fn draw_with(theme: Theme, node: Node) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill)
+  draw_node(theme, node, Down, DrawnFill, DrawnFill, None)
 }
 
 fn spacing_value(theme: Theme, value: SpacingValue) -> Float {
@@ -650,4 +696,294 @@ fn spacing_decoder() -> decode.Decoder(SpacingValue) {
   decode.one_of(decode.map(decode.float, SpacingPixels), [
     decode.map(decode.string, SpacingToken),
   ])
+}
+
+fn container_variant_styles(
+  theme: Theme,
+  variant: ContainerVariant,
+) -> List(#(String, String)) {
+  case variant {
+    Card -> [
+      #("background", theme_color(theme, "surface")),
+      #("border", "1px solid " <> theme_color(theme, "border")),
+      #("border-radius", px(theme_radius(theme, "md"))),
+    ]
+    Plain -> []
+  }
+}
+
+fn text_styles(theme: Theme, text: TextProperties) -> List(#(String, String)) {
+  let #(color, size) = case text.variant {
+    Muted -> #(theme_color(theme, "muted"), theme_text_size(theme, "body"))
+    Small -> #(theme_color(theme, "text"), theme_text_size(theme, "small"))
+    Body -> #(theme_color(theme, "text"), theme_text_size(theme, "body"))
+  }
+  [
+    #("display", "block"),
+    #("box-sizing", "border-box"),
+    #("text-align", text_align(text.align)),
+    #("color", color),
+    #("font-size", px(size)),
+  ]
+}
+
+fn button_styles(
+  theme: Theme,
+  button: ButtonProperties,
+) -> List(#(String, String)) {
+  let look = case button.variant {
+    Secondary -> [
+      #("background", theme_color(theme, "surface")),
+      #("color", theme_color(theme, "primary")),
+      #("border", "1px solid " <> theme_color(theme, "primary")),
+    ]
+    Ghost -> [
+      #("background", "transparent"),
+      #("color", theme_color(theme, "primary")),
+    ]
+    Primary -> [
+      #("background", theme_color(theme, "primary")),
+      #("color", theme_color(theme, "on_primary")),
+    ]
+  }
+  list.append(
+    [
+      #("display", "inline-flex"),
+      #("box-sizing", "border-box"),
+      #("align-items", "center"),
+      #("justify-content", "center"),
+      #("border-radius", px(theme_radius(theme, "sm"))),
+    ],
+    look,
+  )
+}
+
+pub type ButtonVariant {
+  Primary
+  Secondary
+  Ghost
+}
+
+pub type TextVariant {
+  Body
+  Muted
+  Small
+}
+
+pub type ContainerVariant {
+  Plain
+  Card
+}
+
+fn button_variant_decoder() -> decode.Decoder(ButtonVariant) {
+  decode.then(decode.string, fn(value) {
+    case value {
+      "primary" -> decode.success(Primary)
+      "secondary" -> decode.success(Secondary)
+      "ghost" -> decode.success(Ghost)
+      _ -> decode.failure(Primary, "button variant")
+    }
+  })
+}
+
+fn text_variant_decoder() -> decode.Decoder(TextVariant) {
+  decode.then(decode.string, fn(value) {
+    case value {
+      "body" -> decode.success(Body)
+      "muted" -> decode.success(Muted)
+      "small" -> decode.success(Small)
+      _ -> decode.failure(Body, "text variant")
+    }
+  })
+}
+
+fn container_variant_decoder() -> decode.Decoder(ContainerVariant) {
+  decode.then(decode.string, fn(value) {
+    case value {
+      "plain" -> decode.success(Plain)
+      "card" -> decode.success(Card)
+      _ -> decode.failure(Plain, "container variant")
+    }
+  })
+}
+
+pub type Overrides {
+  Overrides(
+    fill: Option(String),
+    border: Option(String),
+    text_color: Option(String),
+    size: Option(TextSizeValue),
+    padding: Option(SpacingValue),
+  )
+}
+
+pub type TextSizeValue {
+  TextSizeToken(String)
+  TextSizePixels(Float)
+}
+
+/// No style overrides, the default for an element.
+pub fn no_overrides() -> Overrides {
+  Overrides(None, None, None, None, None)
+}
+
+fn overrides_decoder() -> decode.Decoder(Overrides) {
+  use fill <- decode.optional_field(
+    "fill",
+    None,
+    decode.map(decode.string, Some),
+  )
+  use border <- decode.optional_field(
+    "border",
+    None,
+    decode.map(decode.string, Some),
+  )
+  use text_color <- decode.optional_field(
+    "text_color",
+    None,
+    decode.map(decode.string, Some),
+  )
+  use size <- decode.optional_field(
+    "size",
+    None,
+    decode.map(text_size_decoder(), Some),
+  )
+  use padding <- decode.optional_field(
+    "padding",
+    None,
+    decode.map(spacing_decoder(), Some),
+  )
+  decode.success(Overrides(fill, border, text_color, size, padding))
+}
+
+fn text_size_decoder() -> decode.Decoder(TextSizeValue) {
+  decode.one_of(decode.map(decode.float, TextSizePixels), [
+    decode.map(decode.string, TextSizeToken),
+  ])
+}
+
+fn color_value(theme: Theme, value: String) -> String {
+  case string.starts_with(value, "#") {
+    True -> value
+    False -> theme_color(theme, value)
+  }
+}
+
+fn text_size_value(theme: Theme, value: TextSizeValue) -> Float {
+  case value {
+    TextSizeToken(name) -> theme_text_size(theme, name)
+    TextSizePixels(pixels) -> pixels
+  }
+}
+
+fn overrides_styles(
+  theme: Theme,
+  overrides: Overrides,
+) -> List(#(String, String)) {
+  list.flatten([
+    case overrides.fill {
+      Some(value) -> [#("background", color_value(theme, value))]
+      None -> []
+    },
+    case overrides.border {
+      Some(value) -> [#("border", "1px solid " <> color_value(theme, value))]
+      None -> []
+    },
+    case overrides.text_color {
+      Some(value) -> [#("color", color_value(theme, value))]
+      None -> []
+    },
+    case overrides.size {
+      Some(value) -> [#("font-size", px(text_size_value(theme, value)))]
+      None -> []
+    },
+    case overrides.padding {
+      Some(value) -> [#("padding", px(spacing_value(theme, value)))]
+      None -> []
+    },
+  ])
+}
+
+/// Draw one screen in preview, where a click reports the element's id.
+pub fn draw_preview(
+  node: Node,
+  on_click: fn(String) -> message,
+) -> Element(message) {
+  draw_preview_with(default_theme(), node, on_click)
+}
+
+/// Draw one screen in preview with `theme`, where a click reports the
+/// element's id.
+pub fn draw_preview_with(
+  theme: Theme,
+  node: Node,
+  on_click: fn(String) -> message,
+) -> Element(message) {
+  draw_node(theme, node, Down, DrawnFill, DrawnFill, Some(on_click))
+}
+
+/// The first top-level screen in a design.
+pub fn first_screen(design: Design) -> Option(Node) {
+  case list.find(design.elements, fn(node) { is_screen(node.kind) }) {
+    Ok(node) -> Some(node)
+    Error(_) -> None
+  }
+}
+
+/// The top-level screen `id` names, if any.
+pub fn screen(design: Design, id: String) -> Option(Node) {
+  case
+    list.find(design.elements, fn(node) {
+      is_screen(node.kind) && node.id == id
+    })
+  {
+    Ok(node) -> Some(node)
+    Error(_) -> None
+  }
+}
+
+/// Where a click on the element `id` goes, if it links to a screen.
+pub fn link_target(design: Design, id: String) -> Option(String) {
+  case dict.get(design.links, id) {
+    Ok(target) -> Some(target)
+    Error(_) -> None
+  }
+}
+
+fn links_of(
+  elements: List(#(Node, List(#(String, String)))),
+) -> Dict(String, String) {
+  let own =
+    list.fold(elements, dict.new(), fn(own, element) {
+      list.fold(element.1, own, fn(own, link) {
+        dict.insert(own, link.0, link.1)
+      })
+    })
+  list.fold(elements, dict.new(), fn(links, element) {
+    inherit_links(element.0, None, own, links)
+  })
+}
+
+fn navigates_to_decoder() -> decode.Decoder(String) {
+  use target <- decode.optional_field("navigates_to", "", decode.string)
+  decode.success(target)
+}
+
+fn inherit_links(
+  node: Node,
+  inherited: Option(String),
+  own: Dict(String, String),
+  links: Dict(String, String),
+) -> Dict(String, String) {
+  let link = case dict.get(own, node.id) {
+    Ok(target) -> Some(target)
+    Error(_) -> inherited
+  }
+  let links = case link {
+    Some(target) -> dict.insert(links, node.id, target)
+    None -> links
+  }
+  list.fold(node.children, links, fn(links, child) {
+    inherit_links(child, link, own, links)
+  })
 }

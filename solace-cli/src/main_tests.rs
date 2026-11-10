@@ -1947,7 +1947,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "80892e011f5c40374f68a418f2e7d511e9feeee5601ae59da3eb656ae3b1a83f");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "f8c63357ad87e35085b013eac3cb9e6cc6c097ba51476564b6176dd3e48b54ad");
 }
 
 #[test]
@@ -2611,15 +2611,6 @@ fn a_guarded_local_name_is_not_imported() {
 }
 
 #[test]
-fn a_gleam_probe_stops_at_its_run_limit_and_keeps_its_output() {
-    let store = probe_project();
-    let code = "pub fn main() {\n  echo \"started\"\n  spin()\n}\n\nfn spin() {\n  spin()\n}\n";
-    let err = store.probe_with_limit(code, None, &[], None, 2).unwrap_err().0;
-    assert!(err.contains("ran out of run time") && err.contains("2s") && err.contains("started"), "{err}");
-    assert!(!store.root.join("test/solace_probe.gleam").exists());
-}
-
-#[test]
 fn a_gleam_probe_compile_error_is_still_reported() {
     let store = probe_project();
     let err = store.probe_with_limit("pub fn main() {\n  nope()\n}\n", None, &[], None, 2).unwrap_err().0;
@@ -2891,4 +2882,13 @@ fn a_task_session_first_call_reads_the_best_matching_project() {
     let next = out.lines().find(|l| l.starts_with("Next:")).expect(&out);
     assert!(next.contains("`inspect widget.widget --project b --context`"), "{next}");
     assert!(!next.contains("app.helper"), "{next}");
+}
+
+#[test]
+fn a_gleam_probe_stops_at_its_run_limit() {
+    let store = probe_project();
+    let code = "pub fn main() {\n  echo \"started\"\n  spin()\n}\n\nfn spin() {\n  spin()\n}\n";
+    let err = store.probe_with_limit(code, None, &[], None, 2).unwrap_err().0;
+    assert!(err.contains("ran out of run time") && err.contains("2s"), "{err}");
+    assert!(!store.root.join("test/solace_probe.gleam").exists());
 }

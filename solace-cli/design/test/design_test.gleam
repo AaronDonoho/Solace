@@ -1034,3 +1034,70 @@ pub fn a_refused_restore_survives_the_history_list_reloading_test() {
   assert string.contains(html, "unknown version 2")
   assert list.length(string.split(html, "unknown version 2")) == 2
 }
+
+fn a_linked_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"one\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":300}},\"children\":[{\"id\":\"go\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Next\",\"navigates_to\":\"two\"}},{\"id\":\"act\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Act\",\"action\":\"save\"}}]},{\"id\":\"two\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":300}},\"children\":[{\"id\":\"back\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Back\",\"navigates_to\":\"one\"}}]}]}"
+}
+
+fn a_preview_model() -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_linked_design()))
+  model
+}
+
+pub fn the_preview_button_shows_the_first_screen_test() {
+  let model = a_preview_model()
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, ">Preview<")
+  assert string.contains(html, "data-design-id=\"one\"")
+  assert string.contains(html, "data-design-id=\"two\"")
+  let #(model, _) = design.update(model, design.Preview)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"one\"")
+  assert !string.contains(html, "data-design-id=\"two\"")
+  assert string.contains(html, ">Exit preview<")
+}
+
+pub fn clicking_a_link_shows_the_target_screen_test() {
+  let #(model, _) = design.update(a_preview_model(), design.Preview)
+  let #(model, _) = design.update(model, design.PreviewClick("go"))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"two\"")
+  assert !string.contains(html, "data-design-id=\"one\"")
+}
+
+pub fn clicking_an_action_changes_nothing_test() {
+  let #(model, _) = design.update(a_preview_model(), design.Preview)
+  let before = element.to_string(design.view(model))
+  let #(model, _) = design.update(model, design.PreviewClick("act"))
+  assert element.to_string(design.view(model)) == before
+}
+
+pub fn exiting_the_preview_shows_every_screen_test() {
+  let #(model, _) = design.update(a_preview_model(), design.Preview)
+  let #(model, _) = design.update(model, design.ExitPreview)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"one\"")
+  assert string.contains(html, "data-design-id=\"two\"")
+  assert string.contains(html, ">Preview<")
+}
+
+pub fn a_preview_leaves_when_its_screen_disappears_test() {
+  let #(model, _) = design.update(a_preview_model(), design.Preview)
+  let #(model, _) = design.update(model, design.PreviewClick("go"))
+  let #(model, _) =
+    design.update(
+      model,
+      design.DesignLoaded("0123456789abcdef", a_ui_design("screen")),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"screen\"")
+  assert string.contains(html, ">Preview<")
+}
