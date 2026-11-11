@@ -822,7 +822,7 @@ impl Store {
         let members = crate::workspace::members(&top).unwrap_or_default();
         // A board run already holds its home project's lock; a dependent that is
         // its home runs under that lock rather than waiting for a second one.
-        let held = context().and_then(|(tid, _)| crate::scope::retry_task(|| crate::scope::home(&self.root, &tid)).ok());
+        let held = context().and_then(|(tid, _)| crate::scope::home(&self.root, &tid).ok());
         let roots = crate::extract::deps::all_dependents(&top, &self.root, &members);
         if roots.is_empty() {
             return Ok(out);
@@ -883,8 +883,7 @@ impl Store {
         if names.is_empty() {
             return None;
         }
-        let more = if names.len() > 3 { format!(" and {} more", names.len() - 3) } else { String::new() };
-        Some(format!("{}{more}", names[..names.len().min(3)].join(", ")))
+        Some(names.join(", "))
     }
     /// Symbols changed since `test` last passed in full: (id, text then, `None`
     /// if new). `None` if it never has.

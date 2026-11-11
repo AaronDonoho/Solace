@@ -557,3 +557,132 @@ fn a_note_line_is_quiet_in_the_transcript() {
     assert_eq!(transcript(&log), [json!({"kind":"usage","text":line})]);
 }
 
+/// A harmless warning stays in the transcript but never hides a later real error.
+#[test]
+fn a_harmless_warning_does_not_hide_a_real_error() {
+    let dir = testing::Scratch::new();
+    let log = dir.join("log.jsonl");
+    let warning = "Model metadata for `gpt-9` not found. Defaulting to fallback metadata.";
+    std::fs::write(&log, format!("{}\n{}", json!({"type":"error","message":warning}), json!({"type":"error","message":"boom"}))).unwrap();
+    let entries = transcript(&log);
+    assert!(entries.iter().any(|e| e["text"].as_str() == Some(warning)));
+    assert_eq!(exit_error(&entries), Some("boom"));
+    assert_eq!(last_words(&entries).as_deref(), Some("boom"));
+    assert!(!has_blocking_agent_error(&[json!({"kind":"error","text":warning})]));
+    assert!(has_blocking_agent_error(&entries));
+}
+
+/// A warning alone, or before a final message, is never a run's failure reason.
+#[test]
+fn a_harmless_warning_is_not_a_failure_reason() {
+    let warning = "Model metadata for `gpt-9` not found. Defaulting to fallback metadata.";
+    let run = json!({"id":"r1","kind":"work","state":"running"});
+    let (p, tid, mut child) = launched(run.clone(), Command::new("sh").arg("-c").arg("exit 1").spawn().unwrap());
+    let log = p.root.join(".solace/r1.log");
+    std::fs::write(&log, json!({"type":"error","message":warning}).to_string()).unwrap();
+    let status = child.wait().unwrap();
+    handle_exit(
+        &Watch::Task(&p.root, &tid),
+        "r1",
+        RunContext { run: &run, log: &log, model: &json!({}), resumed: false, retried: false },
+        status,
+    )
+    .unwrap();
+    let outcome = task(&p.root, &tid).unwrap()["runs"][0]["outcome"].as_str().unwrap().to_string();
+    assert!(!outcome.contains("metadata"), "{outcome}");
+
+    let (p, tid, mut child) = launched(run.clone(), Command::new("sh").arg("-c").arg("exit 1").spawn().unwrap());
+    let log = p.root.join(".solace/r1.log");
+    let reply = json!({"type":"item.completed","item":{"type":"agent_message","text":"Done."}});
+    std::fs::write(&log, format!("{}\n{reply}", json!({"type":"error","message":warning}))).unwrap();
+    let status = child.wait().unwrap();
+    handle_exit(
+        &Watch::Task(&p.root, &tid),
+        "r1",
+        RunContext { run: &run, log: &log, model: &json!({}), resumed: false, retried: false },
+        status,
+    )
+    .unwrap();
+    let outcome = task(&p.root, &tid).unwrap()["runs"][0]["outcome"].as_str().unwrap().to_string();
+    assert!(outcome.contains("Done."), "{outcome}");
+    assert!(!outcome.contains("metadata"), "{outcome}");
+}
+
+/// A discussion reply is kept when a harmless warning follows it.
+#[test]
+fn a_harmless_warning_after_a_discussion_reply_does_not_block_it() {
+    let run = json!({"id":"r1","kind":"discuss","state":"running"});
+    let (p, tid, mut child) = launched(run.clone(), Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap());
+    let log = p.root.join(".solace/r1.log");
+    let reply = json!({"type":"item.completed","item":{"type":"agent_message","text":"Hello."}});
+    let warning = json!({"type":"error","message":"Model metadata for `gpt-9` not found. Defaulting to fallback metadata."});
+    std::fs::write(&log, format!("{reply}\n{warning}")).unwrap();
+    let status = child.wait().unwrap();
+    let e = handle_exit(
+        &Watch::Task(&p.root, &tid),
+        "r1",
+        RunContext { run: &run, log: &log, model: &json!({}), resumed: false, retried: false },
+        status,
+    )
+    .unwrap_err();
+    assert_eq!(e.1, REPLIED);
+    let saved = task(&p.root, &tid).unwrap();
+    assert_eq!(saved["runs"][0]["state"], "waiting");
+    assert_eq!(saved["notes"][0]["text"], "Hello.");
+}
+
+/// A clean exit says the agent stopped early and shows what it last said, not a warning.
+#[test]
+fn a_clean_exit_says_the_agent_stopped_early() {
+    let said = "I updated the tests.";
+    let warning = "Model metadata for `gpt-9` not found. Defaulting to fallback metadata.";
+    let run = json!({"id":"r1","kind":"work","state":"running"});
+    let (p, tid, mut child) = launched(run.clone(), Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap());
+    let log = p.root.join(".solace/r1.log");
+    let tool = json!({
+        "type":"item.completed",
+        "item":{
+            "id":"i1",
+            "type":"mcp_tool_call",
+            "tool":"solace",
+            "arguments":{"command":"test"},
+            "result":{"content":[{"type":"text","text":"ok"}]},
+            "status":"completed",
+        },
+    });
+    let lines =
+        [tool, json!({"type":"error","message":warning}), json!({"type":"item.completed","item":{"type":"agent_message","text":said}})];
+    std::fs::write(&log, lines.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    let status = child.wait().unwrap();
+    handle_exit(
+        &Watch::Task(&p.root, &tid),
+        "r1",
+        RunContext { run: &run, log: &log, model: &json!({}), resumed: false, retried: false },
+        status,
+    )
+    .unwrap();
+    let outcome = task(&p.root, &tid).unwrap()["runs"][0]["outcome"].as_str().unwrap().to_string();
+    assert_eq!(outcome, format!("{ENDED_WITHOUT_FINISHING} (exit status: 0):\n\n{said}"));
+}
+
+/// A late review note clears a flag from a clean exit that stopped early.
+#[test]
+fn a_late_note_finishes_a_review_that_stopped_early() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("T", "", &w["columns"][0]["id"], 1.);
+    let reason = format!("{ENDED_WITHOUT_FINISHING} (exit status: 0)");
+    t["runs"] = json!([{"id":"r1","kind":"review","state":"ended","outcome":reason.clone(),"failed":true}]);
+    t["attention"] = json!({"reason":reason,"time":1});
+    let m = json!({
+        "kind":"agent",
+        "task":"t",
+        "run":"r1",
+        "command":"note",
+        "text":"**Assessment: Needs work**",
+        "changed_during_review":false,
+    });
+    message(&w, &mut t, &m).unwrap();
+    assert_eq!(t["runs"][0]["outcome"], "reviewed");
+    assert!(t["attention"].is_null());
+}
+

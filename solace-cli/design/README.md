@@ -5,15 +5,15 @@ Architecture and UI/UX. Each tab lists its own designs by title in a flat list
 on the left; picking one opens it. Each design has an arrow that expands its
 history beneath it without opening the design, and collapses it again. Opening
 a design and expanding its history are separate actions. Architecture designs
-show their title. A UI/UX design also draws its screens below the title,
+draw their flow diagram below the title; a UI/UX design draws its screens,
 stacked down the page. A Preview button beside the title shows one screen at a
 time; Exit preview returns to the stacked screens. A tab with no designs reads
 "No designs yet."
 
 Designs come from `GET /designs`, sorted by id, and the page follows live
 `{designs}` updates from `/events`, so a design added or changed appears
-without a reload. A design that disappears closes. An open UI/UX design is read
-whole from `GET /designs/{id}`, so the list stays small.
+without a reload. A design that disappears closes. An open design is read whole
+from `GET /designs/{id}`, so the list stays small.
 
 ## History
 
@@ -29,6 +29,16 @@ Restoring posts the version number to `/designs/{id}/restore`, then shows the
 versions the server returns and reads the open design again. A refused restore,
 a failed history load and a version with no design to show display the server's
 message without its code.
+
+## Architecture
+
+An Architecture design's top-level `flow` holds `node` and `edge` elements.
+Each node is a box showing its label and description; each edge is an arrow
+from its `from` node to its `to` node, with its label if it has one. Nodes are
+placed by the Contract view's dagre layout. Every drawn node and edge carries a
+`data-design-id`, so an agent can name it later. While a proposal is open, the
+Proposed/Current switch and the hide-changes control work as they do for
+screens, marking added, removed, changed and moved nodes and edges.
 
 ## Screens
 

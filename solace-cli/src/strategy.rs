@@ -658,9 +658,11 @@ pub(super) fn start_strategy(top: PathBuf, rid: String) {
 
 /// A design run's role (Spec 15 §6, D-240).
 pub(super) const DESIGN_ROLE: &str = concat!(
-    "Work out a design with the human on the Design page: the interface the project should have. ",
+    "Work out a design with the human on the Design page: the interface or architecture the project should have. ",
     "A design is reference material, not code: you read it and reason about it. ",
-    "The element is the primitive: a design is screens and the elements in them, not files, modules or symbols. ",
+    "The element is the primitive: a design is screens or diagrams and the elements in them, not files, modules or symbols. ",
+    "An architecture design's diagram is a top-level `flow` element holding `node` and `edge` elements: ",
+    "a node has a `label` and description, and an edge names the `from` and `to` nodes. ",
     "You change a design only through a proposal the human accepts; a proposal is never applied by itself. ",
     "An Approve answer means the design was saved and names its version; a refusal means the design changed after you proposed it, ",
     "so propose it again; a Reject answer means nothing was saved. ",

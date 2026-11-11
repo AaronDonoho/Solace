@@ -189,3 +189,85 @@ fn count_id(elements: List(render.Node), id: String) -> Int {
     count + here + count_id(node.children, id)
   })
 }
+
+fn flow(id: String, children: List(render.Node)) -> render.Node {
+  render.Node(id, render.Flow, children, render.no_overrides())
+}
+
+fn diagram_node(id: String, label: String) -> render.Node {
+  render.Node(
+    id,
+    render.DiagramNode(render.DiagramNodeProperties(label, "")),
+    [],
+    render.no_overrides(),
+  )
+}
+
+fn diagram_edge(
+  id: String,
+  from: String,
+  to: String,
+  label: String,
+) -> render.Node {
+  render.Node(
+    id,
+    render.DiagramEdge(render.DiagramEdgeProperties(from, to, label)),
+    [],
+    render.no_overrides(),
+  )
+}
+
+pub fn reordering_flow_children_does_not_move_them_test() {
+  let current =
+    design([flow("f", [diagram_node("one", "One"), diagram_node("two", "Two")])])
+  let proposed =
+    design([flow("f", [diagram_node("two", "Two"), diagram_node("one", "One")])])
+  let marked = changes.mark(current, proposed)
+  assert dict.get(marked.marks, "one") == Error(Nil)
+  assert dict.get(marked.marks, "two") == Error(Nil)
+}
+
+pub fn a_changed_edge_is_marked_changed_test() {
+  let current =
+    design([
+      flow("f", [
+        diagram_node("a", "A"),
+        diagram_node("b", "B"),
+        diagram_edge("e", "a", "b", "Next"),
+      ]),
+    ])
+  let proposed =
+    design([
+      flow("f", [
+        diagram_node("a", "A"),
+        diagram_node("b", "B"),
+        diagram_edge("e", "a", "b", "Later"),
+      ]),
+    ])
+  let marked = changes.mark(current, proposed)
+  assert dict.get(marked.marks, "e") == Ok(render.Changed)
+}
+
+pub fn moving_a_flow_node_and_edge_to_another_flow_marks_them_moved_test() {
+  let current =
+    design([
+      flow("f", [
+        diagram_node("a", "A"),
+        diagram_node("b", "B"),
+        diagram_edge("e", "a", "b", "Next"),
+      ]),
+    ])
+  let proposed =
+    design([
+      flow("g", [
+        diagram_node("a", "A"),
+        diagram_node("b", "B"),
+        diagram_edge("e", "a", "b", "Next"),
+      ]),
+    ])
+  let marked = changes.mark(current, proposed)
+  assert dict.get(marked.marks, "a") == Ok(render.Moved)
+  assert dict.get(marked.marks, "e") == Ok(render.Moved)
+  assert dict.get(marked.marks, "f") == Ok(render.Removed)
+  assert dict.get(marked.marks, "g") == Ok(render.Added)
+}

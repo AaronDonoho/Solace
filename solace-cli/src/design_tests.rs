@@ -1250,3 +1250,135 @@ fn an_unknown_operation_is_refused() {
     assert_eq!(e.0, "E7001 invalid operation: unknown operation \"paint\"");
     assert_eq!(d, before);
 }
+
+fn architecture() -> Value {
+    json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "id": "fedcba9876543210",
+        "title": "Checkout flow",
+        "tab": "architecture",
+        "elements": [{
+            "id": "flow",
+            "type": "flow",
+            "properties": {},
+            "children": [
+                {"id": "start", "type": "node", "properties": {"label": "Start", "description": "The first step"}},
+                {"id": "end", "type": "node", "properties": {"label": "End", "description": "The last step"}},
+                {"id": "step", "type": "edge", "properties": {"from": "start", "to": "end", "label": "Next"}}
+            ]
+        }]
+    })
+}
+
+#[test]
+fn a_valid_flow_diagram_passes() {
+    validate(&architecture()).unwrap();
+}
+
+#[test]
+fn an_edge_naming_a_missing_node_is_refused() {
+    let mut d = architecture();
+    d["elements"][0]["children"][2]["properties"]["to"] = json!("ghost");
+    refusal(&d, &["element \"step\"", "to", "ghost"]);
+}
+
+#[test]
+fn an_unknown_diagram_type_is_refused() {
+    let mut d = architecture();
+    d["elements"][0]["type"] = json!("sequence");
+    refusal(&d, &["element \"flow\"", "sequence"]);
+}
+
+#[test]
+fn a_node_needs_a_label_and_a_description() {
+    for property in ["label", "description"] {
+        let mut d = architecture();
+        d["elements"][0]["children"][1]["properties"].as_object_mut().unwrap().remove(property);
+        refusal(&d, &["element \"end\"", "needs property", property]);
+    }
+}
+
+#[test]
+fn an_edge_needs_both_ends() {
+    for property in ["from", "to"] {
+        let mut d = architecture();
+        d["elements"][0]["children"][2]["properties"].as_object_mut().unwrap().remove(property);
+        refusal(&d, &["element \"step\"", "needs property", property]);
+    }
+}
+
+#[test]
+fn nodes_and_edges_live_inside_a_flow() {
+    let mut d = architecture();
+    d["elements"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "loose", "type": "node", "properties": {"label": "Loose", "description": "Not in a flow"}}));
+    refusal(&d, &["element \"loose\"", "must be inside a flow"]);
+    let mut d = architecture();
+    d["elements"].as_array_mut().unwrap().push(json!({"id": "loose", "type": "edge", "properties": {"from": "start", "to": "end"}}));
+    refusal(&d, &["element \"loose\"", "must be inside a flow"]);
+}
+
+#[test]
+fn a_flow_below_the_top_level_is_refused() {
+    let mut d = architecture();
+    d["elements"][0]["children"].as_array_mut().unwrap().push(json!({"id": "inner", "type": "flow", "properties": {}, "children": []}));
+    refusal(&d, &["element \"inner\"", "flow below the top level"]);
+}
+
+#[test]
+fn a_flow_holds_only_nodes_and_edges() {
+    let mut d = architecture();
+    d["elements"][0]["children"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "note", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Note"}}));
+    refusal(&d, &["element \"note\"", "cannot be inside a flow"]);
+}
+
+#[test]
+fn add_remove_and_set_work_on_a_flow_diagram() {
+    let mut d = architecture();
+    apply(
+        &mut d,
+        &[
+            json!({
+                "op": "add",
+                "parent": "flow",
+                "index": 2,
+                "element": {
+                    "id": "retry",
+                    "type": "node",
+                    "properties": {"label": "Retry", "description": "Try again"}
+                }
+            }),
+            json!({"op":"set","id":"retry","field":"properties","property":"description","value":"Try once more"}),
+            json!({"op":"set","id":"step","field":"properties","property":"label","value":"Again"}),
+        ],
+    )
+    .unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"][2]["id"], "retry");
+    assert_eq!(d["elements"][0]["children"][2]["properties"]["description"], "Try once more");
+    assert_eq!(d["elements"][0]["children"][3]["properties"]["label"], "Again");
+
+    apply(&mut d, &[json!({"op":"remove","id":"retry"})]).unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn removing_a_node_that_an_edge_uses_is_refused() {
+    let mut d = architecture();
+    apply(&mut d, &[json!({"op":"remove","id":"end"})]).unwrap();
+    refusal(&d, &["element \"step\"", "to", "end"]);
+}
+
+#[test]
+fn removing_a_node_with_its_edges_passes() {
+    let mut d = architecture();
+    apply(&mut d, &[json!({"op":"remove","id":"step"}), json!({"op":"remove","id":"end"})]).unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["children"].as_array().unwrap().len(), 1);
+}

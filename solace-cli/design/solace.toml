@@ -11,3 +11,4 @@ unwatched = []
 [commands]
 # Optional commands agents may run, for example:
 # app = { run = ["gleam", "run", "--"], args = true }
+install = { run = ["bun", "install"] }

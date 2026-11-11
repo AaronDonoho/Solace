@@ -1239,7 +1239,7 @@ pub(crate) fn record_note(t: &mut Value, rid: &str, text: &str, changed_during_r
             note(t, "agent", Some(rid), text);
             return Ok(());
         }
-        if t["attention"]["reason"].as_str().is_some_and(|reason| reason.starts_with(crate::board::runs::UNFINISHED_EXIT)) {
+        if t["attention"]["reason"].as_str().is_some_and(crate::board::runs::unfinished_exit_reason) {
             t["attention"] = Value::Null;
         }
     }

@@ -34,6 +34,8 @@ pub(crate) enum ValueKind {
     Level,
     /// The id of a top-level screen in the same design.
     Screen,
+    /// The id of a node in the same flow diagram.
+    Node,
 }
 
 /// An element type and the properties it accepts.
@@ -56,6 +58,9 @@ pub(crate) const ELEMENT_TYPES: &[(&str, ElementType)] = &[
     ("button", BUTTON),
     ("text_input", TEXT_INPUT),
     ("image_placeholder", IMAGE_PLACEHOLDER),
+    ("flow", FLOW),
+    ("node", NODE),
+    ("edge", EDGE),
 ];
 
 const DESIGN_KEYS: &[&str] = &["schemaVersion", "id", "title", "tab", "elements"];
@@ -89,7 +94,7 @@ pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
         .collect();
     let mut ids = HashSet::new();
     for element in elements {
-        let (id, ty) = validate_element(element, &mut ids, &screens, true)?;
+        let (id, ty) = validate_element(element, &mut ids, &screens, true, None)?;
         if tab == "ui" && ty != "screen" {
             return Err(invalid(format!("element {id:?} at the top level of a ui design must be a screen")));
         }
@@ -102,6 +107,7 @@ fn validate_element<'a>(
     ids: &mut HashSet<String>,
     screens: &HashSet<String>,
     top_level: bool,
+    flow: Option<&HashSet<String>>,
 ) -> Result<(&'a str, &'a str), Failure> {
     let object = value.as_object().ok_or_else(|| invalid("an element must be a JSON object"))?;
     let id = text(object, "id", "an element")?;
@@ -117,6 +123,16 @@ fn validate_element<'a>(
     if ty == "screen" && !top_level {
         return Err(invalid(format!("{at} is a screen below the top level")));
     }
+    if ty == "flow" && !top_level {
+        return Err(invalid(format!("{at} is a flow below the top level")));
+    }
+    if matches!(ty, "node" | "edge") {
+        if flow.is_none() {
+            return Err(invalid(format!("{at} of type {ty:?} must be inside a flow")));
+        }
+    } else if flow.is_some() {
+        return Err(invalid(format!("{at} of type {ty:?} cannot be inside a flow")));
+    }
     let properties =
         object.get("properties").and_then(Value::as_object).ok_or_else(|| invalid(format!("{at} properties must be an object")))?;
     for (name, value) in properties {
@@ -128,6 +144,12 @@ fn validate_element<'a>(
             let target = value.as_str().unwrap_or_default();
             if !screens.contains(target) {
                 return Err(invalid(format!("{at} property {name:?} names no screen {target:?}")));
+            }
+        }
+        if let ValueKind::Node = values {
+            let target = value.as_str().unwrap_or_default();
+            if !flow.is_some_and(|nodes| nodes.contains(target)) {
+                return Err(invalid(format!("{at} property {name:?} names no node {target:?}")));
             }
         }
     }
@@ -150,8 +172,15 @@ fn validate_element<'a>(
             return Err(invalid(format!("{at} of type {ty:?} can't hold children")));
         }
         let children = children.as_array().ok_or_else(|| invalid(format!("{at} children must be a list")))?;
+        let nodes: Option<HashSet<String>> = (ty == "flow").then(|| {
+            children
+                .iter()
+                .filter(|child| child.get("type").and_then(Value::as_str) == Some("node"))
+                .filter_map(|child| child.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        });
         for child in children {
-            validate_element(child, ids, screens, false)?;
+            validate_element(child, ids, screens, false, nodes.as_ref())?;
         }
     }
     Ok((id, ty))
@@ -189,6 +218,10 @@ impl ValueKind {
             ValueKind::Screen => match value.as_str() {
                 Some(_) => Ok(()),
                 None => Err("must name a screen".to_owned()),
+            },
+            ValueKind::Node => match value.as_str() {
+                Some(_) => Ok(()),
+                None => Err("must name a node".to_owned()),
             },
         }
     }
@@ -973,3 +1006,17 @@ fn set_property(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Fa
     }
     Ok(())
 }
+
+const FLOW: ElementType = ElementType { children: true, properties: &[], required: &[] };
+
+const NODE: ElementType = ElementType {
+    children: false,
+    properties: &[("label", ValueKind::Text), ("description", ValueKind::Text)],
+    required: &["label", "description"],
+};
+
+const EDGE: ElementType = ElementType {
+    children: false,
+    properties: &[("from", ValueKind::Node), ("to", ValueKind::Node), ("label", ValueKind::Text)],
+    required: &["from", "to"],
+};

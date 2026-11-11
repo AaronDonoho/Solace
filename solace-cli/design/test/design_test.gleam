@@ -295,34 +295,6 @@ pub fn several_screens_are_all_drawn_test() {
   assert string.contains(html, "data-design-id=\"second\"")
 }
 
-pub fn architecture_designs_keep_only_their_title_test() {
-  let id = "fedcba9876543210"
-  let #(model, _) =
-    design.update(
-      design.new(design.Architecture),
-      design.DesignsLoaded(an_architecture_list()),
-    )
-  let #(model, _) = design.update(model, design.SelectDesign(id))
-  let #(model, _) =
-    design.update(model, design.DesignLoaded(id, an_architecture_design()))
-  let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Plan</h2>")
-  assert !string.contains(html, "data-design-id")
-  assert !string.contains(html, "This design could not be loaded.")
-  let #(model, _) =
-    design.update(
-      model,
-      design.DesignLoaded(
-        id,
-        "{\"code\":\"E7023\",\"message\":\"E7023 unknown\"}",
-      ),
-    )
-  let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Plan</h2>")
-  assert !string.contains(html, "data-design-id")
-  assert !string.contains(html, "This design could not be loaded.")
-}
-
 pub fn showing_the_open_design_again_keeps_its_drawing_test() {
   let id = "0123456789abcdef"
   let #(model, _) =
@@ -346,7 +318,7 @@ fn an_architecture_list() -> String {
 }
 
 fn an_architecture_design() -> String {
-  "{\"schemaVersion\":1,\"id\":\"fedcba9876543210\",\"title\":\"Plan\",\"tab\":\"architecture\",\"elements\":[{\"id\":\"loose\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\"}}]}"
+  "{\"schemaVersion\":1,\"id\":\"fedcba9876543210\",\"title\":\"Plan\",\"tab\":\"architecture\",\"elements\":[{\"id\":\"flow\",\"type\":\"flow\",\"properties\":{},\"children\":[{\"id\":\"start\",\"type\":\"node\",\"properties\":{\"label\":\"Start\",\"description\":\"The first step\"}},{\"id\":\"end\",\"type\":\"node\",\"properties\":{\"label\":\"End\",\"description\":\"The last step\"}},{\"id\":\"step\",\"type\":\"edge\",\"properties\":{\"from\":\"start\",\"to\":\"end\",\"label\":\"Next\"}}]}]}"
 }
 
 pub fn a_design_load_failure_shows_the_servers_reason_test() {
@@ -682,42 +654,6 @@ fn before(text: String, first: String, second: String) -> Bool {
       }
     Error(_) -> False
   }
-}
-
-pub fn an_architecture_version_shows_only_its_title_test() {
-  let id = "fedcba9876543210"
-  let #(model, _) =
-    design.update(
-      design.new(design.Architecture),
-      design.DesignsLoaded(an_architecture_list()),
-    )
-  let #(model, request) = design.update(model, design.SelectDesign(id))
-  assert request != effect.none()
-  let #(model, _) =
-    design.update(model, design.DesignLoaded(id, an_architecture_design()))
-  let #(model, _) = design.update(model, design.ToggleHistory(id))
-  let #(model, _) =
-    design.update(model, design.HistoryLoaded(id, a_version_list()))
-  let #(model, _) = design.update(model, design.ViewVersion(id, 1))
-  let version =
-    "{\"number\":1,\"time\":1500000000,\"source\":{\"kind\":\"repo\"},\"design\":"
-    <> an_architecture_design()
-    <> "}"
-  let #(model, _) = design.update(model, design.VersionLoaded(id, 1, version))
-  let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Plan</h2>")
-  assert !string.contains(html, "data-design-id")
-  assert !string.contains(html, "Restore version 1")
-  let #(model, _) = design.update(model, design.ViewVersion(id, 2))
-  let different =
-    "{\"number\":2,\"time\":1600000000,\"source\":{\"kind\":\"human\"},\"design\":"
-    <> string.replace(an_architecture_design(), "loose", "other")
-    <> "}"
-  let #(model, _) = design.update(model, design.VersionLoaded(id, 2, different))
-  assert string.contains(
-    element.to_string(design.view(model)),
-    "Restore version 2",
-  )
 }
 
 pub fn expanding_without_an_open_design_survives_list_updates_test() {
@@ -1099,4 +1035,86 @@ pub fn a_preview_leaves_when_its_screen_disappears_test() {
   let html = element.to_string(design.view(model))
   assert string.contains(html, "data-design-id=\"screen\"")
   assert string.contains(html, ">Preview<")
+}
+
+pub fn an_architecture_design_draws_its_flow_test() {
+  let id = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.Architecture),
+      design.DesignsLoaded(an_architecture_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, an_architecture_design()))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "<h2>Plan</h2>")
+  assert string.contains(html, "data-design-id=\"flow\"")
+  assert string.contains(html, "data-design-id=\"start\"")
+  assert string.contains(html, "data-design-id=\"end\"")
+  assert string.contains(html, "data-design-id=\"step\"")
+  assert string.contains(html, ">Start<")
+  assert string.contains(html, ">The first step<")
+  assert string.contains(html, ">Next<")
+  assert string.contains(html, "d=\"M 244.0 84.0 H 294.0 V 84.0 H 344.0\"")
+}
+
+pub fn an_architecture_load_failure_shows_the_servers_reason_test() {
+  let id = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.Architecture),
+      design.DesignsLoaded(an_architecture_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(
+      model,
+      design.DesignLoaded(
+        id,
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown\"}",
+      ),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "<h2>Plan</h2>")
+  assert string.contains(html, "unknown")
+  assert !string.contains(html, "E7023")
+  assert !string.contains(html, "data-design-id")
+}
+
+pub fn an_architecture_version_draws_its_flow_test() {
+  let id = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.Architecture),
+      design.DesignsLoaded(an_architecture_list()),
+    )
+  let #(model, request) = design.update(model, design.SelectDesign(id))
+  assert request != effect.none()
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, an_architecture_design()))
+  let #(model, _) = design.update(model, design.ToggleHistory(id))
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(id, a_version_list()))
+  let #(model, _) = design.update(model, design.ViewVersion(id, 1))
+  let version =
+    "{\"number\":1,\"time\":1500000000,\"source\":{\"kind\":\"repo\"},\"design\":"
+    <> an_architecture_design()
+    <> "}"
+  let #(model, _) = design.update(model, design.VersionLoaded(id, 1, version))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "<h2>Plan</h2>")
+  assert string.contains(html, "data-design-id=\"start\"")
+  assert string.contains(html, "data-design-id=\"step\"")
+  assert !string.contains(html, "Restore version 1")
+  let #(model, _) = design.update(model, design.ViewVersion(id, 2))
+  let different =
+    "{\"number\":2,\"time\":1600000000,\"source\":{\"kind\":\"human\"},\"design\":"
+    <> string.replace(an_architecture_design(), "Start", "Begin")
+    <> "}"
+  let #(model, _) = design.update(model, design.VersionLoaded(id, 2, different))
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "Restore version 2",
+  )
 }

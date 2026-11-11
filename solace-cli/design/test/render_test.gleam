@@ -1436,3 +1436,16 @@ pub fn nested_links_use_the_nearest_target_test() {
   let html = element.to_string(render.draw_preview(screen, fn(id) { id }))
   assert ids(html) == ["one", "card", "share", "label"]
 }
+
+pub fn a_flow_design_decodes_into_nodes_and_edges_test() {
+  let json =
+    "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Flow\",\"tab\":\"architecture\",\"elements\":[{\"id\":\"flow\",\"type\":\"flow\",\"properties\":{},\"children\":[{\"id\":\"start\",\"type\":\"node\",\"properties\":{\"label\":\"Start\",\"description\":\"First\"}},{\"id\":\"end\",\"type\":\"node\",\"properties\":{\"label\":\"End\",\"description\":\"Last\"}},{\"id\":\"step\",\"type\":\"edge\",\"properties\":{\"from\":\"start\",\"to\":\"end\",\"label\":\"Next\"}}]}]}"
+  let assert Ok(render.Design(_, _, [flow], _)) = render.decode(json)
+  let assert render.Node("flow", render.Flow, [start, end, step], _) = flow
+  assert start.kind
+    == render.DiagramNode(render.DiagramNodeProperties("Start", "First"))
+  assert end.kind
+    == render.DiagramNode(render.DiagramNodeProperties("End", "Last"))
+  assert step.kind
+    == render.DiagramEdge(render.DiagramEdgeProperties("start", "end", "Next"))
+}

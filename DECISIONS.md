@@ -1533,3 +1533,10 @@ Amends D-241 point 4 and Spec 15 §1 and §6 (Aaron, board task "agent: accept o
 2. A design that changed since the proposal is not overwritten: an accept whose design has a newest version different from the proposal's `base` is refused (`E7026`), writes nothing, and tells the agent to propose again. A design with no version when proposed is refused if it has one now.
 3. Reject writes nothing. An ended run's proposal can't be answered.
 Why: a proposal is accepted or rejected as a whole, and an accepted change must not lose a change made after it was proposed.
+
+## D-244 A flow diagram's nodes and edges
+Amends D-230 points 1, 3, 4 and 8 (board task "arch: flow diagram rules", 2026-11-10). Part of the design: Architecture tab feature.
+1. `flow` is an element type: an architecture design's diagram is a top-level `flow` whose children are `node` and `edge` elements. A flow below the top level is refused, a node or edge outside a flow is refused, and a flow holds nothing else. Later diagram types, such as `sequence`, join the element table with no format change.
+2. A `node` has required `label` and `description` text, with no fixed list of what it may represent. An `edge` has required `from` and `to`, each a node ID in the same flow, and an optional `label` text. Neither type has `width` or `height`.
+3. An edge whose `from` or `to` names no node in its flow is refused (`E7033`, naming the edge). A node that edges still use is not removed on its own: its edges must be removed in the same proposal.
+4. Why: a diagram names its type in the element table, and nodes and edges keep the format's permanent IDs and the agent's existing operations.

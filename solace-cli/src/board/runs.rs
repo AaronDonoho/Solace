@@ -925,8 +925,10 @@ fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::p
         }
         return Err(Failure("no Solace call; trying a fresh agent".into(), NO_TOOL));
     }
-    let said = exit_error(&entries).map(str::to_string).or_else(|| last_words(&entries));
-    let message = format!("{} ({status}){}", UNFINISHED_EXIT, said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
+    let start = if status.success() { ENDED_WITHOUT_FINISHING } else { UNFINISHED_EXIT };
+    let said =
+        if status.success() { last_words(&entries) } else { exit_error(&entries).map(str::to_string).or_else(|| last_words(&entries)) };
+    let message = format!("{start} ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
     watch.fail(rid, &message)
 }
 
@@ -962,7 +964,13 @@ pub(super) fn endpoint_key(m: &Value) -> Option<String> {
 
 /// The agent's last message, else its last error or output, cut to 1000 bytes.
 pub(crate) fn last_words(entries: &[Value]) -> Option<String> {
-    let last = |kind: &str| entries.iter().rev().find(|e| e["kind"] == kind).and_then(|e| e["text"].as_str());
+    let last = |kind: &str| {
+        entries
+            .iter()
+            .rev()
+            .find(|e| e["kind"] == kind && !is_harmless_warning(e) && (kind != "error" || is_agent_error(e)))
+            .and_then(|e| e["text"].as_str())
+    };
     let text = last("message").or_else(|| last("error")).or_else(|| last("output"))?.trim();
     if text.is_empty() {
         return None;
@@ -1420,7 +1428,8 @@ fn agent_error(entries: &[Value]) -> Option<&str> {
 }
 
 fn exit_error(entries: &[Value]) -> Option<&str> {
-    agent_error(entries).or_else(|| entries.iter().rev().find(|e| e["kind"] == "error").and_then(error_message))
+    agent_error(entries)
+        .or_else(|| entries.iter().rev().filter(|e| e["kind"] == "error" && !is_harmless_warning(e)).find_map(error_message))
 }
 
 fn error_message(entry: &Value) -> Option<&str> {
@@ -1432,7 +1441,7 @@ pub(crate) const SERVER: &str = "server";
 
 /// Whether a transcript entry is the agent's own failure, rather than a server-end line.
 pub(crate) fn is_agent_error(e: &Value) -> bool {
-    e["kind"] == "error" && e["source"] != SERVER
+    e["kind"] == "error" && e["source"] != SERVER && !is_harmless_warning(e)
 }
 
 /// The share of input tokens that came from cache, when the agent reports them.
@@ -1553,4 +1562,25 @@ fn record_line(line: &str) {
         .or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)))
         .or_else(|| design_context().map(|rid| (crate::board::roles::DESIGN_RUN.into(), rid)));
     record_line_for(&root, ids, line);
+}
+
+/// Agent warnings that say nothing about whether a run succeeded.
+const HARMLESS_WARNINGS: &[&[&str]] = &[&["model metadata for", "defaulting to fallback metadata"]];
+
+/// Whether an agent's error text is one of the warnings that don't affect a run.
+pub(crate) fn harmless_warning(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    HARMLESS_WARNINGS.iter().any(|warning| warning.iter().all(|part| text.contains(part)))
+}
+
+fn is_harmless_warning(e: &Value) -> bool {
+    e["kind"] == "error" && e["text"].as_str().is_some_and(harmless_warning)
+}
+
+/// The start of an agent's failure message when it exited cleanly before reporting done.
+pub(crate) const ENDED_WITHOUT_FINISHING: &str = "The agent ended its run without finishing it";
+
+/// Whether an attention reason is a run that exited without finishing.
+pub(crate) fn unfinished_exit_reason(reason: &str) -> bool {
+    reason.starts_with(UNFINISHED_EXIT) || reason.starts_with(ENDED_WITHOUT_FINISHING)
 }

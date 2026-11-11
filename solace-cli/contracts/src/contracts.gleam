@@ -2591,3 +2591,11 @@ fn fresh(model: Model, task: String) -> Model {
     asked: "",
   )
 }
+
+/// Fresh node positions for a flow diagram, from the drawing's layout.
+pub fn flow_positions(nodes: String, edges: String) -> String {
+  flow_layout(nodes, edges, 1440.0)
+}
+
+@external(javascript, "./layout.mjs", "flow_positions")
+fn flow_layout(nodes: String, edges: String, width: Float) -> String

@@ -26,6 +26,25 @@ export function layout(nodes, edges, overview = false, anchor = '', root = null,
   const valid = point => point && Number.isFinite(point.x) && Number.isFinite(point.y);
   const ids = new Set(nodes.map(node => node.id));
   const links = edges.filter(edge => ids.has(edge.from) && ids.has(edge.to));
+  const fresh = fresh_placement(nodes, links, viewport_width(root));
+  if (!overview && valid(saved[anchor])) beside(saved, anchor, links, ids, valid);
+  const occupied = nodes.map(node => saved[node.id]).filter(valid);
+  const positions = nodes.map(node => {
+    const stored = valid(saved[node.id]);
+    const point = stored ? saved[node.id] : fresh[node.id];
+    if (!stored) {
+      // ponytail: linear collision scan for the visible subgraph; use a spatial index if it grows large.
+      while (occupied.some(other => Math.abs(other.x - point.x) < 240 && Math.abs(other.y - point.y) < 140)) point.y += 156;
+      occupied.push(point);
+    }
+    saved[node.id] = point;
+    return { id: node.id, ...point };
+  });
+  memory = saved;
+  try { localStorage.setItem(key, JSON.stringify(memory)); } catch {}
+  return positions;
+}
+function fresh_placement(nodes, links, width) {
   const connected = new Set(links.flatMap(edge => [edge.from, edge.to]));
   const fresh = {};
   let gridY = 0;
@@ -44,26 +63,19 @@ export function layout(nodes, edges, overview = false, anchor = '', root = null,
   }
   const isolated = nodes.filter(node => !connected.has(node.id));
   // Columns fill the sheet width at full size; extra rows run below and are reached by panning.
-  const columns = Math.max(1, Math.floor((viewport_width(root) - 32) / 252));
+  const columns = Math.max(1, Math.floor((width - 32) / 252));
   isolated.forEach((node, index) => {
     fresh[node.id] = { x: (index % columns) * 252, y: gridY + Math.floor(index / columns) * 156 };
   });
-  if (!overview && valid(saved[anchor])) beside(saved, anchor, links, ids, valid);
-  const occupied = nodes.map(node => saved[node.id]).filter(valid);
-  const positions = nodes.map(node => {
-    const stored = valid(saved[node.id]);
-    const point = stored ? saved[node.id] : fresh[node.id];
-    if (!stored) {
-      // ponytail: linear collision scan for the visible subgraph; use a spatial index if it grows large.
-      while (occupied.some(other => Math.abs(other.x - point.x) < 240 && Math.abs(other.y - point.y) < 140)) point.y += 156;
-      occupied.push(point);
-    }
-    saved[node.id] = point;
-    return { id: node.id, ...point };
-  });
-  memory = saved;
-  try { localStorage.setItem(key, JSON.stringify(memory)); } catch {}
-  return positions;
+  return fresh;
+}
+// Fresh node positions for a flow diagram, with no saved positions or page size.
+export function flow_positions(nodes_json, edges_json, width) {
+  const nodes = JSON.parse(nodes_json);
+  const ids = new Set(nodes.map(node => node.id));
+  const links = JSON.parse(edges_json).filter(edge => ids.has(edge.from) && ids.has(edge.to));
+  const fresh = fresh_placement(nodes, links, width);
+  return JSON.stringify(nodes.map(node => ({ id: node.id, ...fresh[node.id] })));
 }
 // A newly opened node's neighbours go next to it: callees in a column to its right, callers to its
 // left, tests below. Everything beyond moves over to make room, so nothing already drawn changes order.

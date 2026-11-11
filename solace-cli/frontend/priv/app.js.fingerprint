@@ -1,5 +1,5 @@
 {
-  "output": "7d399d98588be5cab276f4465e7d96ddbdccdba210ecdf7c94cbe6447bfe8562",
+  "output": "74fa1b2cc8f709a551a0c4f64c2238964a13b014d22ff36a881c3e935908e1cb",
   "sources": {
     "solace-cli/frontend/src": "aada4c48c558ad93db5f6ea5b901a1b5787aad5e9630f62fac93beef111785a7",
     "solace-cli/frontend/gleam.toml": "7f42779c0746c934abd0fe3eb282932a1cbaa7192b1a0fa50e5fb72649f85b3d",
@@ -21,7 +21,7 @@
     "solace-cli/migration/package.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "solace-cli/migration/bun.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "solace-cli/migration/manifest.toml": "9e48b99ff993fef59b84d15cdd760b4eb66e3ed28da1db2b4dcfbc52220ff2d2",
-    "solace-cli/contracts/src": "842a42559ae45d2e824c03f54aa2567d051330b39e2537def63695e4f53d042d",
+    "solace-cli/contracts/src": "ced53f529111002abb44ba53fe10b687c6a6c2571b103ca1a25c1a3df06e90c0",
     "solace-cli/contracts/gleam.toml": "0a79287fd09a88516a132adae584e3e3b156b2b1bb543c34993d2e4539f98a58",
     "solace-cli/contracts/package.json": "699f25c40fe134b411934fa5bc91372869b0df6e5c6ffac71494a7962177e1ab",
     "solace-cli/contracts/bun.lock": "9a6d5f060a8584bcf0793d3b457c4db40370f97eebc0024d076a22714e3cb317",
@@ -36,10 +36,10 @@
     "solace-cli/settings/package.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "solace-cli/settings/bun.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "solace-cli/settings/manifest.toml": "9e48b99ff993fef59b84d15cdd760b4eb66e3ed28da1db2b4dcfbc52220ff2d2",
-    "solace-cli/design/src": "8a4b82bea2b16b733a964ad7b9f67b71a1bf9f67cb5d86deb5905d14f363d058",
-    "solace-cli/design/gleam.toml": "021fe811bfbe5e74b191c0efc65bf7daf36cc97daf4c24f24be00e284cf05427",
-    "solace-cli/design/package.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "solace-cli/design/bun.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "solace-cli/design/manifest.toml": "9e48b99ff993fef59b84d15cdd760b4eb66e3ed28da1db2b4dcfbc52220ff2d2"
+    "solace-cli/design/src": "16861a379b2fb6501ba95b1372a89a149a4665ff34383cb7ac4bb57f366544f9",
+    "solace-cli/design/gleam.toml": "46abe8dad0fccf9bc444d819856745fe64b61334a7c7cc4966ba50c2774f3fde",
+    "solace-cli/design/package.json": "699f25c40fe134b411934fa5bc91372869b0df6e5c6ffac71494a7962177e1ab",
+    "solace-cli/design/bun.lock": "c35d93fdb02a727e3a94c6600cdf4133d2ee045b758b3bb4ab92c700bb7b9f67",
+    "solace-cli/design/manifest.toml": "a80e6fb23827b414846395dd30a93edc512e7788b4f1fa9e7fbe29c961d72860"
   }
 }

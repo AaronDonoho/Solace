@@ -151,7 +151,7 @@ plan       = { to = "planning" }
 to_backlog = { to = "backlog", label = "Back to backlog" }   # from Planning, on the Strategy page (D-132)
 to_planning = { unstamp = "approved", to = "planning", label = "Back to planning" }
 investigate = { run = "investigate", model = true }     # read-only; stays in its column
-review     = { run = "review" }                         # stays in its column
+review     = { to = "needs_review", run = "review" }     # from Assigned it joins Review
 assign     = { to = "assigned", run = "work", model = true }
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }

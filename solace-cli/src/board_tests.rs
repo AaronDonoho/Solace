@@ -3151,6 +3151,8 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
     for guidance in [
         "reference material",
         "element is the primitive",
+        "screens or diagrams",
+        "top-level `flow`",
         "proposal the human accepts",
         "An Approve answer means the design was saved",
         "a refusal means the design changed after you proposed it",
@@ -3165,4 +3167,77 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
     for word in ["design note", "design wait", "design propose", "`design list`", "`strategy list`", "`strategy show"] {
         assert!(brief.contains(word), "{word}: {brief}");
     }
+}
+
+/// Starting a review from Assigned puts the task in Review; starting one from
+/// Review keeps it there with its approval, and an open run still refuses it.
+#[test]
+fn review_moves_the_task_to_review() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let config = p.root.join("config.toml");
+    fs::write(&config, "[[models]]\nid = \"test\"\nlabel = \"Test\"\nagent = \"codex\"\nrun = [\"sh\"]\n").unwrap();
+    setup::with_config(&config, || {
+        let start = |id: &str| api(&s.root, "POST", &format!("/tasks/{id}/actions"), json!({"action": "review", "model": "test"}));
+        let t = api(&s.root, "POST", "/tasks", json!({"title": "Review me"})).unwrap();
+        let id = t["id"].as_str().unwrap().to_string();
+        let put = |column: &str, stamps: Value, runs: Value| {
+            let mut v = task(&s.root, &id).unwrap();
+            v["column"] = json!(column);
+            v["stamps"] = stamps;
+            v["runs"] = runs;
+            tasks::put(&s, &v).unwrap();
+        };
+        put("assigned", json!({}), json!([]));
+        let moved = start(&id).unwrap();
+        assert_eq!(moved["column"], "needs_review");
+        let run = moved["runs"].as_array().unwrap().last().unwrap();
+        assert_eq!((run["kind"].as_str(), run["state"].as_str()), (Some("review"), Some("running")));
+        put("needs_review", json!({"approved": {"who": "human", "time": 1}}), json!([]));
+        let kept = start(&id).unwrap();
+        assert_eq!(kept["column"], "needs_review");
+        assert!(kept["stamps"].get("approved").is_some(), "approval kept");
+        put("assigned", json!({}), json!([{"id": "r1", "kind": "work", "state": "running", "model": "test", "log": "/l"}]));
+        let e = start(&id).unwrap_err().0;
+        assert!(e.starts_with("E7003"), "{e}");
+        assert_eq!(task(&s.root, &id).unwrap()["column"], "assigned");
+    });
+}
+
+/// A task with more than three untested symbols names every one.
+#[test]
+fn a_long_list_of_untested_symbols_names_them_all() {
+    let lib = concat!(
+        "pub fn one() -> i32 {\n    1\n}\n\n",
+        "pub fn two() -> i32 {\n    2\n}\n\n",
+        "pub fn three() -> i32 {\n    3\n}\n\n",
+        "pub fn four() -> i32 {\n    4\n}\n\n",
+        "pub fn five() -> i32 {\n    5\n}\n"
+    );
+    let (root, s) = testing::rust_project(lib);
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Coverage"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let before = snapshot(&s).unwrap();
+    let changed = ["one", "two", "three", "four", "five"];
+    let ix = s.index().unwrap();
+    for name in changed {
+        let id = ix.syms.iter().find(|x| x.name == name).unwrap().id.clone();
+        let text = format!("pub fn {name}() -> i32 {{\n    9\n}}");
+        s.db.execute("UPDATE symbols SET text = ?1 WHERE id = ?2", params![text, id]).unwrap();
+    }
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
+    let ix = s.index().unwrap();
+    let reached = std::collections::HashSet::new();
+    let untested = with_context(&tid, "r1", || s.task_untested(&ix, &reached)).unwrap();
+    let mut named: Vec<String> = untested.split(", ").map(String::from).collect();
+    named.sort_unstable();
+    let mut expected: Vec<String> = changed
+        .iter()
+        .map(|name| ix.syms.iter().position(|x| x.name == *name).map(|i| crate::reach::short(&ix, i)))
+        .collect::<Option<Vec<_>>>()
+        .unwrap();
+    expected.sort_unstable();
+    assert_eq!(named, expected, "{untested}");
 }

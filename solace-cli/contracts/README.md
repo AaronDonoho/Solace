@@ -24,6 +24,6 @@ bun test test/view.test.mjs
 
 - `src/contracts.gleam`: the component.
 - `src/api.mjs`: requests and the event stream, with the project prefix.
-- `src/layout.mjs`: node placement (dagre), fitting, keys, focus and the panel resizer.
+- `src/layout.mjs`: node placement (dagre), fitting, keys, focus and the panel resizer. The Design page reuses `flow_positions`, its fresh placement for flow diagrams.
 - `index.html`: standalone page.
 - `test/`: Gleam tests and Bun tests.

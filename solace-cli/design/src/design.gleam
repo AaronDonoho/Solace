@@ -1,4 +1,6 @@
 import changes
+import diagram
+import gleam/dict
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -395,6 +397,7 @@ const view_styles =
   solace_task.control_styles
   <> solace_task.tab_styles
   <> render.outline_styles
+  <> diagram.styles
   <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--ok-text:#1a6b30}
 .design{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
 .design>.tabs{grid-column:1/-1}
@@ -1072,9 +1075,9 @@ fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
         None -> ""
       }
   }
-  let draws = case open_design(model) {
-    Some(design) -> design.tab == UiUx
-    None -> False
+  let tab = case open_design(model) {
+    Some(design) -> Some(design.tab)
+    None -> None
   }
   [
     html.div([attribute.class("design-heading")], [
@@ -1087,17 +1090,14 @@ fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
         None -> element.none()
       },
     ]),
-    case viewed.drawing {
-      Some(drawing) ->
-        case draws {
-          True ->
-            html.div(
-              [attribute.class("design-screens")],
-              list.map(drawing.elements, render.draw),
-            )
-          False -> element.none()
-        }
-      None -> element.none()
+    case viewed.drawing, tab {
+      Some(drawing), Some(UiUx) ->
+        html.div(
+          [attribute.class("design-screens")],
+          list.map(drawing.elements, render.draw),
+        )
+      Some(drawing), Some(Architecture) -> diagram.draw(drawing, dict.new())
+      _, _ -> element.none()
     },
     case viewed.error {
       "" -> element.none()
@@ -1199,7 +1199,11 @@ fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
       ..controls
     ]),
     case design.tab {
-      Architecture -> element.none()
+      Architecture ->
+        case proposal, showing {
+          Some(proposed), True -> proposed_diagram(model, proposed)
+          _, _ -> current_diagram(model)
+        }
       UiUx ->
         case proposal, showing {
           Some(proposed), True -> proposed_drawing(model, proposed)
@@ -1428,7 +1432,11 @@ fn create_canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
         ..proposal_controls(model, False)
       ]),
       case tab {
-        Architecture -> element.none()
+        Architecture ->
+          case model.show_changes {
+            True -> marked_diagram(changes.all_added(proposed))
+            False -> diagram.draw(proposed, dict.new())
+          }
         UiUx ->
           case model.show_changes {
             True -> marked_all_screens(changes.all_added(proposed))
@@ -1450,4 +1458,26 @@ fn proposal_answered(before: Model, after: Model) -> Bool {
         _, _ -> False
       }
   }
+}
+
+fn current_diagram(model: Model) -> Element(Msg) {
+  case model.drawing {
+    Some(drawing) -> diagram.draw(drawing, dict.new())
+    None ->
+      case model.design_error {
+        "" -> element.none()
+        message -> html.p([attribute.role("alert")], [html.text(message)])
+      }
+  }
+}
+
+fn proposed_diagram(model: Model, proposed: render.Design) -> Element(Msg) {
+  case model.show_changes, model.drawing {
+    True, Some(current) -> marked_diagram(changes.mark(current, proposed))
+    _, _ -> diagram.draw(proposed, dict.new())
+  }
+}
+
+fn marked_diagram(marked: changes.Marked) -> Element(Msg) {
+  diagram.draw(marked.design, marked.marks)
 }

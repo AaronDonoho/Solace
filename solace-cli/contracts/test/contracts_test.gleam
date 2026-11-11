@@ -1,4 +1,5 @@
 import contracts
+import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
@@ -168,4 +169,14 @@ pub fn io_line_and_undescribed_test() {
 /// Outside a browser registering reports the error instead of crashing.
 pub fn register_outside_browser_test() {
   contracts.register() |> should.be_error
+}
+
+pub fn flow_positions_place_connected_nodes_test() {
+  let placed =
+    contracts.flow_positions(
+      "[{\"id\":\"a\"},{\"id\":\"b\"}]",
+      "[{\"from\":\"a\",\"to\":\"b\"}]",
+    )
+  let assert Ok(points) = json.parse(placed, decode.list(decode.dynamic))
+  assert list.length(points) == 2
 }

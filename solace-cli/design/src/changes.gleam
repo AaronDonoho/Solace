@@ -47,6 +47,8 @@ fn change_marks(
 ) -> Dict(String, render.Change) {
   let proposed_places = places(proposed.elements)
   let current_places = places(current.elements)
+  let proposed_flows = flows(proposed.elements)
+  let current_flows = flows(current.elements)
   let common =
     list.fold(dict.keys(proposed_nodes), dict.new(), fn(acc, id) {
       case dict.get(current_nodes, id) {
@@ -64,6 +66,8 @@ fn change_marks(
                   proposed,
                   current_places,
                   proposed_places,
+                  current_flows,
+                  proposed_flows,
                 )
               {
                 Some(change) -> dict.insert(acc, id, change)
@@ -88,12 +92,15 @@ fn change_of(
   proposed: render.Design,
   current_places: Dict(String, #(Option(String), List(String))),
   proposed_places: Dict(String, #(Option(String), List(String))),
+  current_flows: Dict(String, Nil),
+  proposed_flows: Dict(String, Nil),
 ) -> Option(render.Change) {
   let changed =
     old.kind != new.kind
     || old.overrides != new.overrides
     || dict.get(current.links, id) != dict.get(proposed.links, id)
-  let moved = moved(id, current_places, proposed_places)
+  let moved =
+    moved(id, current_places, proposed_places, current_flows, proposed_flows)
   case changed, moved {
     True, True -> Some(render.ChangedAndMoved)
     True, False -> Some(render.Changed)
@@ -106,14 +113,24 @@ fn moved(
   id: String,
   current_places: Dict(String, #(Option(String), List(String))),
   proposed_places: Dict(String, #(Option(String), List(String))),
+  current_flows: Dict(String, Nil),
+  proposed_flows: Dict(String, Nil),
 ) -> Bool {
   case dict.get(current_places, id), dict.get(proposed_places, id) {
     Ok(#(current_parent, current_siblings)),
       Ok(#(proposed_parent, proposed_siblings))
     ->
       current_parent != proposed_parent
-      || relative(id, current_siblings, proposed_siblings)
-      != relative(id, proposed_siblings, current_siblings)
+      || {
+        let ordered = case current_parent {
+          Some(parent) ->
+            !member(current_flows, parent) && !member(proposed_flows, parent)
+          None -> True
+        }
+        ordered
+        && relative(id, current_siblings, proposed_siblings)
+        != relative(id, proposed_siblings, current_siblings)
+      }
     _, _ -> False
   }
 }
@@ -319,4 +336,16 @@ fn without_proposed(
     list.map(kept, fn(child) { without_proposed(child, proposed_ids) }),
     node.overrides,
   )
+}
+
+fn flows(elements: List(render.Node)) -> Dict(String, Nil) {
+  list.fold(elements, dict.new(), flows_of)
+}
+
+fn flows_of(acc: Dict(String, Nil), node: render.Node) -> Dict(String, Nil) {
+  let acc = case node.kind {
+    render.Flow -> dict.insert(acc, node.id, Nil)
+    _ -> acc
+  }
+  list.fold(node.children, acc, flows_of)
 }

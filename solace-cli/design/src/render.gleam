@@ -48,6 +48,9 @@ pub type Kind {
   Button(ButtonProperties)
   TextInput(InputProperties)
   ImagePlaceholder(ImageProperties)
+  Flow
+  DiagramNode(DiagramNodeProperties)
+  DiagramEdge(DiagramEdgeProperties)
 }
 
 pub type Container {
@@ -220,6 +223,9 @@ fn node_sizes(kind: Kind) -> #(Size, Size) {
     Button(button) -> #(button.width, button.height)
     TextInput(input) -> #(input.width, input.height)
     ImagePlaceholder(image) -> #(image.width, image.height)
+    Flow -> #(Fill, Fill)
+    DiagramNode(_) -> #(Fixed(220.0), Fixed(120.0))
+    DiagramEdge(_) -> #(Hug, Hug)
   }
 }
 
@@ -298,6 +304,9 @@ fn kind_styles(theme: Theme, kind: Kind) -> List(#(String, String)) {
       #("border", "1px dashed " <> theme_color(theme, "muted")),
       #("color", theme_color(theme, "muted")),
     ]
+    Flow -> [#("position", "relative")]
+    DiagramNode(_) -> []
+    DiagramEdge(_) -> []
   }
 }
 
@@ -423,6 +432,15 @@ fn kind_decoder(ty: String) -> decode.Decoder(Kind) {
     "image_placeholder" ->
       decode.field("properties", image_decoder(), fn(value) {
         decode.success(ImagePlaceholder(value))
+      })
+    "flow" -> decode.success(Flow)
+    "node" ->
+      decode.field("properties", diagram_node_decoder(), fn(value) {
+        decode.success(DiagramNode(value))
+      })
+    "edge" ->
+      decode.field("properties", diagram_edge_decoder(), fn(value) {
+        decode.success(DiagramEdge(value))
       })
     _ ->
       decode.failure(
@@ -1037,7 +1055,7 @@ pub fn draw_marked_with(
   draw_node(theme, node, Down, DrawnFill, DrawnFill, None, marks)
 }
 
-fn change_class(change: Change) -> String {
+pub fn change_class(change: Change) -> String {
   case change {
     Added -> "design-change-added"
     Removed -> "design-change-removed"
@@ -1045,4 +1063,25 @@ fn change_class(change: Change) -> String {
     Moved -> "design-change-moved"
     ChangedAndMoved -> "design-change-both"
   }
+}
+
+pub type DiagramNodeProperties {
+  DiagramNodeProperties(label: String, description: String)
+}
+
+pub type DiagramEdgeProperties {
+  DiagramEdgeProperties(from: String, to: String, label: String)
+}
+
+fn diagram_node_decoder() -> decode.Decoder(DiagramNodeProperties) {
+  use label <- decode.optional_field("label", "", decode.string)
+  use description <- decode.optional_field("description", "", decode.string)
+  decode.success(DiagramNodeProperties(label, description))
+}
+
+fn diagram_edge_decoder() -> decode.Decoder(DiagramEdgeProperties) {
+  use from <- decode.optional_field("from", "", decode.string)
+  use to <- decode.optional_field("to", "", decode.string)
+  use label <- decode.optional_field("label", "", decode.string)
+  decode.success(DiagramEdgeProperties(from, to, label))
 }

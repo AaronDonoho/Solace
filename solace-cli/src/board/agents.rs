@@ -456,8 +456,7 @@ pub(super) fn api_page(body: &Value) -> Vec<Value> {
 /// list is out of date, so ask the program again.
 pub(super) fn model_gone(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
-    let metadata_warning = e.contains("metadata") && e.contains("not found");
-    !metadata_warning
+    !crate::board::runs::harmless_warning(error)
         && e.contains("model")
         && ["not found", "does not exist", "no such model", "unknown model", "is not available", "not supported"]
             .iter()

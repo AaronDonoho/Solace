@@ -317,7 +317,7 @@ class Board(unittest.TestCase):
         self.assertEqual(t['column'], 'needs_review')
         self.assertEqual(
             t['runs'][-1]['outcome'],
-            'agent exited without finishing (exit status: 0):\n\nreconnect failed'
+            f'The agent ended its run without finishing it (exit status: 0):\n\n{assessment}'
         )
         self.assertIn('without finishing', t['attention']['reason'])
 
