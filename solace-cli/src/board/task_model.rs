@@ -574,7 +574,8 @@ fn continue_answered(t: &mut Value) {
     if !t["paused_from"].is_null() || t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null()) {
         return;
     }
-    let Some(i) = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting") else {
+    // A discussion waits for the human's note, not an answer: delivery wakes it.
+    let Some(i) = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting" && r["kind"] != "discuss") else {
         return;
     };
     // The answers go straight to the waiting agent, in any column and any workflow:
@@ -977,6 +978,9 @@ pub(crate) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     // While a discussion is going, a human note is its next turn.
                     let discussing = discussion(&t);
                     note(&mut t, "human", discussing.as_deref(), text);
+                    if discussing.is_some() {
+                        t["attention"] = Value::Null;
+                    }
                 }
                 // Notes are only appended, so a note's position names it.
                 ("DELETE", ["notes", i]) => {
@@ -1030,7 +1034,7 @@ fn act(root: &Path, s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result
     let a = &w["actions"][name];
     let resolves = matches!(a["run"].as_str(), Some("work" | "new_work" | "investigate"))
         || a["revert"] == true
-        || name == "stop"
+        || matches!(name, "stop" | "end_discussion")
         || column(w, t)["final"] == true;
     if t["attention"]["hold"] != true || resolves {
         t["attention"] = Value::Null;
@@ -1322,7 +1326,8 @@ pub(crate) fn listed(root: &Path) -> Result<Vec<Value>, Failure> {
         for k in ["notes", "changes"] {
             t.as_object_mut().unwrap().remove(k);
         }
-        let current = std::mem::take(t);
+        let mut current = std::mem::take(t);
+        trim_runs(&mut current);
         let found_project = crate::tasks::has_project(&top, &current);
         *t = crate::tasks::with_on_board(&top, current, found_project, &mut waits);
     }
@@ -1401,7 +1406,10 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 return Ok(());
             }
             match command {
-                "note" if kind == "discuss" => t["runs"][i]["state"] = json!("waiting"),
+                "note" if kind == "discuss" => {
+                    t["runs"][i]["state"] = json!("waiting");
+                    hold(t, DISCUSSION_WAITING);
+                }
                 "note" => {}
                 "done" => {
                     if kind == "investigate" {
@@ -1564,3 +1572,21 @@ fn set_column(w: &Value, t: &mut Value, to: &Value) {
         t["archivedTime"] = Value::Null;
     }
 }
+
+/// The run fields a page reads from a task list or a live task event: the rest
+/// of a run is fetched when it is opened.
+const LISTED_RUN_FIELDS: [&str; 11] = ["id", "kind", "state", "model", "effort", "log", "outcome", "started", "ended", "used", "failed"];
+
+/// Reduces each run of task `t` to the fields a page reads from a list.
+pub(crate) fn trim_runs(t: &mut Value) {
+    let Some(runs) = t.get_mut("runs").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for run in runs {
+        if let Some(run) = run.as_object_mut() {
+            run.retain(|key, _| LISTED_RUN_FIELDS.contains(&key.as_str()));
+        }
+    }
+}
+
+pub(crate) const DISCUSSION_WAITING: &str = "a discussion is waiting for your reply";

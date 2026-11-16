@@ -17,7 +17,157 @@ export function request(base, path, method, body, receive) {
     .catch(error => console.error(error));
 }
 const streams = new WeakMap();
-export function events(base, receive, ready = () => {}) {
+const closers = new WeakMap();
+
+// A page's one stream per `base` lives in a background worker, shared by every
+// page bundle in this window. Each subscriber names the top-level message keys
+// it uses, so a page never receives what it does not show.
+const shared = () => globalThis.__solaceEventStreams ??= new Map();
+
+const worker_available = () =>
+  typeof document !== 'undefined' && typeof Worker === 'function' && typeof Blob === 'function'
+  && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+
+// `url` is the stream's absolute address: a worker started from a blob: URL
+// cannot resolve a relative one.
+export function worker_source(url) {
+  return `
+let source = null, attempt = 0, last = '', timer = null, caught_up = false, stopped = false;
+const subs = new Map();
+const snapshot = [];
+const fits = (names, keys) => keys.size === 0 || names === null || names.some(k => keys.has(k));
+const matching = names => [...subs].filter(([, keys]) => fits(names, keys)).map(([id]) => id);
+const send = (message, ids) => { if (ids.length) self.postMessage({ ...message, to: ids }); };
+function open() {
+  if (stopped) return;
+  caught_up = false;
+  snapshot.length = 0;
+  try {
+    source = new EventSource(${JSON.stringify(url)} + (last ? '?last=' + encodeURIComponent(last) : ''));
+  } catch {
+    stopped = true;
+    self.postMessage({ type: 'failed' });
+    return;
+  }
+  source.onmessage = event => {
+    if (event.lastEventId) last = event.lastEventId;
+    let names = null;
+    try {
+      const value = JSON.parse(event.data);
+      if (value && typeof value === 'object' && !Array.isArray(value)) names = Object.keys(value);
+    } catch {}
+    if (!caught_up) snapshot.push({ data: event.data, names });
+    send({ type: 'message', data: event.data, names }, matching(names));
+  };
+  source.addEventListener('ready', () => {
+    attempt = 0;
+    caught_up = true;
+    snapshot.length = 0;
+    send({ type: 'ready' }, [...subs.keys()]);
+  });
+  source.onerror = () => {
+    if (stopped || source.readyState !== 2) return;
+    source.close();
+    const wait = Math.min(1000 * 2 ** attempt, 30000);
+    attempt++;
+    timer = setTimeout(() => { timer = null; open(); }, wait);
+  };
+}
+self.onmessage = event => {
+  const message = event.data || {};
+  if (message.type === 'join') {
+    // A subscriber that joins after the worker caught up missed the live
+    // messages since startup, so it opens a stream of its own from the server.
+    if (caught_up || attempt > 0) {
+      self.postMessage({ type: 'fresh', to: [message.id] });
+      return;
+    }
+    const keys = new Set(message.keys || []);
+    subs.set(message.id, keys);
+    for (const item of snapshot) {
+      if (fits(item.names, keys)) send({ type: 'message', data: item.data, names: item.names }, [message.id]);
+    }
+  } else if (message.type === 'leave') {
+    subs.delete(message.id);
+    if (!subs.size) {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      source?.close();
+      self.close();
+    }
+  }
+};
+open();
+`;
+}
+
+const absolute = path => {
+  try { return new URL(path, globalThis.location?.href).href; } catch { return path; }
+};
+
+// A worker that cannot run or open its stream hands every subscriber a stream
+// of its own, so a page is never left without data.
+function fall_back(stream) {
+  if (shared().get(stream.base) !== stream) return;
+  shared().delete(stream.base);
+  stream.worker.terminate?.();
+  for (const sub of stream.subs.values()) sub.direct = direct_events(stream.base, sub.receive, sub.ready);
+  stream.subs.clear();
+}
+
+function shared_events(base, receive, ready, keys) {
+  let stream = shared().get(base);
+  if (!stream) {
+    stream = { base, worker: null, subs: new Map(), next: 0 };
+    let url;
+    try {
+      url = URL.createObjectURL(new Blob([worker_source(absolute(base + '/events'))], { type: 'text/javascript' }));
+      stream.worker = new Worker(url);
+    } catch {
+      if (url) URL.revokeObjectURL(url);
+      return null;
+    }
+    URL.revokeObjectURL(url);
+    stream.worker.onerror = () => fall_back(stream);
+    stream.worker.onmessage = event => {
+      const message = event.data || {};
+      if (message.type === 'failed') return fall_back(stream);
+      for (const id of message.to || []) {
+        const sub = stream.subs.get(id);
+        if (!sub) continue;
+        if (message.type === 'message') sub.receive(message.data);
+        else if (message.type === 'ready') sub.ready();
+        else if (message.type === 'fresh') {
+          stream.subs.delete(id);
+          sub.direct = direct_events(base, sub.receive, sub.ready);
+          if (!stream.subs.size) {
+            stream.worker.terminate?.();
+            shared().delete(stream.base);
+          }
+        }
+      }
+    };
+    shared().set(base, stream);
+  }
+  const id = ++stream.next;
+  const sub = { receive, ready, direct: null };
+  stream.subs.set(id, sub);
+  stream.worker.postMessage({ type: 'join', id, keys: [...(keys || [])] });
+  const handle = { close() {
+    if (stream.subs.delete(id)) {
+      stream.worker.postMessage({ type: 'leave', id });
+      if (!stream.subs.size) {
+        stream.worker.terminate?.();
+        shared().delete(stream.base);
+      }
+    }
+    if (sub.direct) close_events(sub.direct);
+  } };
+  closers.set(handle, handle.close);
+  return handle;
+}
+
+function direct_events(base, receive, ready) {
   const state = { base, receive, ready, last: '', attempt: 0, timer: null, current: null, stopped: false };
   const open = () => {
     if (state.stopped) return null;
@@ -45,7 +195,17 @@ export function events(base, receive, ready = () => {}) {
   if (source) streams.set(source, state);
   return source;
 }
+
+export function events(base, receive, ready = () => {}, keys = []) {
+  if (worker_available()) {
+    const handle = shared_events(base, receive, ready, keys);
+    if (handle) return handle;
+  }
+  return direct_events(base, receive, ready);
+}
 export function close_events(source) {
+  const close = source && closers.get(source);
+  if (close) return close();
   const state = source && streams.get(source);
   if (!state) return source?.close();
   state.stopped = true;

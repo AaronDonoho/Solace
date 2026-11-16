@@ -1,12 +1,16 @@
 import design
+import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 import gleeunit
+import lustre/dev/query
+import lustre/dev/simulate
 import lustre/effect
 import lustre/element
 import panel
+import render
 import solace_task
 
 pub fn main() -> Nil {
@@ -1181,4 +1185,309 @@ pub fn a_caught_up_replay_of_a_waiting_run_flags_no_attention_test() {
     )
   let #(_, fx) = design.settle(replayed)
   assert fx == effect.none()
+}
+
+fn a_selection_simulation(model: design.Model) {
+  simulate.start(
+    simulate.application(
+      fn(_) { #(model, effect.none()) },
+      design.update,
+      design.view,
+    ),
+    Nil,
+  )
+}
+
+fn element_with_id(id: String) -> query.Query {
+  query.element(query.data("design-id", id))
+}
+
+pub fn a_click_selects_the_clicked_element_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(a_preview_model()),
+      on: element_with_id("go"),
+    )
+  assert simulate.model(simulation).selected == ["go"]
+  assert string.contains(
+    element.to_string(simulate.view(simulation)),
+    "design-selected",
+  )
+}
+
+pub fn a_click_on_a_nested_element_selects_itself_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(a_preview_model()),
+      on: element_with_id("go"),
+    )
+  let selected = simulate.model(simulation).selected
+  assert selected == ["go"]
+  assert !list.contains(selected, "one")
+}
+
+pub fn a_plain_click_replaces_and_a_ctrl_click_adds_or_removes_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(a_preview_model()),
+      on: element_with_id("go"),
+    )
+  let simulation = simulate.click(simulation, on: element_with_id("act"))
+  assert simulate.model(simulation).selected == ["act"]
+  let ctrl_click = fn(simulation) {
+    simulate.event(simulation, on: element_with_id("go"), name: "click", data: [
+      #("ctrlKey", json.bool(True)),
+    ])
+  }
+  let simulation = ctrl_click(simulation)
+  assert simulate.model(simulation).selected == ["act", "go"]
+  let simulation = ctrl_click(simulation)
+  assert simulate.model(simulation).selected == ["act"]
+}
+
+pub fn escape_or_empty_canvas_clears_the_selection_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(a_preview_model()),
+      on: element_with_id("go"),
+    )
+  let escaped = simulate.message(simulation, design.Escape)
+  assert simulate.model(escaped).selected == []
+  let cleared =
+    simulate.click(simulation, on: query.element(query.class("design-screens")))
+  assert simulate.model(cleared).selected == []
+}
+
+pub fn preview_clicks_still_navigate_test() {
+  let #(model, _) = design.update(a_preview_model(), design.Preview)
+  let simulation =
+    simulate.click(a_selection_simulation(model), on: element_with_id("go"))
+  assert simulate.model(simulation).preview == Some("two")
+  assert simulate.model(simulation).selected == []
+}
+
+pub fn opening_another_design_clears_the_selection_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  assert model.selected == ["go"]
+  let #(model, _) =
+    design.update(model, design.SelectDesign("fedcba9876543210"))
+  assert model.selected == []
+}
+
+pub fn a_reload_that_removes_a_selected_element_clears_it_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_ui_design("screen")))
+  assert model.selected == []
+}
+
+pub fn a_reload_keeps_a_selection_only_the_proposal_has_test() {
+  let id = "0123456789abcdef"
+  let assert Ok(proposal) = render.decode(a_ui_design("proposal"))
+  let base = a_preview_model()
+  let model =
+    design.Model(
+      ..base,
+      view_proposal: True,
+      panel: panel.Model(..base.panel, proposals: [
+        panel.Proposed("r9", "ui", proposal),
+      ]),
+    )
+  let #(model, _) =
+    design.update(model, design.ElementClicked("proposal", False))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_linked_design()))
+  assert model.selected == ["proposal"]
+}
+
+pub fn a_reload_keeps_a_selection_only_a_viewed_version_has_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(a_design_with_history(), design.ViewVersion(id, 1))
+  let #(model, _) =
+    design.update(model, design.VersionLoaded(id, 1, a_version_design("older")))
+  let #(model, _) = design.update(model, design.ElementClicked("older", False))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_ui_design("screen")))
+  assert model.selected == ["older"]
+}
+
+pub fn a_region_replaces_the_selection_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.RegionSelected(["one", "two"], False))
+  assert model.selected == ["one", "two"]
+}
+
+pub fn a_ctrl_region_adds_new_ids_and_an_empty_region_clears_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.RegionSelected(["one", "two"], True))
+  assert model.selected == ["go", "one", "two"]
+  let #(model, _) = design.update(model, design.RegionSelected(["two"], True))
+  assert model.selected == ["go", "one", "two"]
+  let #(model, _) = design.update(model, design.RegionSelected([], True))
+  assert model.selected == []
+}
+
+pub fn a_note_box_and_marker_follow_the_selection_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "id=\"design-note-text\"",
+  )
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Rename it")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  assert model.panel.notes
+    == [panel.Note("0123456789abcdef", ["go"], "Rename it")]
+  let rendered = element.to_string(design.view(model))
+  assert string.contains(rendered, "data-note=\"1\"")
+  assert string.contains(rendered, "Rename it")
+  let #(model, _) = design.update(model, design.Panel(panel.RemoveNote(0)))
+  let rendered = element.to_string(design.view(model))
+  assert !string.contains(rendered, "data-note=")
+  assert !string.contains(rendered, "Rename it")
+}
+
+pub fn a_note_on_another_design_has_no_marker_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Other design")))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("another-design", ["go"])))
+  let rendered = element.to_string(design.view(model))
+  assert string.contains(rendered, "class=\"design-note-row\"")
+  assert !string.contains(rendered, "data-note=")
+}
+
+pub fn notes_on_the_same_element_show_every_marker_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("First")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("Second")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  let rendered = element.to_string(design.view(model))
+  assert string.contains(rendered, "data-note=\"1, 2\"")
+  assert string.contains(rendered, "First")
+  assert string.contains(rendered, "Second")
+  let #(model, _) = design.update(model, design.Panel(panel.RemoveNote(0)))
+  let rendered = element.to_string(design.view(model))
+  assert string.contains(rendered, "data-note=\"1\"")
+}
+
+fn an_architecture_model() -> design.Model {
+  let id = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.Architecture),
+      design.DesignsLoaded(an_architecture_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, an_architecture_design()))
+  model
+}
+
+pub fn an_architecture_node_selects_by_id_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(an_architecture_model()),
+      on: element_with_id("start"),
+    )
+  assert simulate.model(simulation).selected == ["start"]
+  assert string.contains(
+    element.to_string(simulate.view(simulation)),
+    "design-node design-selected",
+  )
+}
+
+pub fn an_architecture_edge_selects_by_id_test() {
+  let simulation =
+    simulate.click(
+      a_selection_simulation(an_architecture_model()),
+      on: element_with_id("step"),
+    )
+  assert simulate.model(simulation).selected == ["step"]
+  assert string.contains(
+    element.to_string(simulate.view(simulation)),
+    "design-edge design-selected",
+  )
+}
+
+pub fn an_architecture_region_selects_nodes_and_edges_test() {
+  let model = an_architecture_model()
+  let html = element.to_string(design.view(model))
+  assert string.contains(tag_of(html, "flow"), "data-region")
+  assert string.contains(tag_of(html, "step"), "class=\"design-edge\"")
+  assert string.contains(
+    tag_of(html, "start"),
+    "class=\"design-element design-node\"",
+  )
+  assert string.contains(
+    tag_of(html, "end"),
+    "class=\"design-element design-node\"",
+  )
+  assert before(html, "data-design-id=\"step\"", "data-design-id=\"start\"")
+  assert before(html, "data-design-id=\"start\"", "data-design-id=\"end\"")
+  let #(model, _) =
+    design.update(model, design.RegionSelected(["step", "start", "end"], False))
+  assert model.selected == ["step", "start", "end"]
+}
+
+pub fn an_architecture_note_holds_the_selected_edge_test() {
+  let #(model, _) =
+    design.update(an_architecture_model(), design.ElementClicked("step", False))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Name this arrow")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  assert model.panel.notes
+    == [panel.Note("fedcba9876543210", ["step"], "Name this arrow")]
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-note=\"1\"")
+  assert string.contains(html, "class=\"design-edge-note\"")
+  assert string.contains(html, ">1</text>")
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("Second")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  assert string.contains(element.to_string(design.view(model)), ">1, 2</text>")
+}
+
+fn tag_of(html: String, id: String) -> String {
+  let marker = "data-design-id=\"" <> id <> "\""
+  case string.split_once(html, marker) {
+    Ok(#(before, after)) ->
+      case list.last(string.split(before, "<")), string.split_once(after, ">") {
+        Ok(tag), Ok(#(rest, _)) -> tag <> marker <> rest
+        _, _ -> ""
+      }
+    Error(_) -> ""
+  }
 }

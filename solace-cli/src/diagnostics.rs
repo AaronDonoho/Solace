@@ -345,3 +345,160 @@ fn title_and_note(text: &str) -> (&str, &str) {
 fn strip_error_prefix(line: &str) -> &str {
     line.trim_start_matches("error:").trim()
 }
+
+/// A failed assertion's block with each long value cut to the part that
+/// explains the failure: where a shorter expected value best matches, else
+/// where the values first differ, with the value's length beside it.
+pub(crate) fn shorten_assertions(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let values: Vec<Option<(&str, &str)>> = lines.iter().map(|line| value_line(line)).collect();
+    let mut out: Vec<String> = vec![];
+    let mut block = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let plain = visible(lines[i]).0;
+        let trimmed = plain.trim();
+        if trimmed.starts_with("assert") || trimmed.starts_with("todo ") || trimmed.starts_with("panic ") || trimmed.contains("panicked at")
+        {
+            block = true;
+        }
+        if values[i].is_none() {
+            out.push(lines[i].to_string());
+            if trimmed.is_empty() || trimmed.starts_with("info:") {
+                block = false;
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < lines.len() && values[i].is_some() {
+            i += 1;
+        }
+        let run: Vec<(&str, &str)> = values[start..i].iter().filter_map(|v| *v).collect();
+        for (j, (prefix, value)) in run.iter().enumerate() {
+            let numeric = visible(prefix).0.trim_start().starts_with(|c: char| c.is_ascii_digit());
+            if (!block && numeric) || value.chars().count() <= 160 {
+                out.push(format!("{prefix}{value}"));
+            } else {
+                out.push(format!("{prefix}{}", window(value, anchor(&run, j))));
+            }
+        }
+    }
+    out.join("\n")
+}
+
+/// Where a long value should be shown from: the first place a long sibling
+/// differs, else the best match with a shorter sibling, else its start.
+fn anchor(run: &[(&str, &str)], j: usize) -> (usize, usize) {
+    let value = content(run[j].1);
+    let (mut best, mut long) = ((0, 0), None);
+    for (k, (_, other)) in run.iter().enumerate() {
+        if k == j {
+            continue;
+        }
+        let other = content(other);
+        if other.len() > 160 {
+            long.get_or_insert(other);
+        } else if other.len() >= 4 {
+            let (at, len) = best_match(&value, &other);
+            if len > best.1 {
+                best = (at, len);
+            }
+        }
+    }
+    if let Some(other) = long {
+        let diff = value.iter().zip(&other).position(|(a, b)| a != b).unwrap_or(value.len().min(other.len()));
+        return (diff.min(value.len()), 0);
+    }
+    if best.1 >= 4 { best } else { (0, 0) }
+}
+
+/// A value's characters without the quotes `string.inspect` wraps around it.
+fn content(value: &str) -> Vec<char> {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() >= 2 && chars[0] == '"' && chars[chars.len() - 1] == '"' { chars[1..chars.len() - 1].to_vec() } else { chars }
+}
+
+/// The longest prefix of `needle` that occurs in `value`, and where it starts.
+fn best_match(value: &[char], needle: &[char]) -> (usize, usize) {
+    let Some(first) = needle.first() else {
+        return (0, 0);
+    };
+    let mut best = (0, 0);
+    for (at, c) in value.iter().enumerate() {
+        if c != first {
+            continue;
+        }
+        let len = value[at..].iter().zip(needle).take_while(|(a, b)| a == b).count();
+        if len > best.1 {
+            best = (at, len);
+        }
+    }
+    best
+}
+
+/// A value cut to a window around `at`, naming its whole length.
+fn window(value: &str, (at, len): (usize, usize)) -> String {
+    let chars = content(value);
+    let start = at.saturating_sub(60);
+    let end = (at + len + 100).min(chars.len());
+    let shown: String = chars[start..end].iter().collect();
+    let shown = shown.replace("\\\"", "\"").replace("\\\\", "\\");
+    format!(
+        "{}{}{} ({} chars; test --full shows it whole)",
+        if start > 0 { "…" } else { "" },
+        shown,
+        if end < chars.len() { "…" } else { "" },
+        chars.len()
+    )
+}
+
+/// A reported value line's key (with any color codes and indent) and value.
+fn value_line(line: &str) -> Option<(&str, &str)> {
+    let (plain, at) = visible(line);
+    let lead = plain.len() - plain.trim_start().len();
+    let rest = &plain[lead..];
+    let label = if rest.starts_with("left: ") {
+        6
+    } else if rest.starts_with("right: ") {
+        7
+    } else {
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 || !rest[digits..].starts_with(": ") {
+            return None;
+        }
+        digits + 2
+    };
+    let start = at[lead + label];
+    Some((&line[..start], &line[start..]))
+}
+
+/// A line without terminal color codes, and where each visible byte starts.
+fn visible(line: &str) -> (String, Vec<usize>) {
+    let mut plain = String::with_capacity(line.len());
+    let mut at = Vec::with_capacity(line.len() + 1);
+    let mut i = 0;
+    while i < line.len() {
+        if line.as_bytes()[i] == 0x1b {
+            let mut j = i + 1;
+            if line.as_bytes().get(j) == Some(&b'[') {
+                j += 1;
+                while j < line.len() && !(b'@'..=b'~').contains(&line.as_bytes()[j]) {
+                    j += 1;
+                }
+                i = (j + 1).min(line.len());
+            } else {
+                i = (i + 2).min(line.len());
+            }
+            continue;
+        }
+        let c = line[i..].chars().next().unwrap();
+        for _ in 0..c.len_utf8() {
+            at.push(i);
+        }
+        plain.push(c);
+        i += c.len_utf8();
+    }
+    at.push(line.len());
+    (plain, at)
+}

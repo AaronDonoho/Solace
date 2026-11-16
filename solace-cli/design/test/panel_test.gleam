@@ -207,3 +207,152 @@ fn role(role: String, default: String) -> json.Json {
     #("default", json.string(default)),
   ])
 }
+
+pub fn a_note_holds_the_selected_ids_and_text_test() {
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.Panel(panel.NoteText("Make it blue")),
+    )
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("d1", ["button", "row"])))
+  assert model.panel.notes
+    == [panel.Note("d1", ["button", "row"], "Make it blue")]
+  assert model.panel.note_text == ""
+}
+
+pub fn a_blank_note_is_not_added_test() {
+  let #(model, _) =
+    design.update(design.new(design.UiUx), design.Panel(panel.NoteText("   ")))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("d1", ["button"])))
+  assert model.panel.notes == []
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("Text")))
+  let #(model, _) = design.update(model, design.Panel(panel.AddNote("d1", [])))
+  assert model.panel.notes == []
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("", ["button"])))
+  assert model.panel.notes == []
+}
+
+pub fn a_message_body_carries_notes_and_their_elements_test() {
+  let body =
+    json.to_string(
+      panel.send_body("Please fix", [
+        panel.Note("d1", ["go", "one"], "Rename it"),
+      ]),
+    )
+  assert string.contains(
+    body,
+    "\"notes\":[{\"design\":\"d1\",\"elements\":[\"go\",\"one\"],\"text\":\"Rename it\"}]",
+  )
+  assert !string.contains(
+    json.to_string(panel.send_body("Please fix", [])),
+    "notes",
+  )
+}
+
+pub fn a_selected_buttons_note_is_posted_and_a_reply_naming_it_shows_test() {
+  let #(model, _) =
+    design.update(design.new(design.UiUx), design.SelectDesign("d1"))
+  let #(model, _) = design.update(model, design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Rename the Next button")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  let note = panel.Note("d1", ["go"], "Rename the Next button")
+  assert model.panel.notes == [note]
+  let body = json.to_string(panel.send_body("Please update it", [note]))
+  assert string.contains(body, "\"elements\":[\"go\"]")
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.Replied(
+        True,
+        json.to_string(run("r1", "running", [], [])),
+      )),
+    )
+  let #(model, _) =
+    design.update(model, design.Panel(panel.Text("Please update it")))
+  let #(model, _) = design.update(model, design.Panel(panel.Send))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.Replied(
+        True,
+        json.to_string(
+          run(
+            "r1",
+            "running",
+            [
+              said("The Next button now says Continue", 2),
+            ],
+            [],
+          ),
+        ),
+      )),
+    )
+  assert model.panel.notes == []
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "The Next button now says Continue",
+  )
+}
+
+pub fn a_refused_reply_keeps_the_notes_test() {
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.Panel(panel.Replied(
+        True,
+        json.to_string(run("r1", "running", [], [])),
+      )),
+    )
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Keep me")))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("d1", ["button"])))
+  let #(model, _) = design.update(model, design.Panel(panel.Text("Please")))
+  let #(model, _) = design.update(model, design.Panel(panel.Send))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.Replied(
+        True,
+        "{\"message\":\"unknown element button\"}",
+      )),
+    )
+  assert model.panel.notes == [panel.Note("d1", ["button"], "Keep me")]
+  assert !model.panel.sending
+}
+
+pub fn notes_added_while_sending_wait_for_the_next_message_test() {
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.Panel(panel.Replied(
+        True,
+        json.to_string(run("r1", "running", [], [])),
+      )),
+    )
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("First")))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("d1", ["button"])))
+  let #(model, _) = design.update(model, design.Panel(panel.Text("Please")))
+  let #(model, _) = design.update(model, design.Panel(panel.Send))
+  let #(model, _) = design.update(model, design.Panel(panel.NoteText("Second")))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.AddNote("d1", ["row"])))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.Replied(
+        True,
+        json.to_string(run("r1", "running", [], [])),
+      )),
+    )
+  assert model.panel.notes == [panel.Note("d1", ["row"], "Second")]
+}

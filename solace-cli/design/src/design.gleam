@@ -1,6 +1,7 @@
 import changes
 import diagram
 import gleam/dict
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -16,6 +17,7 @@ import lustre/element/html
 import lustre/event
 import panel
 import plan_panel
+import region
 import render
 import solace_task
 
@@ -37,6 +39,8 @@ pub type Model {
     /// The design id in the address, "" for none.
     open: String,
     drawing: Option(render.Design),
+    /// The ids of the drawn elements the human selected, in selection order.
+    selected: List(String),
     design_error: String,
     /// A restore refusal that belongs to the page rather than one version.
     restore_error: String,
@@ -89,6 +93,15 @@ pub type Msg {
   ExitPreview
   /// A click in the preview, with the element's id.
   PreviewClick(String)
+  /// A click on a drawn element outside Preview; multi adds or removes it.
+  ElementClicked(String, Bool)
+  /// A dragged-out region: the ids wholly inside, and whether a modifier
+  /// asked to add them.
+  RegionSelected(List(String), Bool)
+  /// Clears the element selection.
+  ClearSelection
+  /// Escape clears the element selection.
+  Escape
   /// Shows the open proposal instead of the saved design.
   ShowProposed
   /// Shows the saved design while a proposal is open.
@@ -155,6 +168,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         tab: tab,
         open: "",
         drawing: None,
+        selected: [],
         design_error: "",
         restore_error: "",
         expanded: [],
@@ -170,6 +184,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Model(
           ..model,
           tab: tab,
+          selected: [],
           restore_error: "",
           expanded: [],
           histories: [],
@@ -185,6 +200,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ..clear_history_error(model),
           open: id,
           drawing: None,
+          selected: [],
           design_error: "",
           restore_error: "",
           viewed: None,
@@ -198,6 +214,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ..clear_history_error(model),
           open: id,
           drawing: None,
+          selected: [],
           design_error: "",
           restore_error: "",
           viewed: None,
@@ -223,10 +240,27 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Restore(id, number) -> restore(model, id, number)
     Restored(id, number, text) -> restored(model, id, number, text)
     Preview -> start_preview(model)
-    ExitPreview -> #(Model(..model, preview: None), effect.none())
+    ExitPreview -> #(Model(..model, preview: None, selected: []), effect.none())
     PreviewClick(id) -> preview_click(model, id)
-    ShowProposed -> #(Model(..model, view_proposal: True), effect.none())
-    ShowCurrent -> #(Model(..model, view_proposal: False), effect.none())
+    ElementClicked(id, multi) -> {
+      let next = select_element(model, id, multi)
+      #(next, place_note_box(next.selected))
+    }
+    RegionSelected(ids, multi) -> {
+      let next =
+        Model(..model, selected: region_selection(model.selected, ids, multi))
+      #(next, place_note_box(next.selected))
+    }
+    ClearSelection -> #(Model(..model, selected: []), effect.none())
+    Escape -> #(Model(..model, selected: []), effect.none())
+    ShowProposed -> #(
+      Model(..model, view_proposal: True, selected: []),
+      effect.none(),
+    )
+    ShowCurrent -> #(
+      Model(..model, view_proposal: False, selected: []),
+      effect.none(),
+    )
     ToggleChanges -> #(
       Model(..model, show_changes: !model.show_changes),
       effect.none(),
@@ -241,8 +275,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Model(..model, panel: state),
         effect.batch([
           fx,
+          effect.from(fn(send) { listen_escape(fn(_) { send(Escape) }) }),
           effect.map(panel_fx, Panel),
           effect.before_paint(fn(send, root) {
+            watch_region(root, send)
             send(Panel(panel.Attached(root)))
           }),
         ]),
@@ -254,7 +290,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         connected: False,
         panel: panel.disconnected(model.panel),
       ),
-      effect.none(),
+      effect.from(fn(_) { ignore_escape() }),
     )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
     Live(text) if !model.caught_up -> #(
@@ -262,45 +298,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Live(text) -> {
-      let before = model.panel
-      let updated = apply(model, text)
-      let answered = proposal_answered(model, updated)
-      let updated = case answered {
-        True -> Model(..updated, drawing: None)
-        False -> updated
+      case json.parse(text, decode.dynamic) {
+        Ok(event) -> live(model, event)
+        Error(_) -> #(model, effect.none())
       }
-      let #(after, panel_fx) = panel.follow(before, updated.panel)
-      let follows = case panel.shown(before), panel.shown(after) {
-        Some(a), Some(b) -> a.id == b.id && a.state != b.state
-        _, _ -> False
-      }
-      let attention = panel.needs_attention(before.runs, after.runs)
-      let effects =
-        list.flatten([
-          case updated.designs == model.designs && !answered {
-            True -> []
-            False -> [reload(updated)]
-          },
-          case follows {
-            True -> [effect.map(panel_fx, Panel)]
-            False -> []
-          },
-          case attention {
-            True -> [event.emit("attention", json.null())]
-            False -> []
-          },
-          case panel.models_event(text) {
-            True -> [effect.map(panel.refresh_models(after), Panel)]
-            False -> []
-          },
-        ])
-      let model = Model(..updated, panel: after)
-      let fx = case effects {
-        [] -> effect.none()
-        [one] -> one
-        many -> effect.batch(many)
-      }
-      #(model, fx)
     }
     CaughtUp -> {
       let #(model, fx) = settle(model)
@@ -309,6 +310,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Model(..model, panel: state),
         effect.batch([
           fx,
+          effect.from(fn(send) { listen_escape(fn(_) { send(Escape) }) }),
           effect.map(panel_fx, Panel),
           effect.map(panel.load_models(state), Panel),
         ]),
@@ -421,7 +423,7 @@ const view_styles =
 .design-version:hover{background:var(--hover)}
 .design-version[aria-current=true]{background:var(--paper);border-color:var(--edge);color:var(--ink)}
 .design-empty{color:var(--soft);margin:var(--space-2) 0}
-.design-canvas{flex:1;min-width:0;min-height:0;overflow:auto;background:var(--paper);border:1px solid var(--line);padding:var(--pad-card)}
+.design-canvas{position:relative;flex:1;min-width:0;min-height:0;overflow:auto;background:var(--paper);border:1px solid var(--line);padding:var(--pad-card)}
 .design-canvas h2{margin:0 0 var(--space-3);font-size:var(--h2)}
 .design-heading{display:flex;align-items:baseline;gap:var(--space-3);flex-wrap:wrap;margin:0 0 var(--space-3)}
 .design-heading h2{margin:0}
@@ -433,6 +435,17 @@ const view_styles =
 .design-changes{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
 .design-changes[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
+.design-note{position:absolute;top:var(--space-3);right:var(--space-3);z-index:4;display:flex;flex-direction:column;gap:var(--space-2);width:min(280px,80vw);padding:var(--space-3);background:var(--paper);border:2px solid #c2410c;box-shadow:0 4px 16px rgba(0,0,0,.18)}
+.design-note label{font-size:13px;color:var(--soft)}
+.design-note input{padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line)}
+.design-note button{align-self:flex-end;padding:var(--space-1) var(--space-3);font:inherit;color:var(--paper);background:#c2410c;border:1px solid #c2410c;cursor:pointer}
+.design-note button:disabled{color:var(--soft);background:var(--well);border-color:var(--line);cursor:default}
+.design-notes{list-style:none;margin:0;padding:var(--space-2) 0;border-top:1px solid var(--line);max-height:28vh;overflow:auto}
+.design-note-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:start;gap:var(--space-2);padding:var(--space-1) 0}
+.design-note-number{display:inline-block;min-width:18px;height:18px;border-radius:9px;background:#c2410c;color:#fff;font-size:11px;line-height:18px;text-align:center}
+.design-note-text{color:var(--ink);overflow-wrap:anywhere}
+.design-note-elements{color:var(--soft);font-size:12px;overflow-wrap:anywhere}
+.design-note-remove{padding:0 var(--space-1);font:inherit;color:var(--soft);background:transparent;border:0;cursor:pointer}
 @media (max-width:900px){.design-body{flex-direction:column;height:auto}.design-list{flex:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:0 0 var(--space-3)}.design-screens{height:60vh}}
 "
   <> solace_task.editor_styles
@@ -483,6 +496,7 @@ pub fn new(tab: Tab) -> Model {
     [],
     "",
     None,
+    [],
     "",
     "",
     False,
@@ -545,13 +559,14 @@ fn loaded(model: Model, text: String) -> Model {
   }
 }
 
-fn apply(model: Model, text: String) -> Model {
-  let model = case json.parse(text, designs_decoder()) {
+fn apply(model: Model, event: Dynamic) -> #(Model, Bool) {
+  let model = case decode.run(event, designs_decoder()) {
     Ok(designs) ->
       refresh_open(Model(..model, designs: designs, loading: False, error: ""))
     Error(_) -> model
   }
-  Model(..model, panel: panel.live(model.panel, text))
+  let #(panel, refresh_models) = panel.live(model.panel, event)
+  #(prune_selection(Model(..model, panel: panel)), refresh_models)
 }
 
 /// Applies the events received while catching up, now that the page has its
@@ -562,10 +577,14 @@ pub fn settle(model: Model) -> #(Model, Effect(Msg)) {
   let before = model
   let model = Model(..model, caught_up: True, loading: False)
   let model =
-    list.fold(list.reverse(model.replay), Model(..model, replay: []), apply)
+    list.fold(
+      list.reverse(model.replay),
+      Model(..model, replay: []),
+      apply_text,
+    )
   let answered = proposal_answered(before, model)
   let model = case answered {
-    True -> Model(..model, drawing: None)
+    True -> Model(..model, drawing: None, selected: [])
     False -> model
   }
   case model.designs == designs && !answered {
@@ -599,9 +618,12 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
       effect.from(fn(send) {
         send(
           Listening(
-            solace_task.events("", fn(text) { send(Live(text)) }, fn() {
-              send(CaughtUp)
-            }),
+            solace_task.events(
+              "",
+              fn(text) { send(Live(text)) },
+              fn() { send(CaughtUp) },
+              ["designs", "designRun", "designRuns", "roleModels"],
+            ),
           ),
         )
       }),
@@ -650,6 +672,7 @@ fn refresh_open(model: Model) -> Model {
       Model(
         ..model,
         drawing: None,
+        selected: [],
         design_error: "",
         viewed: None,
         preview: None,
@@ -662,16 +685,19 @@ fn load_design(model: Model, id: String, text: String) -> Model {
     True ->
       case render.decode(text) {
         Ok(drawing) ->
-          Model(
-            ..model,
-            drawing: Some(drawing),
-            design_error: "",
-            preview: keep_preview(model.preview, drawing),
+          prune_selection(
+            Model(
+              ..model,
+              drawing: Some(drawing),
+              design_error: "",
+              preview: keep_preview(model.preview, drawing),
+            ),
           )
         Error(_) ->
           Model(
             ..model,
             drawing: None,
+            selected: [],
             design_error: load_failure(text),
             preview: None,
           )
@@ -944,6 +970,7 @@ fn view_version(
       restore_error: "",
       viewed: Some(Viewed(id, number, None, "")),
       preview: None,
+      selected: [],
     )
   let open_requests = case changed {
     True -> [event.emit("design", json.string(id)), load(model)]
@@ -967,7 +994,11 @@ fn load_version(model: Model, id: String, number: Int, text: String) -> Model {
     Some(viewed) if viewed.id == id && viewed.number == number ->
       case json.parse(text, decode.at(["design"], render.design_decoder())) {
         Ok(drawing) ->
-          Model(..model, viewed: Some(Viewed(id, number, Some(drawing), "")))
+          Model(
+            ..model,
+            viewed: Some(Viewed(id, number, Some(drawing), "")),
+            selected: keep_selected(model.selected, drawing),
+          )
         Error(_) ->
           Model(
             ..model,
@@ -977,6 +1008,7 @@ fn load_version(model: Model, id: String, number: Int, text: String) -> Model {
               None,
               failure(text, "This version has no design to show."),
             )),
+            selected: [],
           )
       }
     _ -> model
@@ -1014,7 +1046,7 @@ fn restored(
         False -> model
       }
       let model = case viewing(model, id, number) {
-        True -> Model(..model, viewed: None)
+        True -> Model(..model, viewed: None, selected: [])
         False -> model
       }
       let request = case id == model.open {
@@ -1057,6 +1089,7 @@ fn post(path: String, body: String, msg: fn(String) -> Msg) -> Effect(Msg) {
 }
 
 fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
+  let markers = panel.markers(model.panel, model.open)
   let title = case viewed.drawing {
     Some(drawing) -> drawing.title
     None ->
@@ -1083,16 +1116,29 @@ fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
     case viewed.drawing, tab {
       Some(drawing), Some(UiUx) ->
         html.div(
-          [attribute.class("design-screens")],
-          list.map(drawing.elements, render.draw),
+          [
+            attribute.class("design-screens"),
+            attribute.data("region", ""),
+            event.on_click(ClearSelection),
+          ],
+          list.map(drawing.elements, fn(node) {
+            render.draw_selectable(
+              node,
+              model.selected,
+              markers,
+              ElementClicked,
+            )
+          }),
         )
-      Some(drawing), Some(Architecture) -> diagram.draw(drawing, dict.new())
+      Some(drawing), Some(Architecture) ->
+        diagram.draw(drawing, dict.new(), diagram_selection(model))
       _, _ -> element.none()
     },
     case viewed.error {
       "" -> element.none()
       message -> html.p([attribute.role("alert")], [html.text(message)])
     },
+    note_box(model),
   ]
 }
 
@@ -1211,6 +1257,7 @@ fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
             }
         }
     },
+    note_box(model),
   ]
 }
 
@@ -1237,6 +1284,7 @@ fn clear_history_error(model: Model) -> Model {
 }
 
 fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
+  let model = Model(..model, selected: [])
   case model.drawing {
     Some(drawing) ->
       case render.first_screen(drawing) {
@@ -1297,16 +1345,23 @@ fn screens(model: Model, drawing: render.Design) -> Element(Msg) {
           html.div([attribute.class("design-screens")], [
             render.draw_preview(screen, PreviewClick),
           ])
-        None -> all_screens(drawing)
+        None -> all_screens(model, drawing)
       }
-    None -> all_screens(drawing)
+    None -> all_screens(model, drawing)
   }
 }
 
-fn all_screens(drawing: render.Design) -> Element(Msg) {
+fn all_screens(model: Model, drawing: render.Design) -> Element(Msg) {
+  let markers = panel.markers(model.panel, model.open)
   html.div(
-    [attribute.class("design-screens")],
-    list.map(drawing.elements, render.draw),
+    [
+      attribute.class("design-screens"),
+      attribute.data("region", ""),
+      event.on_click(ClearSelection),
+    ],
+    list.map(drawing.elements, fn(node) {
+      render.draw_selectable(node, model.selected, markers, ElementClicked)
+    }),
   )
 }
 
@@ -1351,17 +1406,28 @@ fn marked_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
           html.div([attribute.class("design-screens")], [
             render.draw_preview(screen, PreviewClick),
           ])
-        None -> marked_all_screens(marked)
+        None -> marked_all_screens(model, marked)
       }
-    None -> marked_all_screens(marked)
+    None -> marked_all_screens(model, marked)
   }
 }
 
-fn marked_all_screens(marked: changes.Marked) -> Element(Msg) {
+fn marked_all_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
+  let markers = panel.markers(model.panel, model.open)
   html.div(
-    [attribute.class("design-screens")],
+    [
+      attribute.class("design-screens"),
+      attribute.data("region", ""),
+      event.on_click(ClearSelection),
+    ],
     list.map(marked.design.elements, fn(node) {
-      render.draw_marked(node, marked.marks)
+      render.draw_marked_selectable(
+        node,
+        model.selected,
+        marked.marks,
+        markers,
+        ElementClicked,
+      )
     }),
   )
 }
@@ -1424,13 +1490,14 @@ fn create_canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
       case tab {
         Architecture ->
           case model.show_changes {
-            True -> marked_diagram(changes.all_added(proposed))
-            False -> diagram.draw(proposed, dict.new())
+            True -> marked_diagram(model, changes.all_added(proposed))
+            False ->
+              diagram.draw(proposed, dict.new(), diagram_selection(model))
           }
         UiUx ->
           case model.show_changes {
-            True -> marked_all_screens(changes.all_added(proposed))
-            False -> all_screens(proposed)
+            True -> marked_all_screens(model, changes.all_added(proposed))
+            False -> all_screens(model, proposed)
           }
       },
     ]
@@ -1452,7 +1519,7 @@ fn proposal_answered(before: Model, after: Model) -> Bool {
 
 fn current_diagram(model: Model) -> Element(Msg) {
   case model.drawing {
-    Some(drawing) -> diagram.draw(drawing, dict.new())
+    Some(drawing) -> diagram.draw(drawing, dict.new(), diagram_selection(model))
     None ->
       case model.design_error {
         "" -> element.none()
@@ -1463,11 +1530,205 @@ fn current_diagram(model: Model) -> Element(Msg) {
 
 fn proposed_diagram(model: Model, proposed: render.Design) -> Element(Msg) {
   case model.show_changes, model.drawing {
-    True, Some(current) -> marked_diagram(changes.mark(current, proposed))
-    _, _ -> diagram.draw(proposed, dict.new())
+    True, Some(current) ->
+      marked_diagram(model, changes.mark(current, proposed))
+    _, _ -> diagram.draw(proposed, dict.new(), diagram_selection(model))
   }
 }
 
-fn marked_diagram(marked: changes.Marked) -> Element(Msg) {
-  diagram.draw(marked.design, marked.marks)
+fn marked_diagram(model: Model, marked: changes.Marked) -> Element(Msg) {
+  diagram.draw(marked.design, marked.marks, diagram_selection(model))
+}
+
+@external(javascript, "./api.mjs", "listen_escape")
+fn listen_escape(dispatch: fn(Nil) -> Nil) -> Nil
+
+@external(javascript, "./api.mjs", "ignore_escape")
+fn ignore_escape() -> Nil
+
+fn select_element(model: Model, id: String, multi: Bool) -> Model {
+  case multi {
+    False -> Model(..model, selected: [id])
+    True ->
+      case list.contains(model.selected, id) {
+        True ->
+          Model(
+            ..model,
+            selected: list.filter(model.selected, fn(other) { other != id }),
+          )
+        False -> Model(..model, selected: list.append(model.selected, [id]))
+      }
+  }
+}
+
+fn keep_selected(
+  selected: List(String),
+  drawing: render.Design,
+) -> List(String) {
+  list.filter(selected, fn(id) { render.has_element(drawing, id) })
+}
+
+fn prune_selection(model: Model) -> Model {
+  let selected = case shown_drawing(model) {
+    Some(drawing) -> keep_selected(model.selected, drawing)
+    None -> []
+  }
+  Model(..model, selected: selected)
+}
+
+fn shown_drawing(model: Model) -> Option(render.Design) {
+  case viewed_for(model) {
+    Some(viewed) -> viewed.drawing
+    None ->
+      case proposal_for(model, model.open) {
+        Some(proposed) if model.view_proposal -> Some(proposed)
+        _ -> model.drawing
+      }
+  }
+}
+
+fn live(model: Model, event: Dynamic) -> #(Model, Effect(Msg)) {
+  let before = model.panel
+  let #(updated, refresh_models) = apply(model, event)
+  let answered = proposal_answered(model, updated)
+  let updated = case answered {
+    True -> Model(..updated, drawing: None, selected: [])
+    False -> updated
+  }
+  let #(after, panel_fx) = panel.follow(before, updated.panel)
+  let follows = case panel.shown(before), panel.shown(after) {
+    Some(a), Some(b) -> a.id == b.id && a.state != b.state
+    _, _ -> False
+  }
+  let attention = panel.needs_attention(before.runs, after.runs)
+  let effects =
+    list.flatten([
+      case updated.designs == model.designs && !answered {
+        True -> []
+        False -> [reload(updated)]
+      },
+      case follows {
+        True -> [effect.map(panel_fx, Panel)]
+        False -> []
+      },
+      case attention {
+        True -> [event.emit("attention", json.null())]
+        False -> []
+      },
+      case refresh_models {
+        True -> [effect.map(panel.refresh_models(after), Panel)]
+        False -> []
+      },
+    ])
+  let model = Model(..updated, panel: after)
+  let fx = case effects {
+    [] -> effect.none()
+    [one] -> one
+    many -> effect.batch(many)
+  }
+  #(model, fx)
+}
+
+fn apply_text(model: Model, text: String) -> Model {
+  case json.parse(text, decode.dynamic) {
+    Ok(event) -> {
+      let #(model, _) = apply(model, event)
+      model
+    }
+    Error(_) -> model
+  }
+}
+
+fn region_selection(
+  selected: List(String),
+  ids: List(String),
+  multi: Bool,
+) -> List(String) {
+  case ids, multi {
+    [], _ -> []
+    _, False -> ids
+    _, True ->
+      list.fold(ids, selected, fn(current, id) {
+        case list.contains(current, id) {
+          True -> current
+          False -> list.append(current, [id])
+        }
+      })
+  }
+}
+
+@external(javascript, "./api.mjs", "listen_region")
+fn listen_region(
+  root: Dynamic,
+  report: fn(
+    Float,
+    Float,
+    Float,
+    Float,
+    List(#(String, Float, Float, Float, Float)),
+    Bool,
+  ) -> Nil,
+) -> Nil
+
+fn watch_region(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
+  listen_region(root, fn(start_x, start_y, end_x, end_y, positions, multi) {
+    let bounds =
+      list.map(positions, fn(position) {
+        let #(id, left, top, right, bottom) = position
+        #(id, region.Rect(left, top, right, bottom))
+      })
+    let ids =
+      region.ids_inside(region.between(start_x, start_y, end_x, end_y), bounds)
+    send(RegionSelected(ids, multi))
+  })
+}
+
+@external(javascript, "./api.mjs", "place_note_box")
+fn place_note_box_at(root: Dynamic, id: String) -> Nil
+
+fn place_note_box(selected: List(String)) -> Effect(Msg) {
+  case selected {
+    [first, ..] ->
+      effect.after_paint(fn(_, root) { place_note_box_at(root, first) })
+    [] -> effect.none()
+  }
+}
+
+fn note_box(model: Model) -> Element(Msg) {
+  case model.preview, model.selected, model.open {
+    None, [_, ..], open if open != "" ->
+      html.div(
+        [attribute.class("design-note"), attribute.data("note-box", "")],
+        [
+          html.label([attribute.attribute("for", "design-note-text")], [
+            html.text("Note"),
+          ]),
+          html.input([
+            attribute.id("design-note-text"),
+            attribute.type_("text"),
+            attribute.value(model.panel.note_text),
+            attribute.attribute("placeholder", "What should the agent know?"),
+            event.on_input(fn(text) { Panel(panel.NoteText(text)) }),
+          ]),
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.disabled(string.trim(model.panel.note_text) == ""),
+              event.on_click(Panel(panel.AddNote(model.open, model.selected))),
+            ],
+            [html.text("Add note")],
+          ),
+        ],
+      )
+    _, _, _ -> element.none()
+  }
+}
+
+fn diagram_selection(model: Model) -> diagram.Selection(Msg) {
+  diagram.Selection(
+    selected: model.selected,
+    markers: panel.markers(model.panel, model.open),
+    on_click: ElementClicked,
+    on_clear: ClearSelection,
+  )
 }

@@ -396,7 +396,8 @@ fn change_run(
             if !open {
                 return board::err("E7003", format!("the {} run has ended", family.kind));
             }
-            note(&mut run, "human", Some(rid), text);
+            let designs = message_notes(top, req, family, status)?;
+            message_note(&mut run, rid, text, designs);
         }
         // An approved proposal is applied in this same operation (D-93), and every
         // answer to one is noted on the run.
@@ -493,12 +494,13 @@ fn start_run(top: &Path, req: &Value, system: System, family: Family, status: &m
     if let Some(open) = run_records(top, family.kind).iter().find(|r| r["state"] != "ended" && on_page(&r["context"]) == context) {
         return board::err("E7003", format!("{} run {} on this context is open", family.kind, open["id"].as_str().unwrap_or("")));
     }
+    let designs = message_notes(top, req, family, status)?;
     let id = unique_id();
     let log = run_dir(top, family.kind).join(format!("{id}.jsonl"));
     let mut run = json!({"id": id, "kind": family.kind, "model": m["id"],
         "effort": m["effort"], "state": "running", "started": now(),
         "log": log, "context": context, "notes": [], "questions": []});
-    note(&mut run, "human", Some(&id), text);
+    message_note(&mut run, &id, text, designs);
     put_run(top, &run)?;
     Ok(run)
 }
@@ -989,6 +991,9 @@ fn runs_list(top: &Path, kind: &str) -> Vec<Value> {
     let mut out = run_records(top, kind);
     for r in out.iter_mut().filter_map(Value::as_object_mut) {
         r.remove("notes");
+        if r.get("state").and_then(Value::as_str) == Some("ended") {
+            r.remove("questions");
+        }
     }
     out.sort_by(|a, b| a["started"].as_u64().cmp(&b["started"].as_u64()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
     out
@@ -1149,4 +1154,35 @@ fn apply_design_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Fai
         Some(number) => format!("Approved and saved version {number}{created}"),
         None => format!("Approved and saved{created}"),
     })
+}
+
+/// The design notes a message carries, resolved now; other run kinds ignore them (D-245).
+fn message_notes(top: &Path, req: &Value, family: Family, status: &mut u16) -> Result<Vec<Value>, Failure> {
+    if family.kind != crate::board::roles::DESIGN_RUN {
+        return Ok(vec![]);
+    }
+    let Some(notes) = req.get("notes") else { return Ok(vec![]) };
+    let Some(notes) = notes.as_array() else {
+        *status = 400;
+        return board::err("E7001", "notes must be a list");
+    };
+    notes
+        .iter()
+        .map(|note| {
+            crate::design::resolve_note(top, note).map_err(|(code, failure)| {
+                *status = code;
+                failure
+            })
+        })
+        .collect()
+}
+
+/// Records the human's message, with any notes pointing at design elements.
+fn message_note(run: &mut Value, rid: &str, text: &str, designs: Vec<Value>) {
+    note(run, "human", Some(rid), text);
+    if !designs.is_empty()
+        && let Some(last) = run["notes"].as_array_mut().and_then(|notes| notes.last_mut())
+    {
+        last["designNotes"] = Value::Array(designs);
+    }
 }

@@ -6,35 +6,12 @@ frontend bundle, then the binary, because the pages are built into the binary.
 Setup (once, by the human): pip install playwright; playwright install chromium.
 """
 import sys
-import os
 from pathlib import Path
-import subprocess
 
-from layout_audit import Fixture, READY, fail
+from layout_audit import Fixture, READY, built_binary, fail
 
 
 CLI = Path(__file__).resolve().parent.parent
-
-
-def binary():
-    if os.environ.get('SOLACE_TEST_BIN'):
-        return os.environ['SOLACE_TEST_BIN']
-    bundle = subprocess.run(
-        ['sh', '-c', 'gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser'],
-        cwd=CLI/'frontend',
-        text=True,
-        capture_output=True,
-    )
-    if bundle.returncode != 0:
-        fail('frontend build failed:\n' + bundle.stderr[-4000:], 1)
-    built = subprocess.run(
-        ['cargo', 'build', '--manifest-path', str(CLI/'Cargo.toml')],
-        text=True,
-        capture_output=True,
-    )
-    if built.returncode != 0:
-        fail('cargo build failed:\n' + built.stderr[-4000:], 1)
-    return str(CLI/'target/debug/solace')
 
 
 DEEP = r"""
@@ -148,7 +125,7 @@ def type_in(page, editor, text):
 
 
 def main():
-    fixture = Fixture(binary())
+    fixture = Fixture(built_binary())
     try:
         fixture.start()
         task = fixture.api('POST', '/p/a/tasks', {'title': 'Draft flow', 'body': ''})

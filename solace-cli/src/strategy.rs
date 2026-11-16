@@ -684,6 +684,8 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "Cite code by name (`lockdown.dispatch`), not `file:line`: line numbers move. ",
     "Name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
     "written bare and never inside backticks: a bare reference renders as a link with the record's title. ",
+    "A human's message may carry notes: each names a design, one or more elements in it and some text. ",
+    "Each element arrives with its ID, type and the elements it sits inside, top first. ",
     "The human's message is the last note. ",
     "Reply with `design note`: `command` is just `design note`, and the whole reply goes in `text`, ",
     "in short Markdown: lead with the answer, then only what the human needs to act on. ",
@@ -739,7 +741,12 @@ pub(super) fn design_brief(top: &Path, run: &Value, _involvement: &str, _detail:
     let notes: Vec<String> = run["notes"]
         .as_array()
         .map(|ns| {
-            ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect()
+            ns.iter()
+                .map(|n| {
+                    let text = super::briefs::message_text(n).replace('\n', "\n  ");
+                    format!("- {}: {}", n["author"].as_str().unwrap_or(""), text)
+                })
+                .collect()
         })
         .unwrap_or_default();
     if !notes.is_empty() {

@@ -2865,4 +2865,66 @@ mod tests {
         assert_eq!(refused(json!({"title": "x", "feature": f["id"], "milestone": m["id"]})), "E7001");
         assert_eq!(board::all_tasks(&root).unwrap().len(), before, "a refused create stores nothing");
     }
+
+    /// D-245: a message's notes reach the run with each element's type and
+    /// parents; a bad element or design refuses the whole message and writes
+    /// nothing to the run or the design.
+    #[test]
+    fn a_design_message_carries_notes() {
+        let root = root();
+        let config = || -> Result<Value, Failure> {
+            Ok(json!({
+                "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+                "role_models": {"designer": {"default": "fake"}}
+            }))
+        };
+        let call = |m: &str, parts: &[&str], body: Value| super::strategy::design_runs_with(&root, m, parts, body, config);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"},
+                "children": [{
+                    "id": "go",
+                    "type": "button",
+                    "properties": {"width": "hug", "height": "hug", "label": "Go"}
+                }]
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        let file = root.join("designs").join(format!("{id}.json"));
+        let before_file = std::fs::read(&file).unwrap();
+        let before_versions = crate::design::versions(&root, id).unwrap();
+        let note = json!({"design": id, "elements": ["go"], "text": "Make this primary"});
+        let run = call("POST", &[], json!({"text":"Start","notes":[note.clone()]})).unwrap();
+        let rid = run["id"].as_str().unwrap();
+        let carried = &run["notes"][0]["designNotes"][0];
+        assert_eq!(carried["design"], id);
+        assert_eq!(carried["elements"][0]["type"], "button");
+        assert_eq!(carried["elements"][0]["parents"], json!([{"id":"root","type":"screen"}]));
+        super::strategy::update_run(&root, rid, |r| {
+            r["state"] = json!("waiting");
+            Ok(())
+        })
+        .unwrap();
+        let before = super::strategy::strategy_run(&root, rid).unwrap();
+        for (why, body) in [
+            ("nope", json!({"text":"Again","notes":[{"design":id,"elements":["nope"],"text":"?"}]})),
+            ("ffffffffffffffff", json!({"text":"Again","notes":[{"design":"ffffffffffffffff","elements":["go"],"text":"?"}]})),
+        ] {
+            let e = call("POST", &[rid, "notes"], body).unwrap_err();
+            assert_eq!(e.0, 404, "{why}: {}", e.1.0);
+            assert!(e.1.0.contains(why), "{why}: {}", e.1.0);
+            assert_eq!(super::strategy::strategy_run(&root, rid).unwrap(), before);
+        }
+        let noted = call("POST", &[rid, "notes"], json!({"text":"Again","notes":[note]})).unwrap();
+        assert_eq!(noted["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(std::fs::read(&file).unwrap(), before_file);
+        assert_eq!(crate::design::versions(&root, id).unwrap(), before_versions);
+    }
 }

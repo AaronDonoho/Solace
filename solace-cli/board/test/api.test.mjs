@@ -272,3 +272,32 @@ test('the page registers the board and the task detail as elements', async () =>
     [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location] = saved;
   }
 });
+
+// The startup trim sends only the run fields a card reads. This replay matches
+// the shape it sends for the workspace the investigation measured.
+test('a startup-sized task replay catches up well under 50ms', () => {
+  const run = { id: 'r1', kind: 'work', state: 'ended', model: 'm', effort: '', log: '/logs/r1',
+    outcome: 'finished', started: 1, ended: 2, used: {}, failed: false };
+  const tasks = Array.from({ length: 878 }, (_, i) => ({
+    id: 't' + i, title: 'Task ' + i, body: '', column: 'planning', rank: i, runs: [run],
+    notes: [], questions: [], changes: [], stamps: {}, links: [],
+  }));
+  const frames = Array.from({ length: 13 }, (_, i) =>
+    JSON.stringify({ project: '.', tasks: tasks.slice(i * 68, (i + 1) * 68) }));
+  let model, effect;
+  [model, effect] = board.init();
+  [model, effect] = board.update(model, new board.ProjectsLoaded(JSON.stringify({
+    workspace: false, projects: [{ dir: '.', name: 'fixture', base: '' }],
+  })));
+  for (const frame of frames) [model, effect] = board.update(model, new board.Live(frame));
+  let turns = 0, total = 0, longest = 0;
+  while (!model.caught_up && turns < 100) {
+    const started = performance.now();
+    [model, effect] = board.update(model, new board.CaughtUp());
+    const elapsed = performance.now() - started;
+    total += elapsed; longest = Math.max(longest, elapsed); turns++;
+  }
+  console.log(`board CaughtUp: ${total.toFixed(1)} ms over ${turns} turns, longest ${longest.toFixed(1)} ms`);
+  expect(model.caught_up).toBe(true);
+  expect(longest).toBeLessThan(50);
+});

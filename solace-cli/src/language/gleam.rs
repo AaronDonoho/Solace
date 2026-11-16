@@ -86,8 +86,8 @@ impl Language for Gleam {
     fn relocate(&self, line: &str, files: &[FileMap]) -> String {
         relocate(line, files)
     }
-    fn failures(&self, output: &str) -> BTreeMap<String, (String, String)> {
-        failures(output)
+    fn failures(&self, output: &str, full: bool) -> BTreeMap<String, (String, String)> {
+        failures(output, full)
     }
     fn quiet(&self, output: &str) -> String {
         quiet(output)
@@ -650,7 +650,7 @@ fn quiet(output: &str) -> String {
 /// Failed tests in `gleam test` output by `module.name` (Erlang prints
 /// modules as `pilot@x_test`): whether wrong or unfinished, and the failure
 /// block (`assert …`, `test:`, `code:`, `left:`, `right:`, `info:`).
-pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
+pub fn failures(output: &str, full: bool) -> BTreeMap<String, (String, String)> {
     let clean = strip_ansi(output);
     let mut out = BTreeMap::new();
     let mut block: Vec<&str> = vec![];
@@ -659,7 +659,9 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
         if (start || line.is_empty()) && !block.is_empty() {
             if let Some(name) = block.iter().find_map(|l| l.strip_prefix("test: ")) {
                 let kind = if block[0].starts_with("todo ") { "unfinished" } else { "wrong" };
-                out.insert(name.replace('@', "/"), (kind.into(), block.join("\n")));
+                let text = block.join("\n");
+                let text = if full { text } else { crate::diagnostics::shorten_assertions(&text) };
+                out.insert(name.replace('@', "/"), (kind.into(), text));
             }
             block.clear();
         }

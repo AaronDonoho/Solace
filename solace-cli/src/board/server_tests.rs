@@ -417,3 +417,93 @@ fn design_runs_replay_apart_from_strategy_runs() {
     assert_eq!(strategy, json!([]), "{state}");
 }
 
+/// A new stream's task lists carry only the run fields a page reads, while
+/// opening the task still returns them whole.
+#[test]
+fn a_snapshot_trims_task_runs_but_a_task_opens_whole() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let mut t = crate::board::task_model::new_task("Sized", "", &json!("backlog"), 1.);
+    let id = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running","changes":["app.main"]}]);
+    crate::tasks::put(&p.store, &t).unwrap();
+    let board = std::sync::Arc::new(Board::new(p.root.clone(), 0));
+    let mut events = Events::new(board, None, Some("{\"tasks\":0}"));
+    let state = events.snapshot().unwrap();
+    let tasks = state
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .find_map(|event| event.get("tasks").cloned())
+        .unwrap_or_else(|| panic!("no tasks event in {state}"));
+    let listed = tasks.as_array().unwrap().iter().find(|t| t["id"] == id.as_str()).unwrap();
+    assert!(listed["runs"][0].get("changes").is_none(), "{listed}");
+    let opened = crate::board::task_model::read_task_api(&p.root, &["tasks", id.as_str()]).unwrap();
+    assert_eq!(opened["runs"][0]["changes"], json!(["app.main"]), "{opened}");
+}
+
+/// A task with no project still rides the root's stream, trimmed.
+#[test]
+fn homeless_tasks_on_the_root_stream_keep_only_listed_run_fields() {
+    let root = crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        (
+            ".solace/tasks/t1.json",
+            concat!(
+                r#"{"id":"t1","column":"backlog","home":"web","scope":["sub","web"],"#,
+                r#""runs":[{"id":"r1","kind":"work","state":"running","changes":["app.main"]}],"notes":[]}"#,
+            ),
+        ),
+        ("sub/.solace/keep", ""),
+    ]);
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let events = Events::new(board, None, Some("{\"tasks\":0}"));
+    let state = events.strategy_state();
+    let homeless = state
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .find(|event| event["noProject"] == json!(true))
+        .unwrap_or_else(|| panic!("no homeless task in {state}"));
+    let t = homeless["tasks"].as_array().unwrap().iter().find(|t| t["id"] == "t1").unwrap();
+    assert!(t["runs"][0].get("changes").is_none(), "{t}");
+}
+
+/// Answered questions leave a run list only once the run ended; an open run
+/// keeps them, and design runs follow the same rule.
+#[test]
+fn run_lists_drop_questions_only_from_ended_runs() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = crate::scope::top(&p.root);
+    let strategy = top.join(".solace/strategy/runs");
+    std::fs::create_dir_all(&strategy).unwrap();
+    std::fs::write(
+        strategy.join("ended.json"),
+        json!({"id":"ended","kind":"strategy","state":"ended","started":1,"questions":[{"id":"q1"}],"notes":[]}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        strategy.join("open.json"),
+        json!({"id":"open","kind":"strategy","state":"running","started":2,"questions":[{"id":"q2"}],"notes":[]}).to_string(),
+    )
+    .unwrap();
+    let design_dir = top.join(".solace/design/runs");
+    std::fs::create_dir_all(&design_dir).unwrap();
+    std::fs::write(
+        design_dir.join("d1.json"),
+        json!({"id":"d1","kind":"design","state":"ended","started":3,"questions":[{"id":"q3"}],"notes":[]}).to_string(),
+    )
+    .unwrap();
+    let board = std::sync::Arc::new(Board::new(p.root.clone(), 0));
+    let events = Events::new(board, None, Some("{\"tasks\":0}"));
+    let state = events.strategy_state();
+    let data: Vec<Value> =
+        state.lines().filter_map(|line| line.strip_prefix("data: ")).map(|data| serde_json::from_str(data).unwrap()).collect();
+    let runs = data.iter().find_map(|event| event.get("strategyRuns").cloned()).unwrap();
+    let ended = runs.as_array().unwrap().iter().find(|run| run["id"] == "ended").unwrap();
+    let open = runs.as_array().unwrap().iter().find(|run| run["id"] == "open").unwrap();
+    assert!(ended.get("questions").is_none(), "{ended}");
+    assert_eq!(open["questions"], json!([{"id":"q2"}]), "{open}");
+    let design = data.iter().find_map(|event| event.get("designRuns").cloned()).unwrap();
+    assert!(design[0].get("questions").is_none(), "{design}");
+}
+

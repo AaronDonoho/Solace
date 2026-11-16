@@ -3559,7 +3559,8 @@ pub fn an_action_carries_the_typed_text_test() {
 }
 
 /// The note editor offers Discuss between runs, End Discussion during one,
-/// and no Add note action while a discussion is going.
+/// opens by itself while a discussion is going, and stays closed for other
+/// runs and after a discussion has ended.
 pub fn the_notes_editor_offers_discuss_or_end_discussion_test() {
   let idle =
     loaded(
@@ -3576,9 +3577,11 @@ pub fn the_notes_editor_offers_discuss_or_end_discussion_test() {
     loaded(
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
     )
-  let #(discussing, _) = task.update(discussing, task.WriteNote)
-  let actions =
-    between(body(discussing), "class=\"composer-actions\"", "</div>")
+  let #(discussing, _) = task.update(discussing, task.Tab("notes"))
+  let page = body(discussing)
+  page |> string.contains("id=\"note-text\"") |> should.be_true
+  page |> string.contains("class=\"add-note\"") |> should.be_false
+  let actions = between(page, "class=\"composer-actions\"", "</div>")
   actions
   |> string.contains(">End Discussion</span>")
   |> should.be_true
@@ -3591,13 +3594,18 @@ pub fn the_notes_editor_offers_discuss_or_end_discussion_test() {
     loaded(
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
     )
-  let #(working, _) = task.update(working, task.WriteNote)
-  let actions = between(body(working), "class=\"composer-actions\"", "</div>")
-  actions
-  |> string.contains("aria-label=\"Add note\"")
-  |> should.be_true
-  actions |> string.contains(">Discuss</span>") |> should.be_false
-  actions |> string.contains(">End Discussion</span>") |> should.be_false
+  let #(working, _) = task.update(working, task.Tab("notes"))
+  let page = body(working)
+  page |> string.contains("id=\"note-text\"") |> should.be_false
+  page |> string.contains("class=\"add-note\"") |> should.be_true
+  let ended =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r\",\"kind\":\"discuss\",\"state\":\"ended\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
+    )
+  let #(ended, _) = task.update(ended, task.Tab("notes"))
+  let page = body(ended)
+  page |> string.contains("id=\"note-text\"") |> should.be_false
+  page |> string.contains("class=\"add-note\"") |> should.be_true
 }
 
 /// A note send that fails keeps its editor open with the text, so it can be
@@ -4704,4 +4712,23 @@ pub fn a_live_run_hides_agent_buttons_test() {
   ended |> string.contains(">New agent</button>") |> should.be_true
   ended |> string.contains(">Review</button>") |> should.be_true
   ended |> string.contains(">Back to planning</button>") |> should.be_true
+}
+
+/// A question waiting for an answer opens the Notes editor without Add note;
+/// once it is answered the plus returns.
+pub fn the_notes_editor_opens_for_a_waiting_question_test() {
+  let waiting =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[]}],\"runs\":[]}",
+    )
+  let #(waiting, _) = task.update(waiting, task.Tab("notes"))
+  body(waiting) |> string.contains("id=\"note-text\"") |> should.be_true
+  body(waiting) |> string.contains("class=\"add-note\"") |> should.be_false
+  let answered =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[],\"answer\":\"Because\"}],\"runs\":[]}",
+    )
+  let #(answered, _) = task.update(answered, task.Tab("notes"))
+  body(answered) |> string.contains("id=\"note-text\"") |> should.be_false
+  body(answered) |> string.contains("class=\"add-note\"") |> should.be_true
 }

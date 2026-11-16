@@ -287,7 +287,7 @@ pub fn run_tests(root: PathBuf, tid: String) {
             let _ = fs::remove_dir_all(&dir);
             let (state, results) = match output {
                 Ok(log) => {
-                    let failed = lang.failures(&log);
+                    let failed = lang.failures(&log, false);
                     let compile = log.contains("error:") && failed.is_empty();
                     let results = tests
                         .iter()

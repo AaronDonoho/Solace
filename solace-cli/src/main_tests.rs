@@ -1947,7 +1947,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "25084f455b58d1963e2a72aa0c78efd003291a41543c931470d5b46555a6d5c2");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "9dfdc9c4ebb63c811fab9755e4fcdf19646d612e6d87fb607fe5372f90c31c84");
 }
 
 #[test]
@@ -3198,4 +3198,41 @@ fn an_import_dropped_by_a_resubmit_is_added_to_the_header() {
     assert!(out.contains("added `import helper` to app_test"), "{out}");
     let file = fs::read_to_string(store.root.join("test/app_test.gleam")).unwrap();
     assert_eq!(file.matches("import helper").count(), 1, "{file}");
+}
+
+/// A long value in a failed assertion is cut to the part that explains it.
+#[test]
+fn a_long_assertion_value_reports_the_part_that_matters() {
+    let page = format!("<button data-note=\"1\">{}</button>", "x".repeat(400));
+    let test = format!(
+        "import gleam/string\n\npub fn notes_test() {{\n  let rendered = \"{}\"\n \
+         assert string.contains(rendered, \"data-note=\\\"1, 2\\\"\")\n}}\n",
+        page.replace('"', "\\\"")
+    );
+    let store = Scratch::new()
+        .with(&[("src/app.gleam", "pub fn page() -> String {\n  \"\"\n}\n"), ("test/app_test.gleam", &test)])
+        .with_packages()
+        .import();
+    let err = store.test(&["--all"]).unwrap_err().0;
+    assert!(err.contains("notes_test"), "{err}");
+    assert!(err.contains("data-note=\"1\">"), "{err}");
+    assert!(err.contains("chars; test --full shows it whole)"), "{err}");
+    assert!(!err.contains(&"x".repeat(300)), "{err}");
+}
+
+/// `--full` keeps the whole value when the window is not enough.
+#[test]
+fn a_long_assertion_value_can_be_shown_whole() {
+    let page = format!("<button data-note=\"1\">{}</button>", "x".repeat(400));
+    let test = format!(
+        "import gleam/string\n\npub fn notes_test() {{\n  let rendered = \"{}\"\n \
+         assert string.contains(rendered, \"data-note=\\\"1, 2\\\"\")\n}}\n",
+        page.replace('"', "\\\"")
+    );
+    let store = Scratch::new()
+        .with(&[("src/app.gleam", "pub fn page() -> String {\n  \"\"\n}\n"), ("test/app_test.gleam", &test)])
+        .with_packages()
+        .import();
+    let err = store.test(&["--all", "--full"]).unwrap_err().0;
+    assert!(err.contains(&"x".repeat(400)), "{err}");
 }

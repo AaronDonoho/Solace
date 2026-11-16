@@ -86,7 +86,7 @@ A **design run** is an agent working out a design with the human on the Design p
 | --- | --- |
 | `id`, `model`, `effort?`, `state`, `started`, `ended?`, `outcome?`, `log` | As a task's run (§1 `runs`); `kind` is always `design`, `outcome` is `planned` or `stopped` |
 | `context` | The whole Design page: `{kind: "page"}` |
-| `notes` | As a strategy run's: the human's messages, the agent's replies, and `solace` notes |
+| `notes` | As a strategy run's: the human's messages, the agent's replies, and `solace` notes. A human note sent with notes on elements also holds `designNotes`, each with its design, title, text and elements (`id`, `type` and `parents`, top first) as they were when it was sent (D-245) |
 | `questions` | As a strategy run's; a design proposal's `proposal` holds element operations and the design it changes (D-241) |
 
 One design run is open at a time. Its scope is every design, the vision and every persona; it reads code in any project and changes none. A design is reference material and an element is its primitive. It proposes element operations with `design propose` (D-241); a proposal is a question for the human, and nothing is saved until one is accepted; an accept saves it through the design save path as a version sourced from the run (D-243).
@@ -286,8 +286,8 @@ These answer at the root only.
 | --- | --- |
 | `GET /design/runs` | All design runs, without `notes` |
 | `GET /design/runs/{rid}` | One run in full, plus `transcript` as `GET /tasks/{id}/runs/{rid}` gives it |
-| `POST /design/runs` `{model?, effort?, text, context}` | Starts a run; `text` is required (`E7001`) and is its first note. `context` is `{kind: "page"}` or absent; any other context is refused (`E7001`). A request naming no model uses the Designer role's model (`role_models.designer.default`); with none there it is `E7001`. Refused while a design run is open (`E7003`), or for an unavailable model (`E7011`) |
-| `POST /design/runs/{rid}/notes` `{text}` | The human's next message: the waiting agent gets it. Refused once the run has ended (`E7003`) |
+| `POST /design/runs` `{model?, effort?, text, context, notes?}` | Starts a run; `text` is required (`E7001`) and is its first note. `notes` are the notes that point at elements (D-245). `context` is `{kind: "page"}` or absent; any other context is refused (`E7001`). A request naming no model uses the Designer role's model (`role_models.designer.default`); with none there it is `E7001`. Refused while a design run is open (`E7003`), or for an unavailable model (`E7011`) |
+| `POST /design/runs/{rid}/notes` `{text, notes?}` | The human's next message, with any notes that point at elements (D-245): the waiting agent gets it once. Refused once the run has ended (`E7003`) |
 | `POST /design/runs/{rid}/end` | Ends the open run with outcome `planned` (`E7003` if ended); its notes become one transcript note, as `end_discussion` does (§2) |
 | `POST /design/runs/{rid}/stop` | Kills its agent and ends it with outcome `stopped`, with the same transcript note |
 

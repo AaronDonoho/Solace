@@ -29,7 +29,7 @@ fn pending_notes(notes: &[Value], run: &Value, rid: Option<&str>) -> Vec<(String
         .filter(|n| n["author"] == "human" && rid.is_none_or(|rid| n["run"] == rid))
         .filter_map(|n| {
             let key = crate::board::briefs::note_fingerprint(n);
-            (!delivered.contains(&key)).then(|| (key, n["text"].as_str().unwrap_or("").to_string()))
+            (!delivered.contains(&key)).then(|| (key, crate::board::briefs::message_text(n)))
         })
         .collect()
 }

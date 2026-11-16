@@ -752,6 +752,27 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
               model.prefix,
               fn(text) { send(Live(text)) },
               fn() { send(CaughtUp) },
+              [
+                "task",
+                "tasks",
+                "workflow",
+                "removed",
+                "milestones",
+                "features",
+                "milestone",
+                "feature",
+                "removedMilestone",
+                "removedFeature",
+                "vision",
+                "personas",
+                "roleModels",
+                "strategyRuns",
+                "strategyRun",
+                "noProject",
+                "project",
+                "projects",
+                "message",
+              ],
             ),
           ),
         )
@@ -3543,14 +3564,24 @@ fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
       })
     }
     CaughtUp -> {
-      let model = restore_forms(resync(settle(Model(..model, caught_up: True))))
-      Some(#(
-        model,
-        effect.batch([
-          get(model, "/models", ModelsRefreshed),
-          get(model, "/role-models", RoleModelsLoaded),
-        ]),
-      ))
+      let #(model, more) = catch_up(model)
+      case more {
+        True ->
+          Some(#(
+            model,
+            effect.from(fn(send) { after(0, fn() { send(CaughtUp) }) }),
+          ))
+        False -> {
+          let model = restore_forms(resync(Model(..model, caught_up: True)))
+          Some(#(
+            model,
+            effect.batch([
+              get(model, "/models", ModelsRefreshed),
+              get(model, "/role-models", RoleModelsLoaded),
+            ]),
+          ))
+        }
+      }
     }
     _ -> None
   }
@@ -5075,5 +5106,37 @@ fn choose_plan_model(model: Model) -> Model {
         plan_source: solace_task.RoleDefault,
       )
     }
+  }
+}
+
+/// Applies one held message, so a large replay lands across turns and the page
+/// can answer a click; `True` means another known message waits.
+fn catch_up(model: Model) -> #(Model, Bool) {
+  let #(found, rest) = first_known(model, list.reverse(model.replay))
+  let model = Model(..model, replay: list.reverse(rest))
+  case found {
+    None -> #(model, False)
+    Some(text) -> {
+      let model = hand(live(model, text), text)
+      #(model, list.any(rest, fn(t) { knows(model, t) }))
+    }
+  }
+}
+
+/// The oldest held message whose project is listed, and the others in order.
+fn first_known(
+  model: Model,
+  texts: List(String),
+) -> #(Option(String), List(String)) {
+  case texts {
+    [] -> #(None, [])
+    [text, ..rest] ->
+      case knows(model, text) {
+        True -> #(Some(text), rest)
+        False -> {
+          let #(found, kept) = first_known(model, rest)
+          #(found, [text, ..kept])
+        }
+      }
   }
 }

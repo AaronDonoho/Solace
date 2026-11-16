@@ -1020,3 +1020,73 @@ const EDGE: ElementType = ElementType {
     properties: &[("from", ValueKind::Node), ("to", ValueKind::Node), ("label", ValueKind::Text)],
     required: &["from", "to"],
 };
+
+/// The element `id` in `design`, with its type and its ancestors, top first.
+pub(crate) fn element_details(design: &Value, id: &str) -> Option<Value> {
+    fn walk(elements: &[Value], id: &str, parents: &mut Vec<Value>) -> Option<Value> {
+        for element in elements {
+            if element.get("id").and_then(Value::as_str) == Some(id) {
+                return Some(serde_json::json!({
+                    "id": id,
+                    "type": element.get("type").and_then(Value::as_str),
+                    "parents": parents.clone(),
+                }));
+            }
+            if let Some(children) = element.get("children").and_then(Value::as_array) {
+                parents.push(serde_json::json!({
+                    "id": element.get("id").and_then(Value::as_str),
+                    "type": element.get("type").and_then(Value::as_str),
+                }));
+                if let Some(found) = walk(children, id, parents) {
+                    return Some(found);
+                }
+                parents.pop();
+            }
+        }
+        None
+    }
+    walk(design.get("elements").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]), id, &mut vec![])
+}
+
+fn note_invalid(why: impl std::fmt::Display) -> Failure {
+    Failure(format!("E7001 {why}"), 1)
+}
+
+/// A message's design note (D-245): its design and text, and each named element
+/// with its type and ancestors, worked out when the message is sent.
+pub(crate) fn resolve_note(top: &std::path::Path, value: &Value) -> Result<Value, (u16, Failure)> {
+    let object = value.as_object().ok_or_else(|| (400, note_invalid("a note must be a JSON object")))?;
+    unknown_keys(object, &["design", "elements", "text"], "a note").map_err(|e| (400, e))?;
+    let design_id = object
+        .get("design")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| (400, note_invalid("a note needs a design")))?;
+    let text = object
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| (400, note_invalid("a note needs text")))?;
+    let ids = object
+        .get("elements")
+        .and_then(Value::as_array)
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| (400, note_invalid("a note needs at least one element")))?;
+    let design = show(top, design_id).map_err(|failure| {
+        let status = if failure.0.starts_with("E7023") { 404 } else { 409 };
+        (status, failure)
+    })?;
+    let elements = ids
+        .iter()
+        .map(|id| {
+            let id = id.as_str().ok_or_else(|| (400, note_invalid("a note's elements must be ids")))?;
+            element_details(&design, id).ok_or_else(|| (404, Failure(format!("E7023 unknown element {id} in design {design_id}"), 1)))
+        })
+        .collect::<Result<Vec<Value>, (u16, Failure)>>()?;
+    Ok(serde_json::json!({
+        "design": design_id,
+        "title": design["title"],
+        "text": text,
+        "elements": elements,
+    }))
+}

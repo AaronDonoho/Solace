@@ -249,3 +249,50 @@ fn workflow_names_no_action_role() {
     assert!(w.get("roles").is_none());
 }
 
+/// A list, and so every stream's tasks, carries only the run fields a page
+/// reads; opening the task still shows its runs whole.
+#[test]
+fn a_listed_task_keeps_only_the_run_fields_a_page_reads() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let mut t = new_task("Sized", "", &json!("backlog"), 1.);
+    let id = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{
+        "id":"r1","kind":"work","state":"running","model":"m","effort":"high","log":"/l",
+        "outcome":null,"started":1,"ended":null,"used":{"m":"m1"},"failed":false,
+        "changes":["app.main"],"context":{"page":"design"},"notes":["old"],
+    }]);
+    crate::tasks::put(&p.store, &t).unwrap();
+    let listed = listed(&p.root).unwrap().into_iter().find(|t| t["id"] == id.as_str()).unwrap();
+    assert_eq!(
+        listed["runs"][0],
+        json!({"id":"r1","kind":"work","state":"running","model":"m","effort":"high","log":"/l",
+                "outcome":null,"started":1,"ended":null,"used":{"m":"m1"},"failed":false}),
+        "{listed}"
+    );
+    let opened = read_task_api(&p.root, &["tasks", id.as_str()]).unwrap();
+    assert_eq!(opened["runs"][0]["changes"], json!(["app.main"]), "{opened}");
+}
+
+#[test]
+fn a_discussion_note_holds_attention() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("Talk", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"running"}]);
+    message(&w, &mut t, &json!({"kind":"agent","task":"t","run":"r1","command":"note","text":"Hello."})).unwrap();
+    assert_eq!(t["runs"][0]["state"], "waiting");
+    assert_eq!(t["attention"]["reason"], DISCUSSION_WAITING);
+    assert_eq!(t["attention"]["hold"], true);
+}
+
+#[test]
+fn resuming_a_waiting_discussion_keeps_its_attention() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("Talk", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"waiting"}]);
+    t["questions"] = json!([]);
+    t["attention"] = json!({"reason":DISCUSSION_WAITING,"time":1,"hold":true});
+    continue_answered(&mut t);
+    assert_eq!(t["runs"][0]["state"], "waiting");
+    assert_eq!(t["attention"]["hold"], true);
+}
+

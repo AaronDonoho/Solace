@@ -3142,10 +3142,28 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
     )
     .unwrap();
     std::fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\n## Notes\n").unwrap();
-    let run = json!({"context":{"kind":"page"},"notes":[{"author":"human","text":"Make a login screen"}]});
+    let run = json!({"context":{"kind":"page"},"notes":[{
+        "author":"human",
+        "text":"Make a login screen",
+        "designNotes":[{
+            "design":"0123456789abcdef",
+            "title":"Home",
+            "text":"the button",
+            "elements":[{"id":"go","type":"button","parents":[{"id":"root","type":"screen"}]}]
+        }]
+    }]});
     let brief = crate::board::strategy::design_brief(&top, &run, "engineer", "standard", "balanced");
     assert!(brief.contains(crate::board::strategy::DESIGN_ROLE), "{brief}");
-    for text in ["A calm, clear app.", "Ada\n  Objectives: Ship it.", "- D-1 First thing", "Layout and color.", "Make a login screen"] {
+    for text in [
+        "A calm, clear app.",
+        "Ada\n  Objectives: Ship it.",
+        "- D-1 First thing",
+        "Layout and color.",
+        "Make a login screen",
+        "Notes:",
+        "design Home (0123456789abcdef): the button",
+        "element go (button); parents: root (screen)",
+    ] {
         assert!(brief.contains(text), "{text}: {brief}");
     }
     for guidance in [
@@ -3157,6 +3175,9 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
         "An Approve answer means the design was saved",
         "a refusal means the design changed after you proposed it",
         "a Reject answer means nothing was saved",
+        "A human's message may carry notes",
+        "each names a design, one or more elements in it and some text",
+        "Each element arrives with its ID, type and the elements it sits inside, top first",
     ] {
         assert!(brief.contains(guidance), "{guidance}: {brief}");
     }
@@ -3286,4 +3307,32 @@ fn an_open_run_blocks_agents_and_back_to_planning() {
     }
     put("assigned", "work", "ended");
     assert!(act("to_planning").is_ok());
+}
+
+#[test]
+fn a_human_note_clears_a_waiting_discussion() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Talk"})).unwrap();
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"waiting"}]);
+    t["attention"] = json!({"reason":crate::board::task_model::DISCUSSION_WAITING,"time":1,"hold":true});
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let t = api(&s.root, "POST", &format!("/tasks/{tid}/notes"), json!({"text":"Hello."})).unwrap();
+    assert!(t["attention"].is_null());
+    assert_eq!(t["notes"][0]["run"], "r1");
+}
+
+#[test]
+fn ending_a_waiting_discussion_clears_attention() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Talk"})).unwrap();
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"waiting"}]);
+    t["attention"] = json!({"reason":crate::board::task_model::DISCUSSION_WAITING,"time":1,"hold":true});
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let t = api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"end_discussion"})).unwrap();
+    assert!(t["attention"].is_null());
+    assert_eq!(t["runs"][0]["outcome"], "discussed");
 }

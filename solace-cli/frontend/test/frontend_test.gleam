@@ -847,6 +847,7 @@ pub fn the_knowledgebase_shows_the_guide_test() {
       "<section id=\"" <> s.id <> "\"><h2>" <> s.title <> "</h2>",
     )
   })
+  assert string.contains(page, "a discussion is waiting for your reply")
   assert string.contains(page, "Using Solace")
   assert !string.contains(page, "This guide is a separate page")
   assert !string.contains(page, "Back to the board")

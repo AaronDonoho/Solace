@@ -1026,3 +1026,40 @@ pub(crate) fn task_text(t: &Value) -> String {
 
 /// What every brief asks about user-interface details.
 pub(crate) const UI_DETAILS_ASK: &str = "Don't add user-interface details (labels, wording, indicators, colors, new buttons or screens, layout) the task or human didn't ask for; ask the human when one matters, and report user-interface behavior that is broken.";
+
+/// A human's message, with any design notes it carries (D-245).
+pub(crate) fn message_text(note: &Value) -> String {
+    let mut text = note["text"].as_str().unwrap_or("").trim().to_string();
+    let notes = note["designNotes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if notes.is_empty() {
+        return text;
+    }
+    text += "\n\nNotes:";
+    for note in notes {
+        text += &format!(
+            "\n- design {} ({}): {}",
+            note["title"].as_str().unwrap_or(""),
+            note["design"].as_str().unwrap_or(""),
+            note["text"].as_str().unwrap_or("").trim()
+        );
+        for element in note["elements"].as_array().into_iter().flatten() {
+            text += &format!(
+                "\n  - element {} ({}); parents: {}",
+                element["id"].as_str().unwrap_or(""),
+                element["type"].as_str().unwrap_or(""),
+                parents_text(element)
+            );
+        }
+    }
+    text
+}
+
+fn parents_text(element: &Value) -> String {
+    let parents: Vec<String> = element["parents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|parent| format!("{} ({})", parent["id"].as_str().unwrap_or(""), parent["type"].as_str().unwrap_or("")))
+        .collect();
+    if parents.is_empty() { "none".into() } else { parents.join(", ") }
+}

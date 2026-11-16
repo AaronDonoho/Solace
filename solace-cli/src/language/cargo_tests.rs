@@ -110,7 +110,7 @@ fn libtest_failures_and_totals_are_read() {
         "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
     );
     assert_eq!(totals(output), (1, 1));
-    let failed = failures(output);
+    let failed = failures(output, false);
     assert_eq!(failed.len(), 1);
     assert!(failed["board::tests::bad"].1.contains("assertion failed"), "{failed:?}");
 }
@@ -232,7 +232,7 @@ fn a_failed_tests_captured_output_is_kept_whole() {
         "test m::ok ... ok\nvalue: 3\n\nfailures:\n    m::bad\n\n",
         "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
     );
-    let failed = failures(output);
+    let failed = failures(output, false);
     assert_eq!(failed.len(), 1);
     let text = &failed["m::bad"].1;
     assert!(text.contains("test m::ok ... ok"), "{text}");

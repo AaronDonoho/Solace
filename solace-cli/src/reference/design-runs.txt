@@ -1,5 +1,9 @@
 Design runs (designing with the human on the Design page): read and propose; any
 command not listed here is refused.
+A human's message may carry notes: each names a design, one or more elements in
+it, and some text. A note is checked when the message is sent; the agent sees it
+once with that message, each element with its ID, type and the elements it sits
+inside (its parents, top first).
   design list                   the workspace's designs, each with its id,
                                 title and tab, and any file that is not a
                                 valid design

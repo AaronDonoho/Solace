@@ -19,6 +19,9 @@ pub const outline_styles =
   <> ".design-change-added{outline:2px solid #1a6b30;outline-offset:-2px}"
   <> ".design-change-removed{outline:2px solid #b3261e;outline-offset:-2px;opacity:.5}"
   <> ".design-change-changed,.design-change-moved,.design-change-both{outline:2px solid #174f78;outline-offset:-2px}"
+  <> ".design-selected{outline:3px solid #c2410c;outline-offset:-3px}"
+  <> ".design-noted{position:relative}"
+  <> ".design-noted::before{content:attr(data-note);position:absolute;top:-10px;right:-10px;min-width:18px;height:18px;border-radius:9px;background:#c2410c;color:#fff;font:11px/18px system-ui,sans-serif;text-align:center;z-index:2;pointer-events:none}"
   <> ".design-change-added::after,.design-change-removed::after,.design-change-changed::after,.design-change-moved::after,.design-change-both::after{position:absolute;top:0;right:0;padding:0 4px;font:11px/1.4 system-ui,sans-serif;color:#fff;z-index:1}"
   <> ".design-change-added::after{content:'Added';background:#1a6b30}"
   <> ".design-change-removed::after{content:'Removed';background:#b3261e}"
@@ -131,18 +134,41 @@ fn draw_node(
   parent: ParentAxis,
   parent_width: DrawnSize,
   parent_height: DrawnSize,
-  on_click: Option(fn(String) -> message),
+  on_click: Option(fn(String, Bool) -> message),
+  selecting: Bool,
+  selected: List(String),
   marks: Dict(String, Change),
+  markers: Dict(String, String),
 ) -> Element(message) {
   let kind = node.kind
   let #(width, height) = drawn_sizes(kind, parent, parent_width, parent_height)
   let click = case on_click {
-    Some(handle) -> [event.stop_propagation(event.on_click(handle(node.id)))]
+    Some(handle) -> [
+      event.stop_propagation(case selecting {
+        True ->
+          event.prevent_default(event.on(
+            "click",
+            click_decoder(node.id, handle),
+          ))
+        False -> event.on_click(handle(node.id, False))
+      }),
+    ]
     None -> []
   }
   let class = case dict.get(marks, node.id) {
-    Ok(change) -> "design-element " <> change_class(change)
-    Error(_) -> "design-element"
+    Ok(change) ->
+      "design-element "
+      <> change_class(change)
+      <> selected_class(node.id, selected)
+      <> marker_class(node.id, markers)
+    Error(_) ->
+      "design-element"
+      <> selected_class(node.id, selected)
+      <> marker_class(node.id, markers)
+  }
+  let marker = case dict.get(markers, node.id) {
+    Ok(number) -> [attribute.data("note", number)]
+    Error(_) -> []
   }
   let attributes = [
     attribute.class(class),
@@ -154,7 +180,7 @@ fn draw_node(
         overrides_styles(theme, node.overrides),
       ]),
     ),
-    ..click
+    ..list.append(marker, click)
   ]
   case kind {
     Text(text) -> html.div(attributes, [html.text(text.content)])
@@ -184,7 +210,10 @@ fn draw_node(
             width,
             height,
             on_click,
+            selecting,
+            selected,
             marks,
+            markers,
           )
         }),
       )
@@ -715,7 +744,18 @@ pub fn theme_radius(theme: Theme, name: String) -> Float {
 }
 
 pub fn draw_with(theme: Theme, node: Node) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill, None, dict.new())
+  draw_node(
+    theme,
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    None,
+    False,
+    [],
+    dict.new(),
+    dict.new(),
+  )
 }
 
 fn spacing_value(theme: Theme, value: SpacingValue) -> Float {
@@ -960,7 +1000,18 @@ pub fn draw_preview_with(
   node: Node,
   on_click: fn(String) -> message,
 ) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill, Some(on_click), dict.new())
+  draw_node(
+    theme,
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    Some(fn(id, _) { on_click(id) }),
+    False,
+    [],
+    dict.new(),
+    dict.new(),
+  )
 }
 
 /// The first top-level screen in a design.
@@ -1052,7 +1103,18 @@ pub fn draw_marked_with(
   node: Node,
   marks: Dict(String, Change),
 ) -> Element(message) {
-  draw_node(theme, node, Down, DrawnFill, DrawnFill, None, marks)
+  draw_node(
+    theme,
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    None,
+    False,
+    [],
+    marks,
+    dict.new(),
+  )
 }
 
 pub fn change_class(change: Change) -> String {
@@ -1084,4 +1146,114 @@ fn diagram_edge_decoder() -> decode.Decoder(DiagramEdgeProperties) {
   use to <- decode.optional_field("to", "", decode.string)
   use label <- decode.optional_field("label", "", decode.string)
   decode.success(DiagramEdgeProperties(from, to, label))
+}
+
+/// Draw one element outside Preview, with its selected ids and a click
+/// handler that says whether a modifier asked to add or remove.
+pub fn draw_selectable(
+  node: Node,
+  selected: List(String),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_selectable_with(default_theme(), node, selected, markers, on_click)
+}
+
+fn draw_selectable_with(
+  theme: Theme,
+  node: Node,
+  selected: List(String),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_node(
+    theme,
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    Some(on_click),
+    True,
+    selected,
+    dict.new(),
+    markers,
+  )
+}
+
+/// Draw one marked element outside Preview, with its selected ids and a click
+/// handler that says whether a modifier asked to add or remove.
+pub fn draw_marked_selectable(
+  node: Node,
+  selected: List(String),
+  marks: Dict(String, Change),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_marked_selectable_with(
+    default_theme(),
+    node,
+    selected,
+    marks,
+    markers,
+    on_click,
+  )
+}
+
+fn draw_marked_selectable_with(
+  theme: Theme,
+  node: Node,
+  selected: List(String),
+  marks: Dict(String, Change),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_node(
+    theme,
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    Some(on_click),
+    True,
+    selected,
+    marks,
+    markers,
+  )
+}
+
+/// The class that marks `id` selected, or "" when it is not.
+pub fn selected_class(id: String, selected: List(String)) -> String {
+  case list.contains(selected, id) {
+    True -> " design-selected"
+    False -> ""
+  }
+}
+
+/// Reports a click of `id`, with whether Ctrl or Cmd asked to add or remove.
+pub fn click_decoder(
+  id: String,
+  handle: fn(String, Bool) -> message,
+) -> decode.Decoder(message) {
+  decode.optional_field("ctrlKey", False, decode.bool, fn(ctrl) {
+    decode.optional_field("metaKey", False, decode.bool, fn(meta) {
+      decode.success(handle(id, ctrl || meta))
+    })
+  })
+}
+
+/// Whether the design has the element `id`.
+pub fn has_element(design: Design, id: String) -> Bool {
+  list.any(design.elements, fn(node) { node_has_id(node, id) })
+}
+
+fn node_has_id(node: Node, id: String) -> Bool {
+  node.id == id || list.any(node.children, fn(child) { node_has_id(child, id) })
+}
+
+/// The class that marks `id` noted, or "" when it is not.
+pub fn marker_class(id: String, markers: Dict(String, String)) -> String {
+  case dict.get(markers, id) {
+    Ok(_) -> " design-noted"
+    Error(_) -> ""
+  }
 }

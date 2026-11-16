@@ -36,9 +36,13 @@ An Architecture design's top-level `flow` holds `node` and `edge` elements.
 Each node is a box showing its label and description; each edge is an arrow
 from its `from` node to its `to` node, with its label if it has one. Nodes are
 placed by the Contract view's dagre layout. Every drawn node and edge carries a
-`data-design-id`, so an agent can name it later. While a proposal is open, the
-Proposed/Current switch and the hide-changes control work as they do for
-screens, marking added, removed, changed and moved nodes and edges.
+`data-design-id`, so an agent can name it later. Clicking a node or edge selects
+it by that id; Ctrl-click (Cmd-click on a Mac) adds or removes it, and dragging
+across the diagram selects every node and edge wholly inside the box. A click on
+empty diagram clears the selection. Selected nodes and edges have the same
+orange treatment as screens. While a proposal is open, the Proposed/Current
+switch and the hide-changes control work as they do for screens, marking added,
+removed, changed and moved nodes and edges.
 
 ## Screens
 
@@ -50,6 +54,39 @@ of pixels; fill children can shrink inside their parent. Gaps and padding take
 a spacing token (`none`, `xs`, `sm`, `md`, `lg` or `xl`) or a number of pixels,
 and default to 0. Alignment starts at the start until the design states
 otherwise.
+
+Outside Preview, clicking a drawn element selects it by its `data-design-id`.
+A plain click selects only that element; Ctrl-click (Cmd-click on a Mac) adds
+it, or removes it when it is already selected. A selected element has a thick
+solid orange outline. Escape or a click on empty canvas clears the selection.
+Opening another design, tab or history version clears it, as do entering or
+leaving Preview, switching Proposed/Current and a live reload that removes a
+selected element.
+
+Outside Preview, dragging across a drawn canvas selects every element wholly
+inside the box shown while dragging. An element only partly inside is not
+selected; when a parent and its children are all wholly inside, every one is
+selected. A plain drag replaces the selection, and Ctrl-drag (Cmd-drag on a Mac)
+adds the region's elements. A drag that covers nothing clears the selection.
+
+## Notes
+
+With one or more elements selected outside Preview on either tab, a small note
+box sits beside them. Typing a note and pressing Add note stores the open
+design's id, the selected element ids and the text. The note waits on the page
+and is never saved into the design.
+
+Waiting notes appear in the agent panel in the order they were added, each with
+its elements, its text and an × to remove it. The open design's noted elements
+carry numbered markers that match that list. A note keeps its design id, so
+switching designs, tabs or versions does not lose it; only the open design's
+markers show.
+
+The next message to the agent carries every waiting note as `notes`, whether it
+starts a run or continues one. A successful reply clears the notes it sent; a
+refused one keeps them and shows the server's message. Notes added while a
+message is in flight wait for the next message. The Strategy page's panel has no
+notes.
 
 The built-in components draw from the default theme in `render.default_theme`:
 colors, spacing, text sizes and corner radii are named tokens, so a design never
@@ -72,6 +109,8 @@ element with only an `action` changes nothing when clicked. A design may put
 placeholders. `navigates_to` names a top-level screen in the same design, and a
 missing or non-screen id is refused with `E7033`, naming the element. Screens
 and text inputs take neither property.
+
+A click in Preview follows links instead of selecting.
 
 Only the current design is previewed. Opening another design, tab or history
 version leaves preview, and so does a live reload that drops the shown screen.

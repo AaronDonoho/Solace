@@ -2,6 +2,7 @@
 //// width (D-240). Every design run covers the whole page, so the page passes
 //// no context of its own.
 
+import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/int
@@ -10,8 +11,11 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import lustre/attribute
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
+import lustre/element/html
+import lustre/event
 import plan_panel
 import render
 import solace_task
@@ -26,8 +30,14 @@ pub type Model {
     collapsed: Bool,
     width: Int,
     text: String,
+    /// Notes waiting to go with the next message, in the order they were added.
+    notes: List(Note),
+    /// The text in the note box beside the selected elements.
+    note_text: String,
     /// The message a successful start or send clears, None when none.
     clearing: Option(String),
+    /// The notes a successful start or send clears, None when none.
+    clearing_notes: Option(List(Note)),
     sending: Bool,
     error: String,
     entries: List(solace_task.Entry),
@@ -54,6 +64,9 @@ pub type Msg {
   WidthDone
   Key(String)
   Text(String)
+  NoteText(String)
+  AddNote(String, List(String))
+  RemoveNote(Int)
   Format(String, String)
   Block(String)
   ModelPicked(String)
@@ -110,7 +123,10 @@ pub fn new() -> Model {
     collapsed: False,
     width: stored_width(),
     text: plan_panel.load_draft(settings()),
+    notes: [],
+    note_text: "",
     clearing: None,
+    clearing_notes: None,
     sending: False,
     error: "",
     entries: [],
@@ -134,7 +150,13 @@ pub fn connect(model: Model) -> Model {
 }
 
 pub fn disconnected(model: Model) -> Model {
-  Model(..model, connected: False, poll: model.poll + 1, clearing: None)
+  Model(
+    ..model,
+    connected: False,
+    poll: model.poll + 1,
+    clearing: None,
+    clearing_notes: None,
+  )
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -169,6 +191,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       plan_panel.save_draft(settings(), text)
       #(Model(..model, text: text), effect.none())
     }
+    NoteText(text) -> #(Model(..model, note_text: text), effect.none())
+    AddNote(design, elements) -> add_note(model, design, elements)
+    RemoveNote(index) -> #(
+      Model(..model, notes: remove_at(model.notes, index)),
+      effect.none(),
+    )
     Format(before, after) -> #(
       model,
       effect.from(fn(send) {
@@ -239,6 +267,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             None -> ""
           }
           let clear_text = clears && model.text == sent_text
+          let sent_notes = case model.clearing_notes {
+            Some(notes) -> notes
+            None -> []
+          }
           case clear_text {
             True -> plan_panel.clear_draft(settings())
             False -> Nil
@@ -256,6 +288,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 False -> model.text
               },
               clearing: None,
+              clearing_notes: None,
+              notes: case clears {
+                True -> without_all(model.notes, sent_notes)
+                False -> model.notes
+              },
               jump: model.jump || run.id != was_open,
             )
           let next = case json.parse(text, proposed_run_decoder()) {
@@ -265,7 +302,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           track(model, fetch(next, run.id))
         }
         Error(_) -> #(
-          Model(..model, sending: False, error: error(text), clearing: None),
+          Model(
+            ..model,
+            sending: False,
+            error: error(text),
+            clearing: None,
+            clearing_notes: None,
+          ),
           effect.none(),
         )
       }
@@ -348,9 +391,10 @@ pub fn shown(model: Model) -> Option(plan_panel.Run) {
   |> option.from_result
 }
 
-/// Applies the run part of one `/events` message.
-pub fn live(model: Model, text: String) -> Model {
-  case at(text, "designRuns", decode.list(plan_panel.decoder())) {
+/// Applies the run part of one `/events` message, and says whether it was a
+/// design run, whose model list is refreshed.
+pub fn live(model: Model, event: Dynamic) -> #(Model, Bool) {
+  case at(event, "designRuns", decode.list(plan_panel.decoder())) {
     Ok(runs) -> {
       let model =
         Model(
@@ -362,25 +406,31 @@ pub fn live(model: Model, text: String) -> Model {
             }
           }),
         )
-      case at(text, "designRuns", decode.list(proposed_run_decoder())) {
+      let model = case
+        at(event, "designRuns", decode.list(proposed_run_decoder()))
+      {
         Ok(proposed) -> Model(..model, proposals: all_proposals(proposed))
         Error(_) -> model
       }
+      #(model, True)
     }
     Error(_) ->
-      case at(text, "designRun", plan_panel.decoder()) {
+      case at(event, "designRun", plan_panel.decoder()) {
         Ok(run) -> {
           let model = Model(..model, runs: keep(model.runs, run))
-          case at(text, "designRun", proposed_run_decoder()) {
+          let model = case at(event, "designRun", proposed_run_decoder()) {
             Ok(#(rid, proposals)) -> with_proposals(model, rid, proposals)
             Error(_) -> model
           }
+          #(model, True)
         }
         Error(_) ->
-          case at(text, "roleModels", solace_task.role_models_decoder()) {
-            Ok(role_models) ->
-              choose_model(Model(..model, role_models: role_models))
-            Error(_) -> model
+          case at(event, "roleModels", solace_task.role_models_decoder()) {
+            Ok(role_models) -> #(
+              choose_model(Model(..model, role_models: role_models)),
+              False,
+            )
+            Error(_) -> #(model, False)
           }
       }
   }
@@ -424,7 +474,7 @@ pub fn resume(model: Model) -> #(Model, Effect(Msg)) {
 }
 
 pub fn view(model: Model) -> Element(Msg) {
-  plan_panel.view(
+  plan_panel.view_with_notes(
     "",
     settings(),
     plan_panel.Panel(
@@ -463,6 +513,7 @@ pub fn view(model: Model) -> Element(Msg) {
       on_scroll: Scrolled,
       on_newest: Newest,
     ),
+    notes_view(model),
   )
 }
 
@@ -473,11 +524,12 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
       send_request(
         model,
         plan_panel.runs_path(settings()),
-        plan_panel.start_body(
+        plan_panel.start_body_with_notes(
           model.model,
           model.effort,
           model.text,
           plan_panel.page,
+          list.map(model.notes, note_json),
         ),
         True,
       )
@@ -490,7 +542,7 @@ fn send(model: Model) -> #(Model, Effect(Msg)) {
       send_request(
         model,
         plan_panel.run_path(settings(), run.id) <> "/notes",
-        json.object([#("text", json.string(model.text))]),
+        send_body(model.text, model.notes),
         True,
       )
     _, _ -> #(model, effect.none())
@@ -537,10 +589,19 @@ fn send_request(
   case model.sending {
     True -> #(model, effect.none())
     False -> #(
-      Model(..model, sending: True, error: "", clearing: case clears {
-        True -> Some(model.text)
-        False -> None
-      }),
+      Model(
+        ..model,
+        sending: True,
+        error: "",
+        clearing: case clears {
+          True -> Some(model.text)
+          False -> None
+        },
+        clearing_notes: case clears {
+          True -> Some(model.notes)
+          False -> None
+        },
+      ),
       post(path, body, fn(reply) { Replied(clears, reply) }),
     )
   }
@@ -652,8 +713,13 @@ fn keep(
   }
 }
 
-fn at(text: String, key: String, decoder: decode.Decoder(a)) -> Result(a, Nil) {
-  json.parse(text, decode.at([key], decoder)) |> result.replace_error(Nil)
+fn at(
+  event: Dynamic,
+  key: String,
+  decoder: decode.Decoder(a),
+) -> Result(a, Nil) {
+  decode.run(event, decode.at([key], decoder))
+  |> result.replace_error(Nil)
 }
 
 fn error(text: String) -> String {
@@ -736,8 +802,12 @@ pub fn load_models(model: Model) -> Effect(Msg) {
 /// Whether a live update is a design run, whose model list is refreshed so a
 /// config edit reaches the pick.
 pub fn models_event(text: String) -> Bool {
-  ["designRun", "designRuns"]
-  |> list.any(fn(key) { result.is_ok(at(text, key, decode.dynamic)) })
+  case json.parse(text, decode.dynamic) {
+    Ok(event) ->
+      ["designRun", "designRuns"]
+      |> list.any(fn(key) { result.is_ok(at(event, key, decode.dynamic)) })
+    Error(_) -> False
+  }
 }
 
 /// A design proposal the panel decoded from a run: the design it would save,
@@ -827,5 +897,140 @@ fn design_proposal_decoder() -> decode.Decoder(Option(#(String, render.Design)))
       }
     }
     _ -> decode.success(None)
+  }
+}
+
+/// A note waiting to go with the next message: the design it points into, the
+/// elements it points at, and what the human wrote.
+pub type Note {
+  Note(design: String, elements: List(String), text: String)
+}
+
+/// The panel numbers each noted element shows on the open design, in the
+/// panel's order and comma-separated; notes on other designs are left out.
+pub fn markers(model: Model, design: String) -> Dict(String, String) {
+  let #(_, markers) =
+    list.fold(model.notes, #(1, dict.new()), fn(state, note) {
+      let #(number, markers) = state
+      let markers = case note.design == design {
+        True ->
+          list.fold(note.elements, markers, fn(markers, id) {
+            let label = int.to_string(number)
+            dict.insert(markers, id, case dict.get(markers, id) {
+              Ok(existing) -> existing <> ", " <> label
+              Error(_) -> label
+            })
+          })
+        False -> markers
+      }
+      #(number + 1, markers)
+    })
+  markers
+}
+
+/// The waiting notes, in the order they will be sent.
+pub fn notes_view(model: Model) -> Element(Msg) {
+  case model.notes {
+    [] -> element.none()
+    notes -> html.ul([attribute.class("design-notes")], note_rows(notes))
+  }
+}
+
+fn note_rows(notes: List(Note)) -> List(Element(Msg)) {
+  let #(rows, _) =
+    list.fold(notes, #([], 0), fn(state, note) {
+      let #(rows, index) = state
+      #([note_row(index, note), ..rows], index + 1)
+    })
+  list.reverse(rows)
+}
+
+fn note_row(index: Int, note: Note) -> Element(Msg) {
+  html.li([attribute.class("design-note-row")], [
+    html.span([attribute.class("design-note-number")], [
+      html.text(int.to_string(index + 1)),
+    ]),
+    html.span([attribute.class("design-note-text")], [
+      html.text(note.text),
+    ]),
+    html.span([attribute.class("design-note-elements")], [
+      html.text(string.join(note.elements, ", ")),
+    ]),
+    html.button(
+      [
+        attribute.type_("button"),
+        attribute.class("design-note-remove"),
+        attribute.attribute("aria-label", "Remove note"),
+        event.on_click(RemoveNote(index)),
+      ],
+      [html.text("×")],
+    ),
+  ])
+}
+
+/// The body of a message with the notes it carries.
+pub fn send_body(text: String, notes: List(Note)) -> json.Json {
+  json.object(
+    list.flatten([
+      [#("text", json.string(text))],
+      case notes {
+        [] -> []
+        notes -> [#("notes", json.array(notes, note_json))]
+      },
+    ]),
+  )
+}
+
+fn note_json(note: Note) -> json.Json {
+  json.object([
+    #("design", json.string(note.design)),
+    #("elements", json.array(note.elements, json.string)),
+    #("text", json.string(note.text)),
+  ])
+}
+
+fn add_note(
+  model: Model,
+  design: String,
+  elements: List(String),
+) -> #(Model, Effect(Msg)) {
+  case string.trim(model.note_text), design, elements {
+    "", _, _ -> #(model, effect.none())
+    _, "", _ -> #(model, effect.none())
+    _, _, [] -> #(model, effect.none())
+    _, _, _ -> #(
+      Model(
+        ..model,
+        notes: list.append(model.notes, [
+          Note(design, elements, model.note_text),
+        ]),
+        note_text: "",
+      ),
+      effect.none(),
+    )
+  }
+}
+
+fn remove_at(notes: List(Note), index: Int) -> List(Note) {
+  let #(kept, _) =
+    list.fold(notes, #([], 0), fn(state, note) {
+      let #(kept, at) = state
+      case at == index {
+        True -> #(kept, at + 1)
+        False -> #([note, ..kept], at + 1)
+      }
+    })
+  list.reverse(kept)
+}
+
+fn without_all(notes: List(Note), sent: List(Note)) -> List(Note) {
+  list.fold(sent, notes, without)
+}
+
+fn without(notes: List(Note), sent: Note) -> List(Note) {
+  case notes {
+    [] -> []
+    [first, ..rest] if first == sent -> rest
+    [first, ..rest] -> [first, ..without(rest, sent)]
   }
 }

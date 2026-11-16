@@ -18,6 +18,20 @@ function mount() {
 }
 const settle = () => Bun.sleep(20);
 
+// A whole-model check that names only the fields that changed, so a failure
+// does not print the model.
+function assert_unchanged(name, actual, expected) {
+  const changed = Object.keys(expected).filter(key => actual[key] !== expected[key]);
+  if (!changed.length) return;
+  const brief = value => value !== null && typeof value === 'object' ? 'object' : JSON.stringify(value);
+  throw new Error(`${name}: ${changed.map(key => `${key} ${brief(expected[key])} -> ${brief(actual[key])}`).join(', ')}`);
+}
+
+test('a whole-model check names only the changed fields', () => {
+  assert_unchanged('same', { a: 1, b: 'x' }, { a: 1, b: 'x' });
+  expect(() => assert_unchanged('changed', { a: 2, b: 'x' }, { a: 1, b: 'x' })).toThrow('changed: a 1 -> 2');
+});
+
 // This server has no Solace store, process runner or filesystem access.
 test('A11: <solace-task> uses only the HTTP API, including live task and workflow updates', async () => {
   installDrafts();
@@ -94,7 +108,7 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
       t.dispatch(new task.Action(action));
       await Bun.sleep(30);
       expect(requests.length).toBe(before);
-      expect(t.model).toBe(beforeModel);
+      assert_unchanged(`model after ${action}`, t.model, beforeModel);
       expect(confirmations.at(-1)).toContain(current.title);
     }
     expect(confirmations[0]).toContain('reverts its changes');
@@ -379,6 +393,163 @@ test('transport uses the base it is given; explicit project paths stay absolute'
   } finally {
     globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
   }
+});
+
+test('pages on one base share one background stream, and each gets only its keys', async () => {
+  const saved = Object.fromEntries(['document', 'Worker', 'EventSource'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const savedCreate = URL.createObjectURL, savedRevoke = URL.revokeObjectURL;
+  const workers = [];
+  const sources = [];
+  class FakeWorker {
+    constructor(url) { this.url = url; this.sent = []; this.terminated = false; workers.push(this); }
+    postMessage(message) { this.sent.push(message); }
+    terminate() { this.terminated = true; }
+    reply(message) { this.onmessage?.({ data: message }); }
+  }
+  globalThis.document = {};
+  globalThis.Worker = FakeWorker;
+  globalThis.EventSource = class {
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener() {}
+    close() { this.closed = true; }
+  };
+  URL.createObjectURL = () => 'blob:solace-test';
+  URL.revokeObjectURL = () => {};
+  try {
+    const api = await import('../src/task_api.mjs');
+    const designs = [], tasks = [], ready = [];
+    const first = api.events('/p/shared-test', text => designs.push(text), () => ready.push('a'), ['designs']);
+    const second = api.events('/p/shared-test', text => tasks.push(text), () => ready.push('b'), ['tasks']);
+    expect(workers).toHaveLength(1);
+    const worker = workers[0];
+    const [a, b] = worker.sent.filter(message => message.type === 'join').map(message => message.id);
+    expect(worker.sent.find(message => message.id === a).keys).toEqual(['designs']);
+    expect(worker.sent.find(message => message.id === b).keys).toEqual(['tasks']);
+    worker.reply({ type: 'message', to: [a], data: '{"designs":[]}' });
+    worker.reply({ type: 'message', to: [b], data: '{"tasks":[]}' });
+    expect(designs).toEqual(['{"designs":[]}']);
+    expect(tasks).toEqual(['{"tasks":[]}']);
+    worker.reply({ type: 'ready', to: [a, b] });
+    expect(ready).toEqual(['a', 'b']);
+    // A page that joins after startup opens its own stream instead of replaying
+    // the startup snapshot without the live messages since.
+    const late = [];
+    const third = api.events('/p/shared-test', text => late.push(text), () => {}, ['tasks']);
+    const c = worker.sent.filter(message => message.type === 'join').at(-1).id;
+    worker.reply({ type: 'fresh', to: [c] });
+    expect(sources.map(source => source.path)).toEqual(['/p/shared-test/events']);
+    sources[0].onmessage({ data: '{"tasks":[]}' });
+    expect(late).toEqual(['{"tasks":[]}']);
+    api.close_events(third);
+    expect(sources[0].closed).toBe(true);
+    api.close_events(first);
+    expect(worker.terminated).toBe(false);
+    api.close_events(second);
+    expect(worker.terminated).toBe(true);
+  } finally {
+    URL.createObjectURL = savedCreate;
+    URL.revokeObjectURL = savedRevoke;
+    for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
+  }
+});
+
+test('a background stream starts a late subscriber fresh instead of replaying only startup', async () => {
+  const saved = Object.fromEntries(['EventSource', 'setTimeout', 'clearTimeout'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const sources = [], posted = [];
+  globalThis.setTimeout = () => 0;
+  globalThis.clearTimeout = () => {};
+  globalThis.EventSource = class {
+    listeners = {};
+    readyState = 1;
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() { this.closed = true; this.readyState = 2; }
+  };
+  const self = { postMessage: message => posted.push(message), close: () => {} };
+  const sent = (type, id) => posted.filter(message => message.type === type && (!id || (message.to || []).includes(id)));
+  try {
+    const { worker_source } = await import('../src/task_api.mjs');
+    new Function('self', 'EventSource', 'setTimeout', 'clearTimeout', worker_source('/p/late-test/events'))(
+      self, globalThis.EventSource, globalThis.setTimeout, globalThis.clearTimeout,
+    );
+    expect(sources.map(source => source.path)).toEqual(['/p/late-test/events']);
+    const source = sources[0];
+    self.onmessage({ data: { type: 'join', id: 1, keys: ['designs'] } });
+    source.onmessage({ data: '{"designs":[1]}', lastEventId: 'p1' });
+    // A held message for another page is not replayed to a keyed subscriber.
+    source.onmessage({ data: '{"tasks":[]}' });
+    // A subscriber that joins before the stream catches up gets the startup
+    // messages it missed, then the live ones.
+    self.onmessage({ data: { type: 'join', id: 2, keys: ['designs'] } });
+    expect(sent('message', 2).map(message => message.data)).toEqual(['{"designs":[1]}']);
+    // No keys means every held message.
+    self.onmessage({ data: { type: 'join', id: 4, keys: [] } });
+    expect(sent('message', 4).map(message => message.data)).toEqual(['{"designs":[1]}', '{"tasks":[]}']);
+    // An unparseable message has no names to filter on.
+    source.onmessage({ data: 'not json' });
+    source.listeners.ready();
+    expect(sent('ready', 2)).toHaveLength(1);
+    source.onmessage({ data: '{"designs":[2]}' });
+    expect(sent('message', 2).map(message => message.data)).toEqual(['{"designs":[1]}', 'not json', '{"designs":[2]}']);
+    self.onmessage({ data: { type: 'join', id: 3, keys: ['designs'] } });
+    expect(sent('fresh', 3)).toHaveLength(1);
+    expect(sent('message', 3)).toEqual([]);
+  } finally {
+    for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
+  }
+});
+
+test('the background stream is given an absolute address, and falls back to direct streams when it fails', async () => {
+  const saved = Object.fromEntries(['document', 'location', 'Worker', 'EventSource'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const savedCreate = URL.createObjectURL, savedRevoke = URL.revokeObjectURL;
+  const workers = [], blobs = [], sources = [];
+  class FakeWorker {
+    constructor() { this.terminated = false; workers.push(this); }
+    postMessage() {}
+    terminate() { this.terminated = true; }
+  }
+  globalThis.document = {};
+  globalThis.location = { href: 'http://127.0.0.1:3030/design', pathname: '/design' };
+  globalThis.Worker = FakeWorker;
+  globalThis.EventSource = class {
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener() {}
+    close() { this.closed = true; }
+  };
+  URL.createObjectURL = blob => { blobs.push(blob); return 'blob:solace-test'; };
+  URL.revokeObjectURL = () => {};
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.events('/p/absolute-test', () => {}, () => {}, ['designs']);
+    api.events('/p/absolute-test', () => {}, () => {}, ['tasks']);
+    expect(await blobs[0].text()).toContain('"http://127.0.0.1:3030/p/absolute-test/events"');
+    workers[0].onmessage({ data: { type: 'failed' } });
+    expect(workers[0].terminated).toBe(true);
+    expect(sources.map(source => source.path)).toEqual(['/p/absolute-test/events', '/p/absolute-test/events']);
+  } finally {
+    URL.createObjectURL = savedCreate;
+    URL.revokeObjectURL = savedRevoke;
+    for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
+  }
+});
+
+test('a worker that cannot open its stream reports it instead of staying silent', async () => {
+  const posted = [];
+  const self = { postMessage: message => posted.push(message), close: () => {} };
+  const RelativeRejecting = class {
+    constructor(path) { new URL(path); }
+    addEventListener() {}
+  };
+  const { worker_source } = await import('../src/task_api.mjs');
+  new Function('self', 'EventSource', 'setTimeout', 'clearTimeout', worker_source('/p/relative/events'))(
+    self, RelativeRejecting, () => 0, () => {},
+  );
+  expect(posted).toEqual([{ type: 'failed' }]);
+  posted.length = 0;
+  new Function('self', 'EventSource', 'setTimeout', 'clearTimeout', worker_source('http://127.0.0.1:3030/p/ok/events'))(
+    self, RelativeRejecting, () => 0, () => {},
+  );
+  expect(posted).toEqual([]);
 });
 
 test('a stream the browser closed for good reopens from the last event, with backoff', async () => {

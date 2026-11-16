@@ -158,8 +158,8 @@ pub trait Language: Sync {
     /// A line of tool output with its file positions as symbol positions.
     fn relocate(&self, line: &str, files: &[FileMap]) -> String;
     /// Failed tests in test output by `module.name`: whether wrong or
-    /// unfinished, and the failure's text.
-    fn failures(&self, output: &str) -> BTreeMap<String, (String, String)>;
+    /// unfinished, and the failure's text, whole when `full`.
+    fn failures(&self, output: &str, full: bool) -> BTreeMap<String, (String, String)>;
     /// Tool output without build progress and warnings.
     fn quiet(&self, output: &str) -> String;
 }

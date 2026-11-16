@@ -56,6 +56,17 @@ def binary():
     if p.returncode != 0: fail('cargo build failed:\n' + p.stderr[-4000:], 1)
     return str(CLI/'target/debug/solace')
 
+def built_binary():
+    """Builds the frontend bundle, then the binary that embeds it."""
+    if os.environ.get('SOLACE_TEST_BIN'): return os.environ['SOLACE_TEST_BIN']
+    bundle = subprocess.run(
+        ['sh', '-c', 'gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser'],
+        cwd=CLI/'frontend', text=True, capture_output=True)
+    if bundle.returncode != 0: fail('frontend build failed:\n' + bundle.stderr[-4000:], 1)
+    p = subprocess.run(['cargo', 'build', '--manifest-path', str(CLI/'Cargo.toml')], text=True, capture_output=True)
+    if p.returncode != 0: fail('cargo build failed:\n' + p.stderr[-4000:], 1)
+    return str(CLI/'target/debug/solace')
+
 class Fixture:
     """A temp Solace root with projects a and b, as workspace_acceptance builds one."""
     def __init__(self, bin):
@@ -131,12 +142,11 @@ class Fixture:
         while self.api('GET', f'{base}/tasks/{t["id"]}')['column'] != 'needs_review':
             if time.monotonic() > end: fail('the fixture run did not finish', 1)
             time.sleep(.1)
-        # An open run on an open task shows the Plan badge, so its gap is measured.
-        run_base, run_task = tasks[4]
+        # An open run on the page keeps the planning panel in its running state.
         self.run_id = self.api('POST', '/strategy/runs', {
             'model': 'fake',
             'text': json.dumps([{'command': 'strategy note', 'text': 'Waiting for review.'}]),
-            'context': {'kind': 'task', 'id': run_task['id']},
+            'context': {'kind': 'page'},
         })['id']
         return t
     def close(self):

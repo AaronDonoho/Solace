@@ -174,19 +174,7 @@ pub fn start_body(
   text: String,
   context: Context,
 ) -> json.Json {
-  json.object(
-    list.flatten([
-      case model {
-        "" -> []
-        m -> [#("model", json.string(m))]
-      },
-      case effort {
-        "" -> []
-        e -> [#("effort", json.string(e))]
-      },
-      [#("text", json.string(text)), #("context", context_json(context))],
-    ]),
-  )
+  start_body_with_notes(model, effort, text, context, [])
 }
 
 /// The open run on `context`, if there is one: the server allows one. A run
@@ -795,62 +783,7 @@ fn on_page(context: Context) -> Context {
 
 /// The panel a page docks beside its content.
 pub fn view(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
-  html.aside(
-    [
-      attribute.class(case p.collapsed {
-        True -> "plan collapsed"
-        False -> "plan"
-      }),
-      attribute.attribute("aria-label", settings.labels.title),
-      attribute.id(settings.id),
-      attribute.style("--plan-width", int.to_string(p.width) <> "px"),
-    ],
-    [
-      case p.collapsed {
-        True -> element.none()
-        False -> resize_handle(settings, p)
-      },
-      html.header([], [
-        html.h2([], [html.text(settings.labels.title)]),
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.class("edit"),
-            attribute.attribute("aria-expanded", case p.collapsed {
-              True -> "false"
-              False -> "true"
-            }),
-            event.on_click(p.on_collapse),
-          ],
-          [
-            html.text(case p.collapsed {
-              True -> solace_task.ui_label("show")
-              False -> solace_task.ui_label("hide")
-            }),
-          ],
-        ),
-      ]),
-      case p.collapsed {
-        True -> element.none()
-        False -> bar(settings, p)
-      },
-      case p.collapsed {
-        True ->
-          html.p([attribute.class("plan-summary")], [
-            html.text(summary(settings, p)),
-          ])
-        False ->
-          html.div(
-            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
-            body(base, settings, p),
-          )
-      },
-      case p.collapsed {
-        True -> element.none()
-        False -> compose(base, settings, p)
-      },
-    ],
-  )
+  frame(base, settings, p, element.none())
 }
 
 /// The marker a page puts beside a record whose run is open.
@@ -920,4 +853,109 @@ pub fn runs_path(settings: Settings) -> String {
 /// One run of a page's runs.
 pub fn run_path(settings: Settings, id: String) -> String {
   settings.address <> "/" <> id
+}
+
+/// The body of a run's start, with the design notes the first message carries.
+pub fn start_body_with_notes(
+  model: String,
+  effort: String,
+  text: String,
+  context: Context,
+  notes: List(json.Json),
+) -> json.Json {
+  json.object(
+    list.flatten([
+      case model {
+        "" -> []
+        m -> [#("model", json.string(m))]
+      },
+      case effort {
+        "" -> []
+        e -> [#("effort", json.string(e))]
+      },
+      [#("text", json.string(text)), #("context", context_json(context))],
+      case notes {
+        [] -> []
+        notes -> [#("notes", json.array(notes, fn(note) { note }))]
+      },
+    ]),
+  )
+}
+
+/// The panel with a page's waiting notes drawn above the message box.
+pub fn view_with_notes(
+  base: String,
+  settings: Settings,
+  p: Panel(msg),
+  notes: Element(msg),
+) -> Element(msg) {
+  frame(base, settings, p, notes)
+}
+
+fn frame(
+  base: String,
+  settings: Settings,
+  p: Panel(msg),
+  notes: Element(msg),
+) -> Element(msg) {
+  html.aside(
+    [
+      attribute.class(case p.collapsed {
+        True -> "plan collapsed"
+        False -> "plan"
+      }),
+      attribute.attribute("aria-label", settings.labels.title),
+      attribute.id(settings.id),
+      attribute.style("--plan-width", int.to_string(p.width) <> "px"),
+    ],
+    [
+      case p.collapsed {
+        True -> element.none()
+        False -> resize_handle(settings, p)
+      },
+      html.header([], [
+        html.h2([], [html.text(settings.labels.title)]),
+        html.button(
+          [
+            attribute.type_("button"),
+            attribute.class("edit"),
+            attribute.attribute("aria-expanded", case p.collapsed {
+              True -> "false"
+              False -> "true"
+            }),
+            event.on_click(p.on_collapse),
+          ],
+          [
+            html.text(case p.collapsed {
+              True -> solace_task.ui_label("show")
+              False -> solace_task.ui_label("hide")
+            }),
+          ],
+        ),
+      ]),
+      case p.collapsed {
+        True -> element.none()
+        False -> bar(settings, p)
+      },
+      case p.collapsed {
+        True ->
+          html.p([attribute.class("plan-summary")], [
+            html.text(summary(settings, p)),
+          ])
+        False ->
+          html.div(
+            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
+            body(base, settings, p),
+          )
+      },
+      case p.collapsed {
+        True -> element.none()
+        False -> notes
+      },
+      case p.collapsed {
+        True -> element.none()
+        False -> compose(base, settings, p)
+      },
+    ],
+  )
 }

@@ -4,6 +4,8 @@ Checking
                                 shows failures only
   test <name>...                run the tests that reach these symbols
   test --all                    run every test
+  test --full                   show failed assertions' values whole, not just
+                                the part that explains the failure
   check [--warnings]            type-check everything; lists broken symbols
   probe                         run throwaway code (`text`) and show its output;
                                 nothing is saved. Its own code runs for at most

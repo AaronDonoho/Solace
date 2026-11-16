@@ -161,7 +161,7 @@ mod tests {
     /// and a passing test.
     #[test]
     fn gleam_test_output_states() {
-        let failed = gleam::failures(include_str!("../tests/golden/gleam-test-failures.txt"));
+        let failed = gleam::failures(include_str!("../tests/golden/gleam-test-failures.txt"), false);
         assert_eq!(failed["app_test.wrong_test"].0, "wrong");
         assert!(failed["app_test.wrong_test"].1.contains("left: 2\nright: 3"), "{failed:?}");
         assert_eq!(failed["app_test.todo_test"].0, "unfinished");
@@ -276,6 +276,7 @@ mod tests {
     fn test_failure_blocks() {
         let f = gleam::failures(
             "todo test/app_test.gleam:3\n test: app_test.todo_test\nassert test/app_test.gleam:6\n test: app_test.wrong_test\n",
+            false,
         );
         assert_eq!(f["app_test.todo_test"].0, "unfinished");
         assert_eq!(f["app_test.wrong_test"].0, "wrong");

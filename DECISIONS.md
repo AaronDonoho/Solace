@@ -1540,3 +1540,11 @@ Amends D-230 points 1, 3, 4 and 8 (board task "arch: flow diagram rules", 2026-1
 2. A `node` has required `label` and `description` text, with no fixed list of what it may represent. An `edge` has required `from` and `to`, each a node ID in the same flow, and an optional `label` text. Neither type has `width` or `height`.
 3. An edge whose `from` or `to` names no node in its flow is refused (`E7033`, naming the edge). A node that edges still use is not removed on its own: its edges must be removed in the same proposal.
 4. Why: a diagram names its type in the element table, and nodes and edges keep the format's permanent IDs and the agent's existing operations.
+
+## D-245 A message's notes point at design elements
+Adds Spec 15 §1 and §6 (board task "notes: deliver notes to the design agent", 2026-11-16). Part of the design: notes feature.
+1. A human's message to a design run may carry `notes`: a list of `{design, elements, text}`, where `design` is a design ID, `elements` is one or more element IDs in it, and `text` is what the note says. A note with no element or no text is refused. A strategy run ignores `notes`.
+2. Every note is checked when the message is sent. A design that is missing or invalid, or an element that is not in that design, refuses the whole message and names it; nothing is written to the run or the design.
+3. A note lives only on the human's run note, under `designNotes`, with the design's title and each element's `{id, type, parents}`; `parents` lists the elements that contain it, top first, each as `{id, type}`. An edge's parent is its flow. The design is only read.
+4. The agent receives each note once, with its message: the brief's "Notes so far" for the first message, and the delivered reply for later ones. Each note shows its design and text, and each element's ID, type and parents.
+5. Why: a note points at exact elements, and the agent can find them without vision; a note is not narrative and is not kept on the design.

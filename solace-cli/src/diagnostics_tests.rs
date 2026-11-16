@@ -132,3 +132,54 @@ fn a_stored_error_matches_its_title_and_caret_note() {
     assert!(!stored_has_kind(stored, &d("error: Incorrect arity\n   | ^ Expected 6 arguments, got 4")));
     assert!(!stored_has_kind(stored, &d("error: Unknown variable\n   | ^ x")));
 }
+
+#[test]
+fn a_short_assertion_block_is_unchanged() {
+    let block =
+        "assert test/app_test.gleam:3\n test: app_test.wrong_test\n code: assert 1 + 1 == 3\n left: 2\nright: 3\n info: Assertion failed.";
+    assert_eq!(shorten_assertions(block), block);
+}
+
+#[test]
+fn a_long_value_shows_the_short_expected_text() {
+    let page = format!("{:?}", format!("<button data-note=\"1\">{}</button>", "x".repeat(400)));
+    let expected = format!("{:?}", "data-note=\"1, 2\"");
+    let block = format!(
+        "assert test/design_test.gleam:10\n test: design_test.notes_test\n \
+         code: assert string.contains(rendered, \"data-note=\\\"1, 2\\\"\")\n \
+         0: {page}\n 1: {expected}\n info: Assertion failed."
+    );
+    let out = shorten_assertions(&block);
+    assert!(out.contains("data-note=\"1\">"), "{out}");
+    assert!(out.contains("chars; test --full shows it whole)"), "{out}");
+    assert!(!out.contains(&"x".repeat(200)), "{out}");
+    assert!(out.contains(" test: design_test.notes_test"), "{out}");
+    assert!(out.contains(" code: assert string.contains"), "{out}");
+    assert!(out.contains(" info: Assertion failed."), "{out}");
+}
+
+#[test]
+fn two_long_values_show_where_they_first_differ() {
+    let left = format!("{:?}", format!("{}LEFT{}", "a".repeat(200), "b".repeat(200)));
+    let right = format!("{:?}", format!("{}RIGHT{}", "a".repeat(200), "b".repeat(200)));
+    let block = format!("assertion `left == right` failed\n  left: {left}\n right: {right}");
+    let out = shorten_assertions(&block);
+    assert!(out.contains("LEFT") && out.contains("RIGHT"), "{out}");
+    assert_eq!(out.matches("chars; test --full shows it whole)").count(), 2, "{out}");
+    assert!(!out.contains(&"a".repeat(200)), "{out}");
+}
+
+#[test]
+fn a_colored_value_label_is_shortened() {
+    let block = format!("\u{1b}[36m left\u{1b}[39m: {}", "z".repeat(300));
+    let out = shorten_assertions(&block);
+    assert!(out.starts_with("\u{1b}[36m left\u{1b}[39m: "), "{out}");
+    assert!(out.ends_with("(300 chars; test --full shows it whole)"), "{out}");
+}
+
+/// A numbered value line in a test's own output is not an assertion value.
+#[test]
+fn a_value_line_outside_an_assertion_block_is_unchanged() {
+    let line = format!(" 0: {}", "y".repeat(300));
+    assert_eq!(shorten_assertions(&line), line);
+}

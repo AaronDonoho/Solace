@@ -686,3 +686,27 @@ fn a_late_note_finishes_a_review_that_stopped_early() {
     assert!(t["attention"].is_null());
 }
 
+/// A live `task` event carries only the run fields a page reads, like a
+/// task list does.
+#[test]
+fn a_live_task_event_keeps_only_the_run_fields_a_page_reads() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let mut t = crate::board::task_model::new_task("Sized", "", &json!("backlog"), 1.);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running","changes":["app.main"]}]);
+    let event = super::stream_task_event(&p.root, json!({"task": t}), true);
+    assert_eq!(event["task"]["runs"][0]["id"], "r1", "{event}");
+    assert!(event["task"]["runs"][0].get("changes").is_none(), "{event}");
+}
+
+#[test]
+fn a_plain_discussion_reply_holds_attention() {
+    let run = json!({"id":"r1","kind":"discuss","state":"running"});
+    let (p, tid, mut child) = launched(run, Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap());
+    child.wait().unwrap();
+    Watch::Task(&p.root, &tid).reply("r1", "Hello.".into()).unwrap();
+    let saved = task(&p.root, &tid).unwrap();
+    assert_eq!(saved["runs"][0]["state"], "waiting");
+    assert_eq!(saved["attention"]["reason"], crate::board::task_model::DISCUSSION_WAITING);
+    assert_eq!(saved["attention"]["hold"], true);
+}
+

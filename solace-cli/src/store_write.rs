@@ -844,6 +844,7 @@ impl Store {
         let to_lock: Vec<PathBuf> =
             roots.iter().filter(|root| held.as_ref().is_none_or(|home| !crate::project_paths::same_project(root, home))).cloned().collect();
         let _guards = crate::scope::lock_all(&to_lock)?;
+        let full: &[&str] = if args.contains(&"--full") { &["--full"] } else { &[] };
         let mut errors = vec![];
         for root in roots {
             let dir = crate::scope::dir(&top, &root);
@@ -851,7 +852,7 @@ impl Store {
                 if crate::reach::test_symbols(&dep.index()?).is_empty() {
                     return Ok(String::new());
                 }
-                dep.test_with(&[], targets.as_ref(), false)
+                dep.test_with(full, targets.as_ref(), false)
             });
             match run {
                 Ok(text) if !text.is_empty() => out += &format!("\n== In {dir} ==\n{text}"),
@@ -1064,6 +1065,7 @@ impl Store {
         let names = operands(args);
         let named: Vec<usize> = names.iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
         let all_flag = args.contains(&"--all");
+        let full = args.contains(&"--full");
         let stale = !all_flag && named.is_empty() && targets.is_none() && server_needs_every_test(&self.root, &ix);
         let all = all_flag || stale;
         let tests = crate::reach::test_symbols(&ix);
@@ -1185,7 +1187,7 @@ impl Store {
             text += &self.unfinished_lines(reach_ix, &reach_projects, None);
             return crate::failure::fail(text);
         }
-        let failed = if rust { crate::language::cargo::failures(&output) } else { self.lang().failures(&output) };
+        let failed = if rust { crate::language::cargo::failures(&output, full) } else { self.lang().failures(&output, full) };
         // Record results only from a run that finished; passes only when every
         // failure it counted was attributed to a test.
         let summary = output.lines().find(|l| l.contains(" passed, "));
@@ -1231,7 +1233,9 @@ impl Store {
                 out += &format!("\n{name}:\n{text}\n");
             }
         } else {
-            for line in self.lang().quiet(&output).lines() {
+            let quiet = self.lang().quiet(&output);
+            let reported = if full { quiet } else { crate::diagnostics::shorten_assertions(&quiet) };
+            for line in reported.lines() {
                 let line = line.trim_start_matches('.');
                 if line.trim().is_empty() || line.trim().starts_with("Checking ") {
                     continue;

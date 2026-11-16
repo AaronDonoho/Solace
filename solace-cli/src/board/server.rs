@@ -523,7 +523,16 @@ impl Events {
         };
         // Tasks with no project (D-129) ride on the root's streams, marked so
         // the Strategy page can list them whatever their home.
-        let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
+        let tasks = all_tasks(top)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t["noProject"] == true)
+            .map(|mut t| {
+                crate::board::task_model::trim_runs(&mut t);
+                t
+            })
+            .collect::<Vec<_>>();
+        let homeless = json!({"tasks": tasks, "noProject": true});
         format!(
             "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}id: {id}\ndata: {homeless}\n\n"
         )

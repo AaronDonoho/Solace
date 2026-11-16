@@ -319,10 +319,11 @@ pub fn totals(output: &str) -> (usize, usize) {
 
 /// Failed tests in `cargo test` output by libtest name (`board::tests::x`),
 /// each with the block libtest prints for it.
-pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
-    fn flush(name: &mut Option<String>, lines: &mut Vec<String>, out: &mut BTreeMap<String, String>) {
+pub fn failures(output: &str, full: bool) -> BTreeMap<String, (String, String)> {
+    fn flush(name: &mut Option<String>, lines: &mut Vec<String>, out: &mut BTreeMap<String, String>, full: bool) {
         if let Some(name) = name.take() {
-            out.insert(name, lines.join("\n").trim_end().to_string());
+            let block = lines.join("\n").trim_end().to_string();
+            out.insert(name, if full { block } else { crate::diagnostics::shorten_assertions(&block) });
             lines.clear();
         }
     }
@@ -330,7 +331,7 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
     let (mut out, mut name, mut lines): (BTreeMap<String, String>, Option<String>, Vec<String>) = (BTreeMap::new(), None, vec![]);
     for line in clean.lines() {
         if let Some(test) = line.trim_start().strip_prefix("---- ").and_then(|rest| rest.strip_suffix(" stdout ----")) {
-            flush(&mut name, &mut lines, &mut out);
+            flush(&mut name, &mut lines, &mut out, full);
             name = Some(test.trim().to_string());
             lines.push(line.to_string());
             continue;
@@ -339,7 +340,7 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
         // while reading one, only the block's end is a marker.
         if name.is_some() {
             if line.starts_with("failures:") || line.starts_with("test result:") {
-                flush(&mut name, &mut lines, &mut out);
+                flush(&mut name, &mut lines, &mut out, full);
             } else {
                 lines.push(line.to_string());
             }
@@ -348,18 +349,18 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
         if let Some(rest) = line.strip_prefix("test ")
             && let Some((test, status)) = rest.rsplit_once(" ... ")
         {
-            flush(&mut name, &mut lines, &mut out);
+            flush(&mut name, &mut lines, &mut out, full);
             if status.trim() == "FAILED" {
                 out.entry(test.trim().to_string()).or_default();
             }
             continue;
         }
         if line.starts_with("failures:") || line.starts_with("test result:") {
-            flush(&mut name, &mut lines, &mut out);
+            flush(&mut name, &mut lines, &mut out, full);
             continue;
         }
     }
-    flush(&mut name, &mut lines, &mut out);
+    flush(&mut name, &mut lines, &mut out, full);
     out.into_iter().map(|(name, text)| (name, ("wrong".to_string(), text))).collect()
 }
 

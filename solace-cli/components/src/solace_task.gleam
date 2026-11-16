@@ -39,6 +39,7 @@ pub fn events(
   base: String,
   receive: fn(String) -> Nil,
   ready: fn() -> Nil,
+  keys: List(String),
 ) -> Source
 
 @external(javascript, "./task_api.mjs", "close_events")
@@ -267,7 +268,8 @@ pub type Model {
     /// Where the current model pick came from.
     model_source: ModelSource,
     text: String,
-    /// Whether the Notes tab shows its editor (Add note was pressed).
+    /// Whether the human opened the Notes tab's editor, through Add note or a
+    /// saved draft. A discussion or a waiting question opens it separately.
     writing: Bool,
     /// Whether the note editor's send waits for its reply: its send is
     /// disabled meanwhile, so one click makes one request.
@@ -607,9 +609,12 @@ fn listen(model: Model) -> Effect(Msg) {
       effect.from(fn(send) {
         send(
           Listening(
-            events(model.base, fn(text) { send(Live(text)) }, fn() {
-              send(CaughtUp)
-            }),
+            events(
+              model.base,
+              fn(text) { send(Live(text)) },
+              fn() { send(CaughtUp) },
+              [],
+            ),
           ),
         )
       })
@@ -1672,9 +1677,11 @@ fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
 }
 
 /// Newest first, under the Add note button while the editor is closed, and
-/// under the editor once it opens. Each note keeps its position, which names
-/// it to the API.
+/// under the editor once it opens: for Add note, a saved draft, a discussion
+/// still going, or a question still waiting. Each note keeps its position,
+/// which names it to the API.
 fn notes_view(model: Model, t: Task) -> List(Element(Msg)) {
+  let open = note_editor_open(model, t)
   let notes =
     t.notes
     |> list.index_map(fn(n, i) { #(n, i) })
@@ -1697,11 +1704,11 @@ fn notes_view(model: Model, t: Task) -> List(Element(Msg)) {
         md(model.base, n.text),
       ])
     })
-  let note_tools = case model.writing {
+  let note_tools = case open {
     True -> []
     False -> [h.div([a.class("note-tools")], [add_note_button()])]
   }
-  let note_editor = case model.writing {
+  let note_editor = case open {
     True -> [composer(model, t)]
     False -> []
   }
@@ -4785,4 +4792,16 @@ fn confirm_view(model: Model, t: Task) -> Element(Msg) {
           ])
       }
   }
+}
+
+/// Whether the Notes tab shows its editor without Add note: the human opened
+/// it, a discussion is still going, or a question is still waiting.
+fn note_editor_open(model: Model, t: Task) -> Bool {
+  let waiting = case first_unanswered(t) {
+    Some(_) -> True
+    None -> False
+  }
+  model.writing
+  || waiting
+  || list.any(t.runs, fn(r) { r.kind == "discuss" && r.state != "ended" })
 }

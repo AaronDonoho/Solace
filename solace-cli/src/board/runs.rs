@@ -582,6 +582,7 @@ impl Watch<'_> {
                 if t["runs"][i]["state"] != "ended" {
                     note(t, "agent", Some(&rid), &reply);
                     t["runs"][i]["state"] = json!("waiting");
+                    hold(t, crate::board::task_model::DISCUSSION_WAITING);
                 }
                 Ok(())
             }),
@@ -959,6 +960,9 @@ pub(crate) fn stream_task_event(top: &Path, mut event: Value, has_project: bool)
     if event.get("task").is_some_and(Value::is_object) {
         let task = event["task"].take();
         event["task"] = tasks::with_on_board(top, task, has_project, &mut HashMap::new());
+        if let Some(task) = event.get_mut("task") {
+            crate::board::task_model::trim_runs(task);
+        }
     }
     event
 }

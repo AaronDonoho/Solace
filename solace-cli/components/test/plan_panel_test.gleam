@@ -182,3 +182,21 @@ pub fn a_page_names_the_marker_with_its_own_words_test() {
   assert string.contains(marker, ">Design</span>")
   assert string.contains(marker, "title=\"A design run is open on this\"")
 }
+
+pub fn notes_draw_in_the_panel_and_a_start_carries_them_test() {
+  let page =
+    element.to_string(plan_panel.view_with_notes(
+      "",
+      settings(),
+      panel(),
+      plan_panel.marker(settings().labels),
+    ))
+  assert string.contains(page, "class=\"planning\"")
+  let body =
+    json.to_string(
+      plan_panel.start_body_with_notes("fake", "", "Go", plan_panel.page, [
+        json.object([#("text", json.string("A note"))]),
+      ]),
+    )
+  assert string.contains(body, "\"notes\":[{\"text\":\"A note\"}]")
+}

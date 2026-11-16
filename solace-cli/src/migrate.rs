@@ -399,7 +399,7 @@ fn builds(root: &Path, projects: &[String], protect: Option<&Path>) -> Value {
         clear_compiled(root, std::slice::from_ref(d));
         let (build, bout) = run(&dir, &["gleam", "build"], 600, protect);
         let (test, tout) = if build { run(&dir, &["gleam", "test"], 600, protect) } else { (false, String::new()) };
-        let failing: Vec<String> = language::of(&dir).failures(&tout).into_keys().collect();
+        let failing: Vec<String> = language::of(&dir).failures(&tout, false).into_keys().collect();
         ps.insert(d.clone(), json!({"build":build,"test":test,"failing":failing,"output":bout + &tout}));
     }
     Value::Object(ps)

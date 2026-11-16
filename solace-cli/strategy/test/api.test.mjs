@@ -1068,3 +1068,39 @@ test('the strategy draft storage stub matches the components copy', async () => 
   const components = await readFile(new URL('../../components/test/draft_storage.mjs', import.meta.url), 'utf8');
   expect(local.trimEnd()).toBe(components.trimEnd());
 });
+
+// The startup trim sends tasks with only the run fields a row reads, and ended
+// runs without their answered questions. This matches that shape at the
+// investigation's size.
+test('a startup-sized replay catches up well under 50ms', () => {
+  const run = { id: 'r1', kind: 'work', state: 'ended', model: 'm', effort: '', log: '/logs/r1',
+    outcome: 'finished', started: 1, ended: 2, used: {}, failed: false };
+  const tasks = Array.from({ length: 878 }, (_, i) => ({
+    id: 't' + i, title: 'Task ' + i, body: '', column: 'planning', rank: i, runs: [run],
+    notes: [], questions: [], changes: [], stamps: {}, links: [],
+  }));
+  const plan_run = i => ({ id: 'r' + i, model: 'm', effort: '', state: 'ended', started: i, ended: i + 1,
+    outcome: 'planned', context: { kind: 'page', id: '' }, notes: [], questions: [], used: '' });
+  const frames = [
+    ...Array.from({ length: 13 }, (_, i) =>
+      JSON.stringify({ project: '.', tasks: tasks.slice(i * 68, (i + 1) * 68) })),
+    JSON.stringify({ strategyRuns: Array.from({ length: 300 }, (_, i) => plan_run(i)) }),
+    JSON.stringify({ designRuns: Array.from({ length: 100 }, (_, i) => plan_run(300 + i)) }),
+  ];
+  let model, effect;
+  [model, effect] = strategy.init(undefined);
+  [model, effect] = strategy.update(model, new strategy.ProjectsLoaded(JSON.stringify({
+    workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }],
+  })));
+  for (const frame of frames) [model, effect] = strategy.update(model, new strategy.Live(frame));
+  let turns = 0, total = 0, longest = 0;
+  while (!model.caught_up && turns < 100) {
+    const started = performance.now();
+    [model, effect] = strategy.update(model, new strategy.CaughtUp());
+    const elapsed = performance.now() - started;
+    total += elapsed; longest = Math.max(longest, elapsed); turns++;
+  }
+  console.log(`strategy CaughtUp: ${total.toFixed(1)} ms over ${turns} turns, longest ${longest.toFixed(1)} ms`);
+  expect(model.caught_up).toBe(true);
+  expect(longest).toBeLessThan(50);
+});

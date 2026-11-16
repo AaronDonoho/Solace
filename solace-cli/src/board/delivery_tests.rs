@@ -97,3 +97,22 @@ fn wait_limit_reads_the_launch_timeout_from_the_agent_environment() {
     });
     assert_eq!(limit, super::wait_limit_for(7200));
 }
+
+#[test]
+fn a_design_note_carries_its_elements_types_and_parents_once() {
+    let note = serde_json::json!({
+        "id":"n1","author":"human","run":"r1","time":5,"text":"Make it primary",
+        "designNotes": [{
+            "design": "0123456789abcdef", "title": "Home", "text": "the button",
+            "elements": [{"id":"go","type":"button","parents":[{"id":"root","type":"screen"}]}]
+        }]
+    });
+    let run = serde_json::json!({});
+    let pending = super::take_pending(&run, &[note.clone()], Some("r1")).unwrap();
+    let text = super::pending_text(&pending);
+    for part in ["Home", "0123456789abcdef", "the button", "go (button)", "root (screen)"] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    let seen = serde_json::json!({"notes_seen":[crate::board::briefs::note_fingerprint(&note)]});
+    assert!(super::take_pending(&seen, &[note], Some("r1")).is_none(), "a delivered note is not delivered again");
+}
