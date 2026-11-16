@@ -302,24 +302,29 @@ pub(crate) fn persists(m: &Value) -> bool {
 
 /// The project task `t`, at home in `home`, starts its runs in (D-123): the
 /// one of its scope with the most symbols its title, body and Tech Debt
-/// findings name as `module.name`; the home when none has more.
+/// findings name; the home when none has more.
 pub(crate) fn start_project(home: &Path, t: &Value) -> String {
     let top = scope::top(home);
     let mine = scope::dir(&top, home);
     let text = crate::board::briefs::task_text(t);
     let mut candidates = vec![mine.clone()];
     candidates.extend(scope::of(t, &mine).into_iter().filter(|d| *d != mine));
-    let mut best = (0, mine);
+    let mut loaded = vec![];
     for d in candidates {
         let path = scope::path(&top, &d);
-        if crate::language::detect(&path).is_none() {
+        if crate::language::detect(&path).is_none() && !crate::language::is_rust(&path) {
             continue;
         }
         let Ok(s) = Store::peek(&path) else { continue };
         let Ok(ix) = s.index() else { continue };
-        let n = s.named(&ix, &text).len();
-        if n > best.0 {
-            best = (n, d);
+        loaded.push((d, s, ix));
+    }
+    let indexes: Vec<(&Store, &crate::Index)> = loaded.iter().map(|(_, s, ix)| (s, ix)).collect();
+    let named = crate::store_read::named_in(&text, &indexes);
+    let mut best = (0, mine);
+    for ((d, _, _), named) in loaded.iter().zip(named) {
+        if named.len() > best.0 {
+            best = (named.len(), d.clone());
         }
     }
     best.1
@@ -701,13 +706,14 @@ fn tool_input(args: &Value) -> (String, String) {
 }
 
 /// Reads an agent's log (Codex `exec --json` or Claude Code `stream-json`) into
-/// entries a board can show: message, thinking, tool, usage, error or output.
+/// entries a board can show: message, thinking, tool, error or output, and the
+/// latest usage last.
 // rereads the whole log per request; keep an offset if logs get large.
 pub fn transcript(log: &Path) -> Vec<Value> {
     let mut out: Vec<Value> = vec![];
     let mut tools: HashMap<String, usize> = HashMap::new();
     // Claude Code: the context of its latest API call, and output per call (events repeat per content block).
-    let (mut context, mut output, mut ended) = (None, HashMap::new(), false);
+    let (mut context, mut output, mut usage) = (None, HashMap::new(), None);
     let text = fs::read_to_string(log).unwrap_or_default();
     let ends = fs::read_to_string(server_end_log(log)).unwrap_or_default();
     for line in text.lines() {
@@ -761,7 +767,7 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                         format!(" ({n} cached{ratio})")
                     })
                     .unwrap_or_default();
-                out.push(json!({"kind":"usage","text":format!("{input} input tokens{cache}, {} output tokens", u["output_tokens"])}));
+                usage = Some(format!("{input} input tokens{cache}, {} output tokens", u["output_tokens"]));
             }
             ("error", _) => out.push(json!({"kind":"error","text":e["message"]})),
             ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"],"fatal":true})),
@@ -771,6 +777,7 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                 if u.is_object() {
                     context = Some(context_tokens(u));
                     output.insert(e["message"]["id"].to_string(), u["output_tokens"].as_u64().unwrap_or(0));
+                    usage = None;
                 }
                 for c in e["message"]["content"].as_array().unwrap_or(&vec![]) {
                     match c["type"].as_str() {
@@ -798,7 +805,6 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                 }
             }
             ("result", _) => {
-                ended = true;
                 let u = &e["usage"];
                 let last = context.map(|c| format!("; last context {c} tokens")).unwrap_or_default();
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
@@ -817,7 +823,10 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                     None if written.is_empty() => String::new(),
                     None => format!(" ({} written to cache)", n("cache_creation_input_tokens")),
                 };
-                out.push(json!({"kind":"usage","text":format!("{input} input tokens{cache}, {} output tokens{last}", n("output_tokens"))}));
+                if u.as_object().map_or(false, |o| !o.is_empty()) {
+                    usage = Some(format!("{input} input tokens{cache}, {} output tokens{last}", n("output_tokens")));
+                    output.clear();
+                }
                 if e["is_error"] == true {
                     out.push(json!({"kind":"error","text":text_of(&e["result"]),"fatal":true}));
                 }
@@ -832,9 +841,12 @@ pub fn transcript(log: &Path) -> Vec<Value> {
             out.push(json!({"kind":"error","text":line,"source":SERVER}));
         }
     }
-    if let (Some(c), false) = (context, ended) {
+    let usage = usage.or_else(|| {
         // Live, until the run's totals arrive. Some endpoints report output only at the end.
-        out.push(json!({"kind":"usage","text":format!("Context {c} tokens; {} output tokens so far", output.values().sum::<u64>())}));
+        context.map(|c| format!("Context {c} tokens; {} output tokens so far", output.values().sum::<u64>()))
+    });
+    if let Some(text) = usage {
+        out.push(json!({"kind":"usage","text":text}));
     }
     out
 }

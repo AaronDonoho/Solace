@@ -740,7 +740,10 @@ fn bar(settings: Settings, p: Panel(msg)) -> Element(msg) {
 fn compose(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
   let box = fn(label, send, choice, text) {
     html.div(
-      [attribute.class("plan-compose"), event.on("keydown", send_key(send))],
+      [
+        attribute.class("plan-compose"),
+        event.on("keydown", solace_task.send_key(send)),
+      ],
       [
         choice,
         solace_task.editor(
@@ -778,17 +781,6 @@ fn compose(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
         solace_task.ui_label("start"),
       )
     _, _ -> element.none()
-  }
-}
-
-/// Ctrl or Cmd+Enter in the message box: `send`. Other keys pass.
-fn send_key(send: msg) -> decode.Decoder(msg) {
-  use key <- decode.field("key", decode.string)
-  use ctrl <- decode.field("ctrlKey", decode.bool)
-  use meta <- decode.field("metaKey", decode.bool)
-  case key == "Enter" && { ctrl || meta } {
-    True -> decode.success(send)
-    False -> decode.failure(send, "not a send")
   }
 }
 

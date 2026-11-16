@@ -427,9 +427,11 @@ const view_styles =
 .design-heading h2{margin:0}
 .design-version-note{color:var(--soft)}
 .design-restore{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
-.design-preview{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:var(--edge);border:1px solid var(--edge);cursor:pointer}
+.design-preview{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
 .design-choice{padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);cursor:pointer}
 .design-choice[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
+.design-changes{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
+.design-changes[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
 @media (max-width:900px){.design-body{flex-direction:column;height:auto}.design-list{flex:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:0 0 var(--space-3)}.design-screens{height:60vh}}
 "
@@ -552,9 +554,11 @@ fn apply(model: Model, text: String) -> Model {
   Model(..model, panel: panel.live(model.panel, text))
 }
 
-fn settle(model: Model) -> #(Model, Effect(Msg)) {
+/// Applies the events received while catching up, now that the page has its
+/// list. Runs already waiting before launch are not new, so it never flags
+/// attention.
+pub fn settle(model: Model) -> #(Model, Effect(Msg)) {
   let designs = model.designs
-  let runs = model.panel.runs
   let before = model
   let model = Model(..model, caught_up: True, loading: False)
   let model =
@@ -564,24 +568,10 @@ fn settle(model: Model) -> #(Model, Effect(Msg)) {
     True -> Model(..model, drawing: None)
     False -> model
   }
-  let attention = panel.needs_attention(runs, model.panel.runs)
-  let effects =
-    list.flatten([
-      case model.designs == designs && !answered {
-        True -> []
-        False -> [reload(model)]
-      },
-      case attention {
-        True -> [event.emit("attention", json.null())]
-        False -> []
-      },
-    ])
-  let fx = case effects {
-    [] -> effect.none()
-    [one] -> one
-    many -> effect.batch(many)
+  case model.designs == designs && !answered {
+    True -> #(model, effect.none())
+    False -> #(model, reload(model))
   }
-  #(model, fx)
 }
 
 fn error(text: String) -> String {
@@ -1405,7 +1395,7 @@ fn proposal_controls(model: Model, choices: Bool) -> List(Element(Msg)) {
   list.append(switch, [
     html.button(
       [
-        attribute.class("design-choice"),
+        attribute.class("design-changes"),
         attribute.attribute("aria-pressed", bool_text(model.show_changes)),
         attribute.attribute("aria-label", label),
         attribute.attribute("title", label),

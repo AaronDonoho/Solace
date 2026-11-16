@@ -747,3 +747,28 @@ fn find_matches_a_query_with_escaped_quotes() {
         assert!(out.contains("crate.label"), "{query}: {out}");
     }
 }
+
+/// A task's `Type::method` names the method, and a bare name counts only
+/// when it looks like code.
+#[test]
+fn a_task_names_a_method_and_rejects_plain_words() {
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub struct Board;\n\nimpl Board {\n    pub fn explicit(&self) -> bool {\n        true\n    }\n}\n\n",
+                "pub fn task() -> i32 {\n    1\n}\n\npub fn start_project() -> i32 {\n    2\n}\n",
+            ),
+        ),
+    ]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    let names = |text: &str| store.named(&ix, text).into_iter().map(|i| ix.syms[i].qname()).collect::<Vec<_>>();
+    assert_eq!(names("`crate.Board::explicit`").join(" "), "crate.Board::explicit");
+    assert_eq!(names("`Board::explicit`").join(" "), "crate.Board::explicit");
+    assert_eq!(names("`start_project`").join(" "), "crate.start_project");
+    assert_eq!(names("`Board`").join(" "), "crate.Board");
+    assert!(names("`task`").is_empty(), "a plain word is not a name");
+}

@@ -888,7 +888,7 @@ class Board(unittest.TestCase):
         other=self.create();self.action(other,'plan');self.action(other,'assign','E7005',model='fake')
         self.action(t,'review','E7003',model='fake')
         self.api('PATCH','/tasks/'+t['id'],{'title':'blocked edit'},'E7003')
-        self.action(t,'reassign','E7002')
+        self.action(t,'reassign','E7003')
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
         t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['runs'][-1]['id'],rid)
         self.assertIsNone(t['attention'])
@@ -896,10 +896,13 @@ class Board(unittest.TestCase):
         self.assertEqual(len(self.get(t)['runs']),1)  # Retried answers never launch a new agent.
         response=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0]);self.assertEqual(json.loads(response['result']['content'][0]['text'])['questions'][0]['answer'],'a')
         t=self.assign([{'command':'task ask','text':'Again?','options':['a','b']},{'command':'task done answered'}]);t=self.wait(t,lambda x:(x['attention'] or {}).get('hold'));old=t['runs'][-1]['id']
-        t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
-        self.wait(t,lambda x:len(x['questions'])==2)
+        self.action(t,'new_agent','E7003',text='b');self.assertEqual(self.get(t)['runs'][-1]['id'],old)
+        t=self.action(t,'stop');t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
+        t=self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
-        self.action(t,'reassign',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+        self.action(t,'reassign','E7003',text='b')
+        q=[q for q in t['questions'] if q.get('answer') is None][-1]
+        self.api('POST',f'/tasks/{t["id"]}/questions/{q["id"]}',{'option':'a'});self.wait(t,lambda x:x['column']=='needs_review')
     def test_a17_gleam_toml_is_written_directly(self):  # D-147: no question, no human edit
         manifest=self.root/'gleam.toml';original=manifest.read_text();new=original+'[dependencies]\n'
         t=self.completed([{'command':'read gleam.toml'},{'command':'write gleam.toml','text':new}])
@@ -1007,7 +1010,7 @@ class Board(unittest.TestCase):
         t=self.create([*steps,{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task note --text "### Cut'},{'command':'task done report'}]);self.action(t,'plan')
         self.action(t,'investigate',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
         self.assertEqual(t['column'],'planning');self.assertIn('question',t['attention']['reason']);rid=t['runs'][-1]['id']
-        self.action(t,'investigate','E7002')
+        self.action(t,'investigate','E7003')
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'text':'a'})
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(t['runs'][-1]['id'],rid);self.assertEqual(t['runs'][-1]['outcome'],'reported')
         self.assertEqual(t['column'],'planning');self.assertEqual(t['notes'][-1]['text'],'report');self.assertFalse(t['changes'])

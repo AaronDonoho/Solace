@@ -299,12 +299,16 @@ impl Store {
                         ));
                     }
                     let mut header = if parsed.header.is_empty() { header.clone() } else { parsed.header.clone() };
+                    // An import written below a declaration stays in that
+                    // declaration's text, so scan the whole submitted module.
+                    let mut known = module_aliases(&header, parsed.items.iter().map(|i| i.text.as_str()));
                     let (mut changed, mut added) = (vec![], vec![]);
                     for item in &parsed.items {
                         let test = ix.modules.iter().any(|m| m.path == module && m.dir == "test");
-                        for need in missing_imports(&ix, &deps, &header, &item.text, test) {
+                        for need in missing_imports(&ix, &deps, &known, &item.text, test) {
                             let line = need.line();
                             header = add_import(&header, &line);
+                            known.extend(aliases(&line));
                             notes.push(format!("added `{line}` to {module}"));
                         }
                         if test {
@@ -540,9 +544,19 @@ impl Store {
                 }
                 let test = ix.modules.iter().any(|m| &m.path == module && m.dir == "test")
                     || created.iter().any(|(p, d, _)| p == module && *d == "test");
-                for need in missing_imports(&ix, &deps, &header, &item.text, test) {
+                let mut known = module_aliases(
+                    &header,
+                    ix.syms
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, s)| &s.module == module && Some(*i) != *existing)
+                        .map(|(_, s)| s.text.as_str())
+                        .chain(std::iter::once(item.text.as_str())),
+                );
+                for need in missing_imports(&ix, &deps, &known, &item.text, test) {
                     let line = need.line();
                     header = if need.alias.is_some() { add_import(&header, &line) } else { merge_import(&header, &need.module, &[]) };
+                    known.extend(aliases(&line));
                     notes.push(format!("added `{line}` to {module}"));
                 }
                 if test {
@@ -1297,7 +1311,8 @@ impl Store {
             format!("{prelude}{}\n\npub fn main() {{\n{setup}{}\n}}\n", imports.join("\n"), body.join("\n"))
         };
         // the probe lives in test/, so test helpers such as `support` are importable
-        for need in missing_imports(ix, deps, &code, &code, true) {
+        let known = aliases(&code);
+        for need in missing_imports(ix, deps, &known, &code, true) {
             code = format!("{}\n{code}", need.line());
         }
         Ok(code)
@@ -1489,18 +1504,17 @@ fn weak_asserts(text: &str, aliases: &HashSet<String>) -> Vec<String> {
     out
 }
 
-/// Imports needed for `alias.name` references the header doesn't import yet:
+/// Imports needed for `alias.name` references the module doesn't import yet:
 /// one project module or dependency by last path segment, the stdlib, or the
 /// one module another module already imports as that alias. `test`: the code
 /// is in a test module, which may also import test modules and dev modules.
-fn missing_imports(ix: &Index, deps: &[DependencyModule], header: &str, text: &str, test: bool) -> Vec<MissingImport> {
-    let aliases = aliases(header);
+fn missing_imports(ix: &Index, deps: &[DependencyModule], known: &HashSet<String>, text: &str, test: bool) -> Vec<MissingImport> {
     let mut out: Vec<MissingImport> = vec![];
     for r in crate::language::gleam::references(text) {
         let Ref::Qualified(alias, _) = r else {
             continue;
         };
-        if aliases.contains(&alias) {
+        if known.contains(&alias) {
             continue;
         }
         let ImportMatch::One(need) = import_match(ix, deps, &alias, test) else {
@@ -1757,4 +1771,13 @@ struct ProbeOutcome {
     timed_out: bool,
     cut_short: bool,
     output: String,
+}
+
+/// A module's aliases once only the given texts remain in it.
+fn module_aliases<'a>(header: &str, texts: impl Iterator<Item = &'a str>) -> HashSet<String> {
+    let mut known = aliases(header);
+    for text in texts {
+        known.extend(aliases(text));
+    }
+    known
 }

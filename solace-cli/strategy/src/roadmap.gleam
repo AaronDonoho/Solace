@@ -553,7 +553,7 @@ fn form(
         ]),
       ]),
     ]),
-    solace_task.editor(
+    solace_task.editor_sending(
       solace_task.EditorConfig(
         id: text_id,
         task: "",
@@ -566,6 +566,8 @@ fn form(
         on_block: editor.on_block,
         actions: [],
       ),
+      editor.on_save,
+      editor.saving,
     ),
     html.div([attribute.class("filters")], [
       html.label([], [

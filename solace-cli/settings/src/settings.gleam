@@ -61,6 +61,10 @@ pub type Model {
     models: List(Entry),
     /// The languages on this computer, from the system settings.
     languages: List(Language),
+    /// Whether the finished sound plays.
+    finished_sound: Bool,
+    /// Whether the needs-attention sound plays.
+    attention_sound: Bool,
     /// The version of the Solace program running this page.
     version: String,
     /// How agents address the human, how much they write, and how readily they ask.
@@ -97,6 +101,10 @@ pub type Msg {
   TabShown(Tab)
   /// The Dark mode switch: on or off.
   SetDark(Bool)
+  /// The Finished sound switch: on or off.
+  SetFinishedSound(Bool)
+  /// The Needs attention sound switch: on or off.
+  SetAttentionSound(Bool)
   /// The theme setting changed, here or in another window; "" follows the system.
   ThemeChanged(String)
   /// The element was added to the page: it listens for theme changes.
@@ -176,6 +184,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           False -> "light"
         })
       }),
+    )
+    SetFinishedSound(on) -> #(
+      Model(..model, finished_sound: on),
+      effect.from(fn(_) { save(sound_finished_key, sound_stored(on)) }),
+    )
+    SetAttentionSound(on) -> #(
+      Model(..model, attention_sound: on),
+      effect.from(fn(_) { save(sound_attention_key, sound_stored(on)) }),
     )
     // The page has applied the system's theme by now (`follow_theme`).
     ThemeChanged("") -> #(
@@ -466,6 +482,7 @@ pub fn view(model: Model) -> Element(Msg) {
           ]
           Appearance -> [appearance_section(model.dark)]
           Languages -> [languages_section(model)]
+          Notifications -> [notifications_section(model)]
           About -> [about_section(model)]
         },
       )
@@ -515,6 +532,7 @@ const view_styles =
 .about-license{margin-top:12px}.about-license>summary{cursor:pointer}.about-license .md h4{margin:16px 0 8px;font-size:var(--h4)}.about-license .md p,.about-license .md li{color:var(--ink)}.about-license .md ul{margin:8px 0;padding-left:20px}
 .models{margin:0;padding:0 0 0 18px}.models li{margin:6px 0}.models button{margin-right:8px}
 .languages{margin:0;padding:0;list-style:none}.languages li{margin:6px 0}
+.sounds{margin:0;padding:0;list-style:none}.sounds li{margin:6px 0}
 .behavior-groups{margin-top:8px}
 .behavior-group{margin:14px 0}
 .choice-pick{display:flex;flex-wrap:wrap;gap:0;width:max-content;max-width:100%;margin:6px 0}
@@ -602,6 +620,8 @@ pub fn initial(dark: Bool) -> Model {
     unsubscribe: None,
     models: [],
     languages: [],
+    finished_sound: load(sound_finished_key) != "0",
+    attention_sound: load(sound_attention_key) != "0",
     version: "",
     behavior: default_behavior,
     behavior_before: None,
@@ -1412,11 +1432,12 @@ pub type Tab {
   Agents
   Appearance
   Languages
+  Notifications
   About
 }
 
 pub fn tabs() -> List(Tab) {
-  [Agents, Appearance, Languages, About]
+  [Agents, Appearance, Languages, Notifications, About]
 }
 
 pub fn label(tab: Tab) -> String {
@@ -1424,6 +1445,7 @@ pub fn label(tab: Tab) -> String {
     Agents -> "Agents"
     Appearance -> "Appearance"
     Languages -> "Languages"
+    Notifications -> "Notifications"
     About -> "About"
   }
 }
@@ -1434,6 +1456,7 @@ pub fn tab_name(tab: Tab) -> String {
     Agents -> "agents"
     Appearance -> "appearance"
     Languages -> "languages"
+    Notifications -> "notifications"
     About -> "about"
   }
 }
@@ -1754,3 +1777,43 @@ fn queue_skill_load(model: Model) -> #(Model, Effect(Msg)) {
 
 @external(javascript, "./api.mjs", "scroll_into_view")
 fn scroll_into_view(root: dynamic.Dynamic, selector: String) -> Nil
+
+const sound_finished_key = "solace-sound-finished"
+
+const sound_attention_key = "solace-sound-attention"
+
+fn sound_stored(on: Bool) -> String {
+  case on {
+    True -> ""
+    False -> "0"
+  }
+}
+
+fn notifications_section(model: Model) -> Element(Msg) {
+  html.section([attribute.attribute("aria-labelledby", "notifications")], [
+    html.h2([attribute.id("notifications")], [html.text("Sounds")]),
+    html.p([], [
+      html.text(
+        "Solace plays a sound when an agent finishes, and another when a task needs your attention. Both play on whichever page is open; turn either off here.",
+      ),
+    ]),
+    html.ul([attribute.class("sounds")], [
+      sound_row("Finished", model.finished_sound, SetFinishedSound),
+      sound_row("Needs attention", model.attention_sound, SetAttentionSound),
+    ]),
+  ])
+}
+
+fn sound_row(name: String, on: Bool, msg: fn(Bool) -> Msg) -> Element(Msg) {
+  html.li([], [
+    html.label([attribute.class("switch")], [
+      html.input([
+        attribute.type_("checkbox"),
+        attribute.role("switch"),
+        attribute.checked(on),
+        event.on_check(msg),
+      ]),
+      html.text(name),
+    ]),
+  ])
+}

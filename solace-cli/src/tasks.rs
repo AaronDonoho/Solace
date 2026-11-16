@@ -2793,4 +2793,76 @@ mod tests {
         assert!(note.contains(&said), "{note}");
         assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 1);
     }
+
+    /// The text of run `rid`'s question `qid`.
+    fn question(root: &Path, rid: &str, qid: &str) -> String {
+        let run = record(root, "runs", rid).unwrap();
+        run["questions"].as_array().unwrap().iter().find(|q| q["id"] == qid).unwrap()["text"].as_str().unwrap().to_string()
+    }
+
+    /// An edit proposal names the record's current title beside its id, in its
+    /// question and the note an answer leaves, even when it changes other fields.
+    #[test]
+    fn an_edit_proposal_names_the_current_title() {
+        let root = root();
+        let rid = page_run(&root);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        let qid = propose(&root, &rid, "feature", Some(fid), r#"{"body": "a"}"#);
+        let q = question(&root, &rid, &qid);
+        assert!(q.contains(&format!("Change feature {fid} \"F\"")), "{q}");
+        let (_, note) = answer(&root, &rid, &qid, "Reject");
+        assert!(note.contains(&format!("Change feature {fid} \"F\"")), "{note}");
+        let t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let qid = propose(&root, &rid, "task", Some(tid), r#"{"body": "b"}"#);
+        assert!(question(&root, &rid, &qid).contains(&format!("Change task {tid} \"{}\"", t["title"].as_str().unwrap())));
+    }
+
+    /// An edit that changes the title names the current one and the new one.
+    #[test]
+    fn an_edit_that_changes_the_title_names_both() {
+        let root = root();
+        let rid = page_run(&root);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Old"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        let qid = propose(&root, &rid, "feature", Some(fid), r#"{"title": "New"}"#);
+        let headline = format!("Change feature {fid} \"Old\" → \"New\"");
+        assert!(question(&root, &rid, &qid).contains(&headline));
+        let (_, note) = answer(&root, &rid, &qid, "Approve");
+        assert!(note.contains(&headline), "{note}");
+    }
+
+    /// `POST /tasks` keeps a milestone, feature and dependency, checked as an
+    /// edit checks them; a refused create stores nothing.
+    #[test]
+    fn a_created_task_keeps_its_links() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let post = |body: Value| api(&root, "POST", &["tasks"], body);
+        let m = call("POST", &["milestones"], json!({"title": "M"}));
+        let with_milestone = post(json!({"title": "M task", "milestone": m["id"]})).unwrap();
+        assert!(with_milestone["feature"].is_null());
+        assert_eq!(with_milestone["milestone"], m["id"]);
+        let id = with_milestone["id"].as_str().unwrap();
+        assert_eq!(board::task(&root, id).unwrap()["milestone"], m["id"]);
+
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m["id"]}));
+        let first = post(json!({"title": "First"})).unwrap();
+        let with_links = post(json!({"title": "Linked", "feature": f["id"], "dependsOn": [first["id"]]})).unwrap();
+        assert_eq!((&with_links["feature"], &with_links["milestone"]), (&f["id"], &m["id"]));
+        assert_eq!(with_links["dependsOn"], json!([first["id"]]));
+        let id = with_links["id"].as_str().unwrap();
+        let stored = board::task(&root, id).unwrap();
+        assert_eq!((&stored["feature"], &stored["milestone"]), (&f["id"], &m["id"]));
+        assert_eq!(stored["dependsOn"], json!([first["id"]]));
+
+        let before = board::all_tasks(&root).unwrap().len();
+        let refused = |body: Value| post(body).unwrap_err().0[..5].to_string();
+        assert_eq!(refused(json!({"title": "x", "milestone": "nope"})), "E7023");
+        assert_eq!(refused(json!({"title": "x", "feature": "nope"})), "E7023");
+        assert_eq!(refused(json!({"title": "x", "dependsOn": ["nope"]})), "E7024");
+        assert_eq!(refused(json!({"title": "x", "feature": f["id"], "milestone": m["id"]})), "E7001");
+        assert_eq!(board::all_tasks(&root).unwrap().len(), before, "a refused create stores nothing");
+    }
 }

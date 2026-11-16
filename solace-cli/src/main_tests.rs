@@ -3112,3 +3112,90 @@ fn a_compile_failure_names_the_unfinished_crate_changes() {
     assert!(!err.contains("Doc change") && !err.contains("Running task"), "{err}");
     assert!(crate::board::runs::transcript(&log).iter().any(|e| e == &json!({"kind":"usage","text":line})));
 }
+
+/// A task that names a Rust project's `Store` with a bare code name starts
+/// there, and its first call reads that symbol.
+#[test]
+fn a_bare_store_name_starts_in_its_rust_project() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\".\", \"solace-cli\"]\n"),
+        ("solace-cli/Cargo.toml", testing::CARGO),
+        ("solace-cli/src/lib.rs", "/// The store.\npub struct Store;\n"),
+    ]);
+    import(&root.join("solace-cli")).unwrap();
+    let (_, tid) = task_at(&root, "solace-cli", &[".", "solace-cli"]);
+    let s = open(&root.join("solace-cli")).unwrap();
+    let mut t = task(&root.join("solace-cli"), &tid).unwrap();
+    t["body"] = json!("Change `Store`.");
+    put(&s, &t).unwrap();
+    assert_eq!(crate::board::runs::start_project(&root, &t), "solace-cli");
+    let store = Store::at(&root.join("solace-cli")).unwrap();
+    let out = store.task_session("Change `Store`.", Some(&tid), "").unwrap();
+    let next = out.lines().find(|l| l.starts_with("Next:")).expect(&out);
+    assert!(next.contains("`inspect crate.Store"), "{next}");
+}
+
+/// A bare name shared by projects or matching several symbols never chooses
+/// a project or outranks a full name; plain words are not names.
+#[test]
+fn a_bare_name_must_be_unique_and_look_like_code() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/Cargo.toml", testing::CARGO),
+        ("a/src/lib.rs", "pub fn one() -> i32 {\n    1\n}\npub struct Shared;\n"),
+        ("b/Cargo.toml", testing::CARGO),
+        (
+            "b/src/lib.rs",
+            concat!(
+                "pub mod left;\npub mod right;\n\npub struct Shared;\n",
+                "pub fn task() -> i32 { 1 }\npub fn session() -> i32 { 2 }\n",
+                "pub fn submit() -> i32 { 3 }\npub fn answer() -> i32 { 42 }\n",
+            ),
+        ),
+        ("b/src/left.rs", "pub struct Index;\n"),
+        ("b/src/right.rs", "pub struct Index;\n"),
+    ]);
+    for d in ["a", "b"] {
+        import(&root.join(d)).unwrap();
+    }
+    let a = root.join("a");
+    let t = |body: &str| json!({"title": "T", "body": body, "scope": ["a", "b"]});
+    assert_eq!(crate::board::runs::start_project(&a, &t("Change `Index`.")), "a", "an ambiguous name chooses nothing");
+    assert_eq!(crate::board::runs::start_project(&a, &t("Change `Shared`.")), "a", "a bare name shared by projects chooses nothing");
+    assert_eq!(crate::board::runs::start_project(&a, &t("Run `task`, `session`, `submit`.")), "a", "plain words choose nothing");
+    let b = Store::at(&root.join("b")).unwrap();
+    let a_store = Store::at(&root.join("a")).unwrap();
+    let (a_ix, b_ix) = (a_store.index().unwrap(), b.index().unwrap());
+    let named = crate::store_read::named_in("Change `Shared`.", &[(&a_store, &a_ix), (&b, &b_ix)]);
+    assert!(named.iter().all(Vec::is_empty), "a bare name shared by projects names neither: {named:?}");
+    let out = b.task_session("`crate.answer` with `Index`, `task`, `session`, `submit`.", None, "").unwrap();
+    let next = out.lines().find(|l| l.starts_with("Next:")).expect(&out);
+    assert!(next.contains("`inspect crate.answer"), "{next}");
+}
+
+/// An import written below a test is still that module's import, so saving a
+/// symbol that uses it adds nothing.
+#[test]
+fn an_import_below_a_declaration_is_not_added_again() {
+    let store = project(&[
+        ("test/helper.gleam", "pub fn twice() -> Int {\n  2\n}\n"),
+        ("test/app_test.gleam", "pub fn existing() -> Int {\n  1\n}\n\nimport helper\n"),
+    ]);
+    let out = store.submit_symbols(None, Some("app_test"), "pub fn added() -> Int { helper.twice() }").unwrap();
+    assert!(!out.contains("added `import"), "{out}");
+    let file = fs::read_to_string(store.root.join("test/app_test.gleam")).unwrap();
+    assert_eq!(file.matches("import helper").count(), 1, "{file}");
+}
+
+/// A resubmitted symbol no longer lends its old, dropped import to the module.
+#[test]
+fn an_import_dropped_by_a_resubmit_is_added_to_the_header() {
+    let store = project(&[
+        ("test/helper.gleam", "pub fn twice() -> Int {\n  2\n}\n"),
+        ("test/app_test.gleam", "pub fn existing() -> Int {\n  1\n}\n\nimport helper\n"),
+    ]);
+    let out = store.submit_symbols(Some("existing"), None, "pub fn existing() -> Int { helper.twice() }").unwrap();
+    assert!(out.contains("added `import helper` to app_test"), "{out}");
+    let file = fs::read_to_string(store.root.join("test/app_test.gleam")).unwrap();
+    assert_eq!(file.matches("import helper").count(), 1, "{file}");
+}

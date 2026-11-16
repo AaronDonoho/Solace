@@ -100,6 +100,7 @@ pub(crate) fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, n
                 return Ok(t);
             }
             let mut t = created(&root, &body, Column::First)?;
+            crate::board::task_model::set_links(&top, &mut t, &body)?;
             if let Some(r) = request {
                 t["request"] = json!(r);
             }

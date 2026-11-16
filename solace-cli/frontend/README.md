@@ -28,7 +28,8 @@ tab; Architecture has no `tab` query, so a design alone is `?design=<id>`.
 Reload, Back and Forward restore the tab and the open design. An unknown tab
 shows Architecture; a design from the other tab or an unknown one opens
 nothing. A Settings tab change works the same way at `/settings?tab=<name>`;
-Agents has no query, and an unknown tab shows it.
+Agents has no query, an unknown tab shows it, and Notifications is
+`?tab=notifications`.
 
 ## Task, feature and milestone links (D-98, D-122)
 

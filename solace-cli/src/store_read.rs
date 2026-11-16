@@ -71,19 +71,10 @@ impl Store {
         let reference = if reference { format!("\n{}", crate::reference::agent_reference(tid.is_some())) } else { String::new() };
         Ok(format!("{status}{}{}{reference}{next}", self.work_context(ix, &work)?, self.other_projects(tid)))
     }
-    /// The symbols `text` names as `module.name`, in order, each once.
+    /// The symbols `text` names, in order, each once: `module.name` in this
+    /// project, and a bare name only when it is unique here.
     pub(crate) fn named(&self, ix: &Index, text: &str) -> Vec<usize> {
-        let mut named = vec![];
-        for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
-            let word = word.trim_matches(|c| c == '.' || c == '/');
-            if word.contains('.')
-                && let Ok(i) = self.resolve(ix, word)
-                && !named.contains(&i)
-            {
-                named.push(i);
-            }
-        }
-        named
+        named_in(text, &[(self, ix)]).pop().unwrap_or_default()
     }
     /// Where the agent is, and the other projects under this project's Solace
     /// root, which reads reach with `--project` (D-57): in a task run, those
@@ -1063,8 +1054,9 @@ fn symbol_fields(projects: &[(Option<&str>, &Store, &Index)]) -> Vec<Vec<[HashSe
 fn boost_neighbours(task: &str, projects: &[(Option<&str>, &Store, &Index)], scores: &mut [Vec<f64>]) {
     // One hop from each project's best matches: callers, callees and
     // covering tests; then the non-test symbols (fixtures) the top
-    // covering tests use. Symbols the task names (`module.name`) come first.
-    for (&(_, store, ix), score) in projects.iter().zip(scores.iter_mut()) {
+    // covering tests use. Symbols the task names come first.
+    let task_named = named_in(task, &projects.iter().map(|(_, store, ix)| (*store, *ix)).collect::<Vec<_>>());
+    for (p, (&(_, _, ix), score)) in projects.iter().zip(scores.iter_mut()).enumerate() {
         let direct = score.clone();
         let mut seeds: Vec<usize> = (0..direct.len()).filter(|&i| direct[i] > 0.0).collect();
         seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
@@ -1092,7 +1084,7 @@ fn boost_neighbours(task: &str, projects: &[(Option<&str>, &Store, &Index)], sco
                 }
             }
         }
-        for i in store.named(ix, task) {
+        for &i in &task_named[p] {
             score[i] = f64::MAX;
         }
     }
@@ -1102,4 +1094,78 @@ fn boost_neighbours(task: &str, projects: &[(Option<&str>, &Store, &Index)], sco
 /// (`find "\"kind\""` searches for `\"kind\"`).
 fn unwrapped(query: &str) -> &str {
     ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
+}
+
+/// The symbols each project's task text names: `module.name` in each project,
+/// and a name written as code (a backticked `Store`, `start_project`, or
+/// `Type::method`) only when the task's projects hold exactly one symbol for it.
+pub(crate) fn named_in(text: &str, projects: &[(&Store, &Index)]) -> Vec<Vec<usize>> {
+    let mut named = vec![vec![]; projects.len()];
+    let mut bare = vec![];
+    for word in text.split(|c: char| !(c.is_alphanumeric() || "_./:".contains(c))) {
+        let word = word.trim_matches(|c| ".:/".contains(c));
+        if word.contains('.') {
+            for (p, (store, ix)) in projects.iter().enumerate() {
+                if let Ok(i) = store.resolve(ix, word)
+                    && !named[p].contains(&i)
+                {
+                    named[p].push(i);
+                }
+            }
+        } else if word.contains("::") && code_name(word) {
+            bare.push(word);
+        }
+    }
+    for span in text.split('`').skip(1).step_by(2) {
+        if code_name(span) {
+            bare.push(span.trim());
+        }
+    }
+    for name in bare {
+        if let Some((p, i)) = unique_across(projects, name)
+            && !named[p].contains(&i)
+        {
+            named[p].push(i);
+        }
+    }
+    named
+}
+
+/// Whether `span` is one identifier written as code: it has an uppercase
+/// letter, an underscore, or is a `Type::method` path.
+fn code_name(span: &str) -> bool {
+    let span = span.trim();
+    if span.is_empty() || span.contains('.') || !span.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':') {
+        return false;
+    }
+    let mut parts = span.split("::");
+    let first = parts.next().unwrap_or("");
+    if first.is_empty() || !first.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
+    for part in parts {
+        if part.is_empty() || !part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+    }
+    span.contains("::") || span.contains('_') || span.chars().any(char::is_uppercase)
+}
+
+/// The one project and symbol `name` resolves to across every project, or
+/// nothing when it is unknown or matches more than one symbol.
+fn unique_across(projects: &[(&Store, &Index)], name: &str) -> Option<(usize, usize)> {
+    let mut found = None;
+    for (p, (store, ix)) in projects.iter().enumerate() {
+        match store.resolve(ix, name) {
+            Ok(i) => {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((p, i));
+            }
+            Err(_) if !crate::store::matching(ix, name).is_empty() => return None,
+            Err(_) => {}
+        }
+    }
+    found
 }

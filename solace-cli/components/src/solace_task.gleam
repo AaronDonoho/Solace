@@ -104,8 +104,9 @@ pub type Column {
 }
 
 pub type Workflow {
-  /// `labels` names the actions that set a `label` (D-108); any other shows its name.
-  Workflow(columns: List(Column), labels: Dict(String, String))
+  /// `actions` holds each action's label and the run it starts (D-108); an
+  /// action with no label shows its name.
+  Workflow(columns: List(Column), actions: Dict(String, WorkflowAction))
 }
 
 pub type Note {
@@ -280,6 +281,8 @@ pub type Model {
     /// The action sent and not yet answered: its buttons are disabled
     /// meanwhile, so one click makes one request. "" when none.
     acting: String,
+    /// The action whose question is open: "" when none.
+    confirming: String,
     /// A model refresh sent and not yet answered: its button is disabled
     /// meanwhile, so one click makes one request.
     refreshing: Bool,
@@ -377,6 +380,10 @@ pub type Msg {
   Failed(String)
   Save
   Action(String)
+  /// The in-app question's go-ahead: sends the action it asks about.
+  ConfirmAction
+  /// The in-app question's dismissal: changes nothing.
+  DismissAction
   /// Opens the Notes tab's editor, where a note is written.
   WriteNote
   /// The editor's send: adds its text as a note.
@@ -493,6 +500,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       editing: False,
       tab: "details",
       acting: "",
+      confirming: "",
       refreshing: False,
       watching: "",
       entries: [],
@@ -576,6 +584,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         error: "",
         model_source: RoleDefault,
         acting: "",
+        confirming: "",
         writing: False,
         noting: False,
       )
@@ -585,6 +594,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         generation: model.generation + 1,
         workflow: Workflow([], dict.new()),
         copy: #(model.copy.0 + 1, ""),
+        confirming: "",
       )
   }
   #(model, fetch(model))
@@ -1166,13 +1176,20 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
   use columns <- decode.field("columns", decode.list(column_decoder()))
-  let label = decode.optional_field("label", "", decode.string, decode.success)
-  use labels <- decode.optional_field(
+  let action = {
+    use label <- decode.optional_field("label", "", decode.string)
+    use run <- decode.optional_field("run", "", decode.string)
+    decode.success(WorkflowAction(label, run))
+  }
+  use actions <- decode.optional_field(
     "actions",
     dict.new(),
-    decode.dict(decode.string, label),
+    decode.dict(decode.string, action),
   )
-  decode.success(Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })))
+  decode.success(Workflow(
+    columns,
+    dict.filter(actions, fn(_, a) { a.label != "" || a.run != "" }),
+  ))
 }
 
 fn column_decoder() -> decode.Decoder(Column) {
@@ -1202,13 +1219,13 @@ fn projects_decoder() -> decode.Decoder(List(Project)) {
 /// `strategy`: the Strategy page shows the task (D-132).
 pub fn actions(workflow: Workflow, task: Task, strategy: Bool) -> List(String) {
   // Discuss and End Discussion sit in the notes editor; stop ends any run.
-  let built_in = case list.find(task.runs, fn(r) { r.state != "ended" }) {
-    Error(_) -> []
-    Ok(_) -> ["stop"]
+  let live = list.filter(task.runs, fn(r) { r.state != "ended" })
+  let built_in = case live {
+    [] -> []
+    _ -> ["stop"]
   }
-  let offered = case
-    list.find(workflow.columns, fn(c) { c.id == task.column })
-  {
+  let column = list.find(workflow.columns, fn(c) { c.id == task.column })
+  let offered = case column {
     // A final column offers only what it lists: no agent works there (D-108).
     Ok(c) if c.final -> c.actions
     Ok(c) ->
@@ -1224,15 +1241,32 @@ pub fn actions(workflow: Workflow, task: Task, strategy: Bool) -> List(String) {
   }
   // A task with a feature goes back to the backlog only through its feature,
   // and from Planning only on the Strategy page (D-132).
-  let back = case
-    task.feature,
-    list.find(workflow.columns, fn(c) { c.id == task.column })
-  {
+  let back = case task.feature, column {
     Some(_), _ -> False
     None, Ok(c) -> c.final || strategy
     None, Error(_) -> False
   }
-  list.filter(offered, fn(name) { name != "to_backlog" || back })
+  // An open run holds every action that starts or continues an agent, and
+  // Back to planning; a final column has no agent at work (D-108).
+  let hidden = fn(name) {
+    let final = case column {
+      Ok(c) -> c.final
+      Error(_) -> False
+    }
+    let starts_agent = case name {
+      "to_planning" -> True
+      _ ->
+        case dict.get(workflow.actions, name) {
+          Ok(WorkflowAction(_, run)) -> run != ""
+          Error(_) -> False
+        }
+    }
+    !final && live != [] && starts_agent
+  }
+  list.filter(offered, fn(name) {
+    let back_ok = name != "to_backlog" || back
+    back_ok && !hidden(name)
+  })
 }
 
 /// What an action in flight is waiting for: with a work run going, a code
@@ -1460,6 +1494,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         _ -> details_view(model, t)
       }),
     ]),
+    confirm_view(model, t),
   ])
 }
 
@@ -1467,7 +1502,7 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
   case model.editing {
     True -> [
       title_input(model.title, Title),
-      task_editor(model, "edit-body", "Description", []),
+      task_editor(model, "edit-body", "Description", [], Some(Save)),
       h.label([], [
         h.text("Rank (lower comes first)"),
         h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
@@ -1519,7 +1554,7 @@ pub fn title_input(value: String, msg: fn(String) -> msg) -> Element(msg) {
 }
 
 fn composer(model: Model, t: Task) -> Element(Msg) {
-  task_editor(model, "note-text", "Note", note_actions(model, t))
+  task_editor(model, "note-text", "Note", note_actions(model, t), None)
 }
 
 /// One of the task's editors: `id` names what it edits (see `field`).
@@ -1528,20 +1563,34 @@ fn task_editor(
   id: String,
   label: String,
   actions: List(EditorAction(Msg)),
+  send: Option(Msg),
 ) -> Element(Msg) {
   let #(text, msg) = field(model, id)
-  editor(EditorConfig(
-    id: id,
-    task: model.id,
-    base: model.base,
-    label: label,
-    placeholder: "",
-    text: text,
-    on_input: msg,
-    on_format: fn(before, after) { Format(id, before, after) },
-    on_block: Block(id, _),
-    actions: actions,
-  ))
+  let config =
+    EditorConfig(
+      id: id,
+      task: model.id,
+      base: model.base,
+      label: label,
+      placeholder: "",
+      text: text,
+      on_input: msg,
+      on_format: fn(before, after) { Format(id, before, after) },
+      on_block: Block(id, _),
+      actions: actions,
+    )
+  let send = case send {
+    Some(send) -> Some(send)
+    None ->
+      case actions {
+        [action, ..] if !action.disabled -> Some(action.message)
+        _ -> None
+      }
+  }
+  case send {
+    Some(send) -> editor_sending(config, send, False)
+    None -> editor(config)
+  }
 }
 
 /// A markdown editor with formatting tools, which styles the markdown as it
@@ -1553,102 +1602,7 @@ fn task_editor(
 /// one's content is words, or the send icon when empty. The text keeps clear
 /// of them.
 pub fn editor(config: EditorConfig(msg)) -> Element(msg) {
-  let EditorConfig(
-    id,
-    task,
-    base,
-    label,
-    placeholder,
-    text,
-    on_input,
-    on_format,
-    on_block,
-    actions,
-  ) = config
-  let hint = case placeholder {
-    "" -> label <> " (markdown)."
-    hint -> hint
-  }
-  let tool = fn(label, title, before, after) {
-    h.button(
-      [a.type_("button"), a.title(title), e.on_click(on_format(before, after))],
-      [h.text(label)],
-    )
-  }
-  let block_tool = fn(label, title, kind) {
-    h.button([a.type_("button"), a.title(title), e.on_click(on_block(kind))], [
-      h.text(label),
-    ])
-  }
-  let classes = case
-    actions,
-    list.any(actions, fn(action) { action.content != "" })
-  {
-    [], _ -> "composer"
-    _, True -> "composer has-actions has-action-words"
-    _, False -> "composer has-actions"
-  }
-  h.div(
-    [
-      a.class(classes),
-    ],
-    [
-      h.div([a.class("toolbar")], [
-        block_tool("H", "Heading", "heading"),
-        tool("B", "Bold", "**", "**"),
-        tool("`code`", "Code", "`", "`"),
-        block_tool("Code block", "Code block", "code"),
-        block_tool("• List", "List", "list"),
-        block_tool("1. List", "Numbered list", "numbered"),
-        block_tool("Quote", "Quote", "quote"),
-        tool("Link", "Link", "[", "](https://)"),
-        case task {
-          "" -> h.text("")
-          _ ->
-            h.label([a.class("button"), a.title("Add an image")], [
-              h.text("Image"),
-              h.input([
-                a.type_("file"),
-                a.class("md-image sr-only"),
-                a.attribute("data-task", task),
-                a.attribute("data-base", base),
-                a.attribute("data-for", id),
-                a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-              ]),
-            ])
-        },
-      ]),
-      element.element(
-        "solace-md-editor",
-        [
-          a.id(id),
-          a.class("md-editor"),
-          a.attribute("data-task", task),
-          a.attribute("data-base", base),
-          a.attribute("label", label),
-          a.attribute(
-            "placeholder",
-            hint
-              <> case task {
-              "" -> ""
-              _ -> " Paste or drop images here."
-            },
-          ),
-          a.property("value", json.string(text)),
-          e.on(
-            "md-input",
-            decode.at(["detail"], decode.string) |> decode.map(on_input),
-          ),
-        ],
-        [],
-      ),
-      case actions {
-        [] -> h.text("")
-        actions ->
-          h.div([a.class("composer-actions")], list.map(actions, editor_action))
-      },
-    ],
-  )
+  editor_with(config, [])
 }
 
 fn button(label: String, msg: Msg) -> Element(Msg) {
@@ -1663,14 +1617,20 @@ fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
   let first = first_unanswered(t)
   let writing = case first {
     Some(id) -> [
-      task_editor(model, "note-text", ui_label("answer"), [
-        EditorAction(
-          "",
-          ui_label("answer"),
-          Answer(id, ""),
-          string.trim(model.text) == "",
-        ),
-      ]),
+      task_editor(
+        model,
+        "note-text",
+        ui_label("answer"),
+        [
+          EditorAction(
+            "",
+            ui_label("answer"),
+            Answer(id, ""),
+            string.trim(model.text) == "",
+          ),
+        ],
+        None,
+      ),
     ]
     None -> []
   }
@@ -1921,6 +1881,7 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 @media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}
 .detail[aria-busy=true]{animation:stale 0s .3s forwards}@keyframes stale{to{opacity:.6}}"
   <> effort_pick_styles
+  <> modal_styles
 
 /// The markdown editor's look (`editor`), shared with the pages that use it.
 /// Colors come from the page's custom properties. The Image tool is a `label`
@@ -2271,7 +2232,10 @@ pub fn projects_changed(text: String) -> Bool {
 
 /// What an action's button says: its `label`, or else its name (D-108).
 pub fn action_label(workflow: Workflow, name: String) -> String {
-  result.unwrap(dict.get(workflow.labels, name), name)
+  case dict.get(workflow.actions, name) {
+    Ok(WorkflowAction(label, _)) if label != "" -> label
+    _ -> name
+  }
 }
 
 /// A dependency's title and column, as the project that stores it has them.
@@ -2804,6 +2768,7 @@ fn cleared(model: Model) -> Model {
     review_summary: "",
     editing: False,
     acting: "",
+    confirming: "",
     error: "",
     copy: #(model.copy.0, ""),
     deps: [],
@@ -4013,54 +3978,33 @@ fn editor_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     Action(name) ->
       Some(case model.task {
         None -> #(model, effect.none())
-        Some(t) -> {
-          let proceed = case name {
-            "cancel" ->
-              confirm(
-                "Cancel task \""
-                <> t.title
-                <> "\"? This stops its agents and reverts its changes. This cannot be undone.",
-              )
-            "complete" ->
-              confirm(
-                "Complete task \""
-                <> t.title
-                <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
-              )
+        Some(t) ->
+          case name {
+            "cancel" | "complete" -> #(
+              Model(..model, confirming: name),
+              effect.none(),
+            )
             "stop" ->
-              confirm(
-                "Stop the agent working on \""
-                <> t.title
-                <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
-              )
-            _ -> True
-          }
-          case proceed {
-            True -> {
-              let sent = model.text
-              let reply = fn(text) {
-                case sent {
-                  "" -> Acted(model.generation, text)
-                  _ -> ActedClearing(model.generation, "note-text", sent, text)
-                }
+              case
+                confirm(
+                  "Stop the agent working on \""
+                  <> t.title
+                  <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
+                )
+              {
+                True -> perform_action(model, name)
+                False -> #(model, effect.none())
               }
-              #(
-                Model(..model, acting: name),
-                effect.from(fn(dispatch) {
-                  request(
-                    model.base,
-                    "/tasks/" <> t.id <> "/actions",
-                    "POST",
-                    action_body(model, name),
-                    fn(text) { dispatch(reply(text)) },
-                  )
-                }),
-              )
-            }
-            False -> #(model, effect.none())
+            _ -> perform_action(model, name)
           }
-        }
       })
+    ConfirmAction ->
+      Some(case model.confirming {
+        "" -> #(model, effect.none())
+        _ if model.acting != "" -> #(model, effect.none())
+        name -> perform_action(model, name)
+      })
+    DismissAction -> Some(#(Model(..model, confirming: ""), effect.none()))
     WriteNote -> Some(write_note(model))
     AddNote -> Some(add_note(model))
     DeleteNote(i) -> Some(delete_note(model, i))
@@ -4639,4 +4583,206 @@ fn scope_decoder() -> decode.Decoder(List(String)) {
       None -> []
     }
   })
+}
+
+/// An action's label (D-108) and the kind of run it starts, "" for none.
+pub type WorkflowAction {
+  WorkflowAction(label: String, run: String)
+}
+
+/// A markdown editor as `editor` whose Ctrl or Cmd+Enter presses `send`,
+/// unless the button is `disabled`.
+pub fn editor_sending(
+  config: EditorConfig(msg),
+  send: msg,
+  disabled: Bool,
+) -> Element(msg) {
+  case disabled {
+    True -> editor(config)
+    False -> editor_with(config, [e.on("keydown", send_key(send))])
+  }
+}
+
+/// Ctrl or Cmd+Enter: `send`. Other keys pass, so Enter alone still adds a
+/// line.
+pub fn send_key(send: msg) -> decode.Decoder(msg) {
+  use key <- decode.field("key", decode.string)
+  use ctrl <- decode.field("ctrlKey", decode.bool)
+  use meta <- decode.field("metaKey", decode.bool)
+  case key == "Enter" && { ctrl || meta } {
+    True -> decode.success(send)
+    False -> decode.failure(send, "not a send")
+  }
+}
+
+fn editor_with(
+  config: EditorConfig(msg),
+  keys: List(a.Attribute(msg)),
+) -> Element(msg) {
+  let EditorConfig(
+    id,
+    task,
+    base,
+    label,
+    placeholder,
+    text,
+    on_input,
+    on_format,
+    on_block,
+    actions,
+  ) = config
+  let hint = case placeholder {
+    "" -> label <> " (markdown)."
+    hint -> hint
+  }
+  let tool = fn(label, title, before, after) {
+    h.button(
+      [a.type_("button"), a.title(title), e.on_click(on_format(before, after))],
+      [h.text(label)],
+    )
+  }
+  let block_tool = fn(label, title, kind) {
+    h.button([a.type_("button"), a.title(title), e.on_click(on_block(kind))], [
+      h.text(label),
+    ])
+  }
+  let classes = case
+    actions,
+    list.any(actions, fn(action) { action.content != "" })
+  {
+    [], _ -> "composer"
+    _, True -> "composer has-actions has-action-words"
+    _, False -> "composer has-actions"
+  }
+  h.div([a.class(classes), a.attribute("data-editor", id), ..keys], [
+    h.div([a.class("toolbar")], [
+      block_tool("H", "Heading", "heading"),
+      tool("B", "Bold", "**", "**"),
+      tool("`code`", "Code", "`", "`"),
+      block_tool("Code block", "Code block", "code"),
+      block_tool("• List", "List", "list"),
+      block_tool("1. List", "Numbered list", "numbered"),
+      block_tool("Quote", "Quote", "quote"),
+      tool("Link", "Link", "[", "](https://)"),
+      case task {
+        "" -> h.text("")
+        _ ->
+          h.label([a.class("button"), a.title("Add an image")], [
+            h.text("Image"),
+            h.input([
+              a.type_("file"),
+              a.class("md-image sr-only"),
+              a.attribute("data-task", task),
+              a.attribute("data-base", base),
+              a.attribute("data-for", id),
+              a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+            ]),
+          ])
+      },
+    ]),
+    element.element(
+      "solace-md-editor",
+      [
+        a.id(id),
+        a.class("md-editor"),
+        a.attribute("data-task", task),
+        a.attribute("data-base", base),
+        a.attribute("label", label),
+        a.attribute(
+          "placeholder",
+          hint
+            <> case task {
+            "" -> ""
+            _ -> " Paste or drop images here."
+          },
+        ),
+        a.property("value", json.string(text)),
+        e.on(
+          "md-input",
+          decode.at(["detail"], decode.string) |> decode.map(on_input),
+        ),
+      ],
+      [],
+    ),
+    case actions {
+      [] -> h.text("")
+      actions ->
+        h.div([a.class("composer-actions")], list.map(actions, editor_action))
+    },
+  ])
+}
+
+/// Sends an action, once its question is answered: the action's buttons are
+/// disabled until its reply, and any editor text goes with it.
+fn perform_action(model: Model, name: String) -> #(Model, Effect(Msg)) {
+  case model.task {
+    None -> #(model, effect.none())
+    Some(t) -> {
+      let sent = model.text
+      let reply = fn(text) {
+        case sent {
+          "" -> Acted(model.generation, text)
+          _ -> ActedClearing(model.generation, "note-text", sent, text)
+        }
+      }
+      #(
+        Model(..model, acting: name, confirming: ""),
+        effect.from(fn(dispatch) {
+          request(
+            model.base,
+            "/tasks/" <> t.id <> "/actions",
+            "POST",
+            action_body(model, name),
+            fn(text) { dispatch(reply(text)) },
+          )
+        }),
+      )
+    }
+  }
+}
+
+/// The question Complete or Cancel asks before it sends, unchanged from the
+/// browser pop-up's wording.
+fn action_question(t: Task, name: String) -> String {
+  case name {
+    "cancel" ->
+      "Cancel task \""
+      <> t.title
+      <> "\"? This stops its agents and reverts its changes. This cannot be undone."
+    "complete" ->
+      "Complete task \""
+      <> t.title
+      <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board."
+    _ -> ""
+  }
+}
+
+fn confirm_label(name: String) -> String {
+  case name {
+    "cancel" -> "Cancel task"
+    "complete" -> "Complete task"
+    _ -> name
+  }
+}
+
+/// The in-app question for an action that asks first; none while no action
+/// asks, or once a live update stops offering it.
+fn confirm_view(model: Model, t: Task) -> Element(Msg) {
+  case model.confirming {
+    "" -> h.text("")
+    name ->
+      case list.contains(actions(model.workflow, t, model.strategy), name) {
+        False -> h.text("")
+        True ->
+          modal([
+            h.p([], [h.text(action_question(t, name))]),
+            h.div([a.class("actions")], [
+              h.button([e.on_click(ConfirmAction)], [
+                h.text(confirm_label(name)),
+              ]),
+              h.button([e.on_click(DismissAction)], [h.text("Keep task")]),
+            ]),
+          ])
+      }
+  }
 }

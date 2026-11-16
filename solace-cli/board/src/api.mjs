@@ -106,3 +106,30 @@ export function watch_side(root, send) {
   media.addEventListener('change', listener);
   send(media.matches);
 }
+
+// The board's two notification tones, made with the Web Audio API so no files
+// are needed. Browsers may block sound until the page has had a user gesture;
+// then this stays silent.
+let audio;
+export function play(name) {
+  const Context = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!Context || (name !== 'finished' && name !== 'attention')) return;
+  try {
+    audio ||= new Context();
+    audio.resume?.();
+    const now = audio.currentTime;
+    const notes = name === 'attention' ? [880, 660] : [660, 880];
+    notes.forEach((hz, i) => {
+      const at = now + i * 0.12;
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.frequency.value = hz;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.12, at + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
+      osc.connect(gain).connect(audio.destination);
+      osc.start(at);
+      osc.stop(at + 0.18);
+    });
+  } catch {}
+}

@@ -2227,3 +2227,82 @@ pub fn a_live_role_model_change_reaches_the_open_detail_test() {
   let #(model, _) = board.update(model, board.Live(roles))
   model.live |> should.equal([#(1, roles)])
 }
+
+/// A finished work, investigate or review run picks the finished sound; a
+/// failed run picks only the attention sound. Each setting can silence its
+/// sound, and an update that needs attention never picks both.
+pub fn notice_sounds_follow_the_run_and_the_settings_test() {
+  let task = fn(runs: String) {
+    let assert Ok(task) =
+      json.parse(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"runs\":"
+          <> runs
+          <> "}",
+        solace_task.task_decoder(),
+      )
+    task
+  }
+  let old =
+    task(
+      "[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+  let ended = fn(kind, outcome) {
+    task(
+      "[{\"id\":\"r1\",\"kind\":\""
+      <> kind
+      <> "\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\""
+      <> outcome
+      <> "\"}]",
+    )
+  }
+  board.notice_sound(old, ended("work", "finished"), False, True, True)
+  |> should.equal("finished")
+  board.notice_sound(old, ended("investigate", "reported"), False, True, True)
+  |> should.equal("finished")
+  board.notice_sound(old, ended("review", "reviewed"), False, True, True)
+  |> should.equal("finished")
+  board.notice_sound(old, ended("work", "stopped"), False, True, True)
+  |> should.equal("")
+  board.notice_sound(old, ended("work", "the run failed"), True, True, True)
+  |> should.equal("attention")
+  board.notice_sound(old, ended("work", "finished"), True, True, True)
+  |> should.equal("attention")
+  board.notice_sound(old, ended("work", "finished"), False, False, True)
+  |> should.equal("")
+  board.notice_sound(old, ended("work", "finished"), True, True, False)
+  |> should.equal("")
+}
+
+/// A live whole-list update picks one sound: attention when a toast asks for
+/// it, otherwise finished when a run ended well. A snapshot or a task without
+/// an old copy picks nothing.
+pub fn a_finished_run_in_a_live_list_picks_finished_test() {
+  let task = fn(extra) {
+    let assert Ok(task) =
+      json.parse(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1"
+          <> extra
+          <> "}",
+        solace_task.task_decoder(),
+      )
+    task
+  }
+  let running =
+    task(
+      ",\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]",
+    )
+  let ended =
+    task(
+      ",\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]",
+    )
+  board.tasks_sound([running], [ended], False, True, True)
+  |> should.equal("finished")
+  board.tasks_sound([running], [ended], True, True, True)
+  |> should.equal("attention")
+  board.tasks_sound([running], [ended], True, True, False)
+  |> should.equal("")
+  board.tasks_sound([running], [ended], False, False, True)
+  |> should.equal("")
+  board.tasks_sound([], [ended], False, True, True)
+  |> should.equal("")
+}

@@ -16,7 +16,6 @@ use crate::board::briefs::HELD_START;
 use crate::board::briefs::TECH_DEBT_ASK;
 use crate::board::briefs::FINDINGS_ASK;
 use crate::board::briefs::needed_by;
-use crate::board::briefs::WORK_TECH_DEBT_ASK;
 use crate::board::briefs::note_fingerprint;
 use crate::board::briefs::remember;
 use crate::board::task_model::all_tasks;
@@ -587,10 +586,13 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         review.contains("Leave out items already in the work summary's `### Tech debt` section: they are filed already."),
         "a review is told not to repeat work tech debt"
     );
-    assert!(work.contains(WORK_TECH_DEBT_ASK), "a work run is asked for its summary's tech debt");
     assert!(
-        work.contains("ordinary friction, code-quality notes and restating risks are not tech debt"),
-        "a work run is told what is not tech debt"
+        !work.contains("End the `task done` summary with a `### Tech debt` section"),
+        "a work run is not asked for step and tool faults as tech debt"
+    );
+    assert!(
+        !work.contains("ordinary friction, code-quality notes and restating risks are not tech debt"),
+        "a work run is not told what is not tech debt"
     );
     for kind in ["work", "investigate", "discuss"] {
         let prompt = brief(&t, kind, "engineer");

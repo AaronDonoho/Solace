@@ -145,3 +145,61 @@ pub fn editor_action_sits_inside_the_composer_test() {
   plain |> string.contains("class=\"composer\"") |> should.be_true
   plain |> string.contains("has-actions") |> should.be_false
 }
+
+fn action_keyed(
+  action: task.EditorAction(Int),
+  key: String,
+  ctrl: Bool,
+  meta: Bool,
+) {
+  simulate.simple(
+    init: fn(_) { 0 },
+    update: fn(_, message) { message },
+    view: fn(_) {
+      task.editor_sending(
+        task.EditorConfig(
+          id: "body",
+          task: "t1",
+          base: "/p/a",
+          label: "Description",
+          placeholder: "",
+          text: "",
+          on_input: fn(_) { 0 },
+          on_format: fn(_, _) { 0 },
+          on_block: fn(_) { 0 },
+          actions: [action],
+        ),
+        action.message,
+        action.disabled,
+      )
+    },
+  )
+  |> simulate.start(Nil)
+  |> simulate.event(
+    on: query.element(matching: query.class("composer")),
+    name: "keydown",
+    data: editor_action_test_support.key_data(key, ctrl, meta),
+  )
+}
+
+/// Ctrl or Cmd+Enter sends the editor's action; Enter alone sends nothing.
+pub fn ctrl_or_cmd_enter_sends_the_editor_action_test() {
+  let key = fn(key, ctrl, meta) {
+    action_keyed(task.EditorAction("", "Send", 7, False), key, ctrl, meta)
+    |> simulate.model
+  }
+  key("Enter", True, False) |> should.equal(7)
+  key("Enter", False, True) |> should.equal(7)
+  key("Enter", True, True) |> should.equal(7)
+  key("Enter", False, False) |> should.equal(0)
+}
+
+/// A disabled action ignores Ctrl or Cmd+Enter.
+pub fn a_disabled_editor_action_ignores_ctrl_or_cmd_enter_test() {
+  let key = fn(ctrl, meta) {
+    action_keyed(task.EditorAction("", "Send", 7, True), "Enter", ctrl, meta)
+    |> simulate.model
+  }
+  key(True, False) |> should.equal(0)
+  key(False, True) |> should.equal(0)
+}

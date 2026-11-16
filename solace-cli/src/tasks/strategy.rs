@@ -683,7 +683,14 @@ pub(crate) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
     if !reopens.is_empty() {
         p["reopens"] = json!(reopens);
     }
-    let title = fields["title"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+    let proposed = fields["title"].as_str();
+    let current_title = current.as_ref().filter(|_| id.is_some()).and_then(|r| r["title"].as_str());
+    let title = match (current_title, proposed) {
+        (Some(old), Some(new)) if old != new => format!(" \"{old}\" → \"{new}\""),
+        (Some(old), _) => format!(" \"{old}\""),
+        (None, Some(new)) => format!(" \"{new}\""),
+        (None, None) => String::new(),
+    };
     let what = match (kind, id) {
         ("vision", _) => format!("Replace the vision\n\n{text}"),
         (_, Some(id)) => format!("Change {kind} {id}{title}\n\n```json\n{}\n```", serde_json::to_string_pretty(&fields).unwrap()),

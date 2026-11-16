@@ -1544,7 +1544,7 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
       // Past the limit the count is an alert and Save waits (D-92).
       let over = vision_count(text) > vision_limit
       [
-        solace_task.editor(
+        solace_task.editor_sending(
           solace_task.EditorConfig(
             id: vision_id,
             task: "",
@@ -1557,6 +1557,8 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
             on_block: VisionBlock,
             actions: [],
           ),
+          SaveVision,
+          model.saving || over,
         ),
         ..list.flatten([
           [
@@ -2144,7 +2146,7 @@ fn new_task_view(model: Model) -> Element(Msg) {
             ]),
           ]),
         ]),
-        solace_task.editor(
+        solace_task.editor_sending(
           solace_task.EditorConfig(
             id: new_task_id,
             task: "",
@@ -2157,6 +2159,8 @@ fn new_task_view(model: Model) -> Element(Msg) {
             on_block: NewTaskBlock,
             actions: [],
           ),
+          CreateTask,
+          model.task_saving != None || string.trim(d.title) == "",
         ),
         html.div([attribute.class("filters")], [
           case model.workspace && list.length(model.projects) > 1 {

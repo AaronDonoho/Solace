@@ -264,6 +264,7 @@ fn form(
 ) -> Element(msg) {
   let over = count(draft) > limit
   let stale = stale_text(draft, personas)
+  let save_disabled = editor.saving || !valid(draft)
   html.div(
     [attribute.class("feature-form persona-form"), attribute.id("persona-form")],
     [
@@ -284,10 +285,10 @@ fn form(
           ]),
         ]),
       ]),
-      field_editor(base, editor, draft, ObjectivesField),
-      field_editor(base, editor, draft, ToolsField),
-      field_editor(base, editor, draft, ConcernsField),
-      field_editor(base, editor, draft, OtherField),
+      field_editor(base, editor, draft, ObjectivesField, save_disabled),
+      field_editor(base, editor, draft, ToolsField, save_disabled),
+      field_editor(base, editor, draft, ConcernsField, save_disabled),
+      field_editor(base, editor, draft, OtherField, save_disabled),
       html.p(
         [
           attribute.class("vision-count"),
@@ -307,11 +308,7 @@ fn form(
         message -> html.p([attribute.role("alert")], [html.text(message)])
       },
       html.div([attribute.class("vision-actions")], [
-        button(
-          solace_task.ui_label("save"),
-          editor.on_save,
-          editor.saving || !valid(draft),
-        ),
+        button(solace_task.ui_label("save"), editor.on_save, save_disabled),
         button(solace_task.ui_label("cancel"), editor.on_cancel, editor.saving),
         ..case stale {
           "" -> []
@@ -327,8 +324,9 @@ fn field_editor(
   editor: Editor(msg),
   draft: Draft,
   field: Field,
+  disabled: Bool,
 ) -> Element(msg) {
-  solace_task.editor(
+  solace_task.editor_sending(
     solace_task.EditorConfig(
       id: field_id(field),
       task: "",
@@ -341,6 +339,8 @@ fn field_editor(
       on_block: fn(kind) { editor.on_block(field, kind) },
       actions: [],
     ),
+    editor.on_save,
+    disabled,
   )
 }
 

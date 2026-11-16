@@ -3241,3 +3241,49 @@ fn a_long_list_of_untested_symbols_names_them_all() {
     expected.sort_unstable();
     assert_eq!(named, expected, "{untested}");
 }
+
+/// An open run of any kind refuses every action that starts or continues an
+/// agent, and Back to planning, until it ends (D-133).
+#[test]
+fn an_open_run_blocks_agents_and_back_to_planning() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let act = |name: &str| api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": name, "model": "fake"}));
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "plan"})).unwrap();
+    let put = |column: &str, kind: &str, state: &str| {
+        let mut v = task(&s.root, &tid).unwrap();
+        v["column"] = json!(column);
+        v["runs"] = json!([{"id": "r1", "kind": kind, "state": state, "model": "m", "log": "/l"}]);
+        tasks::put(&s, &v).unwrap();
+    };
+    let refused = |name: &str| act(name).unwrap_err().0;
+    for (kind, state) in [
+        ("work", "running"),
+        ("work", "waiting"),
+        ("investigate", "waiting"),
+        ("review", "waiting"),
+        ("discuss", "waiting"),
+        ("investigate", "running"),
+        ("review", "running"),
+        ("discuss", "running"),
+    ] {
+        put("assigned", kind, state);
+        for name in ["reassign", "new_agent", "review"] {
+            assert!(refused(name).starts_with("E7003"), "{} {} {}", kind, state, name);
+        }
+        assert!(refused("to_planning").starts_with("E7001"), "{} {}", kind, state);
+        put("planning", kind, state);
+        for name in ["investigate", "assign"] {
+            assert!(refused(name).starts_with("E7003"), "{} {} {}", kind, state, name);
+        }
+        put("needs_review", kind, state);
+        for name in ["review", "reassign", "start_over"] {
+            assert!(refused(name).starts_with("E7003"), "{} {} {}", kind, state, name);
+        }
+        assert!(refused("to_planning").starts_with("E7001"), "{} {}", kind, state);
+    }
+    put("assigned", "work", "ended");
+    assert!(act("to_planning").is_ok());
+}

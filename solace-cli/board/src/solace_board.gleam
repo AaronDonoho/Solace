@@ -1861,7 +1861,21 @@ fn task_update(
     |> result.replace_error(Nil),
   )
   let new = case lane_of(model, dir), notify {
-    Ok(lane), True -> task_notices(model, lane, task)
+    Ok(lane), True -> {
+      let new = task_notices(model, lane, task)
+      let _ = case list.find(lane.tasks, fn(t) { t.id == task.id }) {
+        Ok(old) ->
+          play(notice_sound(
+            old,
+            task,
+            list.any(new, fn(t) { t.attention }),
+            load(notification_finished_key) != "0",
+            load(notification_attention_key) != "0",
+          ))
+        Error(_) -> Nil
+      }
+      new
+    }
     _, _ -> []
   }
   Ok(
@@ -1922,8 +1936,18 @@ fn tasks_update(
   use pair <- result.try(task_list(text))
   let #(tasks, unreadable) = pair
   let new = case lane_of(model, dir), notify {
-    Ok(lane), True ->
-      list.flat_map(tasks, fn(task) { task_notices(model, lane, task) })
+    Ok(lane), True -> {
+      let new =
+        list.flat_map(tasks, fn(task) { task_notices(model, lane, task) })
+      play(tasks_sound(
+        lane.tasks,
+        tasks,
+        list.any(new, fn(t) { t.attention }),
+        load(notification_finished_key) != "0",
+        load(notification_attention_key) != "0",
+      ))
+      new
+    }
     _, _ -> []
   }
   let model = Model(..model, notices: list.append(model.notices, new))
@@ -2059,4 +2083,79 @@ fn newly_ended(old: solace_task.Task, run: solace_task.Run) -> Bool {
 fn newly_waiting(old: solace_task.Task, run: solace_task.Run) -> Bool {
   run.state == "waiting"
   && !list.any(old.runs, fn(o) { o.id == run.id && o.state == "waiting" })
+}
+
+const notification_finished_key = "solace-sound-finished"
+
+const notification_attention_key = "solace-sound-attention"
+
+@external(javascript, "./api.mjs", "play")
+fn play(name: String) -> Nil
+
+/// The sound a live task update plays, "" for none. An update that asks for
+/// attention never plays the finished sound too; the finished sound is for a
+/// work, investigate or review run that ended well. The settings turn each off.
+pub fn notice_sound(
+  old: solace_task.Task,
+  task: solace_task.Task,
+  attention: Bool,
+  finished_on: Bool,
+  attention_on: Bool,
+) -> String {
+  case attention {
+    True ->
+      case attention_on {
+        True -> "attention"
+        False -> ""
+      }
+    False ->
+      case
+        finished_on
+        && list.any(task.runs, fn(r) {
+          newly_ended(old, r)
+          && r.kind != "discuss"
+          && {
+            r.outcome == "finished"
+            || r.outcome == "reported"
+            || r.outcome == "reviewed"
+          }
+        })
+      {
+        True -> "finished"
+        False -> ""
+      }
+  }
+}
+
+/// The one sound a live task-list update plays, "" for none. As with one
+/// task, an update that asks for attention never plays the finished sound
+/// too, and each setting can silence its sound.
+pub fn tasks_sound(
+  old: List(solace_task.Task),
+  tasks: List(solace_task.Task),
+  attention: Bool,
+  finished_on: Bool,
+  attention_on: Bool,
+) -> String {
+  case attention {
+    True ->
+      case attention_on {
+        True -> "attention"
+        False -> ""
+      }
+    False ->
+      case
+        list.any(tasks, fn(task) {
+          case list.find(old, fn(t) { t.id == task.id }) {
+            Ok(previous) ->
+              notice_sound(previous, task, False, finished_on, attention_on)
+              == "finished"
+            Error(_) -> False
+          }
+        })
+      {
+        True -> "finished"
+        False -> ""
+      }
+  }
 }

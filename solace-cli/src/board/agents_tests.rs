@@ -727,8 +727,8 @@ fn transcripts_read_codex_and_claude_logs() {
     fs::write(&log, text).unwrap();
     let t = transcript(&log);
     let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["tool", "message", "usage", "output"]);
-    assert_eq!(t[2]["text"], "10 input tokens (4 cached, 40% cache hit), 2 output tokens");
+    assert_eq!(kinds, ["tool", "message", "output", "usage"]);
+    assert_eq!(t[3]["text"], "10 input tokens (4 cached, 40% cache hit), 2 output tokens");
     assert_eq!(
         (t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()),
         (Some("solace view a"), Some("ok"), Some("pub fn a()"))
@@ -771,7 +771,7 @@ fn transcripts_read_codex_and_claude_logs() {
     fs::write(&log, text).unwrap();
     let t = transcript(&log);
     assert_eq!(t[0]["input"], "text:\nx");
-    assert_eq!(t[3]["text"], "not json\nstill not");
+    assert_eq!(t[2]["text"], "not json\nstill not");
     assert_eq!(last_words(&t).unwrap(), "All **done**.");
     let claude = [
         json!({
@@ -1088,5 +1088,71 @@ fn ending_a_run_stores_its_model_label() {
     with_config(&config, || end_run(&mut run, "finished"));
     let saved: Value = jsonx::read(&dir.join("agent-models.json")).unwrap();
     assert_eq!(saved["used"]["claude-haiku"], json!({"model":"claude-haiku-9-9","label":"Haiku 9.9"}));
+}
+
+#[test]
+fn a_usage_line_follows_the_latest_message() {
+    let dir = testing::Scratch::new();
+    let log = dir.join("log.jsonl");
+    let write = |v: &[Value]| fs::write(&log, v.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    let codex = [
+        json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
+        json!({"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"Working."}}),
+        json!({"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":5}}),
+        json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"Done."}}),
+    ];
+    write(&codex);
+    let t = transcript(&log);
+    let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["message", "message", "usage"]);
+    assert_eq!(t[2]["text"], "40 input tokens, 5 output tokens");
+    let call = |id: &str, input: u64, output: u64| {
+        json!({
+            "type": "assistant",
+            "message": {
+                "id": id,
+                "usage": {"input_tokens": input, "output_tokens": output},
+                "content": [{"type": "text", "text": id}],
+            },
+        })
+    };
+    write(&[call("m1", 50, 3), call("m2", 120, 4)]);
+    let t = transcript(&log);
+    let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["message", "message", "usage"]);
+    assert_eq!(t[2]["text"], "Context 120 tokens; 7 output tokens so far");
+    // A resumed run's live line follows its last result.
+    write(&[call("m1", 50, 3), json!({"type":"result","usage":{"input_tokens":60,"output_tokens":3}}), call("m2", 120, 4)]);
+    assert_eq!(transcript(&log).last().unwrap()["text"], "Context 120 tokens; 4 output tokens so far");
+}
+
+#[test]
+fn a_failed_run_keeps_its_last_usage() {
+    let dir = testing::Scratch::new();
+    let log = dir.join("log.jsonl");
+    let turn = [
+        json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}),
+        json!({"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"Working."}}),
+        json!({"type":"turn.failed","error":{"message":"boom"}}),
+    ];
+    fs::write(&log, turn.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    let t = transcript(&log);
+    let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["message", "error", "usage"]);
+    assert_eq!(t[2]["text"], "10 input tokens, 2 output tokens");
+    let claude = [
+        json!({
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "usage": {"input_tokens": 50, "output_tokens": 3},
+                "content": [{"type": "text", "text": "Working."}],
+            },
+        }),
+        json!({"type":"error","message":"boom"}),
+    ];
+    fs::write(&log, claude.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    let t = transcript(&log);
+    assert_eq!(t.last().unwrap()["text"], "Context 50 tokens; 3 output tokens so far");
 }
 

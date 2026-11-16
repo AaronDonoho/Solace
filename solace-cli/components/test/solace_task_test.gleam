@@ -492,10 +492,10 @@ pub fn file_changes_list_under_files_test() {
 }
 
 pub fn stop_and_discussion_actions_test() {
-  let workflow =
-    task.Workflow(
-      [task.Column("triage", "Triage", ["assign"], False, "")],
-      dict.new(),
+  let assert Ok(workflow) =
+    json.parse(
+      "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]}],\"actions\":{\"assign\":{\"run\":\"work\",\"label\":\"Assign\"}}}",
+      task.workflow_decoder(),
     )
   let one = fn(kind, state) {
     let text =
@@ -508,9 +508,9 @@ pub fn stop_and_discussion_actions_test() {
     t
   }
   task.actions(workflow, one("work", "running"), False)
-  |> should.equal(["assign", "pause", "stop"])
+  |> should.equal(["pause", "stop"])
   task.actions(workflow, one("discuss", "waiting"), False)
-  |> should.equal(["assign", "pause", "stop"])
+  |> should.equal(["pause", "stop"])
   task.status(one("discuss", "waiting"))
   |> should.equal("Waiting for your reply")
   task.status(one("discuss", "running")) |> should.equal("Agent discussing")
@@ -4339,7 +4339,8 @@ pub fn workflow_decoder_accepts_roles_test() {
     )
   assert plain.columns
     == [task.Column("planning", "Planning", ["assign"], False, "")]
-  assert dict.get(plain.labels, "assign") == Ok("Assign")
+  assert dict.get(plain.actions, "assign")
+    == Ok(task.WorkflowAction("Assign", ""))
   let with_roles =
     decode(
       "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}],\"roles\":{\"assign\":\"worker\"}}",
@@ -4525,4 +4526,182 @@ pub fn a_task_with_no_project_list_opens_test() {
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":\"a\"}",
     )
   invalid.error |> should.equal("Invalid API response")
+}
+
+/// A live run of any kind hides the buttons that start or continue an agent,
+/// and Back to planning: Investigate, Assign, Review, Reassign, New agent and
+/// Start over. They return once the run ends.
+pub fn a_live_run_hides_only_its_action_test() {
+  let assert Ok(workflow) =
+    json.parse(
+      "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]}],\"actions\":{\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"to_planning\":{\"unstamp\":\"approved\",\"to\":\"planning\",\"label\":\"Back to planning\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
+      task.workflow_decoder(),
+    )
+  let with_run = fn(column, kind, state) {
+    let text =
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+      <> column
+      <> "\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\""
+      <> kind
+      <> "\",\"model\":\"m\",\"state\":\""
+      <> state
+      <> "\",\"started\":1,\"log\":\"\"}]}"
+    let assert Ok(t) = json.parse(text, task.task_decoder())
+    t
+  }
+  task.actions(workflow, with_run("planning", "investigate", "running"), False)
+  |> should.equal(["complete", "pause", "stop"])
+  task.actions(workflow, with_run("planning", "investigate", "ended"), False)
+  |> should.equal(["investigate", "assign", "complete", "pause"])
+  task.actions(workflow, with_run("planning", "work", "running"), False)
+  |> should.equal(["complete", "pause", "stop"])
+  task.actions(workflow, with_run("planning", "work", "waiting"), False)
+  |> should.equal(["complete", "pause", "stop"])
+  task.actions(workflow, with_run("assigned", "work", "running"), False)
+  |> should.equal(["cancel", "pause", "stop"])
+  task.actions(workflow, with_run("assigned", "work", "waiting"), False)
+  |> should.equal(["cancel", "pause", "stop"])
+  task.actions(workflow, with_run("assigned", "work", "ended"), False)
+  |> should.equal([
+    "reassign", "new_agent", "review", "to_planning", "cancel", "pause",
+  ])
+  task.actions(workflow, with_run("assigned", "investigate", "running"), False)
+  |> should.equal(["cancel", "pause", "stop"])
+  task.actions(workflow, with_run("assigned", "review", "running"), False)
+  |> should.equal(["cancel", "pause", "stop"])
+  task.actions(workflow, with_run("assigned", "discuss", "running"), False)
+  |> should.equal(["cancel", "pause", "stop"])
+  task.actions(workflow, with_run("needs_review", "review", "running"), False)
+  |> should.equal(["approve", "complete", "cancel", "pause", "stop"])
+  task.actions(workflow, with_run("needs_review", "review", "ended"), False)
+  |> should.equal([
+    "approve", "complete", "review", "reassign", "start_over", "to_planning",
+    "cancel", "pause",
+  ])
+}
+
+/// Ctrl or Cmd+Enter sends from the note, answer and Details editors; a
+/// disabled send does nothing.
+pub fn ctrl_or_cmd_enter_sends_from_each_task_editor_test() {
+  let note =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+    |> task.update(task.WriteNote)
+    |> fn(pair) { pair.0 }
+    |> task.update(task.Text("A note"))
+    |> fn(pair) { pair.0 }
+  let #(_, ctrl) =
+    editor_action_test_support.key_composer(note, "Enter", True, False)
+  ctrl |> should.equal([task.AddNote])
+  let #(_, cmd) =
+    editor_action_test_support.key_composer(note, "Enter", False, True)
+  cmd |> should.equal([task.AddNote])
+  let blank =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+    |> task.update(task.WriteNote)
+    |> fn(pair) { pair.0 }
+  let #(_, nothing) =
+    editor_action_test_support.key_composer(blank, "Enter", True, False)
+  nothing |> should.equal([])
+
+  let answer =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[\"Approve\"]}]}",
+      ),
+      text: "Because",
+    )
+    |> task.update(task.Tab("questions"))
+    |> fn(pair) { pair.0 }
+  let #(_, sent) =
+    editor_action_test_support.key_composer(answer, "Enter", False, True)
+  sent |> should.equal([task.Answer("q1", "")])
+
+  let edit =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+      editing: True,
+      body: "New body",
+    )
+  let #(_, sent) =
+    editor_action_test_support.key_composer(edit, "Enter", True, False)
+  sent |> should.equal([task.Save])
+}
+
+pub fn complete_and_cancel_ask_in_the_app_test() {
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"doing\",\"rank\":1,\"runs\":[]}"
+  let model =
+    task.Model(
+      ..loaded(text),
+      workflow: task.Workflow(
+        [task.Column("doing", "Doing", ["complete", "cancel"], False, "")],
+        dict.new(),
+      ),
+    )
+  let #(complete, _) = task.update(model, task.Action("complete"))
+  complete.confirming |> should.equal("complete")
+  complete.acting |> should.equal("")
+  let shown = html(complete)
+  string.contains(shown, "modal-backdrop") |> should.be_true
+  string.contains(shown, "Complete task") |> should.be_true
+  string.contains(shown, "Keep task") |> should.be_true
+  let #(kept, _) = task.update(complete, task.DismissAction)
+  kept.confirming |> should.equal("")
+  kept.acting |> should.equal("")
+  kept.task |> should.equal(model.task)
+  let #(sent, _) = task.update(complete, task.ConfirmAction)
+  sent.confirming |> should.equal("")
+  sent.acting |> should.equal("complete")
+  let #(cancel, _) = task.update(model, task.Action("cancel"))
+  cancel.confirming |> should.equal("cancel")
+  let cancel_shown = html(cancel)
+  string.contains(cancel_shown, "Cancel task") |> should.be_true
+  let #(cancelled, _) = task.update(cancel, task.ConfirmAction)
+  cancelled.acting |> should.equal("cancel")
+  let #(other, _) = task.update(complete, task.TaskChanged("2"))
+  other.confirming |> should.equal("")
+}
+
+/// A live run hides the buttons that start or continue an agent in the
+/// rendered task, and Back to planning; they return once it ends.
+pub fn a_live_run_hides_agent_buttons_test() {
+  let model = fresh("1")
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(
+        model.generation,
+        "{\"columns\":[{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]}],\"actions\":{\"reassign\":{\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"to_planning\":{\"to\":\"planning\",\"label\":\"Back to planning\"},\"cancel\":{\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
+      ),
+    )
+  let rendered = fn(state) {
+    let #(model, _) =
+      task.update(
+        model,
+        task.TaskLoaded(
+          model.generation,
+          "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\""
+            <> state
+            <> "\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
+        ),
+      )
+    html(model)
+  }
+  let running = rendered("running")
+  running |> string.contains(">Reassign</button>") |> should.be_false
+  running |> string.contains(">New agent</button>") |> should.be_false
+  running |> string.contains(">Review</button>") |> should.be_false
+  running |> string.contains(">Back to planning</button>") |> should.be_false
+  running |> string.contains(">Cancel</button>") |> should.be_true
+  let ended = rendered("ended")
+  ended |> string.contains(">Reassign</button>") |> should.be_true
+  ended |> string.contains(">New agent</button>") |> should.be_true
+  ended |> string.contains(">Review</button>") |> should.be_true
+  ended |> string.contains(">Back to planning</button>") |> should.be_true
 }

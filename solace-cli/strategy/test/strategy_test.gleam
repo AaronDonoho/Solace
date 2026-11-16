@@ -7,6 +7,8 @@ import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 import gleeunit
+import lustre/dev/query
+import lustre/dev/simulate
 import lustre/element
 import plan_panel
 import plan_setup
@@ -1752,8 +1754,6 @@ pub fn a_proposal_and_a_note_in_one_second_keep_their_order_test() {
   ])
 }
 
-import lustre/dev/query
-import lustre/dev/simulate
 import lustre/effect
 
 /// With a task open that has an open run, the bar's New run shows that run.
@@ -4376,4 +4376,95 @@ pub fn a_live_role_model_change_reaches_the_plan_and_open_task_test() {
   let kept = step(manual, strategy.Live(roles))
   assert kept.plan_model == "a"
   assert kept.plan_source == solace_task.Human
+}
+
+fn key_on(
+  model: strategy.Model,
+  on: query.Query,
+  key: String,
+  ctrl: Bool,
+  meta: Bool,
+) -> strategy.Model {
+  simulate.simple(
+    init: fn(_) { model },
+    update: fn(state, message) { step(state, message) },
+    view: fn(state) { strategy.view(state) },
+  )
+  |> simulate.start(Nil)
+  |> simulate.event(on: on, name: "keydown", data: [
+    #("key", json.string(key)),
+    #("ctrlKey", json.bool(ctrl)),
+    #("metaKey", json.bool(meta)),
+  ])
+  |> simulate.model
+}
+
+/// Ctrl or Cmd+Enter saves from the vision, feature, milestone, persona and
+/// new-task editors; a disabled save does nothing.
+pub fn ctrl_or_cmd_enter_saves_from_every_strategy_editor_test() {
+  let key = fn(model, id, ctrl, meta) {
+    key_on(
+      model,
+      query.element(matching: query.attribute("data-editor", id)),
+      "Enter",
+      ctrl,
+      meta,
+    )
+  }
+  let vision =
+    workspace()
+    |> step(strategy.Live("{\"vision\":{\"text\":\"\",\"revision\":\"r0\"}}"))
+    |> step(strategy.EditVision)
+    |> step(strategy.Draft("New vision"))
+  assert key(vision, "vision-text", True, False).saving
+  assert key(vision, "vision-text", False, True).saving
+  let too_long =
+    vision
+    |> step(strategy.Draft(string.repeat("a", strategy.vision_limit + 1)))
+  assert !key(too_long, "vision-text", True, False).saving
+
+  let feature =
+    features_model(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    )
+    |> step(strategy.EditFeature("f1"))
+    |> step(strategy.FeatureTitle("Export"))
+  assert key(feature, "feature-text", True, False).feature_saving
+  assert key(feature, "feature-text", False, True).feature_saving
+
+  let milestone =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"1.0\",\"targetDate\":\"2027-01-01\"}]}",
+    ))
+    |> step(strategy.EditMilestone("m1"))
+    |> step(strategy.MilestoneTitle("2.0"))
+  assert key(milestone, "milestone-text", True, False).milestone_saving
+  assert key(milestone, "milestone-text", False, True).milestone_saving
+
+  let persona =
+    workspace()
+    |> step(strategy.Select(strategy.Personas))
+    |> step(strategy.NewPersona)
+    |> step(strategy.PersonaName("Grace"))
+  assert key(persona, "persona-objectives", True, False).persona_state.saving
+  assert key(persona, "persona-objectives", False, True).persona_state.saving
+  let unnamed =
+    workspace()
+    |> step(strategy.Select(strategy.Personas))
+    |> step(strategy.NewPersona)
+  assert !key(unnamed, "persona-objectives", True, False).persona_state.saving
+
+  let new_task =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskTitle("Index"))
+  assert key(new_task, "new-task-text", True, False).task_saving == Some("")
+  assert key(new_task, "new-task-text", False, True).task_saving == Some("")
+  let untitled =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskTitle(" "))
+  assert key(untitled, "new-task-text", True, False).task_saving == None
 }

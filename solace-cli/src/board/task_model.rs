@@ -594,10 +594,6 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     if !allowed.iter().any(|x| x == name) {
         return err("E7001", format!("not allowed; allowed: {}", allowed.join(", ")));
     }
-    // Back to planning leaves no agent behind: the human stops it first (D-133).
-    if name == "to_planning" && active(t) {
-        return err("E7001", "a run is open on this task; stop it before bringing the task back to planning");
-    }
     if name == "pause" {
         if t["paused_from"].is_null() {
             t["paused_from"] = t["column"].clone();
@@ -642,17 +638,21 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     let discuss = json!({"run":"discuss","model":true});
     let a = if name == "discuss" { &discuss } else { &w["actions"][name] };
     let run = a["run"].as_str().unwrap_or("");
+    // An open run keeps every action that starts or continues an agent, and
+    // Back to planning, closed: the human stops it first (D-133).
+    if active(t) {
+        if name == "to_planning" {
+            return err("E7001", "a run is open on this task; stop it before bringing the task back to planning");
+        }
+        if !run.is_empty() {
+            return err("E7003", "task already has a run");
+        }
+    }
     if matches!(run, "investigate" | "work" | "new_work")
         && body["text"].as_str().is_none_or(|s| s.is_empty())
         && t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null())
     {
         return err("E7002", "answer the questions or supply text");
-    }
-    // `work` and `investigate` continue a waiting agent of their kind.
-    let waiting = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting" && r["kind"] == run);
-    let resume = waiting.is_some();
-    if !run.is_empty() && active(t) && !resume && run != "new_work" && a["revert"] != true {
-        return err("E7003", "task already has a run");
     }
     if matches!(run, "work" | "new_work") {
         let top = scope::top(&s.root);
@@ -660,10 +660,10 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     let config = system()?;
     let chosen = body.get("model").unwrap_or(&t["model"]);
-    if a["model"] == true && !resume && body["model"].as_str().is_none() {
+    if a["model"] == true && body["model"].as_str().is_none() {
         return err("E7001", "this action requires a model");
     }
-    let mut selected = if !run.is_empty() && !resume { Some(model(&config, chosen.as_str().unwrap_or(""))?) } else { None };
+    let mut selected = if !run.is_empty() { Some(model(&config, chosen.as_str().unwrap_or(""))?) } else { None };
     if let Some(m) = selected.as_mut() {
         // A chosen effort must be offered; the task's remembered one applies only when still offered.
         if let Some(e) = body.get("effort").filter(|e| !e.is_null()) {
@@ -724,18 +724,9 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
             }
         }
     }
-    // Moving the task, or starting or continuing a run, ends a pause; a paused run would hang.
-    if a.get("to").is_some() || resume || selected.is_some() {
+    // Moving the task, or starting a run, ends a pause; a paused run would hang.
+    if a.get("to").is_some() || selected.is_some() {
         t["paused_from"] = Value::Null;
-    }
-    if resume {
-        let i = waiting.unwrap();
-        t["runs"][i]["state"] = json!("running");
-        t["runs"][i]["reply"] = json!({"questions":t["questions"],"text":body["text"]});
-        return Ok(None);
-    }
-    if run == "new_work" {
-        end_runs(t, "replaced");
     }
     if let Some(m) = selected {
         let rid = unique_id();

@@ -6,6 +6,7 @@ import gleam/string
 import gleeunit
 import lustre/effect
 import lustre/element
+import panel
 import solace_task
 
 pub fn main() -> Nil {
@@ -1117,4 +1118,67 @@ pub fn an_architecture_version_draws_its_flow_test() {
     element.to_string(design.view(model)),
     "Restore version 2",
   )
+}
+
+fn a_create_proposal_model() -> design.Model {
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.Panel(panel.Replied(True, a_create_run())),
+    )
+  model
+}
+
+fn a_create_run() -> String {
+  "{\"id\":\"r9\",\"kind\":\"design\",\"model\":\"fake\",\"state\":\"waiting\",\"started\":1,\"context\":{\"kind\":\"page\"},\"notes\":[],\"questions\":[{\"id\":\"q9\",\"text\":\"Create it\",\"options\":[\"Approve\",\"Reject\"],\"proposal\":{\"kind\":\"design\",\"title\":\"New\",\"tab\":\"ui\",\"operations\":[],\"design\":{\"schemaVersion\":1,\"id\":\"fedcba9876543210\",\"title\":\"New\",\"tab\":\"ui\",\"elements\":[{\"id\":\"newroot\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[]}]}},\"time\":1,\"after\":0}]}"
+}
+
+pub fn the_preview_button_uses_the_shared_button_look_test() {
+  let page = element.to_string(design.view(a_preview_model()))
+  assert string.contains(page, solace_task.control_styles)
+  assert string.contains(
+    page,
+    ".design-preview{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}",
+  )
+}
+
+pub fn the_changes_button_uses_the_shared_button_look_test() {
+  let page = element.to_string(design.view(a_create_proposal_model()))
+  assert string.contains(page, solace_task.control_styles)
+  assert string.contains(
+    page,
+    ".design-changes{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}",
+  )
+  assert string.contains(page, "class=\"design-changes\"")
+  assert string.contains(page, "aria-pressed=\"true\"")
+  assert string.contains(page, "aria-label=\"Hide changes\"")
+  assert string.contains(page, "title=\"Hide changes\"")
+  assert string.contains(page, "🔍")
+  assert !string.contains(page, "class=\"design-choice\"")
+}
+
+pub fn the_changes_button_labels_both_states_test() {
+  let #(model, _) =
+    design.update(a_create_proposal_model(), design.ToggleChanges)
+  let page = element.to_string(design.view(model))
+  assert string.contains(page, "aria-pressed=\"false\"")
+  assert string.contains(page, "aria-label=\"Show changes\"")
+  assert string.contains(page, "title=\"Show changes\"")
+  assert string.contains(
+    page,
+    ".design-changes[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}",
+  )
+}
+
+/// A run already waiting when the page first loads is not new, so catching up
+/// flags no attention.
+pub fn a_caught_up_replay_of_a_waiting_run_flags_no_attention_test() {
+  let model = design.new(design.UiUx)
+  let #(replayed, _) =
+    design.update(
+      model,
+      design.Live("{\"designRun\":{\"id\":\"r1\",\"state\":\"waiting\"}}"),
+    )
+  let #(_, fx) = design.settle(replayed)
+  assert fx == effect.none()
 }

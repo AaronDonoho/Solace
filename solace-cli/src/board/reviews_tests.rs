@@ -10,7 +10,6 @@ use crate::board::briefs::continuation_brief;
 use crate::board::briefs::START;
 use crate::board::briefs::HELD_START;
 use crate::board::briefs::TECH_DEBT_ASK;
-use crate::board::briefs::WORK_TECH_DEBT_ASK;
 use crate::board::reviews::snapshot;
 use crate::board::reviews::record;
 use crate::board::reviews::reviewable;
@@ -27,7 +26,6 @@ use crate::Store;
 use crate::jsonx;
 use crate::scope;
 use crate::tasks;
-
 /// A line diff keeps two lines around each change and marks the lines it
 /// skips, between changes and after the last one.
 #[test]
@@ -198,7 +196,6 @@ fn tech_debt_items_are_the_sections_bullets() {
         tech_debt_items(TECH_DEBT_ASK),
         vec!["`board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>."]
     );
-    assert_eq!(tech_debt_items(WORK_TECH_DEBT_ASK), vec!["`<command or step>`: <what was wasted>. <what would fix it>."]);
 }
 
 /// D-112: completing a task in a feature files its last review's tech debt

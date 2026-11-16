@@ -1,4 +1,5 @@
 // Test helpers for the markdown editor's composer actions.
+import gleam/json
 import gleam/list
 import gleam/string
 import lustre/dev/query
@@ -48,5 +49,42 @@ pub fn click_composer(
   )
   |> simulate.start(Nil)
   |> simulate.click(on: query.element(matching: query.class("composer-action")))
+  |> simulate.model
+}
+
+/// The data of a keydown: the key and its modifiers.
+pub fn key_data(
+  key: String,
+  ctrl: Bool,
+  meta: Bool,
+) -> List(#(String, json.Json)) {
+  [
+    #("key", json.string(key)),
+    #("ctrlKey", json.bool(ctrl)),
+    #("metaKey", json.bool(meta)),
+  ]
+}
+
+/// A keydown on the composer: the model after it, and the messages it sent.
+pub fn key_composer(
+  model: solace_task.Model,
+  key: String,
+  ctrl: Bool,
+  meta: Bool,
+) -> #(solace_task.Model, List(solace_task.Msg)) {
+  simulate.simple(
+    init: fn(_) { #(model, []) },
+    update: fn(state, message) {
+      let #(model, _) = solace_task.update(state.0, message)
+      #(model, [message, ..state.1])
+    },
+    view: fn(state) { solace_task.view(state.0) },
+  )
+  |> simulate.start(Nil)
+  |> simulate.event(
+    on: query.element(matching: query.class("composer")),
+    name: "keydown",
+    data: key_data(key, ctrl, meta),
+  )
   |> simulate.model
 }

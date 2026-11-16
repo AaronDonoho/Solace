@@ -623,9 +623,11 @@ pub fn tabs_show_their_own_sections_test() {
     == int.compare(0, 1)
   assert int.compare(position("Appearance"), position("Languages"))
     == int.compare(0, 1)
-  assert int.compare(position("Languages"), position("About"))
+  assert int.compare(position("Languages"), position("Notifications"))
     == int.compare(0, 1)
-  let assert [_, agents, appearance, languages, about] =
+  assert int.compare(position("Notifications"), position("About"))
+    == int.compare(0, 1)
+  let assert [_, agents, appearance, languages, notifications, about] =
     string.split(page, "<div aria-labelledby=\"tab-")
   assert string.contains(agents, "id=\"panel-agents\"")
   assert !string.contains(agents, " hidden")
@@ -646,6 +648,7 @@ pub fn tabs_show_their_own_sections_test() {
   absent(agents, [
     "Theme</h2>",
     "Enabled programming languages</h2>",
+    "Sounds</h2>",
     "About</h2>",
   ])
   assert string.contains(appearance, " hidden")
@@ -658,6 +661,7 @@ pub fn tabs_show_their_own_sections_test() {
     "Models</h2>",
     "Skills</h2>",
     "Enabled programming languages</h2>",
+    "Sounds</h2>",
     "About</h2>",
   ])
   assert string.contains(languages, " hidden")
@@ -670,6 +674,22 @@ pub fn tabs_show_their_own_sections_test() {
     "Skills</h2>",
     "Theme</h2>",
     "Dark mode",
+    "Sounds</h2>",
+    "About</h2>",
+  ])
+  assert string.contains(notifications, " hidden")
+  assert string.contains(notifications, "id=\"panel-notifications\"")
+  assert string.contains(notifications, "Sounds</h2>")
+  assert string.contains(notifications, ">Finished</label>")
+  assert string.contains(notifications, ">Needs attention</label>")
+  absent(notifications, [
+    "Agent behavior</h2>",
+    "Roles</h2>",
+    "Models</h2>",
+    "Skills</h2>",
+    "Theme</h2>",
+    "Dark mode",
+    "Enabled programming languages</h2>",
     "About</h2>",
   ])
   assert string.contains(about, " hidden")
@@ -685,6 +705,7 @@ pub fn tabs_show_their_own_sections_test() {
     "Theme</h2>",
     "Dark mode",
     "Enabled programming languages</h2>",
+    "Sounds</h2>",
   ])
 }
 
@@ -692,11 +713,13 @@ pub fn tab_names_round_trip_test() {
   assert settings.tab_from("") == settings.Agents
   assert settings.tab_from("?tab=appearance") == settings.Appearance
   assert settings.tab_from("?tab=languages") == settings.Languages
+  assert settings.tab_from("?tab=notifications") == settings.Notifications
   assert settings.tab_from("?tab=about") == settings.About
   assert settings.tab_from("?tab=nope") == settings.Agents
   assert settings.tab_name(settings.Agents) == "agents"
   assert settings.tab_name(settings.Appearance) == "appearance"
   assert settings.tab_name(settings.Languages) == "languages"
+  assert settings.tab_name(settings.Notifications) == "notifications"
   assert settings.tab_name(settings.About) == "about"
 }
 
@@ -1272,4 +1295,24 @@ pub fn a_skills_reply_with_nothing_in_flight_is_ignored_test() {
       settings.SkillsSaved(house_review_reply(["worker"])),
     ).0
   assert saved_late == editing
+}
+
+/// The Notifications tab lists both sounds, on by default, and a switch
+/// changes only its own sound.
+pub fn notifications_tab_lists_both_sounds_test() {
+  let model = settings.initial(False)
+  assert model.finished_sound
+  assert model.attention_sound
+  let page = element.to_string(settings.view(model))
+  assert string.contains(page, ">Notifications</button>")
+  assert string.contains(page, "id=\"panel-notifications\"")
+  assert string.contains(page, "Sounds</h2>")
+  assert string.contains(page, ">Finished</label>")
+  assert string.contains(page, ">Needs attention</label>")
+  let #(off, _) = settings.update(model, settings.SetFinishedSound(False))
+  assert !off.finished_sound
+  assert off.attention_sound
+  let #(both_on, _) = settings.update(off, settings.SetAttentionSound(False))
+  assert !both_on.finished_sound
+  assert !both_on.attention_sound
 }
