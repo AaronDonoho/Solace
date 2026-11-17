@@ -1751,6 +1751,71 @@ mod tests {
         let parsed = crate::drafts::sections("*** Begin Patch\n*** Add File: notes.txt\n*** End Patch\n", true).unwrap();
         assert_eq!(crate::drafts::file_text("notes.txt", "", parsed[0].0, parsed[0].3.clone()).unwrap(), Some(String::new()));
     }
+
+    /// A patch's Add of a new module keeps its inline tests' imports.
+    #[test]
+    fn a_patch_add_creates_a_module_with_inline_test_imports() {
+        if !cargo::installed() {
+            return;
+        }
+        let (root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add: brand\n",
+            "+pub fn side() -> i32 {\n",
+            "+    2\n",
+            "+}\n",
+            "+\n",
+            "+mod tests {\n",
+            "+    use super::*;\n",
+            "+\n",
+            "+    #[test]\n",
+            "+    fn side_is_two() {\n",
+            "+        assert_eq!(side(), 2);\n",
+            "+    }\n",
+            "+}\n",
+            "*** End Patch\n",
+        );
+        let out = drafts::submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("created module brand"), "{out}");
+        let file = std::fs::read_to_string(root.join("src/brand.rs")).unwrap();
+        let mod_at = file.find("mod tests").unwrap();
+        let use_at = file.find("use super::*;").unwrap();
+        assert!(mod_at < use_at, "{file}");
+        let ix = s.index().unwrap();
+        assert!(s.resolve(&ix, "brand.tests::side_is_two").is_ok());
+    }
+
+    /// A patch's Add of a whole inline `mod` to an existing module keeps its `use`
+    /// lines.
+    #[test]
+    fn a_patch_add_saves_a_whole_inline_mod_with_its_imports() {
+        if !cargo::installed() {
+            return;
+        }
+        let (root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add: crate.tests\n",
+            "+mod tests {\n",
+            "+    use super::*;\n",
+            "+\n",
+            "+    #[test]\n",
+            "+    fn one_is_one() {\n",
+            "+        assert_eq!(one(), 1);\n",
+            "+    }\n",
+            "+}\n",
+            "*** End Patch\n",
+        );
+        let out = drafts::submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("Saved crate.tests"), "{out}");
+        let file = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let mod_at = file.find("mod tests").unwrap();
+        let use_at = file.find("use super::*;").unwrap();
+        assert!(mod_at < use_at, "{file}");
+        let ix = s.index().unwrap();
+        assert!(s.resolve(&ix, "crate.tests::one_is_one").is_ok());
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or

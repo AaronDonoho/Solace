@@ -15,12 +15,13 @@ Every file under the project root is in exactly one category, named for what Sol
 | 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`; Rust: `src/**/*.rs`, `tests/**/*.rs`; none in a project of plain files, D-60) | graph |
 | 2 | `solace.toml` (§2) and `AGENTS.md` (D-45); Rust: `build.rs`, `.cargo/config[.toml]`, `rust-toolchain[.toml]` (D-158, D-174), and a crate below the root's `Cargo.toml` and `build.rs` (D-175) | protected |
 | 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files; and every file of another Solace project nested in this one (a folder below the root with its own `.solace/store.db`, D-57) | internal: no agent access at all (`E6006`) |
-| 4 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`; Rust: `target/`), anything `.gitignore` ignores | unwatched |
-| 5 | A path registered in `unwatched` (§2) | unwatched |
-| 6 | A file over `watch_limit` or binary (not UTF-8, or containing a NUL byte) | unwatched, marked `over limit` or `binary` |
-| 7 | Everything else, including the target's manifest (Gleam: `gleam.toml`) (D-28) | watched |
+| 4 | The root's `[releases]` output folder when `read_only` is on (the default, D-247) | read-only: readable, not writable (`E6002`) |
+| 5 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`; Rust: `target/`), anything `.gitignore` ignores | unwatched |
+| 6 | A path registered in `unwatched` (§2) | unwatched |
+| 7 | A file over `watch_limit` or binary (not UTF-8, or containing a NUL byte) | unwatched, marked `over limit` or `binary` |
+| 8 | Everything else, including the target's manifest (Gleam: `gleam.toml`) (D-28) | watched |
 
-- Watched and unwatched files are readable and writable through file commands and never enter the symbol index (D-26). The workspace root's `designs/` folder (D-230) is the exception: agents read it, but `write`, `remove`, `move` and file patches refuse a path in it (`E6002`), because designs change through the design agent (D-233). Solace keeps no permanent file history (source control does). It keeps the content hash last read or written in each session (§3), and, for direct task edits, the file as it was before the task first changed it (Spec 15 §5).
+- Watched and unwatched files are readable and writable through file commands and never enter the symbol index (D-26). The workspace root's `designs/` folder (D-230) and a read-only release output folder (D-247) are the exceptions: agents read them, but `write`, `remove`, `move` and file patches refuse a path in them (`E6002`), because designs change through the design agent (D-233) and only builds write releases. Solace keeps no permanent file history (source control does). It keeps the content hash last read or written in each session (§3), and, for direct task edits, the file as it was before the task first changed it (Spec 15 §5).
 - Rust: `Cargo.toml` is watched, but a `write` that changes its dependency tables, `[features]`, `[target.*]` dependencies, `[patch]`, `[replace]`, `package.build`, `package.links`, `lib.proc-macro` or the `[workspace]` keys `members`, `default-members`, `exclude` and `dependencies` is a proposal the human approves, as for `solace.toml` (D-158, D-175, D-177).
 
 ## 2. Project settings
@@ -53,11 +54,17 @@ steps   = [
   { name = "install", run = ["bun", "install"] },
   { name = "e2e", command = "e2e" },
 ]
+
+[releases]                       # a passed build's artifacts (D-247)
+output    = "build-output"       # inside the root, never under .solace/
+read_only = true                 # agents read it, never write it
 ```
 
 `checks` (optional, D-44) marks a command as a test suite outside `gleam test` and lists the entry points it drives, by symbol name, or `"*"` for all. For `gleam run -m <module>`, that module's `main` is added, so `checks = []` is enough. A suite's reach is everything its entry points can run. `test`, `impact` and a submit's note name a suite that reaches a change ("Also reached: e2e (`run e2e`)"); Solace never runs a suite unasked. `checks` that isn't an array of strings is invalid (`E6020`).
 
 `[build]` (optional, D-131) is how the project builds: `steps` run in order, each a `name` with `run` (an argument vector) or `command` (an entry of `[commands]`, reused), and an optional `timeout` (else the command's, else 120 s). `after` names the projects built before it; `outputs` lists its artifacts. A fault is `E6020` naming the field. A project without `[build]` gets a default from `package.json`, `gleam.toml` and `Cargo.toml`, or none. `build plan` lists every project's recipe in build order, and marks outputs out of date, with the steps to run, from the committed fingerprint beside each output: a missing or unreadable fingerprint, an output that does not match it, or a changed source part (D-159, D-242).
+
+`[releases]` (optional, D-247) names where a passed build's artifacts go: `output` is a folder inside the root, `build-output` by default and never under `.solace/`; `read_only` (default true) keeps agents from writing anything under it. `E6020` names the field. The Build tab writes both directly, and Solace adds the folder to the root's `.gitignore` once when it creates it.
 
 Solace rereads the file whenever a command starts, so a change takes effect with no restart.
 
@@ -121,7 +128,7 @@ The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E600
 
 ## Tests (acceptance)
 
-- A1. A fixture project covering all seven rules in §1 gives a golden `files` output. A file over `watch_limit` is shown as `unwatched (over limit)`, `.git/` and an `unwatched` directory as one collapsed line each, and an unlisted text file as `watched`. `resources`, `ignore` or `resource_limit` in `solace.toml` is `E6020`.
+- A1. A fixture project covering all eight rules in §1 gives a golden `files` output. A file over `watch_limit` is shown as `unwatched (over limit)`, `.git/` and an `unwatched` directory as one collapsed line each, and an unlisted text file as `watched`. `resources`, `ignore` or `resource_limit` in `solace.toml` is `E6020`.
 - A2. `read` or `write` on a graph file returns `E6001` and names the matching `inspect`/`submit` command. Any file command on `.solace/` returns `E6006`.
 - A3. `read --tail 10` on a 100 MB unwatched log returns 10 lines within the budget. A plain `read` of it stops within the budget and names the next range.
 - A4. `write` creates a new watched file, such as `README.md` or `bin/coolcalc`. Watched and unwatched files can be read, replaced and removed (`remove gleam.toml` is refused), never appear in symbol searches, enforce stale-write and size checks, and direct task edits can be reverted. `move` takes a file or folder whole, refuses a destination that exists and graph, protected or internal files, and a repeat changes nothing. Text replacement of non-UTF-8 bytes is refused unchanged. Import creates valid default settings if absent and preserves existing settings byte for byte. Repeating import on an existing store succeeds, creates missing settings, and does not reimport source or change stored symbols.

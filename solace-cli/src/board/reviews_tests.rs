@@ -583,3 +583,43 @@ fn debts_of(top: &std::path::Path, fid: &str) -> Vec<Value> {
     all_tasks(top).unwrap().into_iter().filter(|t| t["techDebt"] == true && t["feature"] == fid).collect()
 }
 
+#[test]
+fn a_review_brief_re_lists_unfixed_tech_debt() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Review debt"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
+    tasks::put(&s, &t).unwrap();
+    fs::write(s.root.join("first.txt"), "first").unwrap();
+    record_listed(&s, &tid, &json!({"file:first.txt":null}), &json!({"file:first.txt":b"first".to_vec()}));
+    t = task(&s.root, &tid).unwrap();
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"review","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some("review"), "**Assessment: Looks good**\n\n### Tech debt\n\n- `app.main`: name the constant\n");
+    let mut checkpoint = review_state(&s, &t).unwrap();
+    checkpoint["run"] = json!("review");
+    checkpoint["changed_during_review"] = json!(false);
+    let path = review_path(&s.root, &tid, "review").unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    jsonx::write(&path, &checkpoint).unwrap();
+    tasks::put(&s, &t).unwrap();
+    let brief = continuation_brief(
+        &task(&s.root, &tid).unwrap(),
+        &json!({"id":"r2","kind":"review"}),
+        false,
+        &p.root,
+        &p.root,
+        false,
+        "engineer",
+        "standard",
+        "balanced",
+    )
+    .0;
+    assert!(
+        brief.contains("List again in your `### Tech debt` section each item of the previous review's Tech debt that is still not fixed"),
+        "{brief}"
+    );
+    assert!(brief.contains("a new edge case that a fix exposes blocks only under the same bar"), "{brief}");
+    assert!(!brief.contains("in the findings or tech debt"), "{brief}");
+}
+

@@ -38,6 +38,8 @@ pub fn routes_test() {
       "/design?tab=ui-ux&design=fedcba9876543210",
       frontend.Design("ui-ux", "fedcba9876543210"),
     ),
+    #("/delivery", frontend.Delivery("build")),
+    #("/delivery?tab=nope", frontend.Delivery("build")),
     #("/settings", frontend.Settings("agents")),
     #("/settings?tab=appearance", frontend.Settings("appearance")),
     #("/settings?tab=languages", frontend.Settings("languages")),
@@ -89,6 +91,14 @@ pub fn page_elements_test() {
     #(
       #(frontend.Design("ui-ux", "fedcba9876543210"), False),
       "<solace-design design=\"fedcba9876543210\" hidden tab=\"ui-ux\"></solace-design>",
+    ),
+    #(
+      #(frontend.Delivery("build"), True),
+      "<solace-delivery tab=\"build\"></solace-delivery>",
+    ),
+    #(
+      #(frontend.Delivery("build"), False),
+      "<solace-delivery hidden tab=\"build\"></solace-delivery>",
     ),
     #(
       #(frontend.Settings("agents"), True),
@@ -153,6 +163,7 @@ pub fn menu_current_test() {
   assert !string.contains(board, "Migration</a>")
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
   assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
+  assert string.contains(board, "<a href=\"/delivery\">Delivery</a>")
   assert string.contains(board, "<a href=\"/design\">Design</a>")
   assert string.contains(board, "<a href=\"/settings\">Settings</a>")
   assert string.contains(board, "<a href=\"/knowledgebase\">Knowledgebase</a>")
@@ -163,6 +174,7 @@ pub fn menu_current_test() {
       "Design",
       "Board",
       "Contracts",
+      "Delivery",
       "Knowledgebase",
       "Settings",
     ]
@@ -261,11 +273,17 @@ pub fn menu_current_test() {
 
 pub fn starts_on_the_board_outside_a_browser_test() {
   let #(model, _effect) = frontend.init(Nil)
-  // The board, Strategy and Design are open from the start, hidden, to hear of what needs attention.
+  // The board, Strategy, Delivery and Design are open from the start, hidden,
+  // to hear of what needs attention.
   assert model
     == frontend.Model(
       Board,
-      [Board, frontend.Strategy("vision"), frontend.Design("architecture", "")],
+      [
+        Board,
+        frontend.Strategy("vision"),
+        frontend.Delivery("build"),
+        frontend.Design("architecture", ""),
+      ],
       frontend.no_focus,
       [],
       [],
@@ -1229,6 +1247,7 @@ pub fn every_route_has_its_page_path_test() {
     == "/p/web/contracts"
   assert frontend.path_of(frontend.Strategy("vision")) == "/strategy"
   assert frontend.path_of(frontend.Design("ui-ux", "")) == "/design"
+  assert frontend.path_of(frontend.Delivery("build")) == "/delivery"
   assert frontend.path_of(frontend.Settings("agents")) == "/settings"
   assert frontend.path_of(frontend.Knowledgebase) == "/knowledgebase"
   assert frontend.path_of(frontend.RecordLink("task", "t1")) == "/task/t1"
@@ -1369,4 +1388,29 @@ pub fn a_hidden_design_page_flags_its_tab_test() {
     html,
     "<a class=\"attention\" href=\"/design\">Design<span class=\"attention-note\"> (needs attention)</span></a>",
   )
+}
+
+/// A Delivery tab change stays on Delivery; another page's tab event changes nothing.
+pub fn a_delivery_tab_stays_on_delivery_test() {
+  let model =
+    frontend.Model(
+      frontend.Delivery("build"),
+      [frontend.Strategy("tasks"), frontend.Delivery("build")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(model, frontend.TabChanged("solace-delivery", "build"))
+  assert model.route == frontend.Delivery("build")
+  let #(same, _) =
+    frontend.update(model, frontend.TabChanged("solace-strategy", "tasks"))
+  assert same.route == frontend.Delivery("build")
+  let #(board, _) =
+    frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
+  let html = element.to_string(frontend.view(board))
+  assert string.contains(html, "<a href=\"/delivery\">Delivery</a>")
+  assert frontend.delivery_path("build") == "/delivery"
 }

@@ -159,8 +159,8 @@ fn a_step_reuses_a_declared_command() {
     assert!(plan_text(&top).unwrap().contains("- release (command build-release): sh -c make [timeout 900 s]"));
 }
 
-/// D-159: Solace's own crate bundles the frontend, then builds itself. The
-/// board's bundle serves its standalone page, so the board keeps the plan's default, not a release step.
+/// D-159 and D-250: Solace's own crate bundles the frontend, then builds itself.
+/// The board's standalone page is its own release step.
 #[test]
 fn the_self_build_bundles_before_the_crate() {
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -176,7 +176,13 @@ fn the_self_build_bundles_before_the_crate() {
     assert!(frontend.after.is_empty());
     assert_eq!(crate_.after, ["solace-cli/frontend"]);
     assert_eq!(crate_.steps[0].run[..2], ["cargo", "build"]);
-    assert!(!of(top, "solace-cli/board").unwrap().unwrap().declared, "the board's bundle is not in the plan");
+    let board = of(top, "solace-cli/board").unwrap().unwrap();
+    assert!(board.declared, "the board's bundle is in the plan");
+    assert_eq!(
+        board.steps.iter().map(|s| (s.name.as_str(), s.command.as_deref(), s.timeout)).collect::<Vec<_>>(),
+        [("release", Some("build-release"), 120)]
+    );
+    assert!(board.after.is_empty());
 }
 
 /// `build plan` answers through the command dispatch and runs nothing; `build` takes no other argument.

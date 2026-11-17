@@ -24,7 +24,7 @@ use crate::cli::with_root;
 use crate::cli::run_options;
 use crate::board::runs::with_context;
 /// D-186: an investigation states outcomes and constraints, not a plan that
-/// assigns edits, submission calls or checks.
+/// assigns edits or submission calls.
 #[test]
 fn investigate_briefs_report_requirements_not_edits() {
     let code = json!({
@@ -50,7 +50,7 @@ fn investigate_briefs_report_requirements_not_edits() {
         let prompt = brief(task, "investigate", "engineer");
         for required in [
             "Investigate this task",
-            "Report the required behavior, constraints, acceptance criteria and risks",
+            "Report the required behavior, constraints and acceptance criteria",
             "Name the symbols, modules and non-source files that need attention",
             "anything you didn't check",
             named,
@@ -408,7 +408,10 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     }
     let plan = brief(&t, "investigate", "engineer");
     assert!(
-        plan.contains("Report the required behavior, constraints, acceptance criteria and risks")
+        plan.contains("Report the required behavior, constraints and acceptance criteria")
+            && plan.contains("each criterion a result a worker or reviewer can confirm")
+            && plan.contains("list a risk only when you can't settle it, and say why")
+            && !plan.contains("submission shape or checks")
             && !plan.contains("names every module or symbol it changes"),
         "{plan}"
     );
@@ -512,14 +515,23 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     }
     for rule in [
         "Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria, has real bugs, or takes a direction that could be hazardous",
-        "an unlikely, harmless edge case may be mentioned but never blocks on its own",
         "say so plainly in a `### Summary` right after the assessment label",
         "code repeated once or twice isn't tech debt by itself",
         "don't push for an abstraction unless it clearly pays for itself",
-        "Never file tech debt for an unlikely, harmless edge case",
+        "Judge an edge case by what happens if it occurs, not by how likely it is",
+        "Every item to fix later goes in the `### Tech debt` section and nowhere else",
+        "Findings hold only what blocks this task or explains the assessment",
     ] {
         assert!(review.contains(rule), "review: missing {rule}");
         assert!(!work.contains(rule), "work: unexpected {rule}");
+    }
+    assert!(!review.contains("an unlikely, harmless edge case"), "review: old edge-case rule remains");
+    assert!(!review.contains("Never file tech debt for an unlikely, harmless edge case"), "review: old tech-debt rule remains");
+    assert_eq!(review.matches("Judge an edge case by what happens").count(), 1, "review: the edge-case bar must appear once");
+    let followup = "the latest review is part of this task, whatever its assessment";
+    assert!(work.contains(followup), "work: missing the review follow-up rule");
+    for kind in ["review", "investigate", "discuss"] {
+        assert!(!brief(&t, kind, "engineer").contains(followup), "{kind}: unexpected review follow-up rule");
     }
     for involvement in ["engineer", "collaborator", "director"] {
         assert!(
@@ -1269,5 +1281,107 @@ fn task_text_keeps_an_edited_description_and_ignores_notes_off_tech_debt() {
         ],
     });
     assert_eq!(task_text(&ordinary), "Ordinary\nA normal description.");
+}
+
+#[test]
+fn design_links_reach_work_and_review_briefs() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let ui = "0123456789abcdef";
+    crate::design::save(
+        &p.root,
+        &json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": ui,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {
+                    "width": "fill", "height": "fill", "gap": 8, "padding": 16,
+                    "align": "start", "justify": "center"
+                },
+                "children": [{
+                    "id": "heading",
+                    "type": "text",
+                    "properties": {"align": "left", "width": "hug", "height": "hug", "text": "Home"}
+                }]
+            }]
+        }),
+        crate::design::Source::Human,
+    )
+    .unwrap();
+    let architecture = "fedcba9876543210";
+    std::fs::create_dir_all(p.root.join("designs")).unwrap();
+    std::fs::write(
+        p.root.join("designs").join(format!("{architecture}.json")),
+        json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": architecture,
+            "title": "Layers",
+            "tab": "architecture",
+            "elements": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let brief = |body: &str, kind: &str| {
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Designs"})).unwrap();
+        t["body"] = json!(body);
+        continuation_brief(&t, &json!({"id":"r1","kind":kind}), false, &p.root, &p.root, false, "engineer").0
+    };
+    for body in [format!("Build it from design:{ui}."), format!("Build [Home](design:{ui}).")] {
+        let work = brief(&body, "work");
+        assert!(work.contains(&format!("design:{ui}: Home. Read it with `design show design:{ui}`.")), "{work}");
+        assert!(work.contains("reference material: write ordinary code") && work.contains("`help lustre`"), "{work}");
+        let review = brief(&body, "review");
+        assert!(review.contains("elements, their order and their text") && review.contains("not pixel by pixel"), "{review}");
+        assert!(!review.contains("Use `help lustre`"), "{review}");
+    }
+    let architecture_work = brief(&format!("Use design:{architecture}."), "work");
+    assert!(architecture_work.contains("Layers") && !architecture_work.contains("Use `help lustre`"), "{architecture_work}");
+    let architecture_review = brief(&format!("Use design:{architecture}."), "review");
+    assert!(architecture_review.contains("parts and how they connect"), "{architecture_review}");
+    assert!(!architecture_review.contains("built screen against"), "{architecture_review}");
+    let none = "No design here.";
+    for kind in ["work", "review"] {
+        let b = brief(none, kind);
+        assert!(!b.contains("Designs named by the task") && !b.contains("design show"), "{kind}: {b}");
+    }
+    for kind in ["investigate", "discuss"] {
+        let b = brief(&format!("Build design:{ui}."), kind);
+        assert!(!b.contains("Designs named by the task"), "{kind}: {b}");
+    }
+    let code = brief(&format!("Write `design:{ui}` literally."), "work");
+    assert!(!code.contains("Designs named by the task"), "{code}");
+    let missing = brief("Build design:aaaaaaaaaaaaaaaa.", "work");
+    assert!(missing.contains("could not be read") && missing.contains("E7023"), "{missing}");
+    let invalid = "bbbbbbbbbbbbbbbb";
+    std::fs::write(p.root.join("designs").join(format!("{invalid}.json")), "{}").unwrap();
+    let invalid = brief(&format!("Build design:{invalid}."), "work");
+    assert!(invalid.contains("could not be read") && invalid.contains("E7033"), "{invalid}");
+    let malformed = brief("Build design:xyz.", "work");
+    assert!(malformed.contains("could not be read") && malformed.contains("E7001"), "{malformed}");
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Remember"})).unwrap();
+    t["body"] = json!(format!("Build design:{ui}."));
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let remembered = remember(&scope::top(&p.root), t["id"].as_str().unwrap(), "r1", 10_000).unwrap();
+    assert!(remembered.contains(&format!("design:{ui}: Home. Read it with `design show design:{ui}`.")), "{remembered}");
+}
+
+#[test]
+fn design_links_need_a_word_boundary() {
+    let ids = |text: &str| {
+        let mut ids = Vec::new();
+        scan_design_links(text, &mut ids);
+        ids
+    };
+    assert!(ids("redesign:0123456789abcdef").is_empty());
+    assert_eq!(ids("(design:0123456789abcdef)"), ["0123456789abcdef"]);
+    assert_eq!(ids("design:0123456789abcdef"), ["0123456789abcdef"]);
+    assert_eq!(ids("`design:0123456789abcdef`design:fedcba9876543210"), ["fedcba9876543210"]);
+    assert_eq!(ids("design:0123456789abcdef design:0123456789abcdef"), ["0123456789abcdef"]);
 }
 

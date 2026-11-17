@@ -343,10 +343,52 @@ pub fn elements_carry_the_outline_class_test() {
       render.JustifyStart,
       render.Plain,
     )
+  let card =
+    render.Container(
+      render.Hug,
+      render.Hug,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Card,
+    )
+  let screen =
+    node("screen", render.Screen(container), [
+      node(
+        "text",
+        render.Text(render.TextProperties(
+          render.Hug,
+          render.Hug,
+          render.TextLeft,
+          "Body",
+          render.Body,
+        )),
+        [],
+      ),
+      node("card", render.Column(card), []),
+    ])
   let html =
-    element.to_string(render.draw(node("screen", render.Screen(container), [])))
-  assert string.contains(html, "class=\"design-element\"")
-  assert string.contains(render.outline_styles, "outline:1px dotted")
+    element.to_string(
+      render.draw_selectable(screen, [], dict.new(), fn(id, _) { id }),
+    )
+  assert string.contains(
+    html,
+    "class=\"design-element design-wireframe\" data-design-id=\"screen\"",
+  )
+  assert string.contains(
+    html,
+    "class=\"design-element\" data-design-id=\"text\"",
+  )
+  assert string.contains(
+    html,
+    "class=\"design-element\" data-design-id=\"card\"",
+  )
+  assert string.contains(
+    render.outline_styles,
+    ".design-wireframe{outline:1px dotted",
+  )
+  assert !string.contains(render.outline_styles, ".design-element{outline")
 }
 
 pub fn a_fill_child_of_a_hug_column_hugs_along_and_stretches_across_test() {
@@ -1157,6 +1199,10 @@ pub fn each_button_variant_draws_differently_test() {
     "background:" <> render.theme_color(theme, "primary"),
   )
   assert string.contains(
+    primary,
+    "border:1px solid " <> render.theme_color(theme, "primary"),
+  )
+  assert string.contains(
     secondary,
     "background:" <> render.theme_color(theme, "surface"),
   )
@@ -1168,6 +1214,10 @@ pub fn each_button_variant_draws_differently_test() {
   assert string.contains(
     ghost,
     "color:" <> render.theme_color(theme, "primary"),
+  )
+  assert string.contains(
+    ghost,
+    "border:1px solid " <> render.theme_color(theme, "primary"),
   )
 }
 
@@ -1448,4 +1498,32 @@ pub fn a_flow_design_decodes_into_nodes_and_edges_test() {
     == render.DiagramNode(render.DiagramNodeProperties("End", "Last"))
   assert step.kind
     == render.DiagramEdge(render.DiagramEdgeProperties("start", "end", "Next"))
+}
+
+pub fn preview_has_no_wireframe_outline_test() {
+  let container =
+    render.Container(
+      render.Hug,
+      render.Hug,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Plain,
+    )
+  let screen = node("screen", render.Screen(container), [])
+  let html = element.to_string(render.draw_preview(screen, fn(id) { id }))
+  assert !string.contains(html, "design-wireframe")
+}
+
+pub fn wireframe_outline_yields_to_change_and_selection_markings_test() {
+  let assert Ok(#(before_changes, _)) =
+    string.split_once(render.outline_styles, ".design-change-added{")
+  assert string.contains(before_changes, ".design-wireframe{outline:1px dotted")
+  let assert Ok(#(before_selection, _)) =
+    string.split_once(render.outline_styles, ".design-selected{")
+  assert string.contains(
+    before_selection,
+    ".design-wireframe{outline:1px dotted",
+  )
 }

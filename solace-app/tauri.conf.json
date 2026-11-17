@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.solace.app",
   "build": {
-    "frontendDist": "ui",
-    "beforeBuildCommand": "cd \"$(git rev-parse --show-toplevel)\" && (cd solace-cli/frontend && bun bundle.mjs) && cargo build --release --manifest-path solace-cli/Cargo.toml && sh solace-app/scripts/sidecar.sh"
+    "frontendDist": "ui"
   },
   "app": {
     "withGlobalTauri": true,

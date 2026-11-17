@@ -1,7 +1,4 @@
 {
-  "build": {
-    "beforeBuildCommand": null
-  },
   "bundle": {
     "targets": ["nsis"],
     "externalBin": [],

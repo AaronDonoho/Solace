@@ -412,3 +412,19 @@ pub(crate) fn design_path(root: &Path, name: &str) -> bool {
 pub(crate) fn design_error<T>(name: &str) -> Result<T, Failure> {
     error("E6002", name, "designs change through the design agent; agents can't change a design file directly")
 }
+
+/// Whether `name` is the root's release output folder and agents may not write there.
+pub(crate) fn release_path(root: &Path, name: &str) -> bool {
+    if !crate::releases::settings(&crate::scope::top(root)).read_only {
+        return false;
+    }
+    let top = crate::scope::top(root);
+    let place = crate::scope::dir(&top, root);
+    let folder = crate::releases::folder(&top);
+    let path = crate::file_name(&Path::new(&place).join(name));
+    path == folder || path.strip_prefix(&folder).is_some_and(|rest| rest.starts_with('/'))
+}
+
+pub(crate) fn release_error<T>(name: &str) -> Result<T, Failure> {
+    error("E6002", name, "the release output folder is read-only for agents ([releases] read_only); only builds write there")
+}

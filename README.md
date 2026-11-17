@@ -157,10 +157,11 @@ Only the Linux packages have been tested; macOS is untested. Windows has its own
 
 ```sh
 cargo install tauri-cli --version '^2' --locked
+sh solace-app/scripts/sidecar.sh
 cargo tauri build
 ```
 
-This also rebuilds the CLI from step 5 and packs it into the app.
+The app packs the CLI binary from step 5, so run the sidecar copy first. The Build tab runs the whole recipe in order: the page bundles, the CLI, the sidecar copy, then the Tauri bundle.
 
 **3. Install the app** (one line for your system):
 
@@ -347,7 +348,7 @@ cd solace-cli/board && gleam test --target javascript && bun test test/api.test.
 
 The board's web client is in `solace-cli/board/` and the frontend shell that serves it, the contract view and the migration is in `solace-cli/frontend/` (both Gleam and Lustre). Building Solace rebuilds both bundles (see Install); each project's README describes its own build.
 
-Desktop app (`solace-app/`, Tauri v2, D-80): after a release build of `solace-cli`, run `sh solace-app/scripts/sidecar.sh` once, then `cargo tauri dev`. To replace the placeholder icon, run `(cd solace-app && cargo tauri icon path/to/logo.png)` with a square PNG of at least 512×512.
+Desktop app (`solace-app/`, Tauri v2, D-80): after a release build of `solace-cli`, run `sh solace-app/scripts/sidecar.sh` once, then `cargo tauri dev`. There is no pre-build hook, so run the sidecar copy again after each CLI release build. To replace the placeholder icon, run `(cd solace-app && cargo tauri icon path/to/logo.png)` with a square PNG of at least 512×512.
 
 ### Pilots
 

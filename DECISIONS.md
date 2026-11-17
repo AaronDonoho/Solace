@@ -42,7 +42,7 @@ Module views are outlines (`--bodies` for code), `inspect a b c --context` batch
 `session start --task` gives a task packet in place of the index: the name, signature and doc line of symbols ranked deterministically from the task's words (rarity × field weight, named symbols first, one hop out to callers, callees, covering tests and their fixtures), within a byte budget, never bodies. `submit <name> --replace` makes one exact `old` → `text` replacement in one symbol, then checks the whole symbol.
 
 ## D-14 A reply budget instead of truncation or paging
-A reply naming several symbols prints each signature once (`(above)`). Replies have a byte budget per agent, just below that agent's output cut (`solace mcp --budget`: 32,000 for Codex, 80,000 for Claude Code), shared by the commands in one call. Over budget, `inspect --context` cuts callers to a count, then tests to names, then Uses to names, never the symbols asked for, and lists what it left out with the command that shows it; `view` falls back to outlines. Why: truncated output gets requested again, and each page costs a turn.
+A reply naming several symbols prints each signature once (`(above)`). Replies have a byte budget per agent, just below that agent's output cut (`solace mcp --budget`: 32,000 for Codex, 40,000 for Claude Code), shared by the commands in one call. Over budget, `inspect --context` cuts callers to a count, then tests to names, then Uses to names, never the symbols asked for, and lists what it left out with the command that shows it; `view` falls back to outlines. Why: truncated output gets requested again, and each page costs a turn.
 
 ## D-15 Build through the protocol
 Agents build and maintain code through MCP alone (Gate 1). In order: a benchmark task that builds from scratch; creating large modules safely (drafts that survive rejection, diagnostics with lines); read-only dependency signatures from `build/packages/` through `inspect` and `find`. Deferred: package management, bundling, run and smoke commands, runtime errors mapped to symbols, `sync`.
@@ -1548,3 +1548,54 @@ Adds Spec 15 §1 and §6 (board task "notes: deliver notes to the design agent",
 3. A note lives only on the human's run note, under `designNotes`, with the design's title and each element's `{id, type, parents}`; `parents` lists the elements that contain it, top first, each as `{id, type}`. An edge's parent is its flow. The design is only read.
 4. The agent receives each note once, with its message: the brief's "Notes so far" for the first message, and the delivered reply for later ones. Each note shows its design and text, and each element's ID, type and parents.
 5. Why: a note points at exact elements, and the agent can find them without vision; a note is not narrative and is not kept on the design.
+
+## D-246 A build runs the workspace's recipes, one at a time
+Adds Spec 15 (board task "build: runner, status and logs API", 2026-11-16). Part of the build: run from the Build page feature.
+1. A build is one run of a workspace's recipes in plan order, on the working tree as it is; building from a recorded snapshot comes with package inspection. Its record has an id, start and end time, and a state: running, passed, failed or canceled. Each step has waiting, running, passed, failed or skipped, its exit code and duration.
+2. Only one build runs per Solace root. A second start is refused (`E7003`), naming the running build. `POST /builds` builds every recipe, or the named projects and the projects they are after.
+3. A step's command runs the way a declared command does, with its recipe's timeout. Its stdout and stderr are kept interleaved, capped to the end. A failed step carries a summary: its name, command, exit code, and the first lines containing `error`, else the last lines. Canceling stops the running step and its child processes and skips the rest.
+4. Builds are kept in the root's store. A build running when the server stopped is failed as interrupted on the next start.
+5. Why: a build is a repeatable run of the plan the page already shows, and its report must survive a restart and let a failure become a task.
+
+## D-247 A passed build stores a release in an output folder
+Amends D-52, Spec 14 and Spec 15 (Aaron, board task "artifacts: output folder and release records", 2026-11-16).
+1. The root's `[releases] output = "build-output"` and `read_only = true` set a folder inside the root, never under `.solace/`; `E6020` names a bad field. The Build tab writes them directly, and Solace adds the folder to the root's `.gitignore` once.
+2. With `read_only` (default true), agents read the folder but `write`, `remove`, `move` and patches under it are refused with `E6002` naming the setting; off, it is ordinary unwatched. Only builds write there.
+3. A passed build copies each recipe's `outputs` to `<output>/<build id>/<project>/` and writes `release.json` beside them: version, build id, time, each artifact's path, size and SHA-256, the source commit and whether the tree was dirty, and each tool's `--version`. A missing output fails the build naming its path; a missing or hanging tool is recorded without failing.
+4. `GET /releases` and `GET /releases/{version}` read the records; `GET` and `PUT /build/settings` read and write the setting. Until the versions task, the version is the build id.
+Why: a build's artifacts and how they were made stay together, readable but not forgeable by agents.
+
+## D-248 A release's artifacts download by their listed path
+Amends D-247 point 4 and Spec 15 (Aaron, board task "artifacts: download and open folder", 2026-11-16).
+1. `GET /releases/{version}/{path}` serves `<output>/<version>/<path>` only when `path` exactly matches one of the release's `artifacts[].path` entries. An unlisted path, `..`, an empty path or an unknown version is 404 with `E7023`. The file streams with its length and content type.
+2. Why: a browser can save an artifact without the page reading it, and matching the record rather than the disk keeps the route free of traversal.
+
+## D-249 A module outline shortens long constants and fits the reply budget
+Amends D-14 and Spec 3 §3 (Aaron, board task "reading: keep module outlines short", 2026-11-16).
+1. A module outline shows a long constant's doc and the first line of its value, then a marker naming `view <module>.<name>` for the whole value; a value of about 200 characters or fewer stays whole. Item views, `inspect`, the Contract view and internal signature checks keep the whole value.
+2. One module outline follows the reply budget: its heading, doc lines and (with `--header`) whole header come first and are never cut; items are cut at whole items, and the outline says how many it left out and names them. Only printed items count as shown, so a later read does not call an unprinted item `(above)`.
+3. `--bodies` prints a module whole when it fits the budget; otherwise it falls back to that outline, with the existing note that bodies were left out.
+4. D-14's budget for Claude Code is 40,000, as the agent configuration sets it.
+Why: a module list should tell an agent what a module holds without printing style or license text or overflowing the reply.
+
+## D-250 The desktop bundle is a build recipe; the app has no pre-build command
+Amends D-159 point 1, D-242 point 1 and Spec 14 (Aaron, board task "self-build: desktop bundle from a recipe", 2026-11-16).
+1. `solace-cli/board` declares `[build]`: one step `release`, its `build-release` command, so a workspace build refreshes the board's standalone page before the CLI.
+2. `solace-app` declares `[build]` after `solace-cli`: a sidecar step runs `scripts/sidecar.sh`, then `cargo tauri build`, with the deb and AppImage as outputs. Each step times out after 120 s.
+3. `solace-app/tauri.conf.json` has no `beforeBuildCommand`: the recipe does the page bundle, CLI and sidecar work. After a CLI release build, a developer runs `scripts/sidecar.sh` before `cargo tauri dev`.
+Why: the Build tab is the one place the whole desktop bundle is assembled, and a local `cargo tauri build` no longer runs other projects' builds.
+
+## D-251 One version is written to every manifest by a build
+Amends D-247 point 4 and Spec 15 (Aaron, board task "artifacts: one version across manifests", 2026-11-16).
+1. The Build tab lists each workspace project's `Cargo.toml` `[package] version`, `gleam.toml` `version`, `package.json` `version` and `tauri.conf.json` `version`, and flags disagreement. A file without a version, and `version.workspace = true`, is left alone.
+2. `GET /build/versions` gives them with a proposal: the newest release's semver version plus one patch, else from `0.1.0`. The human may type another; a version that is not semver or already has a release is refused.
+3. `POST /builds {version}` writes it to every version line before the steps run, keeping formatting and comments. A failed, canceled or interrupted build restores the old lines. The release folder is `<output>/<version>/`, and `release.json` keeps the chosen version and each file's old and new line.
+Why: one version names the release and every manifest agrees with it.
+
+## D-252 A task brief names the designs its body links
+(Aaron, board task "from design: briefs name the task's design", 2026-11-17). Part of the design: build from a design feature.
+1. A work or review brief names every design linked in the task's body as bare `design:<id>` or `[label](design:<id>)`, once each, with its title and `design show design:<id>` to read it. Text in a code span stays literal and names no design.
+2. A design that can't be read is reported in the brief with its error, not hidden: a malformed id, a missing design, or a file that isn't a valid design.
+3. A work brief on a UI design also says the design is reference material, that the agent writes ordinary code, and to use `help lustre` to translate it. An architecture design is named and read the same way, without the Lustre guide.
+4. A review brief on a UI design asks the reviewer to check the built screen's elements, their order and their text against the design, judged as a goal (D-236), not pixel by pixel. An architecture design is checked by its parts and how they connect against the goal. A task naming no design gets neither.
+Why: an agent working or reviewing a task needs to know a design exists and how to use it, without every brief carrying design guidance.

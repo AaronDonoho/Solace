@@ -9,7 +9,9 @@ Reading
                                 numbered as `read --lines` numbers a file; the
                                 context still covers the whole symbol
   view <name>...                symbols' source
-  view <module>...              outlines: signatures and doc lines
+  view <module>...              outlines: signatures and doc lines, with a long
+                                constant's value cut to its first line and a
+                                `view <module>.<name>` pointer to the whole
   view <module> --bodies        whole module; only for one you will rewrite
   view <module> --header        the outline, with the module's whole header
                                 (comment and imports) in place of its doc lines;
@@ -74,5 +76,8 @@ Reading
                                 there; other commands, the projects the task
                                 covers
 Replies have a size limit: a signature is printed once per reply, and a reply
-that would be larger says what it left out and the command that shows it.
+that would be larger says what it left out and the command that shows it. A
+module outline that does not fit stops at a whole item and names the items it
+left out; a long constant shows only its first line, and `view <module>.<name>`
+shows the whole value.
 

@@ -517,6 +517,8 @@ impl Events {
         };
         let runs = json!({"strategyRuns": crate::tasks::strategy_runs(top)});
         let design_runs = json!({"designRuns": crate::tasks::strategy::design_runs(top)});
+        let builds: Vec<Value> = crate::board::builds::listed(top);
+        let builds = if builds.is_empty() { String::new() } else { format!("id: {id}\ndata: {}\n\n", json!({"builds": builds})) };
         let designs = match crate::design::listed(top) {
             Ok(designs) => format!("id: {id}\ndata: {}\n\n", json!({"designs": designs})),
             Err(_) => String::new(),
@@ -534,7 +536,7 @@ impl Events {
             .collect::<Vec<_>>();
         let homeless = json!({"tasks": tasks, "noProject": true});
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}id: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}{builds}id: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -798,6 +800,8 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     // applies what its inbox holds and takes over (D-77).
     tasks::start(&board.top)?;
     tasks::end_strategy_runs(&board.top)?;
+    // A build that was running when the server stopped has no runner now (D-246).
+    crate::board::builds::recover(&board.top)?;
     // Tasks stored before D-134 in Backlog under an active feature move now.
     tasks::plan_active(&board.top)?;
     // Ask each agent which models it offers, so the list is ready when asked.
@@ -923,6 +927,37 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     Err(e) => respond(req, 409, error_json(&e)),
                 };
             }
+            // The release output folder and its read-only option (D-247).
+            if let ("GET", ["build", "settings"]) = (req.method().as_str(), strategy.as_slice()) {
+                return respond(req, 200, crate::releases::json_settings(&board.top));
+            }
+            // Every manifest's version, the next version and whether they agree (D-251).
+            if let ("GET", ["build", "versions"]) = (req.method().as_str(), strategy.as_slice()) {
+                return respond_json(req, crate::versions::json(&board.top));
+            }
+            if let ("PUT", ["build", "settings"]) = (req.method().as_str(), strategy.as_slice()) {
+                let result = match read_body(&mut req, BODY_LIMIT) {
+                    Some(bytes) => body_json(&bytes).and_then(|v| crate::releases::save_settings(&board.top, &v)),
+                    None => err("E7001", "request body too large"),
+                };
+                return respond_json(req, result);
+            }
+            // Builds (D-246): start, cancel, read a build and read a step's log.
+            if strategy.first() == Some(&"builds") {
+                return build_route(req, &board.top, &strategy);
+            }
+            // A passed build's release record (D-247).
+            if let ("GET", ["releases"]) = (req.method().as_str(), strategy.as_slice()) {
+                return respond_json(req, crate::releases::listed(&board.top));
+            }
+            if let ("GET", ["releases", version]) = (req.method().as_str(), strategy.as_slice()) {
+                return respond_json(req, crate::releases::get(&board.top, version));
+            }
+            if let ("GET", ["releases", version, rest @ ..]) = (req.method().as_str(), strategy.as_slice())
+                && !rest.is_empty()
+            {
+                return release_artifact(req, &board.top, version, &view::percent_decode(&rest.join("/")));
+            }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
             let design_runs = strategy.len() >= 2 && strategy[..2] == ["design", "runs"];
             if matches!(strategy[0], "milestones" | "features" | "personas") || strategy == ["vision"] || runs || design_runs {
@@ -989,6 +1024,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                             | "/migrate"
                             | "/contracts"
                             | "/strategy"
+                            | "/delivery"
                             | "/design"
                             | "/settings"
                             | "/knowledgebase"
@@ -1000,9 +1036,8 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             {
                 let (data, kind) = match page {
                     _ if record_link => (INDEX_HTML, "text/html"),
-                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/design" | "/settings" | "/knowledgebase" => {
-                        (INDEX_HTML, "text/html")
-                    }
+                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/delivery" | "/design" | "/settings"
+                    | "/knowledgebase" => (INDEX_HTML, "text/html"),
                     "/fonts/sans-400.woff2" => (SANS_400, "font/woff2"),
                     "/fonts/sans-700.woff2" => (SANS_700, "font/woff2"),
                     "/fonts/mono-400.woff2" => (MONO_400, "font/woff2"),
@@ -1175,4 +1210,88 @@ fn log_event_error(reason: &str) {
 
 fn failure_status(e: &Failure) -> u16 {
     if e.0.starts_with("E7023") { 404 } else { 409 }
+}
+
+/// Builds (D-246): the root's build routes, including a step's plain-text log.
+fn build_route(mut req: tiny_http::Request, top: &Path, parts: &[&str]) {
+    let method = req.method().as_str().to_string();
+    if let ["builds", id, "steps", n, "task"] = parts {
+        if method != "POST" {
+            return respond(req, 409, error_json(&Failure("E7001 a failed step's task is filed with POST".into(), 1)));
+        }
+        let body = match read_body(&mut req, BODY_LIMIT) {
+            Some(bytes) => match body_json(&bytes) {
+                Ok(v) => v,
+                Err(e) => return respond(req, 409, error_json(&e)),
+            },
+            None => return respond(req, 409, error_json(&Failure("E7001 request body too large".into(), 1))),
+        };
+        return respond_json(req, crate::board::builds::file_task(top, id, n, &body));
+    }
+    if let ["builds", id, "steps", n, "log"] = parts {
+        if method != "GET" {
+            return respond(req, 409, error_json(&Failure("E7001 a step log is read with GET".into(), 1)));
+        }
+        return match crate::board::builds::step_log(top, id, n) {
+            Ok(text) => {
+                let _ = req.respond(
+                    tiny_http::Response::from_string(text)
+                        .with_header(tiny_http::Header::from_bytes("Content-Type", "text/plain; charset=utf-8").unwrap()),
+                );
+            }
+            Err(e) => respond(req, 409, error_json(&e)),
+        };
+    }
+    let body = if method == "POST" && parts == ["builds"] {
+        match read_body(&mut req, BODY_LIMIT) {
+            Some(bytes) => match body_json(&bytes) {
+                Ok(v) => v,
+                Err(e) => return respond(req, 409, error_json(&e)),
+            },
+            None => return respond(req, 409, error_json(&Failure("E7001 request body too large".into(), 1))),
+        }
+    } else {
+        json!({})
+    };
+    let result = match (method.as_str(), parts) {
+        ("POST", ["builds"]) => crate::board::builds::start(top, &body),
+        ("GET", ["builds", id]) => crate::board::builds::get(top, id),
+        ("POST", ["builds", id, "cancel"]) => crate::board::builds::cancel(top, id),
+        _ => super::err("E7001", "unknown build request"),
+    };
+    respond_json(req, result)
+}
+
+/// A release artifact (D-248): only a path listed in the release is served.
+fn release_artifact(req: tiny_http::Request, top: &Path, version: &str, path: &str) {
+    match crate::releases::artifact(top, version, path) {
+        Ok(file) => match fs::File::open(&file) {
+            Ok(data) => {
+                let response = tiny_http::Response::from_file(data)
+                    .with_header(tiny_http::Header::from_bytes("Content-Type", content_type(path)).unwrap());
+                let _ = req.respond(response);
+            }
+            Err(e) => respond_json(req, Err(crate::Failure(format!("E7023 {e}"), 1))),
+        },
+        Err(e) => respond_json(req, Err(e)),
+    }
+}
+
+fn content_type(name: &str) -> &'static str {
+    match name.rsplit('.').next().unwrap_or("") {
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "html" => "text/html",
+        "json" => "application/json",
+        "wasm" => "application/wasm",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }

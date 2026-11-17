@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-start-screen"
+description = "Lets the local start screen check setup, list its info and open a project."
+commands.allow = ["open_project", "start_info", "setup_state", "install_wsl", "import_distro", "open_terminal"]

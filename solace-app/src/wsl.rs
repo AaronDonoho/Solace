@@ -275,3 +275,22 @@ fn terminal() -> Command {
     }
     cmd
 }
+
+pub(crate) fn windows_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.starts_with("//") {
+        return Err(format!(
+            "{path} is not a Linux path inside Solace's environment"
+        ));
+    }
+    Ok(format!(
+        "\\\\wsl.localhost\\{DISTRO}{}",
+        path.replace('/', "\\")
+    ))
+}
+
+pub(crate) fn folder_exists(path: &str) -> bool {
+    in_distro(wsl())
+        .args(["--exec", "test", "-d", path])
+        .status()
+        .is_ok_and(|status| status.success())
+}

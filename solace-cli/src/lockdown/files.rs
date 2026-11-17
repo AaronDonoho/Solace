@@ -195,6 +195,9 @@ pub(crate) fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace
     if drafts::is_patch(new) {
         return usage("this text is a patch; send it with `write` and no path, which applies its `*** Update File: <path>` sections");
     }
+    if crate::lockdown::paths::release_path(root, name) {
+        return crate::lockdown::paths::release_error(name);
+    }
     // `edited` treats a given `old` as a replacement; so does the read check.
     let replace = replace || old.is_some_and(|o| !o.is_empty());
     let p = path(root, name)?;
@@ -313,6 +316,9 @@ fn file_change(
     let root = &store.root;
     if crate::lockdown::paths::design_path(root, name) {
         return crate::lockdown::paths::design_error(name);
+    }
+    if crate::lockdown::paths::release_path(root, name) {
+        return crate::lockdown::paths::release_error(name);
     }
     let p = reachable(root, name)?;
     not_here(root, name)?;
@@ -618,6 +624,9 @@ fn moved_files(name: &str, p: &Path, rel: &str, out: &mut Vec<String>) -> Result
 /// Refuses a move of `name` out of or into its place in `root`: graph files are
 /// a projection of the store, and protected and internal files aren't the agent's.
 fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
+    if crate::lockdown::paths::release_path(root, name) {
+        return crate::lockdown::paths::release_error(name);
+    }
     if name == "gleam.toml" {
         return error("E6002", name, "gleam.toml can't be moved");
     }

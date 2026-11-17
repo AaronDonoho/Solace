@@ -800,7 +800,7 @@ const COLOR_TOKENS: &[&str] = &["background", "surface", "text", "muted", "prima
 const TEXT_SIZE_TOKENS: &[&str] = &["small", "body", "h3", "h2", "h1"];
 
 /// The closed set of per-element style overrides and the kind of value each takes.
-const STYLE_PROPERTIES: &[(&str, ValueKind)] = &[
+pub(crate) const STYLE_PROPERTIES: &[(&str, ValueKind)] = &[
     ("fill", ValueKind::Color),
     ("border", ValueKind::Color),
     ("text_color", ValueKind::Color),

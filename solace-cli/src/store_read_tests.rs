@@ -772,3 +772,74 @@ fn a_task_names_a_method_and_rejects_plain_words() {
     assert_eq!(names("`Board`").join(" "), "crate.Board");
     assert!(names("`task`").is_empty(), "a plain word is not a name");
 }
+
+/// A long constant is cut to its first line in an outline; a short one stays whole.
+#[test]
+fn a_module_outline_shortens_a_long_constant() {
+    let long = "x".repeat(300);
+    let source = format!("/// The long one.\npub const long = \"{long}\"\n\npub const short = \"ok\"\n");
+    let project = project(&[("src/app.gleam", &source)]);
+    let out = project.view(&["app"], false, usize::MAX).unwrap();
+    assert!(out.contains("/// The long one."), "{out}");
+    assert!(out.contains("pub const long ="), "{out}");
+    assert!(!out.contains(&long), "{out}");
+    assert!(out.contains("view app.long"), "{out}");
+    assert!(out.contains("pub const short = \"ok\""), "{out}");
+    assert!(!out.contains("view app.short"), "{out}");
+    let whole = project.view(&["app.long"], false, usize::MAX).unwrap();
+    assert!(whole.contains(&long), "{whole}");
+    let args = ["view", "app"].map(str::to_string);
+    let cli =
+        with_root(&project.root, || run_inner(&project.root, &project.root, &args, &mut || Ok(String::new()), None, usize::MAX)).unwrap();
+    assert!(!cli.contains(&long), "{cli}");
+    assert!(cli.contains("view app.long"), "{cli}");
+}
+
+/// A cut outline keeps its header and names what it left out; unprinted items are not shown.
+#[test]
+fn a_cut_outline_keeps_its_header_and_names_what_it_left_out() {
+    let fns: String = (0..30).map(|i| format!("pub fn f{i}() -> Int {{\n  {i}\n}}\n")).collect::<Vec<_>>().join("\n");
+    let source = format!("//// A sample module.\n\nimport gleam/io\n\n{fns}");
+    let project = project(&[("src/app.gleam", &source)]);
+    crate::SHOWN.with(|s| *s.borrow_mut() = Some(std::collections::HashSet::new()));
+    let args = ["view", "app", "--header"].map(str::to_string);
+    let out = with_root(&project.root, || run_inner(&project.root, &project.root, &args, &mut || Ok(String::new()), None, 500)).unwrap();
+    assert!(out.contains("//// A sample module."), "{out}");
+    assert!(out.contains("import gleam/io"), "{out}");
+    assert!(out.contains("pub fn f0() -> Int"), "{out}");
+    assert!(!out.contains("pub fn f29() -> Int"), "{out}");
+    assert!(out.contains("items not shown") && out.contains("f29"), "{out}");
+    crate::SHOWN.with(|s| {
+        let shown = s.borrow();
+        let shown = shown.as_ref().unwrap();
+        assert!(shown.contains("app.f0"), "{shown:?}");
+        assert!(!shown.contains("app.f29"), "{shown:?}");
+    });
+    crate::SHOWN.with(|s| *s.borrow_mut() = None);
+}
+
+/// A `--bodies` view that does not fit falls back to the cut outline.
+#[test]
+fn a_bodies_view_that_does_not_fit_falls_back_to_a_cut_outline() {
+    let fns: String = (0..30).map(|i| format!("pub fn f{i}() -> Int {{\n  {i}\n}}\n")).collect::<Vec<_>>().join("\n");
+    let source = format!("//// A sample module.\n\nimport gleam/io\n\n{fns}");
+    let project = project(&[("src/app.gleam", &source)]);
+    let out = project.view_with_header(&["app"], true, false, 500).unwrap();
+    assert!(out.contains("bodies left out to fit the size limit"), "{out}");
+    assert!(out.contains("//// A sample module."), "{out}");
+    assert!(!out.contains("\n  0\n"), "{out}");
+    assert!(out.contains("items not shown"), "{out}");
+}
+
+/// A Rust outline is cut at a whole item under a small budget.
+#[test]
+fn a_cut_rust_outline_names_what_it_left_out() {
+    let fns: String = (0..30).map(|i| format!("pub fn f{i}() -> i32 {{\n    {i}\n}}\n")).collect::<Vec<_>>().join("\n");
+    let source = format!("//! A sample crate.\n\n{fns}");
+    let (_root, store) = rust_project(&source);
+    let out = store.view(&["crate"], false, 400).unwrap();
+    assert!(out.contains("//! A sample crate."), "{out}");
+    assert!(out.contains("pub fn f0() -> i32"), "{out}");
+    assert!(!out.contains("pub fn f29() -> i32"), "{out}");
+    assert!(out.contains("items not shown") && out.contains("f29"), "{out}");
+}

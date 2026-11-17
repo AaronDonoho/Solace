@@ -2,7 +2,7 @@
 # Text files up to this many bytes are watched; file writes are limited to it.
 watch_limit = 262144
 # Files Solace doesn't watch or search (agents can still read and write them).
-unwatched = []
+unwatched = ["target/", "binaries/", "gen/"]
 
 [validators]
 # Optional checks, for example:
@@ -11,3 +11,15 @@ unwatched = []
 [commands]
 # Optional commands agents may run, for example:
 # app = { run = ["gleam", "run", "--"], args = true }
+
+# The desktop bundle (D-80): copy the CLI's release binary where Tauri finds it, then bundle.
+[build]
+after = ["solace-cli"]
+outputs = [
+  "target/release/bundle/deb/Solace_0.1.0_amd64.deb",
+  "target/release/bundle/appimage/Solace_0.1.0_amd64.AppImage",
+]
+steps = [
+  { name = "sidecar", run = ["sh", "scripts/sidecar.sh"], timeout = 120 },
+  { name = "tauri", run = ["cargo", "tauri", "build"], timeout = 120 },
+]

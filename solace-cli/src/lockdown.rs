@@ -290,6 +290,9 @@ pub fn dispatch(
                         if crate::lockdown::paths::design_path(root, &name) {
                             return crate::lockdown::paths::design_error(&name);
                         }
+                        if crate::lockdown::paths::release_path(root, &name) {
+                            return crate::lockdown::paths::release_error(&name);
+                        }
                         if t == "protected" {
                             if in_skills(v, &name) {
                                 return error("E6002", &name, "skills are the humans' house rules: `read` them; agents can't change them");
@@ -317,6 +320,10 @@ pub fn dispatch(
                     "remove" => {
                         if crate::lockdown::paths::design_path(root, &name) {
                             refused.extend(crate::lockdown::paths::design_error::<()>(&name).err());
+                            continue;
+                        }
+                        if crate::lockdown::paths::release_path(root, &name) {
+                            refused.extend(crate::lockdown::paths::release_error::<()>(&name).err());
                             continue;
                         }
                         if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
@@ -2382,6 +2389,50 @@ mod tests {
         crate::board::settings::apply_settings(&root.0, &mut design_path).unwrap();
         assert!(design_path["answer"].as_str().unwrap().starts_with("Not applied:"), "{design_path}");
         assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn release_output_is_read_only_for_agents() {
+        let (s, _) = fixture();
+        let root = &s.root;
+        let setting = "watch_limit = 100\n[releases]\noutput = \"build-output\"\n";
+        fs::write(root.join("solace.toml"), setting).unwrap();
+        let v: toml::Value = setting.parse().unwrap();
+        fs::create_dir_all(root.join("build-output")).unwrap();
+        fs::write(root.join("build-output/artifact.txt"), "built\n").unwrap();
+        fs::write(root.join("notes"), "one\n").unwrap();
+        crate::board::runs::with_context("t1", "r1", || {
+            for (args, text, old) in [
+                (vec!["write", "build-output/artifact.txt", "--replace"], "changed\n", Some("built")),
+                (vec!["write", "build-output/new.txt"], "new\n", None),
+                (vec!["remove", "build-output/artifact.txt"], "", None),
+                (vec!["move", "notes", "build-output/notes"], "", None),
+                (vec!["move", "build-output", "old-output"], "", None),
+            ] {
+                let e = call(&s, &v, &args, text, old).unwrap_err().0;
+                assert!(e.contains("read-only") && e.contains("read_only"), "{args:?}: {e}");
+                assert_eq!(fs::read_to_string(root.join("build-output/artifact.txt")).unwrap(), "built\n");
+                assert!(!root.join("build-output/new.txt").exists(), "{args:?}");
+                assert!(!root.join("build-output/notes").exists(), "{args:?}");
+                assert!(!root.join("old-output").exists(), "{args:?}");
+            }
+            let patch = concat!(
+                "*** Begin Patch\n",
+                "*** Update File: notes\n-one\n+two\n",
+                "*** Add File: build-output/patched.txt\n+new\n",
+                "*** End Patch\n"
+            );
+            let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+            assert!(e.starts_with("nothing written:") && e.contains("read_only"), "{e}");
+            assert_eq!(fs::read_to_string(root.join("notes")).unwrap(), "one\n");
+            assert!(!root.join("build-output/patched.txt").exists());
+        });
+
+        let open = "watch_limit = 100\n[releases]\noutput = \"build-output\"\nread_only = false\n";
+        fs::write(root.join("solace.toml"), open).unwrap();
+        let v: toml::Value = open.parse().unwrap();
+        assert_eq!(call(&s, &v, &["write", "build-output/new.txt"], "new\n", None).unwrap(), "Wrote build-output/new.txt (1 line)\n");
+        assert_eq!(fs::read_to_string(root.join("build-output/new.txt")).unwrap(), "new\n");
     }
 }
 

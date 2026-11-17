@@ -388,3 +388,13 @@ fn a_byte_order_mark_alone_decodes_to_no_text() {
 fn utf16_cjk_with_no_byte_order_mark_is_decoded() {
     assert_eq!(decoded(&utf16("无法")), "无法");
 }
+
+#[test]
+fn a_linux_path_becomes_the_distros_windows_path() {
+    assert_eq!(
+        windows_path("/home/solace/out/b1").as_deref(),
+        Ok(r"\\wsl.localhost\Solace\home\solace\out\b1")
+    );
+    assert_eq!(windows_path("/").as_deref(), Ok(r"\\wsl.localhost\Solace\"));
+    assert!(windows_path(r"C:\Users").is_err());
+}

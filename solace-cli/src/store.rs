@@ -111,6 +111,7 @@ pub fn submit_module(root: &Path, module: &str, text: &str, formatted: bool) -> 
 /// item's own name behind its parent's. `formatted`: `text` is already rustfmt's
 /// text (a patch's block), so it is not formatted again. `label` names the
 /// block in a syntax error (`<module>.<name>`).
+/// A whole inline `mod` at the top level keeps its own `use` lines.
 pub fn submit_items(
     root: &Path,
     module: &str,
@@ -155,16 +156,35 @@ pub fn submit_items(
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
     }
-    // A block's `use` items are the module's imports, which `submit --imports`
-    // writes; an item block's own are dropped, so saving one loses them.
-    if language::rust::imports(text).map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))? {
+    // A whole inline `mod` at the top level keeps its own `use` lines: they live
+    // in the block's text, which is saved whole. Any other block's `use` items
+    // are the module's imports, which `submit --imports` writes; an item block's
+    // own are dropped, so saving one loses them.
+    let has_uses = language::rust::imports(text).map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))?;
+    let uses_kept = if !has_uses {
+        true
+    } else if parent.is_some() {
+        false
+    } else {
+        let uses = language::rust::import_ranges(text).map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))?;
+        language::rust::split(text, module).is_ok_and(|original| {
+            uses.iter().all(|(item, _)| {
+                original.items.iter().any(|p| p.kind == "mod" && is_block(p) && p.item.start <= item.start && item.end <= p.item.end)
+            })
+        })
+    };
+    if has_uses && !uses_kept {
         let imports: Vec<String> = language::rust::import_texts(text)
             .map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))?
             .into_iter()
             .map(|import| import.split_whitespace().collect::<Vec<_>>().join(" "))
             .collect();
         let imports: Vec<String> = imports.iter().map(|import| format!("`{import}`")).collect();
-        return fail(format!("Not saved: block {label} carries {}; imports go through `submit --imports {module}`.", imports.join(", ")));
+        let target = match parent {
+            Some((name, _, "mod")) => format!("{module}::{name}"),
+            _ => module.to_string(),
+        };
+        return fail(format!("Not saved: block {label} carries {}; imports go through `submit --imports {target}`.", imports.join(", ")));
     }
     let Some((name, opening, _)) = parent else {
         return Ok(file.items.iter().map(submitted).collect());
@@ -466,8 +486,16 @@ pub(crate) fn module_text(ix: &Index, m: &ModuleRow) -> String {
 }
 
 /// A module's outline: its heading and items, a Rust module's nested under its
-/// parents with each item's signature and its `// BROKEN` mark (D-158).
-pub(crate) fn module_outline(ix: &Index, m: &ModuleRow, broken: &HashMap<String, String>, bodies: bool, header: bool) -> String {
+/// parents with each item's signature and its `// BROKEN` mark (D-158). A long
+/// constant's value is cut, and the items stop at the reply's size limit.
+pub(crate) fn module_outline(
+    ix: &Index,
+    m: &ModuleRow,
+    broken: &HashMap<String, String>,
+    bodies: bool,
+    header: bool,
+    room: usize,
+) -> (String, Vec<String>) {
     let mut text = format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
     if bodies {
         text += &format!("// bodies left out to fit the size limit; `view {} --bodies` alone shows them\n", m.path);
@@ -492,33 +520,58 @@ pub(crate) fn module_outline(ix: &Index, m: &ModuleRow, broken: &HashMap<String,
             text += &format!("{}\n\n", doc.join("\n"));
         }
     }
+    let (mut printed, mut starts) = (vec![], vec![]);
+    let mut used = text.len();
     if rust {
-        walk_by_parent(ix, &by_parent(ix, &m.path), None, 0, broken, &mut text);
+        walk_by_parent(ix, &by_parent(ix, &m.path), None, 0, broken, room, &mut used, &mut printed, &mut starts, &mut text);
     } else {
         for s in ix.syms.iter().filter(|s| s.module == m.path) {
-            text += &format!("{}{}\n\n", crate::index::signature(ix, s), if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" });
+            let item = outline_item(ix, s, broken, 0);
+            if used + item.len() > room {
+                break;
+            }
+            used += item.len();
+            starts.push(text.len());
+            text += &item;
+            printed.push(s.qname());
         }
     }
-    text
+    let mut names = omit_names(ix, &m.path, &printed);
+    let mut hint = omit_hint(&m.path, &names);
+    while text.len() + hint.len() > room {
+        let Some(start) = starts.pop() else { break };
+        text.truncate(start);
+        printed.pop();
+        names = omit_names(ix, &m.path, &printed);
+        hint = omit_hint(&m.path, &names);
+    }
+    text += &hint;
+    (text, printed)
 }
 
-/// Each item under its parent, indented by its depth.
+/// Each item under its parent, indented by its depth, up to `room` bytes.
 fn walk_by_parent<'a>(
     ix: &Index,
     groups: &HashMap<Option<&'a str>, Vec<&'a Sym>>,
     parent: Option<&'a str>,
     depth: usize,
     broken: &HashMap<String, String>,
+    room: usize,
+    used: &mut usize,
+    printed: &mut Vec<String>,
+    starts: &mut Vec<usize>,
     out: &mut String,
 ) {
     for s in groups.get(&parent).map(Vec::as_slice).unwrap_or(&[]) {
-        out.push_str(&"  ".repeat(depth));
-        out.push_str(&crate::index::signature(ix, s));
-        if broken.contains_key(&s.qname()) {
-            out.push_str("  // BROKEN");
+        let item = outline_item(ix, s, broken, depth);
+        if *used + item.len() > room {
+            return;
         }
-        out.push_str("\n\n");
-        walk_by_parent(ix, groups, Some(&s.id), depth + 1, broken, out);
+        *used += item.len();
+        starts.push(out.len());
+        out.push_str(&item);
+        printed.push(s.qname());
+        walk_by_parent(ix, groups, Some(&s.id), depth + 1, broken, room, used, printed, starts, out);
     }
 }
 
@@ -801,4 +854,57 @@ pub(crate) fn module_exact<'a>(ix: &'a Index, input: &str) -> Option<&'a ModuleR
 fn module_forms(input: &str) -> [String; 3] {
     let flat = input.replace("::", "/").replace('.', "/");
     [flat.clone(), flat.replace('/', "::"), input.to_string()]
+}
+
+const OUTLINE_CONST_LIMIT: usize = 200;
+
+/// A module outline's signature for one item: a long Gleam constant keeps its
+/// doc and the first line of its value, then says where the whole value is.
+fn outline_signature(ix: &Index, s: &Sym) -> String {
+    let sig = crate::index::signature(ix, s);
+    if ix.rust || s.kind != crate::language::Kind::Const {
+        return sig;
+    }
+    let doc: usize = sig.split_inclusive('\n').take_while(|line| line.starts_with("///")).map(str::len).sum();
+    let head = &sig[doc..];
+    if head.len() <= OUTLINE_CONST_LIMIT {
+        return sig;
+    }
+    let line = head.lines().next().unwrap_or_default();
+    let first: String = if line.chars().count() > OUTLINE_CONST_LIMIT {
+        format!("{}…", line.chars().take(OUTLINE_CONST_LIMIT).collect::<String>())
+    } else {
+        line.to_string()
+    };
+    format!("{}{}\n// value shortened; `view {}` shows all of it", &sig[..doc], first, s.qname())
+}
+
+/// One outline item with its indentation and `// BROKEN` mark.
+fn outline_item(ix: &Index, s: &Sym, broken: &HashMap<String, String>, depth: usize) -> String {
+    let mut text = "  ".repeat(depth);
+    text += &outline_signature(ix, s);
+    if broken.contains_key(&s.qname()) {
+        text += "  // BROKEN";
+    }
+    text += "\n\n";
+    text
+}
+
+/// The names an outline left out, in the store's order.
+fn omit_names(ix: &Index, module: &str, printed: &[String]) -> Vec<String> {
+    let shown: std::collections::HashSet<&str> = printed.iter().map(String::as_str).collect();
+    ix.syms.iter().filter(|s| s.module == module && !shown.contains(s.qname().as_str())).map(|s| s.name.clone()).collect()
+}
+
+/// What an outline cut out, with the command that shows one of those items.
+fn omit_hint(module: &str, names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        "// {} {} not shown, to fit the size limit; `view {module}.<item>` shows one: {}\n",
+        names.len(),
+        if names.len() == 1 { "item" } else { "items" },
+        names.join(", ")
+    )
 }

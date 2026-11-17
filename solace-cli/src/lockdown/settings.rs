@@ -124,6 +124,8 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
     }
     // `[build]`: the project's build recipe (D-131).
     recipe::check(&v)?;
+    // `[releases]`: the output folder and its read-only option (D-247).
+    crate::releases::check(&v)?;
     Ok(v)
 }
 

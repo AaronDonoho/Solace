@@ -1,0 +1,332 @@
+//! Versions (D-251): the one version a build writes into every manifest in the
+//! workspace, the files that hold it, and the lines a failed build restores.
+
+use crate::Failure;
+use serde_json::Value;
+use serde_json::json;
+use std::fs;
+use std::path::Path;
+#[cfg(test)]
+#[path = "versions_tests.rs"]
+mod tests;
+
+#[derive(Clone)]
+pub struct Edit {
+    pub project: String,
+    pub file: String,
+    pub line: usize,
+    pub before: String,
+    pub after: String,
+}
+
+struct Found {
+    project: String,
+    file: String,
+    line: usize,
+    prefix: String,
+    suffix: String,
+    version: String,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Cargo,
+    Gleam,
+    Json,
+}
+
+/// Every manifest version in the workspace, with the next version and whether
+/// they agree.
+pub fn json(top: &Path) -> Result<Value, Failure> {
+    let found = found(top)?;
+    let mut versions = vec![];
+    let mut distinct: Vec<&str> = vec![];
+    for f in &found {
+        versions.push(json!({"project": f.project, "file": f.file, "version": f.version}));
+        if !distinct.contains(&f.version.as_str()) {
+            distinct.push(&f.version);
+        }
+    }
+    Ok(json!({
+        "versions": versions,
+        "agree": distinct.len() <= 1,
+        "proposal": proposal(top),
+    }))
+}
+
+/// Refuses a version that is not semver or already has a release.
+pub fn check(top: &Path, version: &str) -> Result<(), Failure> {
+    if semver(version).is_none() {
+        return Err(Failure(format!("E7001 version {version} is not semver like 1.2.3"), 1));
+    }
+    if taken(top, version) {
+        return Err(Failure(format!("E7001 version {version} already has a release"), 1));
+    }
+    Ok(())
+}
+
+pub fn edits(top: &Path, version: &str) -> Result<Vec<Edit>, Failure> {
+    Ok(found(top)?
+        .into_iter()
+        .map(|f| Edit {
+            project: f.project,
+            file: f.file,
+            line: f.line,
+            before: format!("{}{}{}", f.prefix, f.version, f.suffix),
+            after: format!("{}{}{}", f.prefix, version, f.suffix),
+        })
+        .collect())
+}
+
+/// Writes each edit, putting back the lines it already wrote if one fails.
+pub fn write(top: &Path, edits: &[Edit]) -> Result<(), Failure> {
+    let mut written = vec![];
+    for edit in edits {
+        if let Err(e) = write_line(top, edit, &edit.after) {
+            restore_edits(top, &written)?;
+            return Err(e);
+        }
+        written.push(edit.clone());
+    }
+    Ok(())
+}
+
+pub fn restore_edits(top: &Path, edits: &[Edit]) -> Result<(), Failure> {
+    for edit in edits {
+        write_line(top, edit, &edit.before)?;
+    }
+    Ok(())
+}
+
+pub fn entries(edits: &[Edit]) -> Value {
+    Value::Array(
+        edits.iter().map(|e| json!({"project": e.project, "file": e.file, "line": e.line, "before": e.before, "after": e.after})).collect(),
+    )
+}
+
+/// Puts a build's version lines back. A build with none, or one already
+/// restored, is left alone.
+pub fn restore(top: &Path, build: &Value) -> Result<(), Failure> {
+    if build["versionsRestored"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    let Some(files) = build["versionFiles"].as_array() else { return Ok(()) };
+    for file in files {
+        let (Some(project), Some(name), Some(before), Some(after)) =
+            (file["project"].as_str(), file["file"].as_str(), file["before"].as_str(), file["after"].as_str())
+        else {
+            continue;
+        };
+        let path = crate::scope::path(top, project).join(name);
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let at = file["line"].as_u64().map(|n| n as usize).filter(|n| line_is(&text, *n, after)).or_else(|| find_line(&text, after));
+        let Some(at) = at else { continue };
+        if let Some(next) = rewrite(&text, at, before) {
+            fs::write(&path, next)?;
+        }
+    }
+    Ok(())
+}
+
+fn proposal(top: &Path) -> String {
+    let mut base = [0, 1, 0];
+    if let Ok(listed) = crate::releases::listed(top)
+        && let Some(releases) = listed["releases"].as_array()
+    {
+        for release in releases {
+            if let Some(version) = release["version"].as_str().and_then(semver) {
+                base = version;
+                break;
+            }
+        }
+    }
+    format!("{}.{}.{}", base[0], base[1], base[2] + 1)
+}
+
+fn taken(top: &Path, version: &str) -> bool {
+    crate::releases::listed(top).ok().is_some_and(|listed| {
+        listed["releases"].as_array().is_some_and(|releases| releases.iter().any(|r| r["version"].as_str() == Some(version)))
+    })
+}
+
+fn semver(version: &str) -> Option<[u64; 3]> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut out = [0; 3];
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        out[i] = part.parse().ok()?;
+    }
+    Some(out)
+}
+
+fn found(top: &Path) -> Result<Vec<Found>, Failure> {
+    let mut out = vec![];
+    for project in crate::workspace::members(top)? {
+        let root = crate::scope::path(top, &project);
+        for (file, kind) in
+            [("Cargo.toml", Kind::Cargo), ("gleam.toml", Kind::Gleam), ("package.json", Kind::Json), ("tauri.conf.json", Kind::Json)]
+        {
+            let Ok(text) = fs::read_to_string(root.join(file)) else { continue };
+            if let Some((line, prefix, suffix, version)) = find(kind, &text) {
+                out.push(Found { project: project.clone(), file: file.to_string(), line, prefix, suffix, version });
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn find(kind: Kind, text: &str) -> Option<(usize, String, String, String)> {
+    match kind {
+        Kind::Cargo => cargo(text),
+        Kind::Gleam => gleam(text),
+        Kind::Json => json_line(text),
+    }
+}
+
+fn cargo(text: &str) -> Option<(usize, String, String, String)> {
+    let mut table = String::new();
+    for (i, part) in text.split_inclusive('\n').enumerate() {
+        let line = strip(part);
+        let header = line.trim().split('#').next().unwrap_or("").trim();
+        if header.starts_with('[') && header.ends_with(']') {
+            table = header[1..header.len() - 1].trim().to_string();
+            continue;
+        }
+        if table == "package"
+            && let Some(found) = key_value(line, "version")
+        {
+            return Some((i, found.0, found.1, found.2));
+        }
+    }
+    None
+}
+
+fn gleam(text: &str) -> Option<(usize, String, String, String)> {
+    for (i, part) in text.split_inclusive('\n').enumerate() {
+        let line = strip(part);
+        if line.trim_start().starts_with('[') {
+            return None;
+        }
+        if let Some(found) = key_value(line, "version") {
+            return Some((i, found.0, found.1, found.2));
+        }
+    }
+    None
+}
+
+fn key_value(line: &str, key: &str) -> Option<(String, String, String)> {
+    let start = line.len() - line.trim_start().len();
+    let rest = line[start..].strip_prefix(key)?;
+    if rest.starts_with('.') || !rest.trim_start().starts_with('=') {
+        return None;
+    }
+    let eq = line[start + key.len()..].find('=')? + start + key.len();
+    let open = line[eq + 1..].find('"')? + eq + 1;
+    let close = line[open + 1..].find('"')? + open + 1;
+    Some((line[..=open].to_string(), line[close..].to_string(), line[open + 1..close].to_string()))
+}
+
+fn json_line(text: &str) -> Option<(usize, String, String, String)> {
+    let mut depth = 0i32;
+    for (i, part) in text.split_inclusive('\n').enumerate() {
+        let line = strip(part);
+        let bytes = line.as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'"' => {
+                    let start = j + 1;
+                    let mut end = start;
+                    while end < bytes.len() && bytes[end] != b'"' {
+                        if bytes[end] == b'\\' {
+                            end += 1;
+                        }
+                        end += 1;
+                    }
+                    if end >= bytes.len() {
+                        return None;
+                    }
+                    if depth == 1 && &line[start..end] == "version" {
+                        let mut colon = end + 1;
+                        while colon < bytes.len() && bytes[colon].is_ascii_whitespace() {
+                            colon += 1;
+                        }
+                        if colon < bytes.len() && bytes[colon] == b':' {
+                            let mut value = colon + 1;
+                            while value < bytes.len() && bytes[value].is_ascii_whitespace() {
+                                value += 1;
+                            }
+                            if value < bytes.len() && bytes[value] == b'"' {
+                                let from = value + 1;
+                                let mut to = from;
+                                while to < bytes.len() && bytes[to] != b'"' {
+                                    if bytes[to] == b'\\' {
+                                        to += 1;
+                                    }
+                                    to += 1;
+                                }
+                                if to < bytes.len() {
+                                    return Some((i, line[..=value].to_string(), line[to..].to_string(), line[from..to].to_string()));
+                                }
+                            }
+                        }
+                    }
+                    j = end + 1;
+                    continue;
+                }
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+    None
+}
+
+fn strip(part: &str) -> &str {
+    part.trim_end_matches('\n').trim_end_matches('\r')
+}
+
+fn write_line(top: &Path, edit: &Edit, line: &str) -> Result<(), Failure> {
+    let path = crate::scope::path(top, &edit.project).join(&edit.file);
+    let text = fs::read_to_string(&path)?;
+    let next = rewrite(&text, edit.line, line).ok_or_else(|| Failure(format!("E7001 {} has no version line", path.display()), 1))?;
+    fs::write(&path, next)?;
+    Ok(())
+}
+
+fn rewrite(text: &str, index: usize, line: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut found = false;
+    for (i, part) in text.split_inclusive('\n').enumerate() {
+        if i == index {
+            found = true;
+            let ending = if part.ends_with("\r\n") {
+                "\r\n"
+            } else if part.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            out.push_str(line);
+            out.push_str(ending);
+        } else {
+            out.push_str(part);
+        }
+    }
+    found.then_some(out)
+}
+
+fn line_is(text: &str, index: usize, line: &str) -> bool {
+    text.split_inclusive('\n').nth(index).is_some_and(|part| strip(part) == line)
+}
+
+fn find_line(text: &str, line: &str) -> Option<usize> {
+    text.split_inclusive('\n').position(|part| strip(part) == line)
+}

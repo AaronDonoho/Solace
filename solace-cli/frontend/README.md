@@ -1,10 +1,10 @@
 # Solace frontend
 
 The Lustre shell registers the board, contract view, migration, strategy,
-design and settings components, draws its own Knowledgebase page (the guide,
-D-140), and uses modem for menu navigation and `src/history.mjs` for browser
-Back and Forward, including Strategy and Design tabs, an open design, a record
-link's focus and Contract view links.
+delivery, design and settings components, draws its own Knowledgebase page
+(the guide, D-140), and uses modem for menu navigation and `src/history.mjs`
+for browser Back and Forward, including Strategy, Delivery and Design tabs,
+an open design, a record link's focus and Contract view links.
 
 | Page | Component |
 | --- | --- |
@@ -12,6 +12,7 @@ link's focus and Contract view links.
 | /workspace | solace-migration (the Workspace page, D-146); /migrate lands here |
 | /contracts | solace-contracts |
 | /strategy | solace-strategy |
+| /delivery | solace-delivery |
 | /design | solace-design |
 | /settings | solace-settings |
 | /knowledgebase | the shell's own page, `knowledgebase.gleam` (the guide); /guide lands here |
@@ -29,7 +30,8 @@ Reload, Back and Forward restore the tab and the open design. An unknown tab
 shows Architecture; a design from the other tab or an unknown one opens
 nothing. A Settings tab change works the same way at `/settings?tab=<name>`;
 Agents has no query, an unknown tab shows it, and Notifications is
-`?tab=notifications`.
+`?tab=notifications`. A Delivery tab change works the same way at
+`/delivery?tab=<name>`; Build has no query and an unknown tab shows it.
 
 ## Task, feature and milestone links (D-98, D-122)
 
@@ -68,7 +70,7 @@ A Contract view link on a lane or a task's Changes tab, and the contract page's
 **← Board** link, are followed in-page the same way. The address is added to the
 history, so Back and Board keep the board mounted with its open task, details
 and editor text.
-The menu (Workspace, Strategy, Design, Board, Contracts, Knowledgebase,
+The menu (Workspace, Strategy, Design, Board, Contracts, Delivery, Knowledgebase,
 Settings) is on every page and highlights the current one; a workspace
 project's contract page highlights Contracts. A Strategy or Settings menu link
 keeps the tab last shown on that page; the Design menu link keeps its tab but
@@ -79,8 +81,8 @@ toasts. Each app owns its styles and lifecycle.
 A page's `attention` event (D-107) flags its menu tab, unless it is the page
 shown: the tab flashes (lit without motion under reduced motion) and reads
 "(needs attention)" to screen readers until the page is shown. The board,
-Strategy and Design are open from the start, hidden, so they hear of what needs
-attention.
+Strategy, Delivery and Design are open from the start, hidden, so they hear of
+what needs attention.
 The shell owns the document font, base styles, menu and page-level drag rule.
 
 The theme is chosen on the Settings page (Dark mode). `index.html` applies the
@@ -96,7 +98,7 @@ while reads still work and changes, checks and tests are refused.
 
 The frontend's one bundle command is `bun bundle.mjs`, run from
 solace-cli/frontend with the sibling board, components, contracts, migration,
-strategy, settings and design projects present. It writes `priv/app.js` and
+strategy, delivery, settings and design projects present. It writes `priv/app.js` and
 `priv/app.js.fingerprint`; both are committed. The root `bundle` command, this
 project's `bundle` and `build-release` commands, and the desktop app's
 pre-build command all run it. `build plan` marks the bundle out of date from
@@ -124,9 +126,9 @@ modem require a browser.
 
 ## Server integration
 
-The server task must serve this index.html at /, /workspace, /migrate, /contracts, /strategy,
-/design, /settings, /knowledgebase, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
-priv/app.js at /app.js, all on port 3030.
+The server task must serve this index.html at /, /workspace, /migrate, /contracts,
+/strategy, /delivery, /design, /settings, /knowledgebase, /task/<id>, /feature/<id>,
+/milestone/<id> and /p/<dir>/contracts, and priv/app.js at /app.js, all on port 3030.
 
 priv/app.js is generated, not source: run `bun bundle.mjs` (or
 `cargo tauri build`, which always remakes it) before `cargo build` embeds it. The server must keep

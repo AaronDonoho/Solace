@@ -148,14 +148,20 @@ never `move` or `remove`; any other file, ignored or not: `read`, `write`,
 Reviewing
   Judge whether the task's goal and acceptance criteria are met.
   Needs work only when they aren't, or there is a real bug or a hazardous
-  direction; an unlikely, harmless edge case never blocks on its own.
+  direction. Judge an edge case by what happens if it occurs, not by how
+  likely it is: if it could lose or corrupt data, give a wrong result, expose
+  what it shouldn't, or break what a user sees, it blocks when it fails the
+  task's goal or acceptance criteria, and otherwise goes in `### Tech debt`;
+  if no user or data would notice its outcome, it is not a concern.
   Say in a Summary when the direction is wrong or a follow-up task is warranted.
   Flag duplication and large modules, but file minor ones as tech debt only
   when fixing them clearly pays off; code repeated once or twice isn't tech
   debt by itself.
   Don't allow cross-domain concerns in the same module.
   Flag excessively long functions and dead code only under that bar.
-  Don't file tech debt for an unlikely, harmless edge case.
+  Put every item to fix later in `### Tech debt`, nowhere else; findings hold
+  only what blocks the task or explains the assessment, and list nothing
+  that isn't to be fixed.
   Keep thoughts, decisions and directives out of code comments and the UI;
   keep details or decisions of implementation or development out of the UI.
 

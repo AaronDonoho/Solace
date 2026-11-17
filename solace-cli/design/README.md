@@ -133,4 +133,5 @@ restore them without emitting.
 
 ```sh
 gleam test
+gleam build && bun test test/api.test.mjs
 ```

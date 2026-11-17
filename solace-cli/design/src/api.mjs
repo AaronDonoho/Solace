@@ -80,6 +80,11 @@ export function listen_region(root, report) {
   const body = doc?.body;
   let gesture = null;
 
+  const clearSelection = () => {
+    doc?.getSelection?.()?.removeAllRanges();
+    root?.getSelection?.()?.removeAllRanges();
+  };
+
   const elementBounds = canvas =>
     Array.from(canvas.querySelectorAll('[data-design-id]'), element => {
       const rect = element.getBoundingClientRect();
@@ -122,6 +127,8 @@ export function listen_region(root, report) {
       box: null,
       select: body?.style.userSelect ?? '',
     };
+    if (body) body.style.userSelect = 'none';
+    clearSelection();
     globalThis.addEventListener('pointermove', onMove);
     globalThis.addEventListener('pointerup', onUp);
     globalThis.addEventListener('pointercancel', onCancel);
@@ -139,6 +146,7 @@ export function listen_region(root, report) {
     gesture.dragging = true;
     event.preventDefault();
     if (body) body.style.userSelect = 'none';
+    clearSelection();
     if (!gesture.box) {
       gesture.box = doc.createElement('div');
       gesture.box.setAttribute('data-design-region', '');

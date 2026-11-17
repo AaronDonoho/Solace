@@ -1,4 +1,5 @@
 import contracts
+import delivery
 import design
 import gleam/bool
 import gleam/dynamic/decode
@@ -31,6 +32,7 @@ pub fn main() -> Nil {
   let assert Ok(_) = migration.register()
   let assert Ok(_) = settings.register()
   let assert Ok(_) = design.register()
+  let assert Ok(_) = delivery.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
     |> lustre.start("#app", Nil)
@@ -46,6 +48,8 @@ pub type Route {
   Strategy(tab: String)
   /// The Design page, the tab its address names, and the design open there.
   Design(tab: String, design: String)
+  /// The Delivery page and the tab its address names.
+  Delivery(tab: String)
   /// The Settings page and the tab its address names.
   Settings(tab: String)
   /// The Knowledgebase page (D-140): the shell's own page, holding the guide. `/guide` lands here.
@@ -95,6 +99,8 @@ pub fn route(uri: Uri) -> Route {
         design.tab_name(design.tab_from(uri_query(uri))),
         design.design_from(uri_query(uri)),
       )
+    ["delivery"] ->
+      Delivery(delivery.tab_name(delivery.tab_from(uri_query(uri))))
     ["settings"] ->
       Settings(settings.tab_name(settings.tab_from(uri_query(uri))))
     ["knowledgebase"] | ["guide"] -> Knowledgebase
@@ -130,6 +136,7 @@ pub fn page(
       attribute.attribute("tab", tab),
       attribute.attribute("design", design),
     ]
+    Delivery(tab) -> [attribute.attribute("tab", tab)]
     Settings(tab) -> [attribute.attribute("tab", tab)]
     _ -> []
   }
@@ -182,18 +189,26 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     RecordLink(kind, id) -> #(Board, find(kind, id, True, Board, 0))
     _ -> #(initial, effect.none())
   }
-  // The board, Strategy and Design are open from the start, hidden, so they
-  // hear of what needs the human and can flag their tab.
+  // The board, Strategy, Delivery and Design are open from the start, hidden,
+  // so they hear of what needs the human and can flag their tab.
   let strategy_page = case initial {
     Strategy(tab) -> Strategy(tab)
     _ -> Strategy(strategy.tab_name(strategy.Vision))
+  }
+  let delivery_page = case initial {
+    Delivery(tab) -> Delivery(tab)
+    _ -> Delivery(delivery.tab_name(delivery.BuildTab))
   }
   let design_page = case initial {
     Design(tab, open) -> Design(tab, open)
     _ -> Design(design.tab_name(design.Architecture), "")
   }
   let opened =
-    [shown] |> open(Board) |> open(strategy_page) |> open(design_page)
+    [shown]
+    |> open(Board)
+    |> open(strategy_page)
+    |> open(delivery_page)
+    |> open(design_page)
   #(
     Model(
       route: shown,
@@ -245,6 +260,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     TabChanged(page, name) -> {
       let next = case page {
         "solace-strategy" -> strategy_route(name)
+        "solace-delivery" -> delivery_route(name)
         "solace-design" -> design_route(name)
         "solace-settings" -> settings_route(name)
         _ -> model.route
@@ -420,6 +436,7 @@ fn link(
 pub fn view(model: Model) -> Element(Msg) {
   let shown = page_of(model.route)
   let tab = strategy_tab(model)
+  let current_delivery_tab = delivery_tab(model)
   let design_tab = design_tab(model)
   let current_settings_tab = settings_tab(model)
   let link = fn(path, label, route) {
@@ -433,6 +450,11 @@ pub fn view(model: Model) -> Element(Msg) {
       link(design_path(design_tab), "Design", Design(design_tab, "")),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("", "")),
+      link(
+        delivery_path(current_delivery_tab),
+        "Delivery",
+        Delivery(current_delivery_tab),
+      ),
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
       link(
         settings_path(current_settings_tab),
@@ -736,6 +758,7 @@ pub fn page_of(route: Route) -> String {
     Contracts(_, _) -> "solace-contracts"
     Strategy(_) -> "solace-strategy"
     Design(_, _) -> "solace-design"
+    Delivery(_) -> "solace-delivery"
     Settings(_) -> "solace-settings"
     Knowledgebase -> "solace-knowledgebase"
     RecordLink(_, _) -> "solace-board"
@@ -978,6 +1001,7 @@ fn query_of(route: Route) -> String {
   case route {
     Strategy(tab) -> strategy_query(tab)
     Design(tab, design) -> design_query(tab, design)
+    Delivery(tab) -> delivery_query(tab)
     Settings(tab) -> settings_query(tab)
     Contracts(_, task) ->
       case task {
@@ -1154,6 +1178,7 @@ pub fn path_of(route: Route) -> String {
     Contracts(base, _) -> base <> "/contracts"
     Strategy(_) -> "/strategy"
     Design(_, _) -> "/design"
+    Delivery(_) -> "/delivery"
     Settings(_) -> "/settings"
     Knowledgebase -> "/knowledgebase"
     RecordLink(kind, id) -> "/" <> kind <> "/" <> id
@@ -1165,6 +1190,7 @@ fn route_tab(route: Route, first: String) -> String {
   case route {
     Strategy(tab) -> tab
     Design(tab, _) -> tab
+    Delivery(tab) -> tab
     Settings(tab) -> tab
     _ -> first
   }
@@ -1207,4 +1233,23 @@ fn target_error(reply: String) -> Target {
     Ok("E7023") -> Missing
     _ -> Unknown
   }
+}
+
+/// The route for a Delivery tab name, Build for an unknown one.
+fn delivery_route(tab: String) -> Route {
+  Delivery(delivery.tab_name(delivery.tab_from("tab=" <> tab)))
+}
+
+/// The menu's address for a Delivery tab: Build has no query.
+pub fn delivery_path(tab: String) -> String {
+  page_path(Delivery(tab), delivery.tab_name(delivery.BuildTab))
+}
+
+fn delivery_query(tab: String) -> String {
+  page_query(tab, delivery.tab_name(delivery.BuildTab))
+}
+
+/// The tab shown on Delivery, or the tab it will open on.
+fn delivery_tab(model: Model) -> String {
+  page_tab(model, "solace-delivery", delivery.tab_name(delivery.BuildTab))
 }

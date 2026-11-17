@@ -263,6 +263,8 @@ fn agent_reference_leaves_out_host_and_task_commands() {
 #[test]
 fn help_answers_one_command_its_own_section() {
     let full = agent_help(None);
+    let task = reference::agent_help_for(Some("task"), true, false, false);
+    assert!(task.contains("Reviews, investigations"), "{task}");
     let table = REFERENCE.split("Commands (").nth(1).unwrap();
     let rows: Vec<&str> = table.lines().skip_while(|l| !l.starts_with("  ")).take_while(|l| l.starts_with("  ")).collect();
     assert!(rows.len() >= 19, "{rows:?}");
@@ -1947,7 +1949,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "9dfdc9c4ebb63c811fab9755e4fcdf19646d612e6d87fb607fe5372f90c31c84");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "7c6a658743f739165110adce9125e26a552577b360d2b76affa73dd27a2f6ed4");
 }
 
 #[test]
@@ -3235,4 +3237,21 @@ fn a_long_assertion_value_can_be_shown_whole() {
         .import();
     let err = store.test(&["--all", "--full"]).unwrap_err().0;
     assert!(err.contains(&"x".repeat(400)), "{err}");
+}
+
+#[test]
+fn the_lustre_guide_names_every_element_type_and_property() {
+    let guide = crate::reference::LUSTRE_GUIDE;
+    let words: Vec<&str> = guide.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+    for (name, ty) in crate::design::ELEMENT_TYPES {
+        assert!(words.contains(name), "element type {name} is not in the Lustre guide");
+        for (property, _) in ty.properties {
+            assert!(words.contains(property), "property {property} of {name} is not in the Lustre guide");
+        }
+    }
+    for (property, _) in crate::design::STYLE_PROPERTIES {
+        assert!(words.contains(property), "style property {property} is not in the Lustre guide");
+    }
+    assert!(agent_help(Some("lustre")).contains(guide.trim_end()), "help lustre does not show the guide");
+    assert!(agent_reference(true).contains("help lustre"), "a task's reference does not point at the guide");
 }

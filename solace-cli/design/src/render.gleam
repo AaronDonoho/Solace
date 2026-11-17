@@ -14,7 +14,7 @@ import lustre/element/html
 import lustre/event
 
 pub const outline_styles =
-  ".design-element{outline:1px dotted currentColor;outline-offset:-1px}"
+  ".design-wireframe{outline:1px dotted currentColor;outline-offset:-1px}"
   <> ".design-change-added,.design-change-removed,.design-change-changed,.design-change-moved,.design-change-both{position:relative}"
   <> ".design-change-added{outline:2px solid #1a6b30;outline-offset:-2px}"
   <> ".design-change-removed{outline:2px solid #b3261e;outline-offset:-2px;opacity:.5}"
@@ -136,6 +136,7 @@ fn draw_node(
   parent_height: DrawnSize,
   on_click: Option(fn(String, Bool) -> message),
   selecting: Bool,
+  wireframe: Bool,
   selected: List(String),
   marks: Dict(String, Change),
   markers: Dict(String, String),
@@ -161,10 +162,12 @@ fn draw_node(
       <> change_class(change)
       <> selected_class(node.id, selected)
       <> marker_class(node.id, markers)
+      <> wireframe_class(kind, wireframe)
     Error(_) ->
       "design-element"
       <> selected_class(node.id, selected)
       <> marker_class(node.id, markers)
+      <> wireframe_class(kind, wireframe)
   }
   let marker = case dict.get(markers, node.id) {
     Ok(number) -> [attribute.data("note", number)]
@@ -211,6 +214,7 @@ fn draw_node(
             height,
             on_click,
             selecting,
+            wireframe,
             selected,
             marks,
             markers,
@@ -752,6 +756,7 @@ pub fn draw_with(theme: Theme, node: Node) -> Element(message) {
     DrawnFill,
     None,
     False,
+    False,
     [],
     dict.new(),
     dict.new(),
@@ -816,7 +821,6 @@ fn button_styles(
     Secondary -> [
       #("background", theme_color(theme, "surface")),
       #("color", theme_color(theme, "primary")),
-      #("border", "1px solid " <> theme_color(theme, "primary")),
     ]
     Ghost -> [
       #("background", "transparent"),
@@ -834,6 +838,7 @@ fn button_styles(
       #("align-items", "center"),
       #("justify-content", "center"),
       #("border-radius", px(theme_radius(theme, "sm"))),
+      #("border", "1px solid " <> theme_color(theme, "primary")),
     ],
     look,
   )
@@ -1008,6 +1013,7 @@ pub fn draw_preview_with(
     DrawnFill,
     Some(fn(id, _) { on_click(id) }),
     False,
+    False,
     [],
     dict.new(),
     dict.new(),
@@ -1111,6 +1117,7 @@ pub fn draw_marked_with(
     DrawnFill,
     None,
     False,
+    False,
     [],
     marks,
     dict.new(),
@@ -1174,6 +1181,7 @@ fn draw_selectable_with(
     DrawnFill,
     Some(on_click),
     True,
+    True,
     selected,
     dict.new(),
     markers,
@@ -1215,6 +1223,7 @@ fn draw_marked_selectable_with(
     DrawnFill,
     Some(on_click),
     True,
+    True,
     selected,
     marks,
     markers,
@@ -1255,5 +1264,14 @@ pub fn marker_class(id: String, markers: Dict(String, String)) -> String {
   case dict.get(markers, id) {
     Ok(_) -> " design-noted"
     Error(_) -> ""
+  }
+}
+
+fn wireframe_class(kind: Kind, wireframe: Bool) -> String {
+  case wireframe, kind {
+    True, Screen(Container(variant: Plain, ..)) -> " design-wireframe"
+    True, Row(Container(variant: Plain, ..)) -> " design-wireframe"
+    True, Column(Container(variant: Plain, ..)) -> " design-wireframe"
+    _, _ -> ""
   }
 }

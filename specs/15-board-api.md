@@ -262,6 +262,34 @@ At the root only.
 | --- | --- |
 | `GET /build/plan` | Every project's build recipe, in build order: `[{project, source, after, outputs, stale, steps: [{name, run, timeout, command?}]}]`. `source` is `declared` (its `solace.toml` `[build]`) or `default` (from its files); a project with neither is left out. `stale` is null when current, else the reason: a missing or unreadable output fingerprint, an output that does not match it, or a source part changed since it was written (D-242). A `command` step's `run` is that command's. An invalid recipe, an `after` naming no project, or a cycle is 409 with `E6020` |
 
+### Builds (D-246)
+
+At the root only.
+
+| Request | Effect |
+| --- | --- |
+| `POST /builds` `{projects?, version?}` | Starts a build of every project's recipe in build order, or of `projects` and the projects they are `after`. A `version` is written to every workspace manifest before the steps run (D-251); a version that is not semver or already has a release is refused (`E7001`). A step is `{project, name, command, timeout, state, exitCode, duration, summary?}`, where `state` is `waiting`, `running`, `passed`, `failed` or `skipped`, and `duration` is milliseconds. Returns the build `{id, version, state, startedAt, endedAt, steps}`, where the build state is `running`, `passed`, `failed` or `canceled`. Refused while another build runs (`E7003`, naming it), for an invalid recipe (`E6020`), or for a named project with no recipe (`E7023`) |
+| `POST /builds/{id}/cancel` | Stops the running step and its child processes, marks it and the remaining steps `skipped`, and the build `canceled`. A build that wrote a version restores the old manifest lines. `E7003` when the build is not running |
+| `GET /builds/{id}` | One build whole |
+| `GET /builds/{id}/steps/{n}/log` | That step's output, stdout and stderr interleaved, as plain text, capped to its last 64 KiB. `n` is the step's index. An unknown step is `E7023` |
+| `GET /build/versions` | Every workspace manifest's version: `{versions: [{project, file, version}], agree, proposal}`. A file with no version, and `version.workspace = true`, is left out. `agree` is true when the listed versions match. `proposal` is the newest release's semver version plus one patch, else from `0.1.0` (D-251) |
+
+A failed step's `summary` is `{step, command, exitCode, lines}`: its name, its command as one line, its exit code, and up to five lines containing `error` (ignoring case), else the last lines. A build the server left running is failed with `reason: "interrupted"` on the next start. A build that wrote a version restores the old manifest lines when it fails or is interrupted.
+
+**Events.** The root's `/events` sends `{build}` in full after every state change, and `{buildLog: {id, step, text}}` with new output while a step runs. A new connection's replay sends `{builds: [...]}` after `{designs}` when there is any build.
+
+### Releases (D-247)
+
+At the root only.
+
+| Request | Effect |
+| --- | --- |
+| `GET /releases` | Every release record, newest first: `{releases: [{version, build, time, artifacts: [{path, size, sha256}], versions: [{project, file, before, after}], commit, dirty, tools}]}`. The folder is `<output>/<version>/` (D-251) |
+| `GET /releases/{version}` | One release record. An unknown version is 404 with `E7023` |
+| `GET /releases/{version}/{path}` | The artifact at that listed path, streamed with its content type and length. Only a path in the release's `artifacts` is served: an unlisted path, `..`, an empty path or an unknown version is 404 with `E7023` |
+| `GET /build/settings` | The release output folder and its option: `{output, read_only}` |
+| `PUT /build/settings` `{output, read_only?}` | Writes the root's `[releases]` table directly and returns it. An output outside the root or under `.solace/`, or a non-boolean `read_only`, is 409 with `E6020` naming the field |
+
 ### Strategy runs (D-93)
 
 These answer at the root only.

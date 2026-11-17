@@ -1,5 +1,5 @@
 # Solace: the code as last approved (D-58). Commit this file; Solace keeps it current.
-28dbcbc587ed5d15a06bfcdc689ef97e settings (imports)
+6d50de516821350f7fc6d584d0f64ef3 settings (imports)
 e0f95a1dec2716c766b3424fecd8f635 settings.Assignment
 d17325b03616131fb63082a08dcd832e settings.Behavior
 d4f1a744b63e475e70515e9efffd224f settings.Choice
@@ -106,12 +106,12 @@ c73cbd378bdca5f330025de0158943d9 settings.sound_stored
 5c39fc6cd7e75aa57ca6f3e3e3d8b431 settings.tabs
 4ac5fcffe6cf98cc11ede1c8e38cb192 settings.text_field
 5f7165311011129a8d052dbb7926653f settings.theme
-f8becf0373d9103e56d13ed314df77b3 settings.theme_control
+c6ce672f565e0deeb42ec47c8788a5c1 settings.theme_control
 568bd077abf6c46605865ce6c50100e8 settings.theme_key
 8ed02def38f24394179e0632fc6d76fd settings.update
 5f8dd11882f1573472d24cbace328d48 settings.version_decoder
 7db39d7db21b32b0f4799b80b37655c1 settings.view
-b31786c4f2976215a92a1dc2ef52dccb settings.view_styles
+9dd89f5bcf167c75722378828de0545a settings.view_styles
 df09981116706f9b0ffee47cd1cada49 settings_test (imports)
 c423ce1965e40cfd457a1a3e28ef2425 settings_test.a_confirmed_tick_clears_the_queue_test
 eba30f4e97d82157576c9dc68bd9dbae settings_test.a_reconnect_keeps_queued_skill_writes_test

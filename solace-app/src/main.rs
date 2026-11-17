@@ -125,6 +125,7 @@ fn main() {
             setup_state,
             install_wsl,
             import_distro,
+            open_release_folder,
             open_terminal
         ])
         .setup(|app| {
@@ -701,4 +702,99 @@ fn import_distro(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn open_terminal() -> Result<(), String> {
     wsl::open_terminal()
+}
+
+/// Opens one release's folder for the board window that asked, from its
+/// version alone (D-248).
+#[tauri::command]
+fn open_release_folder(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    version: String,
+) -> Result<(), String> {
+    let server = app.state::<workspaces::Server>();
+    let root = workspaces::workspace_root(&server, window.label())
+        .ok_or("this window has no workspace")?;
+    let port = workspaces::workspace_port(&server, &root)
+        .ok_or("this workspace's server is not running")?;
+    let settings = server_json(port, "/build/settings")?;
+    let output = settings["output"]
+        .as_str()
+        .ok_or("this workspace has no release folder")?;
+    let dir = release_folder(&root, output, &version)?;
+    if cfg!(windows) {
+        if !wsl::folder_exists(&dir) {
+            return Err("that release folder does not exist".into());
+        }
+        let windows = wsl::windows_path(&dir)?;
+        tauri_plugin_opener::open_path(windows, None::<&str>).map_err(|e| e.to_string())
+    } else {
+        let dir = std::path::PathBuf::from(dir);
+        if !dir.is_dir() {
+            return Err("that release folder does not exist".into());
+        }
+        tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+    }
+}
+
+fn server_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|e| e.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| e.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .ok_or("the server sent no reply")?;
+    serde_json::from_str(body).map_err(|e| e.to_string())
+}
+
+fn release_folder(root: &Path, output: &str, version: &str) -> Result<String, String> {
+    if version.is_empty()
+        || version.contains('/')
+        || version.contains('\\')
+        || version.contains("..")
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("unknown release".into());
+    }
+    if output.is_empty()
+        || output.starts_with('/')
+        || output.contains('\\')
+        || output
+            .split('/')
+            .any(|part| part == ".." || part == ".solace")
+    {
+        return Err("this workspace's release folder is not valid".into());
+    }
+    Ok(format!("{}/{output}/{version}", root.to_string_lossy()))
+}
+
+#[test]
+fn release_folder_test() {
+    let root = Path::new("/work");
+    assert_eq!(
+        release_folder(root, "build-output", "b1"),
+        Ok("/work/build-output/b1".to_string())
+    );
+    for version in ["", "../b1", "a/b", "a\\b", "b1;id", "$(id)"] {
+        assert!(
+            release_folder(root, "build-output", version).is_err(),
+            "{version}"
+        );
+    }
+    for output in ["", "/out", "../out", "a/../out", ".solace/out", "a\\out"] {
+        assert!(release_folder(root, output, "b1").is_err(), "{output}");
+    }
 }

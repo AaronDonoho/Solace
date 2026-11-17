@@ -239,6 +239,8 @@ fn workspace_tracking_test() {
     assert_eq!(workspace_window(&server, b), Some(b_label.clone()));
     assert_eq!(workspace_shown_port(&server, a), Some(3030));
     assert_eq!(window_labels(&server).len(), 2);
+    assert_eq!(workspace_root(&server, &a_label), Some(a.to_path_buf()));
+    assert_eq!(workspace_root(&server, "main"), None);
 
     set_workspace_port(&server, a, 4040);
     assert_eq!(workspace_port(&server, a), Some(4040));
@@ -435,4 +437,14 @@ fn a_second_take_reports_a_restart_already_in_progress() {
     assert_eq!(snapshot.child, ChildState::Missing);
     let _ = taken.kill();
     let _ = taken.wait();
+}
+
+pub(crate) fn workspace_root(server: &Server, label: &str) -> Option<PathBuf> {
+    server
+        .roots
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, workspace)| workspace.window.as_deref() == Some(label))
+        .map(|(root, _)| root.clone())
 }

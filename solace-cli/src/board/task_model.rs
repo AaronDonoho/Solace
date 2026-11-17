@@ -581,7 +581,8 @@ fn continue_answered(t: &mut Value) {
     // The answers go straight to the waiting agent, in any column and any workflow:
     // no workflow action is looked up, and nothing is moved, stamped or replaced.
     t["runs"][i]["state"] = json!("running");
-    t["runs"][i]["reply"] = json!({"questions":t["questions"],"text":null});
+    let reply = answer_reply(t, &t["runs"][i]);
+    t["runs"][i]["reply"] = reply;
     t["attention"] = Value::Null;
     t["finished"] = Value::Null;
 }
@@ -1422,6 +1423,7 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                     t["finished"] = json!({"kind":t["runs"][i]["kind"],"outcome":t["runs"][i]["outcome"],"time":now()});
                 }
                 "ask" => {
+                    t["runs"][i]["answers_before"] = json!(answered(t));
                     t["questions"].as_array_mut().unwrap().push(m["question"].clone());
                     t["runs"][i]["state"] = json!("waiting");
                     hold(t, "an agent asked a question");
@@ -1445,6 +1447,7 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 note(t, "solace", rid, &late);
                 return Ok(());
             }
+            t["runs"][i]["answers_before"] = json!(answered(t));
             t["questions"].as_array_mut().unwrap().push(m["question"].clone());
             t["runs"][i]["state"] = json!("waiting");
             hold(t, "an agent proposed a settings change");
@@ -1590,3 +1593,29 @@ pub(crate) fn trim_runs(t: &mut Value) {
 }
 
 pub(crate) const DISCUSSION_WAITING: &str = "a discussion is waiting for your reply";
+
+/// The reply that continues a waiting run: the answers to the questions it
+/// asked, with a settings proposal named by its file rather than its old and
+/// new text. Questions answered before the run last waited stay on the task.
+fn answer_reply(t: &Value, run: &Value) -> Value {
+    let from = run["answers_before"].as_u64().unwrap_or(0) as usize;
+    let answers: Vec<Value> = t["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .skip(from)
+        .filter(|q| !q["answer"].is_null())
+        .map(|q| {
+            let mut answer = json!({"id":q["id"],"text":q["text"],"answer":q["answer"]});
+            if let Some(file) = q["settings"]["file"].as_str() {
+                answer["settings"] = json!({"file":file});
+            }
+            answer
+        })
+        .collect();
+    json!({"questions":answers,"text":null})
+}
+
+fn answered(t: &Value) -> usize {
+    t["questions"].as_array().map_or(0, |qs| qs.iter().filter(|q| !q["answer"].is_null()).count())
+}

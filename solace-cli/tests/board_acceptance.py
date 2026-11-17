@@ -262,7 +262,8 @@ class Board(unittest.TestCase):
         self.assertIn('Code and relevant context are unchanged', prompt)
         self.assertIn('must not turn Needs work into Looks good', prompt)
         self.assertIn('A prior finding matters only if it still blocks under the Needs work bar', prompt)
-        self.assertIn('a new edge case that a fix exposes is mentioned', prompt)
+        self.assertIn('a new edge case that a fix exposes blocks only under the same bar', prompt)
+        self.assertIn('List again in your `### Tech debt` section each item of the previous review', prompt)
         self.assertIn(first, replies[0])
         self.assertIn('No task entity changes', replies[0])
         baseline = t['runs'][-1]['id']
@@ -339,7 +340,7 @@ class Board(unittest.TestCase):
             note = '**Assessment: Looks good**\n\n### Tech debt\n\n- `app.one`: '+finding+'\n\n### Verification\n\n- ok\n'
             t, prompt, _ = self.review(t, [{'command':'task note','text':note}])
             # Every review is asked for tech debt.
-            self.assertIn('Put minor, non-blocking findings', prompt)
+            self.assertIn('Put every non-blocking item to fix later', prompt)
             self.assertIn("Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria", prompt)
             self.assertIn('file an item only when fixing it clearly pays off', prompt)
             # D-138: the prompt names the task's feature.
@@ -2108,6 +2109,115 @@ class Board(unittest.TestCase):
         notes = [n for n in t['notes'] if n['author'] == 'agent' and 'batched' in n['text']]
         self.assertEqual(len(notes), 1)
         self.assertEqual(t['notes'][-1]['text'], '**Assessment: Looks good** batched')
+
+    def wait_build(self, bid, predicate, timeout=15):
+        end=time.monotonic()+timeout;build=self.api('GET','/builds/'+bid)
+        while time.monotonic()<end:
+            build=self.api('GET','/builds/'+bid)
+            if predicate(build):return build
+            time.sleep(.03)
+        self.fail('timed out: '+json.dumps(build))
+
+    def build_recipe(self, steps, projects=None):
+        text='unwatched=["priv/gen/"]\n'
+        if projects is not None:text+='projects='+json.dumps(projects)+'\n'
+        tables=[]
+        for s in steps:
+            run='['+','.join(json.dumps(x) for x in s['run'])+']'
+            tables.append('{name='+json.dumps(s['name'])+',run='+run+'}')
+        text+='[build]\nsteps=['+','.join(tables)+']\n'
+        (self.root/'solace.toml').write_text(text)
+
+    def build_log(self, bid, n):
+        status,body=self.bare('GET',f'/builds/{bid}/steps/{n}/log',{})
+        self.assertEqual(status,200,body)
+        return body.decode()
+
+    def test_builds_run_recipes_in_order(self):
+        # D-246: a named project brings the one it is after, in plan order.
+        for name in ['a','b']:
+            (self.root/name).mkdir()
+            (self.root/name/'.solace').mkdir()
+            (self.root/name/'gleam.toml').write_text(f'name="{name}"\nversion="1.0.0"\n')
+        (self.root/'a/solace.toml').write_text('[build]\nsteps=[{name="a",run=["sh","-c","printf a > ../order.txt"]}]\n')
+        (self.root/'b/solace.toml').write_text('[build]\nafter=["a"]\nsteps=[{name="b",run=["sh","-c","grep -q a ../order.txt"]}]\n')
+        self.build_recipe([{'name':'root','run':['sh','-c','true']}],['a','b'])
+        build=self.api('POST','/builds',{'projects':['b']})
+        build=self.wait_build(build['id'],lambda b:b['state']!='running')
+        self.assertEqual(build['state'],'passed')
+        self.assertEqual([(s['project'],s['name'],s['state']) for s in build['steps']],[('a','a','passed'),('b','b','passed')])
+        # Every recipe with no names, root first.
+        build=self.api('POST','/builds',{})
+        build=self.wait_build(build['id'],lambda b:b['state']!='running')
+        self.assertEqual([s['project'] for s in build['steps']],['.','a','b'])
+
+    def test_a_failed_build_stops_and_keeps_the_end_of_its_log(self):
+        self.build_recipe([
+            {'name':'ok','run':['sh','-c','echo fine']},
+            {'name':'bad','run':['sh','-c','echo hello; echo error: broken; echo done; exit 3']},
+            {'name':'after','run':['sh','-c','echo never']},
+        ])
+        build=self.api('POST','/builds',{})
+        build=self.wait_build(build['id'],lambda b:b['state']!='running')
+        self.assertEqual(build['state'],'failed')
+        self.assertEqual([s['state'] for s in build['steps']],['passed','failed','skipped'])
+        bad=build['steps'][1]
+        self.assertEqual(bad['exitCode'],3);self.assertGreaterEqual(bad['duration'],0)
+        self.assertEqual(bad['summary']['step'],'bad');self.assertEqual(bad['summary']['exitCode'],3)
+        self.assertIn('error: broken',bad['summary']['lines']);self.assertNotIn('done',bad['summary']['lines'])
+        log=self.build_log(build['id'],1)
+        self.assertIn('hello',log);self.assertIn('error: broken',log)
+        self.assertEqual(self.build_log(build['id'],2),'','a skipped step has no log')
+
+    def test_a_log_keeps_its_capped_end(self):
+        self.build_recipe([{'name':'big','run':['python3','-c',"import sys;sys.stdout.write('x'*200000);print('THE-END')"]}])
+        build=self.api('POST','/builds',{})
+        build=self.wait_build(build['id'],lambda b:b['state']!='running')
+        self.assertEqual(build['state'],'passed')
+        log=self.build_log(build['id'],0)
+        self.assertLess(len(log),65536+2000)
+        self.assertTrue(log.endswith('THE-END\n'),log[-40:])
+        self.assertEqual(log.count('x'),len(log)-len('THE-END\n'))
+
+    def test_a_build_can_be_canceled_and_a_second_start_is_refused(self):
+        self.build_recipe([
+            {'name':'slow','run':['python3','-c',"import os,time;print('pid',os.getpid(),flush=True);time.sleep(30)"]},
+            {'name':'rest','run':['sh','-c','true']},
+        ])
+        build=self.api('POST','/builds',{})
+        end=time.monotonic()+10;pid=None
+        while pid is None and time.monotonic()<end:
+            log=self.build_log(build['id'],0)
+            if 'pid ' in log:pid=int(log.split('pid ',1)[1].split()[0])
+            time.sleep(.03)
+        self.assertIsNotNone(pid)
+        refused=self.api('POST','/builds',{},'E7003')
+        self.assertIn(build['id'],refused['message'])
+        build=self.api('POST','/builds/'+build['id']+'/cancel')
+        self.assertEqual(build['state'],'canceled')
+        self.assertEqual([s['state'] for s in build['steps']],['skipped','skipped'])
+        time.sleep(.2)
+        with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+
+    def test_a_build_running_when_the_server_stopped_is_interrupted(self):
+        self.build_recipe([
+            {'name':'slow','run':['python3','-c',"import os,time;print('pid',os.getpid(),flush=True);time.sleep(30)"]},
+            {'name':'rest','run':['sh','-c','true']},
+        ])
+        build=self.api('POST','/builds',{})
+        end=time.monotonic()+10;pid=None
+        while pid is None and time.monotonic()<end:
+            log=self.build_log(build['id'],0)
+            if 'pid ' in log:pid=int(log.split('pid ',1)[1].split()[0])
+            time.sleep(.03)
+        self.assertIsNotNone(pid)
+        self.stop()
+        try:os.killpg(pid,9)
+        except ProcessLookupError:pass
+        self.serve()
+        build=self.api('GET','/builds/'+build['id'])
+        self.assertEqual(build['state'],'failed');self.assertEqual(build['reason'],'interrupted')
+        self.assertEqual([s['state'] for s in build['steps']],['failed','skipped'])
 
 if __name__=='__main__':unittest.main()
 

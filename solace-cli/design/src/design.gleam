@@ -1,3 +1,5 @@
+//// Design page: architecture and UI/UX designs, their versions and proposals.
+
 import changes
 import diagram
 import gleam/dict

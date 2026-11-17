@@ -12,3 +12,4 @@ unwatched = []
 # Optional commands agents may run, for example:
 # app = { run = ["gleam", "run", "--"], args = true }
 install = { run = ["bun", "install"] }
+js_tests = { run = ["sh", "-c", "gleam build && bun test test/api.test.mjs"], allowed_in_reviews = true }

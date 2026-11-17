@@ -149,6 +149,7 @@ def main():
             ('Board', '/', '.lane', task['title']),
             ('Strategy features', '/strategy?tab=features', 'button', 'Layout pass'),
             ('Strategy roadmap', '/strategy?tab=roadmap', '.milestone h3 .toggle', '1.0 Beta'),
+            ('Delivery', '/delivery', '.build-start', 'No builds yet.'),
         ]
         with sync_playwright() as pw:
             try:

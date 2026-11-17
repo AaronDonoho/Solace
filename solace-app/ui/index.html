@@ -97,7 +97,14 @@
   }
   async function prepare() {
     showSetup('Checking your computer…');
-    const state = await invoke('setup_state');
+    let state;
+    try {
+      state = await invoke('setup_state');
+    } catch (e) {
+      document.getElementById('error').textContent = String(e);
+      showSetup('That didn’t work.', 'Try again', prepare);
+      return;
+    }
     if (state === 'needs-wsl') {
       showSetup(
         'Solace runs inside Windows Subsystem for Linux, which isn’t turned on yet. Windows will ask for administrator permission, and may ask you to restart.',

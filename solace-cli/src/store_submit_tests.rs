@@ -681,7 +681,7 @@ fn a_nested_block_with_imports_names_the_imports_command() {
     let (root, store) = rust_project(lib);
     let text = "use std::fmt;\n\npub fn two() -> i32 {\n    2\n}\n";
     let err = store.submit_symbols(None, Some("crate.tests"), text).unwrap_err().0;
-    assert!(err.contains("`use std::fmt;`") && err.contains("submit --imports"), "{err}");
+    assert!(err.contains("`use std::fmt;`") && err.contains("submit --imports crate::tests"), "{err}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 /// A symbol three levels deep — inside a `mod` inside a `mod` — is named and
@@ -2540,4 +2540,23 @@ fn a_whole_module_submit_changes_a_mod_lines_visibility() {
     let out = store.submit(crate::store::Target::Module("crate"), &edited).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), edited);
+}
+
+/// A whole inline `mod` added by `submit --new` keeps its own `use` lines.
+#[test]
+fn new_saves_an_inline_mod_with_its_imports() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "mod tests {\n    use super::*;\n\n    #[test]\n    fn one_is_one() {\n        assert_eq!(one(), 1);\n    }\n}\n";
+    let out = store.submit_symbols(None, Some("crate"), text).unwrap();
+    assert!(out.contains("Saved crate.tests"), "{out}");
+    let file = text_of(&root, "src/lib.rs");
+    let mod_at = file.find("mod tests").unwrap();
+    let use_at = file.find("use super::*;").unwrap();
+    assert!(mod_at < use_at, "{file}");
+    let ix = store.index().unwrap();
+    assert!(store.resolve(&ix, "crate.tests::one_is_one").is_ok());
 }

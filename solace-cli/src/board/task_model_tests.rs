@@ -296,3 +296,33 @@ fn resuming_a_waiting_discussion_keeps_its_attention() {
     assert_eq!(t["attention"]["hold"], true);
 }
 
+#[test]
+fn an_answer_reply_holds_only_the_waiting_runs_answers() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("Ask", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"waiting","answers_before":1},{"id":"r2","kind":"work","state":"ended"}]);
+    t["questions"] = json!([
+        {"id":"q1","run":"r2","text":"Old?","options":["a"],"answer":"a"},
+        {"id":"q2","run":"r1","text":"New?","options":["a"],"answer":"a"}
+    ]);
+    continue_answered(&mut t);
+    assert_eq!(t["runs"][0]["state"], "running");
+    assert_eq!(t["runs"][0]["reply"], json!({"questions":[{"id":"q2","text":"New?","answer":"a"}],"text":null}));
+    assert_eq!(t["questions"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn an_answer_reply_names_a_settings_proposal_by_its_file() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("Settings", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"waiting"}]);
+    t["questions"] = json!([{"id":"s1","run":"r1","text":"Change app/AGENTS.md","options":["Approve","Reject"],
+        "answer":"Approved and written","settings":{"file":"AGENTS.md","project":".","base":"old","proposed":"new"}}]);
+    continue_answered(&mut t);
+    let expected = json!({
+        "questions": [{"id":"s1","text":"Change app/AGENTS.md","answer":"Approved and written","settings":{"file":"AGENTS.md"}}],
+        "text": null
+    });
+    assert_eq!(t["runs"][0]["reply"], expected);
+}
+

@@ -1,3 +1,5 @@
+//// Strategy page: vision, personas, features, roadmap, tasks and the planning panel.
+
 import combobox
 import features
 import form_draft

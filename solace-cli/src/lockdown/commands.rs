@@ -202,7 +202,7 @@ pub fn passed(out: &str) -> bool {
 
 /// The command `command` and `background` start: the project's tool, with the
 /// agent's task context removed (D-71).
-fn prepared(root: &Path, argv: &[String], sandbox: bool) -> Result<std::process::Command, Failure> {
+pub(crate) fn prepared(root: &Path, argv: &[String], sandbox: bool) -> Result<std::process::Command, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
     // `sandbox` is a Rust check, test or build on Linux (D-158 point 4); a
     // migration's original is read-only to commands in the copy (Spec 17).

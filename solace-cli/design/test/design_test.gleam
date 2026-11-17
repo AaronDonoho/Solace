@@ -998,10 +998,18 @@ pub fn the_preview_button_shows_the_first_screen_test() {
   assert string.contains(html, ">Preview<")
   assert string.contains(html, "data-design-id=\"one\"")
   assert string.contains(html, "data-design-id=\"two\"")
+  assert string.contains(
+    html,
+    "class=\"design-element design-wireframe\" data-design-id=\"one\"",
+  )
   let #(model, _) = design.update(model, design.Preview)
   let html = element.to_string(design.view(model))
   assert string.contains(html, "data-design-id=\"one\"")
   assert !string.contains(html, "data-design-id=\"two\"")
+  assert !string.contains(
+    html,
+    "class=\"design-element design-wireframe\" data-design-id=\"one\"",
+  )
   assert string.contains(html, ">Exit preview<")
 }
 

@@ -12,6 +12,7 @@ pub(super) mod settings;
 pub(super) mod roles;
 pub(crate) mod unfinished;
 pub(crate) mod delivery;
+mod builds;
 
 use serde_json::Value;
 use std::env;

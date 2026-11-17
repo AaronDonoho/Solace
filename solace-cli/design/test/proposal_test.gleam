@@ -69,7 +69,7 @@ pub fn a_create_proposal_draws_everything_added_test() {
   let html = element.to_string(design.view(model))
   assert string.contains(
     html,
-    "class=\"design-element design-change-added\" data-design-id=\"newroot\"",
+    "class=\"design-element design-change-added design-wireframe\" data-design-id=\"newroot\"",
   )
   assert string.contains(
     html,

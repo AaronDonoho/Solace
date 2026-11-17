@@ -47,3 +47,5 @@ In notes, cite code by name (`lockdown.dispatch`, `checkout.pay`), not by
 backticks: a bare reference renders as a link with the record's title, and a
 code span stays literal.
 
+Building a screen from a design in a Lustre project: `help lustre`.
+

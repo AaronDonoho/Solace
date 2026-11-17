@@ -729,8 +729,7 @@ fn is_string(l: &proc_macro2::Literal) -> bool {
 }
 
 /// Whether `source` holds a module-level `use`: parsed, so `pub use` and
-/// `pub(crate) use` count, and an inline `mod`'s imports — which a nested save
-/// would drop as a child row — are found (D-168).
+/// `pub(crate) use` count, and an inline `mod`'s imports are found too (D-168).
 pub fn imports(source: &str) -> Result<bool, syn::Error> {
     Ok(!import_texts(source)?.is_empty())
 }

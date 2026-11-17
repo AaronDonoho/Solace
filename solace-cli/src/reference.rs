@@ -93,6 +93,9 @@ pub(crate) fn agent_help(topic: Option<&str>) -> String {
 
 /// `agent_help` with the run's mode given, so a test can read a run's help.
 pub(crate) fn agent_help_for(topic: Option<&str>, in_task: bool, strategy_run: bool, design_run: bool) -> String {
+    if topic == Some("lustre") {
+        return format!("{LUSTRE_GUIDE}\n");
+    }
     let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
     let (full, _host) = full.split_once("\nHost commands").unwrap();
     let (general, runs) = full.split_once("\nTask runs").unwrap();
@@ -146,3 +149,6 @@ fn paragraphs_naming<'a>(text: &'a str, topic: &str) -> Vec<&'a str> {
     let entry = |l: &str| l.starts_with("  ") && !l[2..].starts_with(' ') && row_names(l).iter().any(|w| *w == topic);
     text.split("\n\n").filter(|p| p.lines().any(entry)).collect()
 }
+
+/// The Lustre translation guide, shown by `help lustre`.
+pub(crate) const LUSTRE_GUIDE: &str = include_str!("lustre-guide.txt");

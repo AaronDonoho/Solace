@@ -1,3 +1,5 @@
+//// Settings page: models, languages, agent behavior, skills, notifications and appearance.
+
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/json
@@ -450,7 +452,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   }
 }
 
-/// The Dark mode switch: a labelled checkbox, on when the page is dark.
+/// The Dark mode switch: a labeled checkbox, on when the page is dark.
 pub fn theme_control(dark: Bool) -> Element(Msg) {
   html.label([attribute.class("switch")], [
     html.input([
@@ -515,7 +517,7 @@ pub fn view(model: Model) -> Element(Msg) {
   )
 }
 
-/// The light colour set; the dark one is the page's (`index.html`, and the
+/// The light color set; the dark one is the page's (`index.html`, and the
 /// shell's for `/settings`).
 const view_styles =
   solace_task.control_styles

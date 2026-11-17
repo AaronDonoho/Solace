@@ -1,8 +1,8 @@
 # Solace root: the projects in this folder, shown on one board. Each has its own solace.toml.
-projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend", "solace-cli/contracts", "solace-cli/components", "solace-cli/strategy", "solace-cli/settings", "solace-cli", "solace-app", "solace-cli/design"]
+projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend", "solace-cli/contracts", "solace-cli/components", "solace-cli/strategy", "solace-cli/settings", "solace-cli", "solace-app", "solace-cli/design", "solace-cli/delivery"]
 # Solace project settings. Protected: agents may read this file.
 # Text files up to this many bytes are watched; file writes are limited to it.
-watch_limit = 262144
+watch_limit = 524288
 # Files Solace doesn't watch or search (agents can still read and write them).
 unwatched = []
 

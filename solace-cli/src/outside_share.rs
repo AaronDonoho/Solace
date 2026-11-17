@@ -186,3 +186,20 @@ pub(crate) struct HiddenNote {
     pub(crate) hidden: Option<String>,
     pub(crate) dirty: bool,
 }
+
+/// Keeps the release output folder out of git, once (D-247).
+pub fn ignore_output(root: &Path, folder: &str) -> Result<(), Failure> {
+    let entry = format!("{}/", folder.trim_matches('/'));
+    let path = root.join(".gitignore");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    if text.lines().any(|l| l.trim().trim_end_matches('/') == entry.trim_end_matches('/')) {
+        return Ok(());
+    }
+    let newline = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    fsx::write_atomic(&path, format!("{text}{newline}{entry}\n"))?;
+    Ok(())
+}

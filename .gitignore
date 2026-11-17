@@ -43,3 +43,4 @@ node_modules/
 !**/.solace/store.db
 !**/.solace/approved
 # Solace: shared store files end.
+build-output/

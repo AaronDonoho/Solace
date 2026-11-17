@@ -1,0 +1,92 @@
+Building from a design (Lustre)
+
+This guide is for Lustre projects only. A design is reference material, not
+the source of the code: write ordinary Lustre code, reuse the project's own
+view helpers, theme and messages, and keep or adapt existing UI rather than
+replacing it. Match what the design shows: structure, sizes, spacing, look.
+Read a design with `design show <id>`.
+
+The CSS below is what the Design page draws. Get the same look the project's
+way (its classes, theme or view helpers), or with one `attribute.styles([...])`
+where it has none.
+
+Elements (each becomes one Lustre element):
+  screen             html.div, flex column, background = color background;
+                     usually the view of one page or route
+  row                html.div, flex row
+  column             html.div, flex column
+  text               html.div with html.text(text); display block
+  heading            html.h1 / h2 / h3 for level 1 / 2 / 3 (level 3 and above
+                     use h3); font-size h1 / h2 / h3; color text
+  button             html.button with html.text(label)
+  text_input         html.input, type text, placeholder; background surface,
+                     1px solid border, radius sm
+  image_placeholder  html.div showing label, centered, 1px dashed muted
+                     border, color muted; a stand-in for an image the task
+                     supplies
+  flow, node, edge   architecture diagrams (label, description, from, to):
+                     not UI, never turned into code
+
+Containers (screen, row, column): display flex, box-sizing border-box.
+  gap, padding       spacing token or number, in px
+  align              align-items: start flex-start, center center,
+                     end flex-end, stretch stretch
+  justify            justify-content: start flex-start, center center,
+                     end flex-end, between space-between, around space-around
+  variant            plain: nothing; card: background surface,
+                     1px solid border, border-radius md
+
+Sizes (width, height). A row lays children out across; screen and column lay
+them out down. The main axis is the parent's direction.
+  number             that many px, and flex none on the main axis
+  hug                flex none on the main axis; nothing across
+  fill               main axis: flex 1 1 0 with min-width/min-height 0;
+                     across: align-self stretch with min 0
+  fill in a hug      parent hugs on that axis: drawn as hug on the main
+                     axis and as stretch across
+  fill in a stretch  parent stretched on that axis: main axis flex 1 1 auto
+                     with min 0; across align-self stretch with min 0
+  screen fill        a screen's fill on its main axis is 100%, flex none
+
+Other properties:
+  text, label        the visible text
+  placeholder        the input's placeholder attribute
+  level              heading level, as above
+  align              text and heading: text-align left, center, right
+  variant (text)     body: color text, size body; muted: color muted, size
+                     body; small: color text, size small
+  variant (button)   all: inline-flex, centered, border-radius sm.
+                     primary: background primary, color on_primary;
+                     secondary: background surface, color primary, 1px solid
+                     primary border; ghost: background transparent, color
+                     primary
+  action             the message the element sends when clicked
+                     (event.on_click); name it after the action, in the
+                     project's message type
+  navigates_to       clicking goes to that screen: use the project's routing
+                     (a route or page change), not a link the design draws
+
+Defaults, when a property is left out:
+  containers  gap 0, padding 0, align start (align-items: flex-start,
+              not the browser's stretch), justify start, variant plain
+  text        align left, variant body
+  heading     align left
+  button      variant primary
+
+Tokens. Design values are tokens of one default theme. Use the project's
+own theme values or CSS variables where it has them; otherwise use these:
+  colors      background #faf9f5, surface #ffffff, text #172226,
+              muted #667274, primary #174f78, on_primary #ffffff,
+              border #94a7a5
+  spacing     none 0, xs 4, sm 8, md 16, lg 24, xl 32 (px)
+  text sizes  small 14, body 16, h3 20, h2 24, h1 32 (px)
+  radii       none 0, sm 4, md 8 (px)
+
+Style overrides (an element's own look, applied after its type's styles,
+so they win). Each takes a token or a literal: a hex color, or a number
+in px.
+  fill        background
+  border      border: 1px solid <color>
+  text_color  color
+  size        font-size
+  padding     padding

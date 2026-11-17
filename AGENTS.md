@@ -22,6 +22,16 @@ A semantic programming system: programs are a store of identified, typed, verifi
 
 
 ## Layout
-- `solace-cli/`: the Rust CLI and server; `board/`, `migration/` and `frontend/` below it are Gleam projects of their own.
+- `solace-cli/`: the Rust CLI and server. The Gleam projects below it are its pages and tools:
+  - `board/`: the task board.
+  - `migration/`: the migration tool.
+  - `frontend/`: the app's shared page bundle.
+  - `components/`: the shared web elements.
+  - `contracts/`: the Contract view page, a project's code graph.
+  - `strategy/`: the Strategy page: vision, personas, features, roadmap, tasks and the planning panel.
+  - `settings/`: the Settings page: models, languages, agent behavior, skills and appearance.
+  - `design/`: the Design page: architecture and UI/UX designs, their versions and proposals.
+  - `delivery/`: the Build page: recipes, builds and releases.
+- `solace-app/`: the Tauri desktop app (D-80).
 - `specs/`: specifications, numbered.
-- `bench/`: benchmark pilots, tasks and harness (benchmark runs need Aaron's go-ahead).
+- `bench/`: benchmark pilots, tasks and harness (benchmark runs need Aaron's go-ahead); `visualizer/` shows their results, with its page in `visualizer/frontend/`.

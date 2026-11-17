@@ -485,16 +485,22 @@ impl Store {
         let (mut out, mut left) = (String::new(), vec![]);
         let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
         for &name in names {
+            let mut printed: Vec<String> = vec![];
             let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
                 let body = crate::store::module_text(&ix, m);
-                if bodies && fits(&out, &body) {
+                if bodies && body.len() <= budget.saturating_sub(out.len()) {
+                    printed = ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect();
                     (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
                 } else {
-                    (crate::store::module_outline(&ix, m, &self.broken()?, bodies, header && !bodies), vec![])
+                    let (text, shown) =
+                        crate::store::module_outline(&ix, m, &self.broken()?, bodies, header && !bodies, budget.saturating_sub(out.len()));
+                    printed = shown;
+                    (text, vec![])
                 }
             } else {
                 match self.resolve(&ix, name) {
                     Ok(i) => {
+                        printed.push(ix.syms[i].qname());
                         (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]])
                     }
                     Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
@@ -502,10 +508,6 @@ impl Store {
             };
             if left.is_empty() && fits(&out, &text) {
                 out += &text;
-                let printed: Vec<String> = match self.resolve_module(&ix, name) {
-                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect(),
-                    None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
-                };
                 printed.into_iter().for_each(mark_shown);
                 served.into_iter().for_each(|s| crate::reads::mark_served(&self.root, s));
             } else {
