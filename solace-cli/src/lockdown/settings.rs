@@ -158,7 +158,11 @@ pub fn settings_file(root: &Path, name: &str) -> bool {
     if crate::lockdown::paths::design_path(root, name) {
         return false;
     }
-    name == "solace.toml" || name == "AGENTS.md" || is_gitignore(name) || (crate::language::is_rust(root) && rust_setting(name))
+    name == "solace.toml"
+        || name == "AGENTS.md"
+        || name == crate::decisions::FILE
+        || is_gitignore(name)
+        || (crate::language::is_rust(root) && rust_setting(name))
 }
 
 /// Why a Cargo.toml change that touches a protected key is refused (D-158 point 4).

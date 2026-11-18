@@ -276,7 +276,10 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
                     let at = at.trim().trim_end_matches("@@").trim();
                     // a unified diff's `@@ -3,4 +3,5 @@` gives no context line
                     let numbers = at.starts_with('-') && at[1..].starts_with(|c: char| c.is_ascii_digit());
-                    hunks.push(((!at.is_empty() && !numbers).then(|| at.to_string()), vec![], n));
+                    let selector = (!at.is_empty() && !numbers).then(|| at.to_string());
+                    // without a selector the hunk starts at the cursor, so name its first line
+                    let at_line = if selector.is_some() { n } else { n + 1 };
+                    hunks.push((selector, vec![], at_line));
                 } else if !update && !l.starts_with('+') {
                     // an Add with no `+` line at all is a fault in the whole patch
                     let mut rest = raw.lines().skip(n).take_while(|x| !x.starts_with("***"));
@@ -315,12 +318,26 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
             while hunk.last().is_some_and(String::is_empty) {
                 hunk.pop();
             }
-            for line in hunk.iter_mut().filter(|line| line.is_empty()) {
-                *line = " ".into();
-            }
         }
         if *kind == Section::Update {
+            // an unprefixed empty line between two added lines adds a blank; anywhere else it means an existing blank (D-204)
+            for (_, hunk, _) in hunks.iter_mut() {
+                for i in 0..hunk.len() {
+                    if !hunk[i].is_empty() {
+                        continue;
+                    }
+                    let added_before = hunk[..i].iter().rev().find(|l| !l.is_empty()).is_some_and(|l| l.starts_with('+'));
+                    let added_after = hunk[i + 1..].iter().find(|l| !l.is_empty()).is_some_and(|l| l.starts_with('+'));
+                    hunk[i] = if added_before && added_after { "+" } else { " " }.into();
+                }
+            }
             hunks.retain(|(at, hunk, _)| at.is_some() || !hunk.is_empty());
+        } else {
+            for (_, hunk, _) in hunks.iter_mut() {
+                for line in hunk.iter_mut().filter(|line| line.is_empty()) {
+                    *line = " ".into();
+                }
+            }
         }
     }
     Ok(sections)
@@ -410,6 +427,20 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
                 _ => String::new(),
             };
             let more = if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() };
+            let blank_hint = match hunk.iter().position(|l| l.starts_with(' ') && l.trim().is_empty()) {
+                Some(i)
+                    if {
+                        let mut without = hunk.clone();
+                        without[i] = "+".into();
+                        let old: Vec<&str> = without.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
+                        !old.is_empty() && hunk_start(&old, lines, from, !at_end).is_some()
+                    } =>
+                {
+                    let n = if at.is_some() { hl + 1 + i } else { hl + i };
+                    format!(" Line {n} of the patch is an empty context line; start it with `+` to add a blank line.")
+                }
+                _ => String::new(),
+            };
             // when the D-120 hint shows, the headline names the same line the hint names
             let quote = match (part, within.as_slice()) {
                 (Some(p), [_]) => p,
@@ -435,7 +466,7 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
             } else {
                 format!("these lines weren't found: `{}`{more}; copy them exactly from `{show}`.{hint}", quote)
             };
-            return Err(bad(format!("in {target} (hunk at line {hl}), {msg}")));
+            return Err(bad(format!("in {target} (hunk at line {hl}), {msg}{blank_hint}")));
         };
         indented |= loose;
         let new = replacement(&hunk, &old, lines, k, loose);
@@ -1815,6 +1846,57 @@ mod tests {
         assert!(mod_at < use_at, "{file}");
         let ix = s.index().unwrap();
         assert!(s.resolve(&ix, "crate.tests::one_is_one").is_ok());
+    }
+
+    /// An unprefixed empty line between added lines adds a blank line; one
+    /// touching context or a removal still means an existing blank line.
+    #[test]
+    fn unprefixed_empty_between_added_lines_is_added() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n}\n")]);
+        let patch = concat!("*** Begin Patch\n*** Update: app\n@@\n-}\n+}\n\n", "+pub fn x() {\n+  1\n+}\n*** End Patch\n",);
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("// ── app.x ──\npub fn x() {\n  1\n}"), "{blocks}");
+
+        // An empty line between two added lines is kept as a blank line.
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n}\n")]);
+        let patch = concat!("*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n\n", "+  let y = 3\n*** End Patch\n",);
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("let x = 2\n\n  let y = 3"), "{blocks}");
+
+        // Next to a context line, an empty line is still an existing blank line.
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n\n  x\n}\n")]);
+        let patch = "*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n\n  x\n*** End Patch\n";
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("let x = 2\n\n  x"), "{blocks}");
+
+        // A blank that can't be matched names its patch line, even when the target has blanks elsewhere.
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n")]);
+        let patch = concat!("*** Begin Patch\n*** Update: app\n@@\n-  let x = 1\n+  let x = 2\n\n", "  x\n*** End Patch\n",);
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(e.contains("Line 6 of the patch") && e.contains("start it with `+`"), "{e}");
+    }
+
+    /// A bare `@@` anchors nothing: a file's added lines land at the end, and a symbol refuses them.
+    #[test]
+    fn a_bare_hunk_header_keeps_add_only_placement() {
+        let parsed = crate::drafts::sections("*** Begin Patch\n*** Update File: notes.txt\n@@\n+appended\n*** End Patch\n", true).unwrap();
+        let text = crate::drafts::file_text("notes.txt", "one\ntwo\n", parsed[0].0, parsed[0].3.clone()).unwrap();
+        assert_eq!(text.unwrap().lines().collect::<Vec<_>>(), vec!["one", "two", "appended"]);
+
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n}\n")]);
+        let patch = "*** Begin Patch\n*** Update: app.main\n@@\n+  let y = 2\n*** End Patch\n";
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(e.contains("a hunk that only adds lines needs `@@ <the line before them>`"), "{e}");
+    }
+
+    /// The blank-line hint appears only when turning the blank into an added line would apply.
+    #[test]
+    fn the_blank_line_hint_names_only_the_cause() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n\n  x\n}\n")]);
+        let patch =
+            concat!("*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n\n", "-  q\n+  let z = 9\n*** End Patch\n",);
+        let e = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(!e.contains("start it with `+`"), "{e}");
     }
 }
 

@@ -4,8 +4,8 @@ A semantic programming system: programs are a store of identified, typed, verifi
 
 ## Working on a board task
 - Your task, its notes and its answers are in your brief. Start from them.
-- `DECISIONS.md` contains past decision: `grep D-57` (or a word) finds the line, and `read DECISIONS.md --lines a..b` reads that record. Don't re-open a settled decision.
-- A new decision made by a human goes at the end of `DECISIONS.md`, in the same short form as the others. If you need a human's judgment, ask with `task ask`; don't guess.
+- `DECISIONS.md` contains past decisions: `read DECISIONS.md --lines a..b` reads a record. Don't re-open a settled decision.
+- A decision is added only when the human approves it. In a run, propose one with `task decision` (or `strategy decision` on the Strategy page), in the same short form as the others, when the human settles something later work must follow. If you need a human's judgment, ask with `task ask`; don't guess.
 
 ## Rules
 - Specs (`specs/`) change only through a decision.

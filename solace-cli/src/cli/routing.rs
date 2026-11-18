@@ -549,6 +549,18 @@ fn settings_proposal(
     else {
         return Ok(SettingsWrite::None);
     };
+    if file == crate::decisions::FILE {
+        let text = input()?;
+        let reason = crate::REASON.with(|r| r.borrow().clone());
+        return Ok(SettingsWrite::Proposed(crate::board::settings::propose_decision(
+            home,
+            tid,
+            rid,
+            &text,
+            reason.as_deref(),
+            std::mem::take(guard),
+        )));
+    }
     crate::lockdown::paths::reachable(&store.root, &file)?;
     let current = fs::read(store.root.join(&file)).unwrap_or_default();
     let proposed = edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
@@ -661,6 +673,11 @@ pub(crate) fn inspect_options<'a>(args: &[&'a str]) -> Result<(Vec<&'a str>, Opt
 /// root, taking no project lock. Every other command is refused (`E7010`);
 /// the run's own commands are `design note`, `design wait` and `design propose`.
 fn design_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
+    design_run_at(&top, rid, args, input, budget)
+}
+
+fn design_run_at(top: &Path, rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let command = a.first().copied().unwrap_or("");
     let strategy_read = command == "strategy" && matches!(a.get(1).copied(), Some("list" | "show"));
@@ -676,20 +693,27 @@ fn design_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget
         };
         return crate::lockdown::error("E7010", command, why);
     }
-    let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
-    crate::board::design_guard(&top, rid, &a)?;
-    if command == "strategy" {
-        return crate::board::strategy_command(&top, rid, &a, input, budget);
-    }
-    if command == "design" && matches!(a.get(1).copied(), Some("note" | "wait" | "propose")) {
-        return crate::board::design_command(&top, rid, &a, input);
-    }
-    // A read, in the root's project or with `--project` in another.
-    match a.iter().position(|x| *x == "--project") {
+    crate::board::design_guard(top, rid, &a)?;
+    let (dir, read_args) = match a.iter().position(|x| *x == "--project") {
         Some(i) => {
             let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
-            read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
+            (dir, [&args[..i], &args[i + 2..]].concat())
         }
-        None => read_project(".", args, budget),
+        None => (".", args.to_vec()),
+    };
+    if command == "design" && a.get(1).copied() == Some("show") {
+        let id = read_args.get(2).map(String::as_str);
+        let (shown, version) = crate::cli::projects::read_project_with_version(dir, &read_args, budget)?;
+        if let (Some(id), Some(version)) = (id, version) {
+            crate::tasks::strategy::record_design_read(top, rid, id.strip_prefix("design:").unwrap_or(id), &version)?;
+        }
+        return Ok(shown);
     }
+    if command == "strategy" {
+        return crate::board::strategy_command(top, rid, &a, input, budget);
+    }
+    if command == "design" && matches!(a.get(1).copied(), Some("note" | "wait" | "propose")) {
+        return crate::board::design_command(top, rid, &a, input);
+    }
+    read_project(dir, &read_args, budget)
 }

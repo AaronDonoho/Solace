@@ -629,7 +629,8 @@ impl Store {
         let Some((tid, _)) = crate::board::runs::context() else { return Ok(()) };
         let baseline = baseline.to_vec();
         let root = self.root.clone();
-        crate::tasks::update(&root, &tid, move |t| {
+        let home = crate::scope::home(&root, &tid)?;
+        crate::tasks::update(&home, &tid, move |t| {
             if !t["dependent_errors"].is_object() {
                 t["dependent_errors"] = serde_json::json!({});
             }

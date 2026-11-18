@@ -265,7 +265,6 @@ pub type Panel(msg) {
     /// Shows the run with this id, "" for none.
     on_show: fn(String) -> msg,
     on_end: msg,
-    on_stop: msg,
     /// Whether the run's end is in reach in the panel, so a new message
     /// scrolls to it (D-118).
     at_bottom: Bool,
@@ -635,8 +634,8 @@ pub fn new_run(runs: List(Run), context: Context) -> String {
 }
 
 /// The run bar, pinned above the conversation: what the shown run is on (else
-/// what a new run would plan), its state and model, End and Stop while it is
-/// open, the Earlier runs on the same record, newest first, and New run.
+/// what a new run would plan), its state and model, End while it is open, the
+/// Earlier runs on the same record, newest first, and New run.
 fn bar(settings: Settings, p: Panel(msg)) -> Element(msg) {
   let current = case p.shown {
     Some(run) -> run.id
@@ -668,7 +667,6 @@ fn bar(settings: Settings, p: Panel(msg)) -> Element(msg) {
         case p.shown {
           Some(run) if run.state != "ended" -> [
             small(solace_task.ui_label("end"), p.sending, p.on_end),
-            small(solace_task.ui_label("stop"), p.sending, p.on_stop),
           ]
           _ -> []
         },

@@ -4,7 +4,7 @@ projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board",
 # Text files up to this many bytes are watched; file writes are limited to it.
 watch_limit = 524288
 # Files Solace doesn't watch or search (agents can still read and write them).
-unwatched = []
+unwatched = ["bench/results/"]
 
 [validators]
 # Optional checks, for example:

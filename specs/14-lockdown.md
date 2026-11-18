@@ -13,7 +13,7 @@ Every file under the project root is in exactly one category, named for what Sol
 | # | Rule | Category |
 | --- | --- | --- |
 | 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`; Rust: `src/**/*.rs`, `tests/**/*.rs`; none in a project of plain files, D-60) | graph |
-| 2 | `solace.toml` (§2) and `AGENTS.md` (D-45); Rust: `build.rs`, `.cargo/config[.toml]`, `rust-toolchain[.toml]` (D-158, D-174), and a crate below the root's `Cargo.toml` and `build.rs` (D-175) | protected |
+| 2 | `solace.toml` (§2), `AGENTS.md` (D-45) and `DECISIONS.md` (§2); Rust: `build.rs`, `.cargo/config[.toml]`, `rust-toolchain[.toml]` (D-158, D-174), and a crate below the root's `Cargo.toml` and `build.rs` (D-175) | protected |
 | 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files; and every file of another Solace project nested in this one (a folder below the root with its own `.solace/store.db`, D-57) | internal: no agent access at all (`E6006`) |
 | 4 | The root's `[releases]` output folder when `read_only` is on (the default, D-247) | read-only: readable, not writable (`E6002`) |
 | 5 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`; Rust: `target/`), anything `.gitignore` ignores | unwatched |
@@ -31,6 +31,8 @@ Every file under the project root is in exactly one category, named for what Sol
 A root project's `solace.toml` may also list `projects`, the folders below it that share its board (D-57, Spec 15 §4). Only humans change that list, from the board or with `solace create`: an agent's proposed `solace.toml` that changes `projects` is refused (`E6020`).
 
 `AGENTS.md` in the project root holds the project's instructions for agents and is shown first in `session start` (Spec 3). It follows the same rule as `solace.toml`: humans write it, agents read it, and a work run's `write AGENTS.md` is a proposal the human approves (D-45).
+
+`DECISIONS.md` at the workspace's top folder is the workspace's decision log, created when the workspace is set up or migrated; a member project reads the top folder's log. It follows the same rule as `solace.toml`: humans write it, agents read it, and a work, investigation or discussion run's `task decision`, a strategy run's `strategy decision`, or a work run's `write DECISIONS.md` proposes an entry the human approves. A review can't propose one. An approved entry is appended with the next number; a rejected one adds nothing.
 
 A proposal is only for a path a file command could reach: Solace checks that when the proposal is made and again when it is approved. A path outside the project, through a symlink, in the workspace's `designs` folder or otherwise unreachable changes nothing.
 

@@ -19,13 +19,14 @@ pub(crate) fn tool_schema() -> Value {
             "name": "solace",
             "description": concat!(
                 "Read this project's code, designs and plan with the human; this run changes no code. ",
-                "A design change is a proposal for the human to accept. ",
+                "A design change is checked and saved at once as a new version; read a design before changing it. ",
                 "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`, `design list` and `design show <id>`, ",
                 "the plan and vision with `strategy list` and `strategy show <task|feature|milestone> <id>...` ",
                 "(a task's notes with `strategy show note`, its run log with `strategy show run`), ",
                 "and decisions with `grep` or `read` of `DECISIONS.md` ",
                 "(`--project <folder>` for a project below the root); propose a design change with ",
-                "`design propose [<id>]`, alone in its call; reply with `design note`, ",
+                "`design propose [<id>]`, alone in its call; it replies at once with the saved version. ",
+                "reply with `design note`, ",
                 "and keep waiting with `design wait`. Several reads go in one call, one per line, and run in order."
             ),
             "inputSchema": {
@@ -58,7 +59,7 @@ pub(crate) fn tool_schema() -> Value {
                 "(one id, or several in one reply) (a task's notes in full: ",
                 "`strategy show note <task> <notes>`; a task's run log: ",
                 "`strategy show run <task> <run> [<steps>|all]`, or `--failed` alone); propose a change with ",
-                "`strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; ",
+                "`strategy task|feature|milestone [<id>]`, `strategy vision` or `strategy decision`, alone in its call; ",
                 "reply with `strategy note`. Several reads go in one call, one per line, and run in order."
             ),
             "inputSchema": {
@@ -75,7 +76,8 @@ pub(crate) fn tool_schema() -> Value {
                         "type": "string",
                         "description": concat!(
                             "The reply for `strategy note`; a proposal's fields as a JSON object ",
-                            "(`help strategy` lists them per kind); the new vision for `strategy vision`"
+                            "(`help strategy` lists them per kind); the new vision for `strategy vision`, ",
+                            "or the entry for `strategy decision`"
                         )
                     }
                 },
@@ -116,7 +118,7 @@ pub(crate) fn tool_schema() -> Value {
                         "project); for `write` with no path: a patch of files ",
                         "(`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); ",
                         "the task for `session start --task`; the record, note, summary or question for ",
-                        "`work add` and `task note|done|ask`"
+                        "`work add` and `task note|done|ask|decision`"
                     )
                 },
                 "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},

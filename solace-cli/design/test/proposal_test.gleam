@@ -269,3 +269,56 @@ pub fn an_architecture_create_proposal_draws_everything_added_test() {
   assert string.contains(html, "data-design-id=\"newedge\"")
   assert !string.contains(html, "Current")
 }
+
+fn a_previous_version(design: String) -> String {
+  "{\"number\":1,\"time\":1600000000,\"source\":{\"kind\":\"human\"},\"design\":"
+  <> design
+  <> "}"
+}
+
+pub fn a_waiting_proposal_keeps_the_current_versions_changes_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(
+        "{\"designs\":[{\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"version\":2}]}",
+      ),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, proposed_design()))
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 2, a_previous_version(saved())),
+    )
+  let proposed =
+    string.replace(
+      proposed_design(),
+      "\"text\":\"Added\"",
+      "\"text\":\"Added now\"",
+    )
+  let #(model, _) =
+    design.update(model, design.Panel(panel.Replied(True, run(proposed))))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "Proposed")
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-changed\" data-design-id=\"added\"",
+  )
+  assert !string.contains(
+    html,
+    "class=\"design-element design-change-added\" data-design-id=\"added\"",
+  )
+  let #(model, _) = design.update(model, design.ShowCurrent)
+  let html = element.to_string(design.view(model))
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-added\" data-design-id=\"added\"",
+  )
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-removed\" data-design-id=\"removed\"",
+  )
+}

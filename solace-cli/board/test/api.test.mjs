@@ -120,6 +120,54 @@ test('dragging is stopped once per root, wherever the board is nested', async ()
   expect([...listeners.entries()]).toEqual([['dragstart', 1]]);
 });
 
+test('cards stay under the bar unless their stack is too tall for the room below it', async () => {
+  const api = await import('../src/api.mjs');
+  const saved = Object.fromEntries(['MutationObserver', 'ResizeObserver', 'addEventListener', 'removeEventListener']
+    .map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  let stacks = [], mutations, resizes;
+  const listeners = {};
+  const area = { clientHeight: 300, style: { value: '', setProperty(name, value) { this.value = `${name}:${value}`; } } };
+  const bar = { getBoundingClientRect: () => ({ height: 38 }) };
+  const makeStack = height => {
+    const names = new Set();
+    return { classList: { toggle(name, on) { on ? names.add(name) : names.delete(name); }, contains: name => names.has(name) },
+      getBoundingClientRect: () => ({ height }) };
+  };
+  const root = {
+    querySelector: sel => sel === '.lanes-area' ? area : sel === '.lane-head' ? bar : null,
+    querySelectorAll: sel => sel === '.lane .stack' ? stacks : [],
+  };
+  globalThis.MutationObserver = class { constructor(fn) { mutations = fn; } observe() {} disconnect() {} };
+  globalThis.ResizeObserver = class { constructor(fn) { resizes = fn; } observe() {} disconnect() {} };
+  globalThis.addEventListener = (name, fn) => { listeners[name] = fn; };
+  globalThis.removeEventListener = name => { delete listeners[name]; };
+  try {
+    api.watch_stacks(root);
+    expect(area.style.value).toBe('--lane-bar:38px');
+    stacks = [makeStack(100), makeStack(300)];
+    mutations();
+    expect(stacks[0].classList.contains('tall')).toBe(false);
+    expect(stacks[1].classList.contains('tall')).toBe(true);
+    // The band opens or the window grows: the room below the bar grows.
+    area.clientHeight = 800;
+    resizes();
+    expect(stacks[1].classList.contains('tall')).toBe(false);
+    // A card added by a live update: the measurement sees the new stack.
+    stacks = [makeStack(900)];
+    mutations();
+    expect(stacks[0].classList.contains('tall')).toBe(true);
+    // A shrinking window re-measures from its own event too.
+    area.clientHeight = 400;
+    listeners.resize();
+    expect(stacks[0].classList.contains('tall')).toBe(true);
+    area.clientHeight = 1200;
+    resizes();
+    expect(stacks[0].classList.contains('tall')).toBe(false);
+  } finally {
+    for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
+  }
+});
+
 test('text dragged within a text box or a markdown editor moves; anything else stays put', async () => {
   const api = await import('../src/api.mjs');
   let drag;

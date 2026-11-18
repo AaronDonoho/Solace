@@ -62,7 +62,6 @@ fn panel() -> plan_panel.Panel(Nil) {
     on_answer: fn(_, _) { Nil },
     on_show: fn(_) { Nil },
     on_end: Nil,
-    on_stop: Nil,
     at_bottom: True,
     new_message: False,
     on_scroll: fn(_) { Nil },

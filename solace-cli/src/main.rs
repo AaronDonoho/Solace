@@ -63,6 +63,7 @@ mod outside_copies;
 mod base64;
 mod releases;
 mod versions;
+mod decisions;
 use crate::cli::{next_step, operands, path_dependencies};
 pub(crate) use failure::{Failure, Out, fail, usage};
 use crate::store_core::SCHEMA;

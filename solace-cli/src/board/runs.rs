@@ -757,7 +757,7 @@ pub fn transcript(log: &Path) -> Vec<Value> {
             ("item.completed", "agent_message") => out.push(json!({"kind":"message","text":item["text"]})),
             ("item.completed", "reasoning") => out.push(json!({"kind":"thinking","text":item["text"]})),
             ("item.completed", "web_search") => out.push(json!({"kind":"tool","title":format!("web search {}", item["query"].as_str().unwrap_or("")),"input":"","output":"","status":"ok"})),
-            ("item.completed", "error") => out.push(json!({"kind":"error","text":item["message"]})),
+            ("item.completed", "error") => out.push(codex_error_entry(&item["message"])),
             ("turn.completed", _) => {
                 let u = &e["usage"];
                 let input = u["input_tokens"].as_u64().unwrap_or(0);
@@ -770,7 +770,7 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                     .unwrap_or_default();
                 usage = Some(format!("{input} input tokens{cache}, {} output tokens", u["output_tokens"]));
             }
-            ("error", _) => out.push(json!({"kind":"error","text":e["message"]})),
+            ("error", _) => out.push(codex_error_entry(&e["message"])),
             ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"],"fatal":true})),
             // Claude Code
             ("assistant", _) => {
@@ -1161,7 +1161,7 @@ pub fn task_command(
     let i = run_at(&t, rid)?;
     // A message written into `command` (`task note --text "..."`) arrives cut at
     // its first line; refuse it so the agent resends it whole.
-    if matches!(a.get(1).copied(), Some("note" | "done" | "ask")) && a.get(2).is_some_and(|w| w.starts_with("--")) {
+    if matches!(a.get(1).copied(), Some("note" | "done" | "ask" | "decision")) && a.get(2).is_some_and(|w| w.starts_with("--")) {
         return err(
             "E7015",
             &format!("nothing was sent. Resend with `command` set to just `task {}` and the whole message in the `text` argument", a[1]),
@@ -1238,10 +1238,16 @@ pub fn task_command(
             }
             return wait_reply(s, tid, rid);
         }
+        Some("decision") => {
+            if t["runs"][i]["kind"] == "review" {
+                return err("E7010", "a review cannot propose a decision");
+            }
+            return crate::board::settings::propose_decision(s, tid, rid, &text, None, guard);
+        }
         _ => {
             return usage(concat!(
                 "task peek <task> [--notes [3,7,10..12]] [--from <n>] | task peek feature | ",
-                "task note | task wait | task ask | task done, with the text in `text`; ",
+                "task note | task wait | task ask | task decision | task done, with the text in `text`; ",
                 "task diff [--since-review] [name ...]",
             ));
         }
@@ -1590,7 +1596,7 @@ pub(crate) fn harmless_warning(text: &str) -> bool {
 }
 
 fn is_harmless_warning(e: &Value) -> bool {
-    e["kind"] == "error" && e["text"].as_str().is_some_and(harmless_warning)
+    matches!(e["kind"].as_str(), Some("error" | "output")) && e["text"].as_str().is_some_and(harmless_warning)
 }
 
 /// The start of an agent's failure message when it exited cleanly before reporting done.
@@ -1599,4 +1605,12 @@ pub(crate) const ENDED_WITHOUT_FINISHING: &str = "The agent ended its run withou
 /// Whether an attention reason is a run that exited without finishing.
 pub(crate) fn unfinished_exit_reason(reason: &str) -> bool {
     reason.starts_with(UNFINISHED_EXIT) || reason.starts_with(ENDED_WITHOUT_FINISHING)
+}
+
+/// A codex error event: a warning that doesn't affect the run shows as plain output.
+fn codex_error_entry(message: &Value) -> Value {
+    match message.as_str() {
+        Some(text) if harmless_warning(text) => json!({"kind":"output","text":message}),
+        _ => json!({"kind":"error","text":message}),
+    }
 }

@@ -107,6 +107,50 @@ export function watch_side(root, send) {
   send(media.matches);
 }
 
+// A lane's cards stay under its column bar while the lane scrolls, unless a
+// column's stack is taller than the room below the bar: then it scrolls with
+// the lane as it always has. The bar's height comes from its parts, so it is
+// measured and set as the stack's sticky offset.
+const stackWatchers = new WeakMap();
+export function watch_stacks(root) {
+  if (typeof root?.querySelector !== 'function') return;
+  const old = stackWatchers.get(root);
+  if (old) old();
+  let resizing;
+  const stacks = () => Array.from(root.querySelectorAll?.('.lane .stack') ?? []);
+  const measure = () => {
+    const area = root.querySelector('.lanes-area');
+    if (!area) return;
+    const bar = root.querySelector('.lane-head');
+    const barHeight = bar?.getBoundingClientRect?.().height ?? 0;
+    try { area.style?.setProperty?.('--lane-bar', `${barHeight}px`); } catch {}
+    const room = (area.clientHeight ?? 0) - barHeight;
+    for (const stack of stacks()) {
+      stack.classList?.toggle?.('tall', (stack.getBoundingClientRect?.().height ?? 0) > room);
+    }
+  };
+  const watch_sizes = () => {
+    measure();
+    const Resize = globalThis.ResizeObserver;
+    if (!Resize) return;
+    resizing ||= new Resize(measure);
+    resizing.disconnect();
+    const area = root.querySelector('.lanes-area');
+    if (area) resizing.observe(area);
+    for (const stack of stacks()) resizing.observe(stack);
+  };
+  const mutations = globalThis.MutationObserver ? new globalThis.MutationObserver(watch_sizes) : null;
+  mutations?.observe(root, { childList: true, subtree: true });
+  const on_resize = () => watch_sizes();
+  globalThis.addEventListener?.('resize', on_resize);
+  watch_sizes();
+  stackWatchers.set(root, () => {
+    mutations?.disconnect();
+    resizing?.disconnect?.();
+    globalThis.removeEventListener?.('resize', on_resize);
+  });
+}
+
 // The board's two notification tones, made with the Web Audio API so no files
 // are needed. Browsers may block sound until the page has had a user gesture;
 // then this stays silent.

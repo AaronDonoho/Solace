@@ -177,11 +177,9 @@ pub fn start(top: &Path, body: &Value) -> Result<Value, Failure> {
     let mut steps = vec![];
     let mut prints = vec![];
     for recipe in &chosen {
-        let sources = if recipe.outputs.is_empty() {
-            Value::Null
-        } else {
-            crate::recipe::source_hashes(top, &crate::scope::path(top, &recipe.project))
-        };
+        let outputs = crate::recipe::resolved(top, recipe);
+        let sources =
+            if outputs.is_empty() { Value::Null } else { crate::recipe::source_hashes(top, &crate::scope::path(top, &recipe.project)) };
         let first = steps.len();
         for step in &recipe.steps {
             steps.push(json!({
@@ -194,8 +192,8 @@ pub fn start(top: &Path, body: &Value) -> Result<Value, Failure> {
                 "duration": 0,
             }));
         }
-        if !recipe.outputs.is_empty() && steps.len() > first {
-            prints.push(Print { project: recipe.project.clone(), outputs: recipe.outputs.clone(), sources, last: steps.len() - 1 });
+        if !outputs.is_empty() && steps.len() > first {
+            prints.push(Print { project: recipe.project.clone(), outputs, sources, last: steps.len() - 1 });
         }
     }
     let id = crate::unique_id();

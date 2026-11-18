@@ -186,6 +186,7 @@ fn establish(root: &Path) -> Result<(), Failure> {
     if crate::language::detect(root).is_none() && !has_store(root) {
         import(root)?;
     }
+    crate::decisions::ensure(root)?;
     Ok(())
 }
 
@@ -323,7 +324,9 @@ pub fn add(root: &Path, dir: &str) -> Out {
 /// for a new project, a Cargo package added in place, and a migration's copy.
 pub fn setup(root: &Path, dir: &str) -> Out {
     if dir == "." {
-        return Ok(format!("{}: {}", root.display(), import(root)?));
+        let out = import(root)?;
+        crate::decisions::ensure(root)?;
+        return Ok(format!("{}: {}", root.display(), out));
     }
     if !contained(root, dir) {
         return lockdown::error("E6002", dir, "expected a folder below the root, reached without symlinks");
@@ -347,6 +350,7 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} and {d} would overlap: a project can't sit inside another's src/, test/ or tests/."));
     }
     let out = import(&path)?;
+    crate::decisions::ensure(root)?;
     dirs.push(dir.to_string());
     save(root, &dirs)?;
     Ok(format!("{dir}: {out}"))
@@ -800,6 +804,35 @@ mod tests {
         assert!(err.contains("already a project"), "{err}");
         assert!(root.join("a").is_dir(), "a folder that was there before the refusal stays");
         assert!(!root.join("a/b").exists());
+    }
+
+    #[test]
+    fn setting_up_creates_the_decision_log_and_keeps_it() {
+        let root = Scratch::new();
+        project(&root, ".");
+        setup(&root, ".").unwrap();
+        let log = root.join("DECISIONS.md");
+        assert!(fs::read_to_string(&log).unwrap().starts_with("# Decisions\n"), "a new root gets the log");
+        fs::write(&log, "# Decisions\n\n## D-1 Kept\nWhy: x\n").unwrap();
+        project(&root, "frontend");
+        setup(&root, "frontend").unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "# Decisions\n\n## D-1 Kept\nWhy: x\n", "an existing log is kept");
+    }
+
+    #[test]
+    fn reading_the_decision_log_from_a_member_reaches_the_top() {
+        let root = Scratch::new();
+        project(&root, ".");
+        project(&root, "frontend");
+        fs::write(root.join("frontend/src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+        setup(&root, "frontend").unwrap();
+        fs::write(root.join("DECISIONS.md"), "# Decisions\n\n## D-1 Top\nWhy: x\n").unwrap();
+        let member = root.join("frontend");
+        let s = crate::Store::peek(&member).unwrap();
+        let v = crate::lockdown::settings(&root).unwrap();
+        let mut input = || Ok(String::new());
+        let out = crate::lockdown::dispatch(&s, &v, &["read", "DECISIONS.md"], &mut input, None, 10_000).unwrap().unwrap();
+        assert!(out.contains("## D-1 Top"), "{out}");
     }
 }
 

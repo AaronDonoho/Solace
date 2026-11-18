@@ -131,7 +131,13 @@ pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -
 
 /// `tier`, with the file's bytes when they were read to decide the tier, so a
 /// caller that wants a size reads the file once (D-119 point 4).
-pub(crate) fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
+pub(crate) fn tier_and_bytes(
+    root: &Path,
+    v: &toml::Value,
+    ignores: &mut Ignores,
+    name: &str,
+    proposed: Option<&[u8]>,
+) -> (String, Option<Vec<u8>>) {
     // A project of plain files holds no symbols (D-60).
     if crate::language::detect(root).is_some() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
         return ("graph".into(), None);
@@ -140,7 +146,7 @@ pub(crate) fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores
     if crate::language::is_rust(root) && (name.starts_with("src/") || name.starts_with("tests/")) && name.ends_with(".rs") {
         return ("graph".into(), None);
     }
-    if name == "solace.toml" || name == "AGENTS.md" {
+    if name == "solace.toml" || name == "AGENTS.md" || name == crate::decisions::FILE {
         return ("protected".into(), None);
     }
     // Cargo's and rustup's settings run programs at check time (D-158 point 4, D-174);

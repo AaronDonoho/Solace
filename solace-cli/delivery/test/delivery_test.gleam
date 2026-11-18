@@ -256,9 +256,20 @@ pub fn loading_versions_fills_the_version_box_test() {
     delivery.update(
       delivery.initial(),
       delivery.VersionsLoaded(
-        "{\"versions\":[{\"project\":\"app\",\"file\":\"gleam.toml\",\"version\":\"0.1.0\"}],\"agree\":true,\"proposal\":\"0.1.1\"}",
+        "{\"versions\":[{\"project\":\"app\",\"file\":\"gleam.toml\",\"version\":\"0.1.0\"}],\"agree\":true,\"proposal\":\"0.1.1\",\"newest\":\"0.1.0\"}",
       ),
     )
   assert model.version == "0.1.1"
   assert list.length(model.versions) == 1
+  assert model.newest == "0.1.0"
+}
+
+pub fn an_older_version_is_warned_and_still_builds_test() {
+  let model =
+    delivery.Model(..delivery.initial(), version: "0.1.1", newest: "0.2.0")
+  let page = html(model)
+  assert string.contains(page, "older than the newest release")
+  assert !delivery.start_disabled(model)
+  let current = delivery.Model(..model, version: "0.2.0")
+  assert !string.contains(html(current), "older than the newest release")
 }

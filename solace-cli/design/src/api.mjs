@@ -69,6 +69,72 @@ export function drag(x, width, move, done) {
   globalThis.addEventListener('pointercancel', onUp);
 }
 
+// Dragging the note box by its handle, within its canvas. The first real move
+// marks the box, so a later selection leaves it where the human put it.
+let noteRoot = null;
+export function drag_note_box(root, moved) {
+  if (!root || noteRoot === root) return;
+  noteRoot = root;
+  const doc = root.ownerDocument;
+  const body = doc?.body;
+  let gesture = null;
+
+  const place = (box, canvas, left, top) => {
+    box.style.left = `${Math.max(0, Math.min(left, canvas.scrollWidth - box.offsetWidth - 8))}px`;
+    box.style.top = `${Math.max(0, Math.min(top, canvas.scrollHeight - box.offsetHeight - 8))}px`;
+  };
+
+  function onDown(event) {
+    if (event.button !== 0 || gesture) return;
+    const handle = event.target?.closest?.('[data-note-handle]');
+    const box = handle?.closest?.('[data-note-box]');
+    const canvas = box?.closest?.('.design-canvas');
+    if (!handle || !box || !canvas) return;
+    event.preventDefault();
+    const rect = box.getBoundingClientRect();
+    const area = canvas.getBoundingClientRect();
+    gesture = {
+      box,
+      canvas,
+      x: event.clientX,
+      y: event.clientY,
+      left: rect.left - area.left + canvas.scrollLeft,
+      top: rect.top - area.top + canvas.scrollTop,
+      dragging: false,
+      select: body?.style.userSelect ?? '',
+    };
+    globalThis.addEventListener('pointermove', onMove);
+    globalThis.addEventListener('pointerup', onUp);
+    globalThis.addEventListener('pointercancel', onUp);
+  }
+
+  function onMove(event) {
+    if (!gesture) return;
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    if (!gesture.dragging && Math.max(Math.abs(dx), Math.abs(dy)) < 4) return;
+    if (!gesture.dragging) {
+      gesture.dragging = true;
+      if (body) body.style.userSelect = 'none';
+      gesture.box.style.right = 'auto';
+      gesture.box.setAttribute('data-moved', '');
+      moved();
+    }
+    event.preventDefault();
+    place(gesture.box, gesture.canvas, gesture.left + dx, gesture.top + dy);
+  }
+
+  function onUp() {
+    globalThis.removeEventListener('pointermove', onMove);
+    globalThis.removeEventListener('pointerup', onUp);
+    globalThis.removeEventListener('pointercancel', onUp);
+    if (body && gesture) body.style.userSelect = gesture.select;
+    gesture = null;
+  }
+
+  root.addEventListener('pointerdown', onDown);
+}
+
 // Dragging across a design's canvas: reports where the drag started and ended
 // with the bounds of every drawn element under the canvas. Gleam decides which
 // elements are inside. A drag with almost no movement stays a click.
@@ -206,7 +272,7 @@ export function scroll_plan(root) {
 export function place_note_box(root, id) {
   const box = root?.querySelector?.('[data-note-box]');
   const canvas = box?.closest?.('.design-canvas');
-  if (!box || !canvas || !id) return;
+  if (!box || !canvas || !id || box.hasAttribute('data-moved')) return;
   const target = Array.from(root.querySelectorAll('[data-design-id]')).find(
     element =>
       element.getAttribute('data-design-id') === id &&

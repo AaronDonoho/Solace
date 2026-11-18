@@ -249,6 +249,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.from(fn(send) {
         prevent_drag(root)
         watch_side(root, fn(side) { send(Sided(side)) })
+        watch_stacks(root)
       }),
     )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
@@ -592,10 +593,15 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane))) {
 }
 
 pub fn view(model: Model) -> Element(Msg) {
+  let stacking = case model.workspace {
+    True -> stack_styles
+    False -> ""
+  }
   h.main([], [
     h.style(
       [],
       board_styles
+        <> stacking
         <> detail_band_styles
         <> selected_card_styles
         <> notice_styles
@@ -824,12 +830,8 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
             False -> order.Gt
           }
         })
-      h.section([a.class("column"), a.attribute("aria-label", c.label)], [
-        case labels {
-          True -> h.h2([], [h.text(c.label)])
-          False -> h.text("")
-        },
-        ..list.map(tasks, fn(card) {
+      let card_views =
+        list.map(tasks, fn(card) {
           let #(home, t) = card
           let current = model.selected_card == Some(#(home, t.id))
           let waiting = case waiting_on(model, t) {
@@ -947,6 +949,15 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
             },
           ])
         })
+      h.section([a.class("column"), a.attribute("aria-label", c.label)], [
+        case labels {
+          True -> h.h2([], [h.text(c.label)])
+          False -> h.text("")
+        },
+        ..case labels {
+          True -> card_views
+          False -> [h.div([a.class("stack")], card_views)]
+        }
       ])
     }),
   )
@@ -2173,3 +2184,15 @@ pub fn tasks_sound(
       }
   }
 }
+
+/// Measures each lane's card stacks and holds them under the column bar
+/// unless a stack is taller than the visible area.
+@external(javascript, "./api.mjs", "watch_stacks")
+fn watch_stacks(root: dynamic.Dynamic) -> Nil
+
+/// In a workspace lane, one stack holds a column's cards so the browser can
+/// keep them under the column bar while the lane scrolls. The measurement
+/// sets the bar's height; a stack too tall for the visible area is `tall` and
+/// scrolls with its lane.
+const stack_styles =
+  ".lane .stack{position:sticky;top:var(--lane-bar,38px);z-index:4}.lane .stack.tall{position:static}"

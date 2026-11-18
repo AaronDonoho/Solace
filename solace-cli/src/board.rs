@@ -77,3 +77,9 @@ pub use strategy::{strategy_command, strategy_guard};
 // The unit tests are in their own file, so this one stays within watch_limit.
 #[path = "board_tests.rs"]
 mod tests;
+
+/// This computer's offset from UTC at `at` (seconds since the epoch), in
+/// seconds; none when it can't be found.
+pub(crate) fn local_offset(at: i64) -> Option<i64> {
+    agents::zone_offset(None, at)
+}

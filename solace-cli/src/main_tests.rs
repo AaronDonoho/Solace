@@ -1949,7 +1949,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "7c6a658743f739165110adce9125e26a552577b360d2b76affa73dd27a2f6ed4");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "030063c5664c673562600485962e81cf8abe1f0bef94a082afdb843b78221cda");
 }
 
 #[test]
@@ -3254,4 +3254,48 @@ fn the_lustre_guide_names_every_element_type_and_property() {
     }
     assert!(agent_help(Some("lustre")).contains(guide.trim_end()), "help lustre does not show the guide");
     assert!(agent_reference(true).contains("help lustre"), "a task's reference does not point at the guide");
+}
+
+/// A save in another of the task's projects records the dependent's earlier
+/// errors on the task, found from its home.
+#[test]
+fn a_save_beside_the_home_keeps_an_earlier_dependent_error() {
+    let root = column_workspace_with_a_broken_frontend();
+    let (frontend, tid) = task_at(&root, "frontend", &["components", "frontend"]);
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let text = column_patch();
+    let args = ["submit", "--project", "components"].map(String::from);
+    let out =
+        with_root(&frontend, || with_context(&tid, "run", || run_options(&args, &mut || Ok(text.clone()), None, 100_000, &[]))).unwrap();
+    assert!(out.starts_with("Saved") && out.contains("frontend") && out.contains("knowledgebase"), "{out}");
+    assert!(!out.contains("E7001"), "{out}");
+    let saved = task(&frontend, &tid).unwrap()["dependent_errors"]["frontend"].to_string();
+    assert!(saved.contains("legacy"), "{saved}");
+}
+
+/// A delete in another of the task's projects records the dependent's earlier
+/// errors on the task, found from its home.
+#[test]
+fn a_delete_beside_the_home_keeps_an_earlier_dependent_error() {
+    let root = column_workspace_with(&[
+        ("components/src/extra.gleam", "pub fn gone() -> Int {\n  1\n}\n"),
+        (
+            "frontend/src/knowledgebase.gleam",
+            concat!(
+                "import solace_task\nimport extra\n\n",
+                "pub fn known_columns() -> List(solace_task.Column) {\n",
+                "  let _ = extra.gone()\n  [solace_task.Column(\"a\")]\n}\n",
+            ),
+        ),
+        ("frontend/src/legacy.gleam", "pub fn legacy() -> Int {\n  \"old\"\n}\n"),
+    ]);
+    let (frontend, tid) = task_at(&root, "frontend", &["components", "frontend"]);
+    Store::at(&root.join("frontend")).unwrap().check().unwrap_err();
+    let args = ["delete", "extra.gone", "--project", "components"].map(String::from);
+    let out =
+        with_root(&frontend, || with_context(&tid, "run", || run_options(&args, &mut || Ok(String::new()), None, 100_000, &[]))).unwrap();
+    assert!(out.contains("Deleted") && out.contains("frontend") && out.contains("gone"), "{out}");
+    assert!(!out.contains("E7001"), "{out}");
+    let saved = task(&frontend, &tid).unwrap()["dependent_errors"]["frontend"].to_string();
+    assert!(saved.contains("legacy"), "{saved}");
 }

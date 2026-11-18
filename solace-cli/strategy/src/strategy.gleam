@@ -37,6 +37,7 @@ pub fn main() {
 pub type Tab {
   Vision
   Personas
+  Decisions
   Features
   Roadmap
   Tasks
@@ -85,6 +86,12 @@ pub type Model {
     /// A save sent and not yet answered.
     saving: Bool,
     vision_error: String,
+    /// The board's decision log, newest first.
+    decisions: List(Decision),
+    /// The decision open on the Decisions tab, None when none.
+    decision_open: Option(String),
+    /// The Decisions tab's refusal.
+    decision_error: String,
     /// The Personas tab's saved list and open form (D-216).
     persona_state: personas.State,
     /// The feature being written on the Features tab, None when no form is open.
@@ -156,7 +163,7 @@ pub type Model {
     /// The message a successful start or send clears, None when none. It is
     /// what the request was sent with.
     plan_clearing: Option(String),
-    /// A start, message, answer, end or stop sent and not yet answered.
+    /// A start, message, answer or end sent and not yet answered.
     plan_sending: Bool,
     plan_error: String,
     /// The shown run's transcript.
@@ -252,6 +259,10 @@ pub type Msg {
   VisionSaved(String)
   /// Drops the draft and edits the vision as it is now.
   ReloadVision
+  /// The board's decision log, newest first.
+  DecisionsLoaded(String)
+  /// Opens or closes the decision with this id.
+  ShowDecision(String)
   /// Opens the form for a new persona.
   NewPersona
   /// Opens the form on the persona with this id.
@@ -400,9 +411,8 @@ pub type Msg {
   /// Answers a proposal of the shown run: the question's id and the option.
   AnswerPlan(String, String)
   EndPlan
-  StopPlan
-  /// The reply to a start, message, answer, end or stop: whether it empties
-  /// the message box, and the run or a refusal.
+  /// The reply to a start, message, answer or end: whether it empties the
+  /// message box, and the run or a refusal.
   PlanReplied(Bool, String)
   /// Shows the run with this id in the panel, "" for none.
   ShowPlan(String)
@@ -421,7 +431,7 @@ pub type Msg {
 fn tab_query() -> String
 
 pub fn tabs() -> List(Tab) {
-  [Vision, Personas, Features, Roadmap, Tasks]
+  [Vision, Personas, Decisions, Features, Roadmap, Tasks]
 }
 
 /// The tab's name in the URL: `/strategy?tab=<name>`.
@@ -429,6 +439,7 @@ pub fn tab_name(tab: Tab) -> String {
   case tab {
     Vision -> "vision"
     Personas -> "personas"
+    Decisions -> "decisions"
     Features -> "features"
     Roadmap -> "roadmap"
     Tasks -> "tasks"
@@ -439,6 +450,7 @@ pub fn label(tab: Tab) -> String {
   case tab {
     Vision -> "Vision"
     Personas -> "Personas"
+    Decisions -> "Decisions"
     Features -> "Features"
     Roadmap -> "Roadmap"
     Tasks -> "Tasks"
@@ -482,6 +494,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     fn() { navigation_events(model, msg) },
     fn() { connection_events(model, msg) },
     fn() { vision_events(model, msg) },
+    fn() { decision_events(model, msg) },
     fn() { persona_format_events(model, msg) },
     fn() { persona_events(model, msg) },
     fn() { feature_events(model, msg) },
@@ -532,6 +545,7 @@ pub fn view(model: Model) -> Element(Msg) {
           Tasks -> tasks_view(model)
           Vision -> vision_view(model)
           Personas -> personas_view(model)
+          Decisions -> decisions_view(model)
           Features -> features_view(model)
           Roadmap -> roadmap_view(model)
         },
@@ -674,6 +688,9 @@ pub fn new(tab: Tab) -> Model {
     draft: None,
     saving: False,
     vision_error: "",
+    decisions: [],
+    decision_open: None,
+    decision_error: "",
     persona_state: personas.blank(),
     feature_draft: None,
     feature_collapsed: False,
@@ -1902,7 +1919,6 @@ fn plan_view(model: Model) -> Element(Msg) {
       on_answer: AnswerPlan,
       on_show: ShowPlan,
       on_end: EndPlan,
-      on_stop: StopPlan,
       at_bottom: model.plan_at_bottom,
       new_message: model.plan_new,
       on_scroll: PlanScrolled,
@@ -3240,9 +3256,21 @@ fn navigation_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     Select(tab) ->
       Some(#(
         Model(..model, tab: tab),
-        event.emit("tab", json.string(tab_name(tab))),
+        effect.batch([
+          event.emit("tab", json.string(tab_name(tab))),
+          ..case tab {
+            Decisions -> [decisions_get(model)]
+            _ -> []
+          }
+        ]),
       ))
-    TabShown(tab) -> Some(#(Model(..model, tab: tab), effect.none()))
+    TabShown(tab) ->
+      Some(
+        #(Model(..model, tab: tab), case tab {
+          Decisions -> decisions_get(model)
+          _ -> effect.none()
+        }),
+      )
     // From the Features tab the task shows on the Tasks tab.
     Open(dir, id) ->
       Some(
@@ -4762,16 +4790,12 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
           )
         None -> #(model, effect.none())
       })
-    EndPlan | StopPlan ->
+    EndPlan ->
       Some(case plan_shown(model) {
         Some(run) ->
           plan_send(
             model,
-            plan_panel.run_path(plan_setup.settings(), run.id)
-              <> case msg {
-              EndPlan -> "/end"
-              _ -> "/stop"
-            },
+            plan_panel.run_path(plan_setup.settings(), run.id) <> "/end",
             json.object([]),
             False,
           )
@@ -5140,5 +5164,90 @@ fn first_known(
           #(found, [text, ..kept])
         }
       }
+  }
+}
+
+/// One record in the board's decision log.
+pub type Decision {
+  Decision(id: String, title: String, text: String)
+}
+
+fn decisions_get(model: Model) -> Effect(Msg) {
+  get(model, "/decisions", DecisionsLoaded)
+}
+
+fn decision_decoder() -> decode.Decoder(Decision) {
+  use id <- decode.field("id", decode.string)
+  use title <- decode.field("title", decode.string)
+  use text <- decode.field("text", decode.string)
+  decode.success(Decision(id, title, text))
+}
+
+fn decisions_decoder() -> decode.Decoder(List(Decision)) {
+  decode.at(["decisions"], decode.list(decision_decoder()))
+}
+
+fn decision_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    DecisionsLoaded(text) ->
+      Some(case json.parse(text, decisions_decoder()) {
+        Ok(decisions) -> #(
+          Model(..model, decisions: decisions, decision_error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, decision_error: error(text)),
+          effect.none(),
+        )
+      })
+    ShowDecision(id) ->
+      Some(#(
+        Model(..model, decision_open: case model.decision_open {
+          Some(open) if open == id -> None
+          _ -> Some(id)
+        }),
+        effect.none(),
+      ))
+    _ -> None
+  }
+}
+
+/// The Decisions tab: each record's title, newest first, and the open one whole.
+fn decisions_view(model: Model) -> List(Element(Msg)) {
+  let recorded =
+    list.map(model.decisions, fn(decision) {
+      let open = model.decision_open == Some(decision.id)
+      html.li([], [
+        html.button(
+          [
+            attribute.type_("button"),
+            attribute.attribute("aria-expanded", case open {
+              True -> "true"
+              False -> "false"
+            }),
+            event.on_click(ShowDecision(decision.id)),
+          ],
+          [html.text(decision.id <> " " <> decision.title)],
+        ),
+        ..case open {
+          True -> [
+            html.div([attribute.class("vision")], [
+              solace_task.md(model.prefix, decision.text),
+            ]),
+          ]
+          False -> []
+        }
+      ])
+    })
+  case model.decision_error {
+    "" ->
+      case model.decisions {
+        [] -> [html.p([], [html.text("No decisions yet.")])]
+        _ -> [html.ul([], recorded)]
+      }
+    message -> [
+      html.p([attribute.role("alert")], [html.text(message)]),
+      html.ul([], recorded),
+    ]
   }
 }

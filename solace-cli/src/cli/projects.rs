@@ -47,27 +47,7 @@ pub(crate) fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Fail
 /// (D-57). It takes no lock in that project, so reading never waits on its
 /// agents. Changes go through `scoped` (D-61).
 pub(crate) fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let command = a.first().copied().unwrap_or("");
-    if let Some(out) = unknown_option(&a) {
-        return out;
-    }
-    if !READS.contains(&command) || a.contains(&"--draft") {
-        return crate::lockdown::error(
-            "E6007",
-            command,
-            if strategy_context().is_some() || crate::board::runs::design_context().is_some() {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read, design)"
-            } else {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read, design) here; in a board run, \
-                 it also changes the task's other projects"
-            },
-        );
-    }
-    // From a project, or from a folder of projects with none at its root.
-    let here = env::current_dir()?;
-    let own = crate::Store::root().ok();
-    read_project_in(&a, &here, own.as_deref(), dir, budget)
+    read_project_with_version(dir, args, budget).map(|(text, _)| text)
 }
 
 /// Each `E1001 unknown name` line of a reply, followed by the project that
@@ -106,65 +86,9 @@ fn elsewhere(here: &Path, name: &str) -> Option<String> {
 
 /// `read_project` from an explicit working folder and owning project, so a test
 /// never changes the process-wide working folder.
+#[cfg(test)]
 pub(crate) fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budget: usize) -> Out {
-    let command = a.first().copied().unwrap_or("");
-    // From a project, or from a folder of projects with none at its root.
-    let root = match crate::workspace::enclosing(own.unwrap_or(here))? {
-        Some(root) => root,
-        None => own.map(Path::to_path_buf).ok_or_else(|| {
-            Failure(
-                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
-                 make a new one with `solace create <name>`."
-                    .into(),
-                1,
-            )
-        })?,
-    };
-    let members = crate::workspace::members(&root)?;
-    let dir = &crate::project_paths::project_folder(&root, own, dir, &members);
-    if !members.iter().any(|m| m == dir) {
-        return crate::lockdown::error(
-            "E6007",
-            dir,
-            format!(
-                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
-                members.join(", ")
-            ),
-        );
-    }
-    let target = crate::scope::path(&root, dir);
-    // A board run's agent must still be running, as for any command.
-    let _guard = match (context(), own) {
-        (Some((tid, rid)), Some(own)) => Some(agent_guard(&crate::scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
-        _ => None,
-    };
-    if let ["design", rest @ ..] = a {
-        return crate::design::command(&root, rest, budget);
-    }
-    let store = crate::Store::peek(&target)?;
-    let settings = settings(&store.root)?;
-    if let Some(out) = crate::lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
-        return out;
-    }
-    // A Rust project has no `Language`; its store's symbols are read as any
-    // other's (D-158), so only a project of plain files is refused.
-    if store.lang.is_none() && !crate::language::is_rust(&store.root) {
-        let task = context().map(|(tid, _)| tid);
-        return crate::lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
-    }
-    let out = match a {
-        ["view", rest @ ..] if !operands(rest).is_empty() => {
-            store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
-        }
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => {
-            let (names, lines) = crate::cli::routing::inspect_options(rest)?;
-            store.inspect(&names, rest.contains(&"--context"), lines, budget)
-        }
-        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
-        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
-    };
-    hinted(out, &store.root)
+    read_project_output(a, here, own, dir, budget).map(|(text, _)| text)
 }
 
 /// The Solace root and the folders of the other projects under it, the run's
@@ -201,4 +125,96 @@ pub(crate) fn path_dependencies(root: &Path) -> Vec<PathBuf> {
         .filter_map(|spec| spec.get("path").and_then(|p| p.as_str()))
         .map(|path| root.join(path))
         .collect()
+}
+
+/// `read_project`, also naming the design version a `design show` displayed.
+pub(crate) fn read_project_with_version(dir: &str, args: &[String], budget: usize) -> Result<(String, Option<serde_json::Value>), Failure> {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    if let Some(out) = unknown_option(&a) {
+        return out.map(|text| (text, None));
+    }
+    if !READS.contains(&command) || a.contains(&"--draft") {
+        return crate::lockdown::error(
+            "E6007",
+            command,
+            if strategy_context().is_some() || crate::board::runs::design_context().is_some() {
+                "`--project` only reads (view, inspect, refs, find, grep, files, read, design)"
+            } else {
+                "`--project` only reads (view, inspect, refs, find, grep, files, read, design) here; in a board run, \
+                 it also changes the task's other projects"
+            },
+        );
+    }
+    // From a project, or from a folder of projects with none at its root.
+    let here = env::current_dir()?;
+    let own = crate::Store::root().ok();
+    read_project_output(&a, &here, own.as_deref(), dir, budget)
+}
+
+fn read_project_output(
+    a: &[&str],
+    here: &Path,
+    own: Option<&Path>,
+    dir: &str,
+    budget: usize,
+) -> Result<(String, Option<serde_json::Value>), Failure> {
+    let command = a.first().copied().unwrap_or("");
+    // From a project, or from a folder of projects with none at its root.
+    let root = match crate::workspace::enclosing(own.unwrap_or(here))? {
+        Some(root) => root,
+        None => own.map(Path::to_path_buf).ok_or_else(|| {
+            Failure(
+                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
+                 make a new one with `solace create <name>`."
+                    .into(),
+                1,
+            )
+        })?,
+    };
+    let members = crate::workspace::members(&root)?;
+    let dir = &crate::project_paths::project_folder(&root, own, dir, &members);
+    if !members.iter().any(|m| m == dir) {
+        return crate::lockdown::error(
+            "E6007",
+            dir,
+            format!(
+                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
+                members.join(", ")
+            ),
+        );
+    }
+    let target = crate::scope::path(&root, dir);
+    // A board run's agent must still be running, as for any command.
+    let _guard = match (context(), own) {
+        (Some((tid, rid)), Some(own)) => Some(agent_guard(&crate::scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
+        _ => None,
+    };
+    if let ["design", rest @ ..] = a {
+        return crate::design::command_with_version(&root, rest, budget);
+    }
+    let store = crate::Store::peek(&target)?;
+    let settings = settings(&store.root)?;
+    if let Some(out) = crate::lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
+        return out.map(|text| (text, None));
+    }
+    // A Rust project has no `Language`; its store's symbols are read as any
+    // other's (D-158), so only a project of plain files is refused.
+    if store.lang.is_none() && !crate::language::is_rust(&store.root) {
+        let task = context().map(|(tid, _)| tid);
+        return crate::lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
+    }
+    let out = match a {
+        ["view", rest @ ..] if !operands(rest).is_empty() => {
+            store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
+        }
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => {
+            let (names, lines) = crate::cli::routing::inspect_options(rest)?;
+            store.inspect(&names, rest.contains(&"--context"), lines, budget)
+        }
+        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
+        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
+        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
+    };
+    hinted(out, &store.root).map(|text| (text, None))
 }

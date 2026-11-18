@@ -1,5 +1,9 @@
 import { test, expect } from 'bun:test';
-import { listen_region } from '../build/dev/javascript/design/api.mjs';
+import {
+  drag_note_box,
+  listen_region,
+  place_note_box,
+} from '../build/dev/javascript/design/api.mjs';
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
@@ -84,6 +88,43 @@ function fakeGlobalListeners() {
     find: name => listeners.find(listener => listener.name === name),
     restore,
   };
+}
+
+function fakeNoteDrag() {
+  const { root, state } = fakeRoot('text');
+  state.root = root;
+  const canvas = {
+    scrollLeft: 10,
+    scrollTop: 20,
+    scrollWidth: 400,
+    scrollHeight: 500,
+    getBoundingClientRect: () => ({ left: 50, top: 100 }),
+  };
+  const handle = {
+    closest: selector => selector === '[data-note-box]' ? state.box : null,
+  };
+  state.box = {
+    style: {},
+    attributes: {},
+    offsetWidth: 120,
+    offsetHeight: 80,
+    closest: selector => selector === '.design-canvas' ? canvas : null,
+    getBoundingClientRect: () => ({ left: 100, top: 150 }),
+    setAttribute(name, value) { this.attributes[name] = value; },
+  };
+  state.handle = handle;
+  return state;
+}
+
+function noteDown(state, x, y, extra = {}) {
+  state.rootListeners.pointerdown({
+    button: 0,
+    clientX: x,
+    clientY: y,
+    preventDefault: () => {},
+    target: { closest: () => state.handle },
+    ...extra,
+  });
 }
 
 function down(state, canvas, x, y, extra = {}) {
@@ -183,6 +224,130 @@ test('a movement under the threshold stays a click', () => {
   } finally {
     globals.restore();
   }
+});
+
+test('dragging the note handle moves the box and marks it moved', () => {
+  const state = fakeNoteDrag();
+  const globals = fakeGlobalListeners();
+  let moves = 0;
+  try {
+    drag_note_box(state.root, () => { moves++; });
+    noteDown(state, 100, 150);
+    expect(state.body.style.userSelect).toBe('text');
+
+    let prevented = 0;
+    globals.find('pointermove').handler({
+      clientX: 102,
+      clientY: 151,
+      preventDefault: () => { prevented++; },
+    });
+    expect(prevented).toBe(0);
+    expect(moves).toBe(0);
+    expect(state.box.style).toEqual({});
+
+    globals.find('pointermove').handler({
+      clientX: 130,
+      clientY: 170,
+      preventDefault: () => { prevented++; },
+    });
+    expect(prevented).toBe(1);
+    expect(moves).toBe(1);
+    expect(state.body.style.userSelect).toBe('none');
+    expect(state.box.style).toMatchObject({
+      left: '90px',
+      top: '90px',
+      right: 'auto',
+    });
+    expect(state.box.attributes['data-moved']).toBe('');
+
+    globals.find('pointermove').handler({
+      clientX: 1000,
+      clientY: 1000,
+      preventDefault: () => {},
+    });
+    expect(state.box.style).toMatchObject({ left: '272px', top: '412px' });
+
+    globals.find('pointerup').handler();
+    expect(state.body.style.userSelect).toBe('text');
+    expect(globals.listeners.map(listener => listener.name))
+      .not.toContain('pointermove');
+  } finally {
+    globals.restore();
+  }
+});
+
+test('only a left press on the note handle starts a drag', () => {
+  const state = fakeNoteDrag();
+  const globals = fakeGlobalListeners();
+  let moves = 0;
+  try {
+    drag_note_box(state.root, () => { moves++; });
+
+    noteDown(state, 100, 150, { button: 1 });
+    expect(globals.find('pointermove')).toBeUndefined();
+    expect(state.body.style.userSelect).toBe('text');
+
+    state.rootListeners.pointerdown({
+      button: 0,
+      clientX: 100,
+      clientY: 150,
+      target: { closest: () => null },
+    });
+    expect(globals.find('pointermove')).toBeUndefined();
+
+    noteDown(state, 100, 150);
+    globals.find('pointermove').handler({
+      clientX: 120,
+      clientY: 170,
+      preventDefault: () => {},
+    });
+    expect(moves).toBe(1);
+    expect(state.body.style.userSelect).toBe('none');
+
+    globals.find('pointercancel').handler();
+    expect(moves).toBe(1);
+    expect(state.body.style.userSelect).toBe('text');
+    expect(globals.listeners.map(listener => listener.name))
+      .not.toContain('pointermove');
+  } finally {
+    globals.restore();
+  }
+});
+
+test('a note box moved by hand is not placed on a later selection', () => {
+  const canvas = {
+    scrollLeft: 0,
+    scrollTop: 0,
+    scrollWidth: 400,
+    scrollHeight: 400,
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+  };
+  let moved = true;
+  const box = {
+    style: { left: '10px', top: '20px' },
+    hasAttribute: name => name === 'data-moved' && moved,
+    closest: selector => selector === '.design-canvas' ? canvas : null,
+    getBoundingClientRect: () => ({ width: 120, height: 80 }),
+  };
+  const target = {
+    getAttribute: name => name === 'data-design-id' ? 'go' : null,
+    getClientRects: () => [{}],
+    getBoundingClientRect: () => ({ left: 40, top: 100, height: 20 }),
+  };
+  const root = {
+    querySelector: () => box,
+    querySelectorAll: () => [target],
+  };
+
+  place_note_box(root, 'go');
+  expect(box.style).toEqual({ left: '10px', top: '20px' });
+
+  place_note_box(root, '');
+  expect(box.style).toEqual({ left: '10px', top: '20px' });
+
+  moved = false;
+  place_note_box(root, 'go');
+  expect(box.style).toMatchObject({ left: '40px', top: '128px' });
 });
 
 test('only a left press on a visible canvas starts a drag', async () => {

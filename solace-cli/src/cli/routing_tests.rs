@@ -93,3 +93,69 @@ fn a_project_outside_a_tasks_scope_names_it_once() {
     assert!(!e.contains("if the task needs it"), "{e}");
 }
 
+fn design_test_root() -> (crate::testing::Scratch, String) {
+    let root = crate::testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+    crate::board::task_model::open(&root).unwrap();
+    crate::board::task_model::adopt_tasks(&root, &root).unwrap();
+    let config = || -> Result<serde_json::Value, crate::failure::Failure> {
+        Ok(serde_json::json!({
+            "models": [{"id":"fake","label":"Fake","agent":"codex","run":["sh"]}],
+            "role_models": {"designer": {"default": "fake"}}
+        }))
+    };
+    let rid = crate::tasks::strategy::design_runs_with(&root, "POST", &[], serde_json::json!({"text":"Design it"}), config).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (root, rid)
+}
+
+/// A show that fails records no read, so a change without a successful read is refused.
+#[test]
+fn a_failed_design_show_does_not_count_as_a_read() {
+    let (root, rid) = design_test_root();
+    let id = "0123456789abcdef";
+    let design = serde_json::json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": id,
+        "title": "Home",
+        "tab": "ui",
+        "elements": [{"id": "root", "type": "screen", "properties": {"width": "fill", "height": "fill"}}]
+    });
+    crate::design::save(&root, &design, crate::design::Source::Human).unwrap();
+    let show: Vec<String> = ["design", "show", id, "--from", "nope"].iter().map(|s| s.to_string()).collect();
+    let e = super::with_root(&root, || super::design_run_at(&root, &rid, &show, &mut || Ok(String::new()), 4000)).unwrap_err().0;
+    assert!(e.contains("has no element `nope`"), "{e}");
+    let propose: Vec<String> = ["design", "propose", id].iter().map(|s| s.to_string()).collect();
+    let text =
+        serde_json::json!({"operations": [{"op":"set","id":"root","field":"properties","property":"width","value":"hug"}]}).to_string();
+    let e = super::with_root(&root, || super::design_run_at(&root, &rid, &propose, &mut || Ok(text.clone()), 4000)).unwrap_err().0;
+    assert!(e.starts_with("E7026") && e.contains("design show"), "{e}");
+}
+
+/// `design show --project <folder> <id>` records the design, not the option.
+#[test]
+fn a_design_show_with_project_before_its_id_records_the_id() {
+    let (root, rid) = design_test_root();
+    let id = "0123456789abcdef";
+    let design = serde_json::json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": id,
+        "title": "Home",
+        "tab": "ui",
+        "elements": [{"id": "root", "type": "screen", "properties": {"width": "fill", "height": "fill"}}]
+    });
+    crate::design::save(&root, &design, crate::design::Source::Human).unwrap();
+    let show: Vec<String> = ["design", "show", "--project", ".", id].iter().map(|s| s.to_string()).collect();
+    let shown = super::with_root(&root, || super::design_run_at(&root, &rid, &show, &mut || Ok(String::new()), 4000)).unwrap();
+    assert!(shown.contains(id), "{shown}");
+    let propose: Vec<String> = ["design", "propose", id].iter().map(|s| s.to_string()).collect();
+    let text =
+        serde_json::json!({"operations": [{"op":"set","id":"root","field":"properties","property":"width","value":"hug"}]}).to_string();
+    let reply = super::with_root(&root, || super::design_run_at(&root, &rid, &propose, &mut || Ok(text.clone()), 4000)).unwrap();
+    assert_eq!(reply.trim(), "Saved version 2");
+    let versions = crate::design::versions(&root, id).unwrap();
+    assert_eq!(versions[0]["source"]["kind"], "run");
+    assert_eq!(versions[0]["source"]["id"].as_str(), Some(rid.as_str()));
+}
+

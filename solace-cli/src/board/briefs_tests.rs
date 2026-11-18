@@ -1369,6 +1369,9 @@ fn design_links_reach_work_and_review_briefs() {
     tasks::put(&s, &t).unwrap();
     let remembered = remember(&scope::top(&p.root), t["id"].as_str().unwrap(), "r1", 10_000).unwrap();
     assert!(remembered.contains(&format!("design:{ui}: Home. Read it with `design show design:{ui}`.")), "{remembered}");
+    crate::design::delete(&p.root, ui).unwrap();
+    let gone = brief(&format!("Build design:{ui}."), "work");
+    assert!(gone.contains("could not be read") && gone.contains("E7023"), "{gone}");
 }
 
 #[test]

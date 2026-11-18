@@ -262,8 +262,8 @@ fn designs_at_a_project_root_list_and_read() {
     assert_eq!(
         listed["designs"],
         json!([
-            {"id": "aaaaaaaaaaaaaaaa", "title": "Home", "tab": "architecture"},
-            {"id": "bbbbbbbbbbbbbbbb", "title": "Settings", "tab": "ui"}
+            {"id": "aaaaaaaaaaaaaaaa", "title": "Home", "tab": "architecture", "version": 0},
+            {"id": "bbbbbbbbbbbbbbbb", "title": "Settings", "tab": "ui", "version": 0}
         ])
     );
     assert_eq!(listed["invalid"].as_array().unwrap().len(), 2, "{listed}");
@@ -294,7 +294,7 @@ fn designs_list_when_the_root_is_not_a_project() {
     std::fs::write(root.join("designs/0123456789abcdef.json"), design.to_string()).unwrap();
     assert_eq!(
         board.projects_api("GET", "/designs", &json!({})).unwrap(),
-        json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "ui"}], "invalid": []})
+        json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "ui", "version": 0}], "invalid": []})
     );
     assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap(), design);
 }
@@ -505,5 +505,26 @@ fn run_lists_drop_questions_only_from_ended_runs() {
     assert_eq!(open["questions"], json!([{"id":"q2"}]), "{open}");
     let design = data.iter().find_map(|event| event.get("designRuns").cloned()).unwrap();
     assert!(design[0].get("questions").is_none(), "{design}");
+}
+
+#[test]
+fn design_rename_delete_and_undo_routes() {
+    let root = crate::testing::Scratch::new();
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let first = design_value("0123456789abcdef", "First", "architecture");
+    crate::design::save(&root, &first, crate::design::Source::Human).unwrap();
+    let renamed = board.projects_api("POST", "/designs/0123456789abcdef/rename", &json!({"title": "Renamed"})).unwrap();
+    assert_eq!(renamed["title"], json!("Renamed"));
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap()["title"], json!("Renamed"));
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef/versions", &json!({})).unwrap().as_array().unwrap().len(), 2);
+    let listed = board.projects_api("DELETE", "/designs/0123456789abcdef", &json!({})).unwrap();
+    assert!(listed["designs"].as_array().unwrap().is_empty(), "{listed}");
+    assert!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap_err().0.starts_with("E7023"));
+    assert!(board.projects_api("GET", "/designs/0123456789abcdef/versions", &json!({})).unwrap_err().0.starts_with("E7023"));
+    let back = board.projects_api("POST", "/designs/0123456789abcdef/undo", &json!({})).unwrap();
+    assert_eq!(back["designs"][0]["title"], json!("Renamed"));
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap()["title"], json!("Renamed"));
+    let blank = board.projects_api("POST", "/designs/0123456789abcdef/rename", &json!({"title": " "})).unwrap_err();
+    assert!(blank.0.starts_with("E7033"), "{}", blank.0);
 }
 

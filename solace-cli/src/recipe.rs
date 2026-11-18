@@ -297,8 +297,9 @@ pub fn plan_text(top: &Path) -> Out {
         if !r.after.is_empty() {
             out += &format!("   after: {}\n", r.after.join(", "));
         }
-        if !r.outputs.is_empty() {
-            out += &format!("   outputs: {}\n", r.outputs.join(", "));
+        let outputs = resolved(top, r);
+        if !outputs.is_empty() {
+            out += &format!("   outputs: {}\n", outputs.join(", "));
             if let Some(why) = stale(top, r) {
                 let steps: Vec<String> = r.steps.iter().map(|s| format!("`{}`", s.name)).collect();
                 out += &format!("   out of date: {why}: run {} {}\n", if steps.len() == 1 { "step" } else { "steps" }, steps.join(", "));
@@ -329,7 +330,9 @@ pub fn plan_json(top: &Path) -> Result<Value, Failure> {
             })
             .collect();
         let source = if r.declared { "declared" } else { "default" };
-        json!({"project": r.project, "source": source, "after": r.after, "outputs": r.outputs, "stale": stale(top, r), "steps": steps})
+        let outputs = resolved(top, r);
+        let stale = stale(top, r);
+        json!({"project": r.project, "source": source, "after": r.after, "outputs": outputs, "stale": stale, "steps": steps})
     };
     Ok(json!(recipes.iter().map(shown).collect::<Vec<_>>()))
 }
@@ -423,7 +426,7 @@ fn stale(top: &Path, r: &Recipe) -> Option<String> {
     let root = scope::path(top, &r.project);
     let parts = source_parts(top, &root);
     let sources = source_hashes(top, &root);
-    for output in &r.outputs {
+    for output in &resolved(top, r) {
         if let Some(change) = fingerprint_change(&root, output, &parts, &sources) {
             return Some(change);
         }
@@ -458,12 +461,12 @@ fn fingerprint_change(root: &Path, output: &str, parts: &[(String, PathBuf)], so
 }
 
 /// The outputs of a recipe whose last step runs `command`, when a passing `run` can record them.
-pub(crate) fn last_step_outputs(v: &toml::Value, command: &str) -> Option<Vec<String>> {
+pub(crate) fn last_step_outputs(root: &Path, v: &toml::Value, command: &str) -> Option<Vec<String>> {
     check(v).ok()?;
     let build = v.get("build")?;
     let last = build.get("steps")?.as_array()?.last()?;
     (last.get("command").and_then(|c| c.as_str()) == Some(command))
-        .then(|| argv(build.get("outputs")))
+        .then(|| versioned(&argv(build.get("outputs")), crate::versions::at(root).as_deref()))
         .filter(|outputs| !outputs.is_empty())
 }
 
@@ -476,4 +479,25 @@ pub(crate) fn write_fingerprints(root: &Path, outputs: &[String], sources: &Valu
         crate::fsx::write_atomic(&root.join(name), format!("{}\n", serde_json::to_string_pretty(&record).unwrap()))?;
     }
     Ok(())
+}
+
+/// The outputs as file paths, replacing `{version}` when a version is known.
+fn versioned(outputs: &[String], version: Option<&str>) -> Vec<String> {
+    match version {
+        Some(version) => outputs.iter().map(|o| o.replace("{version}", version)).collect(),
+        None => outputs.to_vec(),
+    }
+}
+
+/// The outputs as file paths for `version`: `{version}` is replaced.
+pub fn outputs_at(outputs: &[String], version: &str) -> Vec<String> {
+    versioned(outputs, Some(version))
+}
+
+/// The outputs as the project's current manifests name them.
+pub fn resolved(top: &Path, r: &Recipe) -> Vec<String> {
+    match crate::versions::of(top, &r.project) {
+        Some(version) => outputs_at(&r.outputs, &version),
+        None => r.outputs.clone(),
+    }
 }

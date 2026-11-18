@@ -1795,26 +1795,39 @@ class Board(unittest.TestCase):
         self.assertIn('The human replied:\n\nMake it calm\n',self.replies(rid))
         self.api('POST',f'/design/runs/{rid}/end')
 
-    def test_a_design_proposal_is_accepted_and_listed(self):  # D-243
-        # The human asks for a Home screen; the fake agent proposes it and waits.
+    def test_a_design_change_is_saved_and_listed(self):  # D-243
+        # The human asks for a Home screen; the fake agent changes it and the
+        # version is saved at once, with no question.
         operations=[{'op':'add','index':0,'element':{'id':'root','type':'screen','properties':{'width':'fill','height':'fill'}}}]
-        steps=[{'command':'design propose','text':json.dumps({'title':'Home','tab':'ui','operations':operations})}]
+        steps=[{'command':'design propose','text':json.dumps({'title':'Home','tab':'ui','operations':operations})},
+               {'command':'design note','text':'Saved the Home screen'}]
         rid=self.api('POST','/design/runs',{'model':'fake','text':json.dumps(steps)})['id']
-        run=self.wait_design_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==1)
-        q=run['questions'][0]
-        design_id=q['proposal']['design']['id']
-        self.assertEqual((q['options'],q['proposal']['design']['title'],q['proposal']['design']['elements'][0]['id']),(['Approve','Reject'],'Home','root'))
-        self.assertEqual(self.api('GET','/designs')['designs'],[])
-        answered=self.api('POST',f'/design/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
-        self.assertEqual(answered['questions'][0]['answer'],'Approved and saved version 1: created design:'+design_id)
-        self.assertEqual([(d['id'],d['title'],d['tab']) for d in self.api('GET','/designs')['designs']],[(design_id,'Home','ui')])
+        run=self.wait_design_run(rid,lambda r:r['state']=='waiting')
+        self.assertEqual(run['questions'],[])
+        designs=self.api('GET','/designs')['designs']
+        self.assertEqual(len(designs),1)
+        design_id=designs[0]['id']
+        self.assertEqual([(d['id'],d['title'],d['tab']) for d in designs],[(design_id,'Home','ui')])
         self.assertEqual(self.api('GET','/designs/'+design_id)['elements'][0]['id'],'root')
         versions=self.api('GET',f'/designs/{design_id}/versions')
         self.assertEqual([(v['number'],v['source']) for v in versions],[(1,{'kind':'run','id':rid})])
-        deadline=time.monotonic()+10
-        while time.monotonic()<deadline and not self.replies(rid):time.sleep(.05)
-        self.assertIn('Approved and saved version 1',self.replies(rid)[0])
+        self.assertIn('Saved version 1: created design:'+design_id,self.replies(rid)[0])
         self.api('POST',f'/design/runs/{rid}/end')
+        # A later run reads the design before changing it, and its change is
+        # saved as the next version.
+        steps=[{'command':'design show '+design_id},
+               {'command':'design propose '+design_id,
+                'text':json.dumps({'operations':[{'op':'set','id':'root','field':'properties','property':'width','value':'hug'}]})},
+               {'command':'design note','text':'Saved the change'}]
+        rid2=self.api('POST','/design/runs',{'model':'fake','text':json.dumps(steps)})['id']
+        run=self.wait_design_run(rid2,lambda r:r['state']=='waiting')
+        self.assertEqual(run['questions'],[])
+        versions=self.api('GET',f'/designs/{design_id}/versions')
+        self.assertEqual([(v['number'],v['source']) for v in versions],[(2,{'kind':'run','id':rid2}),(1,{'kind':'run','id':rid})])
+        self.assertEqual(self.api('GET','/designs/'+design_id)['elements'][0]['properties']['width'],'hug')
+        self.assertTrue(any('Saved version 2' in r for r in self.replies(rid2)),self.replies(rid2))
+        self.api('POST',f'/design/runs/{rid2}/end')
+
 
     def test_strategy_proposals_wait_for_approval(self):  # D-93, A19
         f=self.api('POST','/features',{'title':'Done F','state':'complete'})

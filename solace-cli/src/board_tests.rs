@@ -99,7 +99,11 @@ fn agent_guard_follows_the_run() {
         assert!(guard(rid, &["run", "safe"]).is_ok(), "{rid}");
         assert!(guard(rid, &["run", "e2e"]).unwrap_err().contains("allowed_in_reviews"), "{rid}");
         assert!(guard(rid, &["write", "x"]).unwrap_err().contains("this run is read-only"), "{rid}");
+        assert!(guard(rid, &["task", "decision"]).is_ok(), "{rid}");
     }
+    let mut input = || Ok("## Toolchain\nUse Rust.\nWhy: fast.".to_string());
+    let e = crate::board::runs::task_command(&s, tid, "r1", &["task", "decision"], &mut input, &[], vec![]).unwrap_err();
+    assert!(e.0.contains("a review cannot propose a decision"), "{}", e.0);
     for a in [["submit", "app.main"], ["write", "x"]] {
         assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
     }
@@ -210,7 +214,7 @@ fn strategy_runs_read_the_graph() {
     assert!(brief.contains("lockdown.dispatch") && !brief.contains("board.rs::within"), "{brief}");
     assert!(brief.contains("`--in <path>`") && brief.contains("`--context n`") && brief.contains("`--failed`"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
-    assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
+    assert!(brief.contains("`read DECISIONS.md --lines a..b`") && !brief.contains("folder of projects"), "{brief}");
     // D-27: the root project's own skills are listed in the brief.
     assert!(brief.contains("- design: Layout and color. (`read skills/design/SKILL.md`)"), "{brief}");
     // Only commands the run can use.
@@ -222,7 +226,7 @@ fn strategy_runs_read_the_graph() {
     fs::write(top.join("DECISIONS.md"), many).unwrap();
     let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}), "engineer", "standard", "balanced");
     assert!(brief.contains("- D-5 Thing 5") && brief.contains("- D-14 Thing 14") && !brief.contains("- D-4 Thing"), "{brief}");
-    assert!(brief.contains("… 4 earlier decisions: `grep D-` lists them."), "{brief}");
+    assert!(brief.contains("… 4 earlier decisions: `read DECISIONS.md` lists them."), "{brief}");
 }
 
 /// D-27: a strategy brief for a folder of projects carries the workspace's
@@ -1224,7 +1228,7 @@ fn an_approved_fetch_clears_the_reopen_failure() {
     let base = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let proposed = format!("{base}\n[features]\nextra = []\n");
     let mut q = json!({"settings":{"file":"Cargo.toml","base":base,"proposed":proposed}});
-    apply_settings(&root, &mut q).unwrap();
+    apply_settings(&root, "t1", &mut q).unwrap();
     assert_eq!(q["answer"], "Approved and written", "{q}");
     assert!(!root.join(".solace/fetch-failed").exists(), "the stale failure is cleared");
 }
@@ -3057,7 +3061,10 @@ fn a_design_change_reaches_the_root_stream() {
     });
     crate::design::save(&root, &design, crate::design::Source::Human).unwrap();
     crate::design::announce_change(&root, &mut seen);
-    assert_eq!(next_designs(&mut reader), json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "architecture"}]}));
+    assert_eq!(
+        next_designs(&mut reader),
+        json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "architecture", "version": 1}]})
+    );
 }
 
 /// D-61/D-112: completing a task saved without a project list files its tech
@@ -3171,10 +3178,10 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
         "element is the primitive",
         "screens or diagrams",
         "top-level `flow`",
-        "proposal the human accepts",
-        "An Approve answer means the design was saved",
-        "a refusal means the design changed after you proposed it",
-        "a Reject answer means nothing was saved",
+        "saved at once as a new version",
+        "there is no Accept or Reject",
+        "a design that gained a version since you read it is refused",
+        "invalid change is refused and nothing is saved",
         "A human's message may carry notes",
         "each names a design, one or more elements in it and some text",
         "Each element arrives with its ID, type and the elements it sits inside, top first",
@@ -3335,4 +3342,25 @@ fn ending_a_waiting_discussion_clears_attention() {
     let t = api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"end_discussion"})).unwrap();
     assert!(t["attention"].is_null());
     assert_eq!(t["runs"][0]["outcome"], "discussed");
+}
+
+#[test]
+fn a_work_brief_lists_recent_decisions_and_how_to_propose() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"Decide"})).unwrap();
+    fs::write(scope::top(&p.root).join("DECISIONS.md"), "# Decisions\n\n## D-1 First\nWhy: x\n").unwrap();
+    for kind in ["work", "investigate", "review", "discuss"] {
+        let brief =
+            continuation_brief(&t, &json!({"id":"r1","kind":kind}), false, &p.root, &p.root, false, "engineer", "standard", "balanced").0;
+        assert!(brief.contains("- D-1 First"), "{kind}: {brief}");
+        assert!(brief.contains("`read DECISIONS.md --lines a..b`"), "{kind}: {brief}");
+        assert!(brief.contains("what the product does or refuses to do"), "{kind}: {brief}");
+        assert!(brief.contains("Not a decision: anything the code or tests already show"), "{kind}: {brief}");
+        if kind == "review" {
+            assert!(brief.contains("A review can't propose one") && !brief.contains("`task decision`"), "{brief}");
+        } else {
+            assert!(brief.contains("`task decision`"), "{kind}: {brief}");
+        }
+    }
 }

@@ -386,6 +386,7 @@ fn change_run(
         *status = 404;
         return board::err("E7023", format!("unknown {} run {rid}", family.kind));
     };
+    let origin = run_origin(top, &run);
     let open = run["state"] != "ended";
     match (method, &parts[1..]) {
         ("POST", ["notes"]) => {
@@ -433,7 +434,7 @@ fn change_run(
             } else if !q["proposal"].is_null() {
                 if chosen && matches!(answer.as_str(), "Approve" | "Approve to Planning") {
                     let column = if answer == "Approve to Planning" { Column::Planning } else { Column::First };
-                    answer = apply_proposal(top, rid, &q["proposal"], column).unwrap_or_else(|e| format!("Not applied: {}", e.0));
+                    answer = apply_proposal(top, rid, &origin, &q["proposal"], column).unwrap_or_else(|e| format!("Not applied: {}", e.0));
                 } else if !chosen {
                     answer = format!("Not applied; the human answered: {answer}");
                 }
@@ -444,11 +445,11 @@ fn change_run(
                 note(&mut run, "solace", Some(rid), &format!("Proposal: {what}\n\nAnswer: {answer}"));
             }
         }
-        ("POST", ["end" | "stop"]) => {
+        ("POST", ["end"]) => {
             if !open {
                 return board::err("E7003", format!("the {} run has ended", family.kind));
             }
-            end_strategy(&mut run, if parts[1] == "end" { "planned" } else { "stopped" });
+            end_strategy(&mut run, "planned");
         }
         _ => return board::err("E7001", "unknown route"),
     }
@@ -614,6 +615,23 @@ pub(crate) fn bare_links(mut fields: Value) -> Value {
 /// the `complete` or `canceled` feature and milestone a task proposal links to,
 /// which Approve also sets `upcoming`.
 pub(crate) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text: &str) -> Result<Value, Failure> {
+    if kind == "decision" {
+        let entry = crate::decisions::entry(text)?;
+        let base = entry.edit.map(|n| crate::decisions::current(top, n)).transpose()?;
+        let what = match (entry.edit, &base) {
+            (Some(n), Some(current)) => {
+                format!("Change decision D-{n}\n\nCurrent:\n{current}\n\nProposed:\n## D-{n} {}\n{}", entry.title, entry.body)
+            }
+            _ => format!("Record decision \"{}\"\n\n{}", entry.title, entry.body),
+        };
+        return Ok(json!({
+            "id": unique_id(),
+            "text": what,
+            "options": ["Approve", "Reject"],
+            "proposal": {"kind": "decision", "fields": {"title": entry.title, "body": entry.body}, "edit": entry.edit, "base": base},
+            "answer": null,
+        }));
+    }
     let fields = if kind == "vision" {
         json!({"text": text})
     } else {
@@ -706,7 +724,18 @@ pub(crate) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
 /// applied (D-93), with the same refusals. Everything is built and checked
 /// first, the vision's base among it, so a refused apply writes nothing. The
 /// answer to record: what was applied. A new task goes in `column`.
-fn apply_proposal(top: &Path, rid: &str, p: &Value, column: Column) -> Result<String, Failure> {
+fn apply_proposal(top: &Path, rid: &str, origin: &str, p: &Value, column: Column) -> Result<String, Failure> {
+    if p["kind"] == "decision" {
+        let entry = crate::decisions::Entry {
+            title: p["fields"]["title"].as_str().unwrap_or("").to_string(),
+            body: p["fields"]["body"].as_str().unwrap_or("").to_string(),
+            edit: p["edit"].as_u64().map(|n| n as u32),
+        };
+        let changed = entry.edit.is_some();
+        let id = crate::decisions::append(top, &entry, "human", origin, p["base"].as_str())?;
+        let what = if changed { "changed" } else { "added" };
+        return Ok(format!("Approved and {what} {id}"));
+    }
     if p["kind"] == "vision" && vision(top)["revision"] != p["base"] {
         return board::err("E7026", "the vision changed since the proposal; it was not replaced");
     }
@@ -1048,10 +1077,11 @@ pub fn design_runs(top: &Path) -> Vec<Value> {
     runs_list(top, crate::board::roles::DESIGN_RUN)
 }
 
-/// A design run's proposal (D-241) as the question its agent waits on: the
-/// operations are applied to a copy and checked, writing nothing. `id` edits
-/// that design; none creates one. A run keeps at most one open proposal per design.
-pub(crate) fn design_proposal(top: &Path, rid: &str, id: Option<&str>, text: &str) -> Result<Value, Failure> {
+/// A design run's change (D-243): applied to a copy, checked, and saved at
+/// once as a new version with the run as its source. `id` edits that design;
+/// none creates one. A design the run has not read, or that gained a version
+/// since the run read it, is refused with `E7026`.
+pub(crate) fn design_proposal(top: &Path, rid: &str, id: Option<&str>, text: &str) -> Result<String, Failure> {
     let request = match serde_json::from_str::<Value>(text) {
         Ok(value) if value.is_object() => value,
         _ => return board::err("E7001", "the proposal's operations go in `text`, as a JSON object"),
@@ -1069,62 +1099,49 @@ pub(crate) fn design_proposal(top: &Path, rid: &str, id: Option<&str>, text: &st
     let Some(run) = strategy_run(top, rid) else {
         return board::err("E7023", format!("unknown design run {rid}"));
     };
-    let open = run["questions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|q| q["answer"].is_null() && q["proposal"]["kind"] == "design" && q["proposal"]["id"].as_str() == id);
-    if open {
-        let why = if id.is_some() { "this design already has an open proposal" } else { "an open proposal already creates a design" };
-        return board::err("E7003", why);
-    }
-    let (base, title, tab, mut design) = match id {
+    match id {
         Some(id) => {
-            let current = crate::design::show(top, id)?;
-            let base =
-                crate::design::versions(top, id)?.as_array().and_then(|versions| versions.first()).map(|version| version["number"].clone());
-            (base, None, None, current)
+            let mut design = crate::design::show(top, id)?;
+            let Some(read) = run["design_reads"].get(id).cloned() else {
+                return board::err("E7026", format!("read design {id} with `design show {id}` before changing it; it may have changed"));
+            };
+            if newest_design_version(top, id)? != read {
+                return board::err("E7026", format!("the design changed since you read it; read design {id} again and propose again"));
+            }
+            crate::design::apply(&mut design, &operations)?;
+            crate::design::validate(&design)?;
+            let saved = crate::design::save_guarded(top, &design, crate::design::Source::DesignRun(rid), || {
+                if newest_design_version(top, id)? != read {
+                    return board::err("E7026", format!("the design changed since you read it; read design {id} again and propose again"));
+                }
+                Ok(())
+            })?;
+            Ok(match saved {
+                Some(number) => format!("Saved version {number}"),
+                None => "Nothing changed; the design was already as proposed".into(),
+            })
         }
         None => {
             let title =
                 request["title"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `title`".into(), 1))?.to_string();
             let tab = request["tab"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `tab`".into(), 1))?.to_string();
-            let design = json!({
+            let id = unique_id();
+            let mut design = json!({
                 "schemaVersion": crate::design::SCHEMA_VERSION,
-                "id": unique_id(),
+                "id": id,
                 "title": title,
                 "tab": tab,
                 "elements": []
             });
-            (None, Some(title), Some(tab), design)
-        }
-    };
-    crate::design::apply(&mut design, &operations)?;
-    crate::design::validate(&design)?;
-    let mut proposal = json!({"kind": "design", "operations": operations, "design": design});
-    match id {
-        Some(id) => {
-            proposal["id"] = json!(id);
-            if let Some(base) = base {
-                proposal["base"] = base;
-            }
-        }
-        None => {
-            proposal["title"] = json!(title.unwrap_or_default());
-            proposal["tab"] = json!(tab.unwrap_or_default());
+            crate::design::apply(&mut design, &operations)?;
+            crate::design::validate(&design)?;
+            let saved = crate::design::save(top, &design, crate::design::Source::DesignRun(rid))?;
+            Ok(match saved {
+                Some(number) => format!("Saved version {number}: created design:{id}"),
+                None => format!("Saved: created design:{id}"),
+            })
         }
     }
-    let what = match id {
-        Some(id) => {
-            format!("Change design {id}\n\n```json\n{}\n```", serde_json::to_string_pretty(&proposal["operations"]).unwrap())
-        }
-        None => format!(
-            "Create design \"{}\"\n\n```json\n{}\n```",
-            proposal["title"].as_str().unwrap_or(""),
-            serde_json::to_string_pretty(&proposal["operations"]).unwrap()
-        ),
-    };
-    Ok(json!({"id": unique_id(), "text": what, "options": ["Approve", "Reject"], "proposal": proposal, "answer": null}))
 }
 
 /// Applies design run `rid`'s approved proposal `p` through the design save
@@ -1135,22 +1152,33 @@ fn apply_design_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Fai
     let design = &p["design"];
     let id = design["id"].as_str().unwrap_or_default();
     let created = p.get("id").is_none();
-    let previous = if created { None } else { Some(crate::design::versions(top, id)?) };
-    if let Some(versions) = &previous {
+    let proposed_at = p["created"].as_u64();
+    let saved = crate::design::save_guarded(top, design, crate::design::Source::DesignRun(rid), || {
+        if let Some(deleted_at) = crate::design::deleted_at(top, id) {
+            let deleted_since = proposed_at.map_or(true, |at| deleted_at >= at);
+            if created || deleted_since {
+                return board::err("E7026", "the design was deleted since the proposal; propose it again");
+            }
+        }
+        if created {
+            if crate::design::deleted(top, id) || crate::design::show(top, id).is_ok() {
+                return board::err("E7026", "a design now has that id; propose it again");
+            }
+            return Ok(());
+        }
+        let versions = crate::design::versions(top, id)?;
         let newest = versions.as_array().and_then(|v| v.first()).map(|v| v["number"].clone());
         let stale = if p["base"].is_null() { newest.is_some() } else { newest.as_ref() != Some(&p["base"]) };
         if stale {
             return board::err("E7026", "the design changed since the proposal; propose it again");
         }
-    }
-    crate::design::save(top, design, crate::design::Source::DesignRun(rid))?;
-    let version = crate::design::versions(top, id)?.as_array().and_then(|v| v.first()).map(|v| v["number"].clone());
-    let before = previous.as_ref().and_then(|v| v.as_array()).and_then(|v| v.first()).map(|v| v["number"].clone());
-    if !created && version == before {
+        Ok(())
+    })?;
+    if !created && saved.is_none() {
         return Ok("Approved; the design was already as proposed".into());
     }
     let created = if created { format!(": created design:{id}") } else { String::new() };
-    Ok(match version {
+    Ok(match saved {
         Some(number) => format!("Approved and saved version {number}{created}"),
         None => format!("Approved and saved{created}"),
     })
@@ -1184,5 +1212,53 @@ fn message_note(run: &mut Value, rid: &str, text: &str, designs: Vec<Value>) {
         && let Some(last) = run["notes"].as_array_mut().and_then(|notes| notes.last_mut())
     {
         last["designNotes"] = Value::Array(designs);
+    }
+}
+
+/// The newest saved version of `id`, or null when it has none.
+fn newest_design_version(top: &Path, id: &str) -> Result<Value, Failure> {
+    crate::design::newest_version(top, id)
+}
+
+/// Records that design run `rid` was shown design `id` at version `read`, so
+/// a later change is refused if the design gained a version in between.
+pub(crate) fn record_design_read(top: &Path, rid: &str, id: &str, read: &Value) -> Result<(), Failure> {
+    let Some(run) = strategy_run(top, rid) else {
+        return board::err("E7023", format!("unknown design run {rid}"));
+    };
+    if run["design_reads"].get(id) == Some(read) {
+        return Ok(());
+    }
+    let id = id.to_string();
+    let read = read.clone();
+    update_run(top, rid, move |run| {
+        let mut reads = run.get("design_reads").and_then(Value::as_object).cloned().unwrap_or_default();
+        reads.insert(id, read);
+        run["design_reads"] = Value::Object(reads);
+        Ok(())
+    })
+}
+
+/// `/decisions`: the board's decision log, newest first.
+pub fn decisions_api(top: &Path, method: &str, _body: Value) -> Result<Value, (u16, Failure)> {
+    match method {
+        "GET" => Ok(crate::decisions::api(top)),
+        _ => Err((400, Failure("E7001 unknown route".into(), 1))),
+    }
+}
+
+/// What a strategy run's decision attribution names: the page, or the feature
+/// or milestone it was started on (D-255).
+fn run_origin(top: &Path, run: &Value) -> String {
+    let c = &run["context"];
+    match c["kind"].as_str() {
+        Some(kind @ ("feature" | "milestone")) => {
+            let id = c["id"].as_str().unwrap_or("");
+            let title = record(top, &format!("{kind}s"), id)
+                .and_then(|r| r["title"].as_str().map(str::to_string))
+                .unwrap_or_else(|| id.to_string());
+            format!("strategy run on {kind} \"{title}\"")
+        }
+        _ => "strategy run on the Strategy page".into(),
     }
 }

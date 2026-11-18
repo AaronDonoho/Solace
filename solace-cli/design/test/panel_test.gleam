@@ -43,6 +43,9 @@ pub fn a_run_starts_from_the_panel_test() {
     )
   assert model.panel.open == "r1"
   assert model.panel.text == ""
+  let page = element.to_string(design.view(model))
+  assert string.contains(page, ">End</button>")
+  assert !string.contains(page, ">Stop</button>")
   restore_drafts()
 }
 

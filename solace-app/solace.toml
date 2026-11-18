@@ -16,8 +16,8 @@ unwatched = ["target/", "binaries/", "gen/"]
 [build]
 after = ["solace-cli"]
 outputs = [
-  "target/release/bundle/deb/Solace_0.1.0_amd64.deb",
-  "target/release/bundle/appimage/Solace_0.1.0_amd64.AppImage",
+  "target/release/bundle/deb/Solace_{version}_amd64.deb",
+  "target/release/bundle/appimage/Solace_{version}_amd64.AppImage",
 ]
 steps = [
   { name = "sidecar", run = ["sh", "scripts/sidecar.sh"], timeout = 120 },

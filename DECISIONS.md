@@ -1527,12 +1527,12 @@ Amends D-159 point 4, D-163 and D-166 points 2 and 3 (Aaron, board task "build: 
 3. `build plan` and `GET /build/plan` judge an output only by its fingerprint. A missing or unreadable fingerprint, an output that does not match it, or a changed input is reported with the step to run; file times no longer decide this output.
 Why: the bundle's freshness must survive a fresh clone, another PC, a checkout and a branch switch, and a record kept inside Solace's ignored store could not.
 
-## D-243 A human accepts or rejects a design proposal
-Amends D-241 point 4 and Spec 15 §1 and §6 (Aaron, board task "agent: accept or reject a proposal", 2026-11-10). Part of the design agent feature.
-1. Answering a design proposal goes through the question route as a strategy proposal's does. Approve checks the proposed design again and saves it through the design save path, with the run as its version's source; a new design keeps the id it got when proposed and gets its first version. The answer says it was saved and names the version.
-2. A design that changed since the proposal is not overwritten: an accept whose design has a newest version different from the proposal's `base` is refused (`E7026`), writes nothing, and tells the agent to propose again. A design with no version when proposed is refused if it has one now.
-3. Reject writes nothing. An ended run's proposal can't be answered.
-Why: a proposal is accepted or rejected as a whole, and an accepted change must not lose a change made after it was proposed.
+## D-243 A design change is saved at once as a version
+Amends D-241 point 4 and Spec 15 §1 and §6 (Aaron, board task "agent: accept or reject a proposal", 2026-11-10; amended by board task "design agent: changes saved as versions", 2026-11-17). Part of the design agent feature.
+1. A design run's change is checked against a copy and saved straight away through the design save path, with the run as its version's source; a new design gets an id assigned by the server and its first version. There is no Accept or Reject step, and the reply names the version and, for a new design, its id.
+2. A design that gained a version after the run last read it is not overwritten: the change is refused (`E7026`), writes nothing, and tells the agent to read the design again and propose again. A run that has not read a design must read it with `design show` before changing it; the newest version the run read is recorded on the run.
+3. An invalid change is refused (`E7033` or `E7001`) and writes nothing. A change identical to the saved design saves no version, and the reply says nothing changed.
+Why: a change is visible as soon as the agent makes it, while a later change is never lost.
 
 ## D-244 A flow diagram's nodes and edges
 Amends D-230 points 1, 3, 4 and 8 (board task "arch: flow diagram rules", 2026-11-10). Part of the design: Architecture tab feature.
@@ -1589,7 +1589,7 @@ Why: the Build tab is the one place the whole desktop bundle is assembled, and a
 Amends D-247 point 4 and Spec 15 (Aaron, board task "artifacts: one version across manifests", 2026-11-16).
 1. The Build tab lists each workspace project's `Cargo.toml` `[package] version`, `gleam.toml` `version`, `package.json` `version` and `tauri.conf.json` `version`, and flags disagreement. A file without a version, and `version.workspace = true`, is left alone.
 2. `GET /build/versions` gives them with a proposal: the newest release's semver version plus one patch, else from `0.1.0`. The human may type another; a version that is not semver or already has a release is refused.
-3. `POST /builds {version}` writes it to every version line before the steps run, keeping formatting and comments. A failed, canceled or interrupted build restores the old lines. The release folder is `<output>/<version>/`, and `release.json` keeps the chosen version and each file's old and new line.
+3. `POST /builds {version}` writes it to every version line before the steps run, keeping formatting and comments. It also updates every lock file that records the version of a package the build wrote: Gleam `manifest.toml` entries with `source = "local"`, Cargo `Cargo.lock` `[[package]]` entries with no `source`, npm `package-lock.json` top-level and workspace versions, and bun `bun.lock` workspace versions. Registry entries and lock files that record no workspace package version, such as `pnpm-lock.yaml` and `yarn.lock`, are left alone. A failed, canceled or interrupted build restores the old lines. The release folder is `<output>/<version>/`, and `release.json` keeps the chosen version and each file's old and new line.
 Why: one version names the release and every manifest agrees with it.
 
 ## D-252 A task brief names the designs its body links
@@ -1599,3 +1599,44 @@ Why: one version names the release and every manifest agrees with it.
 3. A work brief on a UI design also says the design is reference material, that the agent writes ordinary code, and to use `help lustre` to translate it. An architecture design is named and read the same way, without the Lustre guide.
 4. A review brief on a UI design asks the reviewer to check the built screen's elements, their order and their text against the design, judged as a goal (D-236), not pixel by pixel. An architecture design is checked by its parts and how they connect against the goal. A task naming no design gets neither.
 Why: an agent working or reviewing a task needs to know a design exists and how to use it, without every brief carrying design guidance.
+
+## D-253 Designs are renamed and deleted, with Undo
+(Aaron, board task "designs: rename and delete", 2026-11-17). Part of the design: direct editing feature.
+1. Renaming saves the new title through the design save path as a human change, so it becomes a new version and earlier versions stay. A blank title is refused. A proposal waiting for that design is then stale and is refused; the agent proposes again.
+2. Deleting removes the design file and its versions from the workspace under the save lock, and keeps both for Undo for 24 hours. After a delete the design is unknown: `show`, `versions` and a task brief naming it report `E7023`. An open proposal for it is refused and brings nothing back, including one that would create it. The delete is recorded beyond the Undo window, so a proposal made before it stays refused after the trash is purged.
+3. Undo puts the design and every version back. If a design was saved again with the same id, Undo refuses rather than overwrite it.
+4. Notes already sent keep the design's title. Notes not yet sent that point into the deleted design are dropped by the Design page.
+5. Restore stays: it goes back to an earlier version of a design you keep, while Delete removes the whole design.
+Why: humans can organize designs without losing history, and nothing that referred to a deleted design breaks.
+
+## D-254 A decision log is one protected file at the top folder
+Adds Spec 14 §2 and Spec 15 §3 (board task "decisions: a decision log in every project", 2026-11-17). Part of the Built-in quality practices feature.
+1. One `DECISIONS.md` sits at the workspace's top folder and its member projects read it; a project on its own is its own top folder. Setup, adding a project and migration create it, and an existing log is kept.
+2. It is protected like `AGENTS.md`: agents read it, and no direct `write`, `remove` or `move` changes it.
+3. A work, investigation or discussion run proposes an entry with `task decision`, and a strategy run with `strategy decision`; a review cannot propose one. A proposal has a title, what was decided and why. When the human approves it, it is appended as `## D-<next> <title>`, numbered then, with who approved it, the task and the date. A rejected proposal adds nothing.
+4. Every brief lists the 10 most recent titles with the lines that hold them, and says how to read an earlier one and how to propose a new one.
+5. The Strategy page has a read-only Decisions tab to the right of Personas: it lists titles newest first, and each record opens as Markdown.
+Why: one approved, protected log keeps every project's agents aligned with what the human decided, while only the human decides what goes in it.
+(human, board task 76554b1e77976ad7, 2026-11-18)
+
+## D-255 A decision is changed in place by an approved proposal
+Amends D-254 point 3.
+1. A proposal whose title names an existing record, `## D-<n> <title>`, proposes new wording for that record. One with no number is a new record. A number that names no record is refused.
+2. The human sees the record's current text and the proposed text, then approves or rejects. When approved, the record keeps its number and place, its title and body are replaced, and a line says who changed it, from which task or strategy run, and on which date. Earlier wording stays only in the project's history.
+3. If the record changed after the proposal was made, the approval is refused and nothing is written. The agent then proposes again.
+4. A record's attribution line, `(<who>, board task "<task title>", <date>)` or the strategy run's equivalent, comes right after its title and uses the local date. Solace writes it; the proposal doesn't.
+Why: the log should say what holds now, and a reader of one record shouldn't have to find later entries that changed it.
+(human, board task 34b1759c76c6ca68, 2026-11-18)
+
+## D-256 Build outputs name the built version
+(human, board task "build: release finds chosen version", 2026-11-17)
+Extends D-131 point 1 and D-250: an output path in a project's `[build]` may contain `{version}`, replaced by the project's manifest version when the build plan is read and when a build records its release.
+
+Why: the desktop bundles are named for the version a build writes, so a fixed output name cannot find them after the version changes.
+
+## D-257 A build version older than the newest release is warned, not refused
+(human, board task "build: release finds chosen version", 2026-11-17)
+Amends D-251 point 2: on the Delivery page, a version that is valid semver and has no release, but is lower than the highest released version, shows a warning that it is older than the newest release. Start stays enabled and the build runs. Versions that aren't semver, or that already have a release, are still refused.
+
+Why: an older version is usually a typo, but rebuilding an older release line on purpose should stay possible.
+

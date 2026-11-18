@@ -885,6 +885,7 @@ class Root(unittest.TestCase):
     def test_a_root_without_gleam_is_a_project_of_plain_files(self):
         project(self.root/'app')
         (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'ROOT.md').write_text('root\n')
         (self.root/'tool.py').write_text('print("ran")\n')
         self.migrate('--project', 'app')
         settings = (self.root/'solace.toml').read_text()
@@ -905,7 +906,8 @@ class Root(unittest.TestCase):
         self.assertIn('# Decisions', self.cli('read', 'DECISIONS.md', '--project', '.', cwd=self.root/'app'))
         self.start()
         steps = [{'command': 'session start'}, {'command': 'read DECISIONS.md'},
-                 {'command': 'write DECISIONS.md', 'text': '# Decisions\n\n## D-1 Root files are reachable\n'},
+                 {'command': 'read ROOT.md'},
+                 {'command': 'write ROOT.md', 'text': 'root changed\n'},
                  {'command': 'run tool'}, {'command': 'write app/src/app.gleam', 'text': 'pub fn one() { 2 }\n'},
                  {'command': 'check'}, {'command': 'task done recorded'}]
         t = self.api('POST', '/tasks', {'title': 'Record a decision', 'body': json.dumps(steps)})
@@ -915,25 +917,26 @@ class Root(unittest.TestCase):
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
         self.assertIn('plain files', replies[0])
         self.assertIn('# Decisions', replies[1])
-        self.assertIn('ran', replies[3])
-        self.assertIn('E6006', replies[4])
-        self.assertIn('E6013', replies[5])
-        self.assertIn('D-1 Root files are reachable', (self.root/'DECISIONS.md').read_text())
+        self.assertIn('Wrote ROOT.md', replies[3])
+        self.assertIn('ran', replies[4])
+        self.assertIn('E6006', replies[5])
+        self.assertIn('E6013', replies[6])
+        self.assertEqual((self.root/'ROOT.md').read_text(), 'root changed\n')
         self.assertIn('{ 1 }', (self.root/'app/src/app.gleam').read_text())
         # A subproject's agent reads the root's files but can't change them.
-        self.assertIn('E6006', self.cli('write', '../DECISIONS.md', cwd=self.root/'app', input='x', ok=False))
+        self.assertIn('E6006', self.cli('write', '../ROOT.md', cwd=self.root/'app', input='x', ok=False))
         # Undoing the task restores the root's files; there is no code to type-check.
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
-        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+        self.assertEqual((self.root/'ROOT.md').read_text(), 'root\n')
 
     def test_a_file_patch_changes_several_files_and_cancel_undoes_them(self):
         # D-104: `write` with no path takes a patch of several files; the task records each, and cancel restores them.
         project(self.root/'app')
-        (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'ROOT.md').write_text('# Root\n')
         (self.root/'old.txt').write_text('old\n')
         self.migrate('--project', 'app')
         self.start()
-        patch = ('*** Begin Patch\n*** Update File: DECISIONS.md\n@@ # Decisions\n+\n+## D-1 Patched\n'
+        patch = ('*** Begin Patch\n*** Update File: ROOT.md\n@@ # Root\n+\n+## D-1 Patched\n'
                  '*** Add File: docs/new.md\n+new\n*** Delete File: old.txt\n*** End Patch\n')
         steps = [{'command': 'write', 'text': patch}, {'command': 'task done patched'}]
         t = self.api('POST', '/tasks', {'title': 'Patch files', 'body': json.dumps(steps)})
@@ -941,23 +944,23 @@ class Root(unittest.TestCase):
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
         t = self.wait('', t, lambda x: x['column'] == 'needs_review')
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
-        self.assertIn('Wrote DECISIONS.md\nAdded docs/new.md\nRemoved old.txt\n', replies[0])
-        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n\n## D-1 Patched\n')
+        self.assertIn('Wrote ROOT.md\nAdded docs/new.md\nRemoved old.txt\n', replies[0])
+        self.assertEqual((self.root/'ROOT.md').read_text(), '# Root\n\n## D-1 Patched\n')
         self.assertEqual((self.root/'docs/new.md').read_text(), 'new\n')
         self.assertFalse((self.root/'old.txt').exists())
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
-        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+        self.assertEqual((self.root/'ROOT.md').read_text(), '# Root\n')
         self.assertFalse((self.root/'docs/new.md').exists())
         self.assertEqual((self.root/'old.txt').read_text(), 'old\n')
 
     def test_a_refused_file_patch_is_fixed_in_its_draft_and_recorded(self):
         # D-120: a refused `write` patch is kept as a draft; a `--replace` on it retries the whole patch, recorded as the task's change.
         project(self.root/'app')
-        (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'ROOT.md').write_text('# Root\n')
         (self.root/'notes.md').write_text('A failed read does not stop the call (D-109).\n')
         self.migrate('--project', 'app')
         self.start()
-        patch = ('*** Begin Patch\n*** Update File: DECISIONS.md\n@@ # Decisions\n+\n+## D-1 Patched\n'
+        patch = ('*** Begin Patch\n*** Update File: ROOT.md\n@@ # Root\n+\n+## D-1 Patched\n'
                  '*** Update File: notes.md\n-does not stop the call (D-109).\n+does not stop the call (D-119).\n*** End Patch\n')
         steps = [{'command': 'write', 'text': patch}, {'command': 'drafts'},
                  {'command': 'write --draft {draft} --replace', 'old': '-does not stop the call (D-109).\n+does',
@@ -970,20 +973,20 @@ class Root(unittest.TestCase):
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
         self.assertIn('is only part of line 1: `A failed read', replies[0])
         self.assertIn('["write"] (current)', replies[1])
-        self.assertIn('Wrote DECISIONS.md\nWrote notes.md\n', replies[2])
+        self.assertIn('Wrote ROOT.md\nWrote notes.md\n', replies[2])
         self.assertEqual((self.root/'notes.md').read_text(), 'A failed read does not stop the call (D-119).\n')
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
-        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+        self.assertEqual((self.root/'ROOT.md').read_text(), '# Root\n')
         self.assertEqual((self.root/'notes.md').read_text(), 'A failed read does not stop the call (D-109).\n')
 
     def test_a_file_patch_draft_refused_for_its_form_is_recorded_once_fixed(self):
         # D-120: a draft kept for a line with no ` `, `-` or `+` doesn't parse; its fixed text names the files to record.
         project(self.root/'app')
-        (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'ROOT.md').write_text('# Root\n')
         (self.root/'notes.md').write_text('A failed read\n')
         self.migrate('--project', 'app')
         self.start()
-        patch = ('*** Begin Patch\n*** Update File: DECISIONS.md\n@@ # Decisions\n+\n+## D-1 Patched\n'
+        patch = ('*** Begin Patch\n*** Update File: ROOT.md\n@@ # Root\n+\n+## D-1 Patched\n'
                  '*** Update File: notes.md\nA failed read\n+more\n*** End Patch\n')
         steps = [{'command': 'write', 'text': patch},
                  {'command': 'write --draft {draft} --replace', 'old': '\nA failed read\n', 'text': '\n@@ A failed read\n'},
@@ -994,10 +997,10 @@ class Root(unittest.TestCase):
         t = self.wait('', t, lambda x: x['column'] == 'needs_review')
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
         self.assertIn('each line starts with', replies[0])
-        self.assertIn('Wrote DECISIONS.md\nWrote notes.md\n', replies[1])
+        self.assertIn('Wrote ROOT.md\nWrote notes.md\n', replies[1])
         self.assertEqual((self.root/'notes.md').read_text(), 'A failed read\nmore\n')
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
-        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+        self.assertEqual((self.root/'ROOT.md').read_text(), '# Root\n')
         self.assertEqual((self.root/'notes.md').read_text(), 'A failed read\n')
 
     def test_every_root_gets_its_own_lane(self):

@@ -45,7 +45,7 @@ pub(crate) const ROLES: [Role; 6] = [
     Role {
         id: "designer",
         name: "Designer",
-        purpose: "Works out a design with the human, proposing changes for them to accept.",
+        purpose: "Works out a design with the human, saving each change as a new version.",
         runs: &[DESIGN_RUN],
     },
 ];

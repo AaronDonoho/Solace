@@ -55,6 +55,9 @@ pub type Model {
     expanded: List(String),
     histories: List(History),
     viewed: Option(Viewed),
+    /// The version before the shown one, with the shown design's id and
+    /// version, when it has been loaded.
+    previous: Option(#(String, Int, render.Design)),
     /// The screen the click-through preview shows, if previewing.
     preview: Option(String),
     /// Whether the canvas shows an open proposal rather than the saved design.
@@ -63,6 +66,12 @@ pub type Model {
     show_changes: Bool,
     /// The agent panel's state, shared by both tabs.
     panel: panel.Model,
+    /// The title being edited, None when the title is not a text box.
+    renaming: Option(String),
+    /// Whether the delete confirmation is shown.
+    confirm_delete: Bool,
+    /// The design the Undo button brings back, while it shows.
+    undo: Option(String),
   )
 }
 
@@ -87,6 +96,8 @@ pub type Msg {
   HistoryLoaded(String, String)
   ViewVersion(String, Int)
   VersionLoaded(String, Int, String)
+  /// The reply to the version before the shown one, with the shown version.
+  PreviousLoaded(String, Int, String)
   Restore(String, Int)
   Restored(String, Int, String)
   /// Starts the click-through preview at the first screen.
@@ -112,6 +123,32 @@ pub type Msg {
   ToggleChanges
   /// A message for the agent panel.
   Panel(panel.Msg)
+  /// The saved design's title is clicked, turning it into a text box.
+  RenameStart
+  /// The title text box's text changed.
+  RenameText(String)
+  /// The title text box's text settled; saves it.
+  RenameSaved(String)
+  /// A key pressed in the title text box.
+  RenameKey(String)
+  /// The title edit ended without a new title.
+  RenameCancel
+  /// The reply to a rename, with the design it was asked for.
+  Renamed(String, String)
+  /// Delete is clicked; the confirmation shows.
+  DeleteAsk
+  /// The delete confirmation is dismissed.
+  DeleteCancel
+  /// The delete confirmation is accepted.
+  Delete
+  /// The reply to a delete, with the design it removed.
+  Deleted(String, String)
+  /// Undo is clicked for the design it brings back.
+  UndoDelete(String)
+  /// The reply to an undo.
+  Undone(String)
+  /// The undo window closed for this design.
+  UndoExpired(String)
 }
 
 pub fn tabs() -> List(Tab) {
@@ -176,6 +213,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         expanded: [],
         histories: [],
         viewed: None,
+        previous: None,
         preview: None,
       ),
       event.emit("tab", json.string(tab_name(tab))),
@@ -191,6 +229,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           expanded: [],
           histories: [],
           viewed: None,
+          previous: None,
           preview: None,
         )
       #(model, load(model))
@@ -206,6 +245,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           design_error: "",
           restore_error: "",
           viewed: None,
+          previous: None,
           preview: None,
         )
       #(model, load(model))
@@ -220,6 +260,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           design_error: "",
           restore_error: "",
           viewed: None,
+          previous: None,
           preview: None,
         )
       #(
@@ -230,13 +271,20 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         ]),
       )
     }
-    DesignLoaded(id, text) -> #(load_design(model, id, text), effect.none())
+    DesignLoaded(id, text) -> {
+      let model = load_design(model, id, text)
+      #(model, current_previous_request(model))
+    }
     DesignsLoaded(text) -> #(loaded(model, text), effect.none())
     ToggleHistory(id) -> toggle_history(model, id)
     HistoryLoaded(id, text) -> #(load_history(model, id, text), effect.none())
     ViewVersion(id, number) -> view_version(model, id, number)
     VersionLoaded(id, number, text) -> #(
       load_version(model, id, number, text),
+      effect.none(),
+    )
+    PreviousLoaded(id, number, text) -> #(
+      load_previous(model, id, number, text),
       effect.none(),
     )
     Restore(id, number) -> restore(model, id, number)
@@ -281,6 +329,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.map(panel_fx, Panel),
           effect.before_paint(fn(send, root) {
             watch_region(root, send)
+            drag_note_box(root, fn() { Nil })
             send(Panel(panel.Attached(root)))
           }),
         ]),
@@ -318,6 +367,37 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         ]),
       )
     }
+    RenameStart ->
+      case open_design(model) {
+        Some(design) -> #(
+          Model(..model, renaming: Some(design.title)),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
+      }
+    RenameText(text) -> #(Model(..model, renaming: Some(text)), effect.none())
+    RenameSaved(title) -> rename(model, title)
+    RenameKey(key) if key == "Escape" -> #(
+      Model(..model, renaming: None),
+      effect.none(),
+    )
+    RenameKey(_) -> #(model, effect.none())
+    RenameCancel -> #(Model(..model, renaming: None), effect.none())
+    Renamed(id, text) -> renamed(model, id, text)
+    DeleteAsk -> #(Model(..model, confirm_delete: True), effect.none())
+    DeleteCancel -> #(Model(..model, confirm_delete: False), effect.none())
+    Delete -> delete_design(model)
+    Deleted(id, text) -> deleted(model, id, text)
+    UndoDelete(id) -> undo_delete(model, id)
+    Undone(text) -> undone(model, text)
+    UndoExpired(id) ->
+      case model.undo {
+        Some(showing) if showing == id -> #(
+          Model(..model, undo: None),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      }
     Panel(msg) -> {
       let #(state, fx) = panel.update(model.panel, msg)
       #(Model(..model, panel: state), effect.map(fx, Panel))
@@ -389,6 +469,26 @@ pub fn view(model: Model) -> Element(Msg) {
                   )
               },
             ]),
+            case model.undo {
+              Some(id) ->
+                html.div(
+                  [
+                    attribute.class("design-undo-notice"),
+                    attribute.role("status"),
+                  ],
+                  [
+                    html.span([], [html.text("Design deleted.")]),
+                    html.button(
+                      [
+                        attribute.class("design-undo"),
+                        event.on_click(UndoDelete(id)),
+                      ],
+                      [html.text("Undo")],
+                    ),
+                  ],
+                )
+              None -> element.none()
+            },
             html.div([attribute.class("design-canvas")], canvas(model, tab)),
           ]),
         ],
@@ -437,17 +537,25 @@ const view_styles =
 .design-changes{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
 .design-changes[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
-.design-note{position:absolute;top:var(--space-3);right:var(--space-3);z-index:4;display:flex;flex-direction:column;gap:var(--space-2);width:min(280px,80vw);padding:var(--space-3);background:var(--paper);border:2px solid #c2410c;box-shadow:0 4px 16px rgba(0,0,0,.18)}
+.design-note{position:absolute;top:var(--space-3);right:var(--space-3);z-index:4;display:flex;flex-direction:column;gap:var(--space-2);width:min(280px,80vw);padding:var(--space-3);background:var(--paper);border:2px solid #c2410c;opacity:0.5;box-shadow:0 4px 16px rgba(0,0,0,.18)}
+.design-note-handle{align-self:stretch;padding:var(--space-1) 0;font-size:13px;color:var(--soft);cursor:grab;user-select:none}
 .design-note label{font-size:13px;color:var(--soft)}
 .design-note input{padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line)}
-.design-note button{align-self:flex-end;padding:var(--space-1) var(--space-3);font:inherit;color:var(--paper);background:#c2410c;border:1px solid #c2410c;cursor:pointer}
-.design-note button:disabled{color:var(--soft);background:var(--well);border-color:var(--line);cursor:default}
+.design-note button{align-self:flex-end;padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
 .design-notes{list-style:none;margin:0;padding:var(--space-2) 0;border-top:1px solid var(--line);max-height:28vh;overflow:auto}
 .design-note-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:start;gap:var(--space-2);padding:var(--space-1) 0}
 .design-note-number{display:inline-block;min-width:18px;height:18px;border-radius:9px;background:#c2410c;color:#fff;font-size:11px;line-height:18px;text-align:center}
 .design-note-text{color:var(--ink);overflow-wrap:anywhere}
 .design-note-elements{color:var(--soft);font-size:12px;overflow-wrap:anywhere}
 .design-note-remove{padding:0 var(--space-1);font:inherit;color:var(--soft);background:transparent;border:0;cursor:pointer}
+.design-title{padding:0;font:inherit;font-size:var(--h2);font-weight:700;color:inherit;background:transparent;border:1px solid transparent;cursor:text}
+.design-title:hover{border-color:var(--line)}
+.design-title-input{padding:0 var(--space-1);font:inherit;font-size:var(--h2);font-weight:700;color:var(--ink);background:var(--paper);border:1px solid var(--focus)}
+.design-heading-actions{display:flex;align-items:baseline;gap:var(--space-2);margin-left:auto}
+.design-delete{padding:var(--space-1) var(--space-2);font:inherit;color:#a12b1f;background:transparent;border:1px solid #a12b1f;cursor:pointer}
+.design-danger{padding:var(--space-1) var(--space-2);font:inherit;color:var(--paper);background:#a12b1f;border:1px solid #a12b1f;cursor:pointer}
+.design-undo{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
+.design-confirm{display:flex;align-items:baseline;gap:var(--space-2);margin-left:auto}
 @media (max-width:900px){.design-body{flex-direction:column;height:auto}.design-list{flex:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:0 0 var(--space-3)}.design-screens{height:60vh}}
 "
   <> solace_task.editor_styles
@@ -469,7 +577,7 @@ pub fn register() -> Result(Nil, lustre.Error) {
 }
 
 pub type Design {
-  Design(id: String, title: String, tab: Tab)
+  Design(id: String, title: String, tab: Tab, version: Int)
 }
 
 /// The design id a URL query names ("?design=<id>"), "" for none.
@@ -511,9 +619,13 @@ pub fn new(tab: Tab) -> Model {
     [],
     None,
     None,
+    None,
     True,
     True,
     panel.new(),
+    None,
+    False,
+    None,
   )
 }
 
@@ -538,7 +650,12 @@ fn design_decoder() -> decode.Decoder(Design) {
   use id <- decode.field("id", decode.string)
   use title <- decode.field("title", decode.string)
   use tab <- decode.field("tab", decode.string)
-  decode.success(Design(id, title, tab_of(tab)))
+  use version <- decode.optional_field(
+    "version",
+    0,
+    decode.one_of(decode.int, [decode.success(0)]),
+  )
+  decode.success(Design(id, title, tab_of(tab), version))
 }
 
 fn designs_decoder() -> decode.Decoder(List(Design)) {
@@ -591,7 +708,7 @@ pub fn settle(model: Model) -> #(Model, Effect(Msg)) {
   }
   case model.designs == designs && !answered {
     True -> #(model, effect.none())
-    False -> #(model, reload(model))
+    False -> #(model, reload(before, model))
   }
 }
 
@@ -677,6 +794,7 @@ fn refresh_open(model: Model) -> Model {
         selected: [],
         design_error: "",
         viewed: None,
+        previous: None,
         preview: None,
       )
   }
@@ -691,6 +809,10 @@ fn load_design(model: Model, id: String, text: String) -> Model {
             Model(
               ..model,
               drawing: Some(drawing),
+              previous: case model.viewed {
+                None -> None
+                Some(_) -> model.previous
+              },
               design_error: "",
               preview: keep_preview(model.preview, drawing),
             ),
@@ -715,20 +837,19 @@ fn load(model: Model) -> Effect(Msg) {
   }
 }
 
-fn reload(model: Model) -> Effect(Msg) {
-  case open_design(model) {
-    Some(design) ->
-      case list.contains(model.expanded, design.id) {
-        False -> load(model)
-        True ->
-          effect.batch([
-            load(model),
-            get("/designs/" <> design.id <> "/versions", fn(text) {
-              HistoryLoaded(design.id, text)
-            }),
-          ])
-      }
-    None -> effect.none()
+fn reload(before: Model, model: Model) -> Effect(Msg) {
+  let open = case open_design(model) {
+    Some(_) -> [load(model)]
+    None -> []
+  }
+  let histories =
+    list.map(history_ids(before, model), fn(id) {
+      get("/designs/" <> id <> "/versions", fn(text) { HistoryLoaded(id, text) })
+    })
+  case list.flatten([open, histories]) {
+    [] -> effect.none()
+    [one] -> one
+    many -> effect.batch(many)
   }
 }
 
@@ -971,6 +1092,7 @@ fn view_version(
       design_error: "",
       restore_error: "",
       viewed: Some(Viewed(id, number, None, "")),
+      previous: None,
       preview: None,
       selected: [],
     )
@@ -982,6 +1104,7 @@ fn view_version(
     model,
     effect.batch([
       get(version_path(id, number), fn(text) { VersionLoaded(id, number, text) }),
+      previous_request(model, id, number),
       ..open_requests
     ]),
   )
@@ -1048,7 +1171,7 @@ fn restored(
         False -> model
       }
       let model = case viewing(model, id, number) {
-        True -> Model(..model, viewed: None, selected: [])
+        True -> Model(..model, viewed: None, previous: None, selected: [])
         False -> model
       }
       let request = case id == model.open {
@@ -1091,7 +1214,6 @@ fn post(path: String, body: String, msg: fn(String) -> Msg) -> Effect(Msg) {
 }
 
 fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
-  let markers = panel.markers(model.panel, model.open)
   let title = case viewed.drawing {
     Some(drawing) -> drawing.title
     None ->
@@ -1104,36 +1226,33 @@ fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
     Some(design) -> Some(design.tab)
     None -> None
   }
+  let controls = case previous_version(model, viewed.id, viewed.number) {
+    Some(_) -> [changes_control(model)]
+    None -> []
+  }
   [
     html.div([attribute.class("design-heading")], [
       html.h2([], [html.text(title)]),
       html.span([attribute.class("design-version-note")], [
         html.text("Version " <> int.to_string(viewed.number)),
       ]),
+      case tab, viewed.drawing {
+        Some(UiUx), Some(_) -> preview_button(model)
+        _, _ -> element.none()
+      },
       case restore_button(model, viewed) {
         Some(button) -> button
         None -> element.none()
       },
+      ..controls
     ]),
     case viewed.drawing, tab {
-      Some(drawing), Some(UiUx) ->
-        html.div(
-          [
-            attribute.class("design-screens"),
-            attribute.data("region", ""),
-            event.on_click(ClearSelection),
-          ],
-          list.map(drawing.elements, fn(node) {
-            render.draw_selectable(
-              node,
-              model.selected,
-              markers,
-              ElementClicked,
-            )
-          }),
-        )
+      Some(drawing), Some(UiUx) -> version_screens(model, viewed, drawing)
       Some(drawing), Some(Architecture) ->
-        diagram.draw(drawing, dict.new(), diagram_selection(model))
+        case version_marks(model, viewed, drawing) {
+          Some(marked) -> marked_diagram(model, marked)
+          None -> diagram.draw(drawing, dict.new(), diagram_selection(model))
+        }
       _, _ -> element.none()
     },
     case viewed.error {
@@ -1225,38 +1344,32 @@ fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
   }
   let controls = case proposal {
     Some(_) -> proposal_controls(model, True)
-    None -> []
+    None ->
+      case previous_version(model, design.id, design.version) {
+        Some(_) -> [changes_control(model)]
+        None -> []
+      }
   }
+  let editable = !showing
   [
     html.div([attribute.class("design-heading")], [
-      html.h2([], [html.text(title)]),
+      html.h2([], [title_control(model, title, editable)]),
       case design.tab, model.drawing {
         UiUx, Some(_) -> preview_button(model)
         _, _ -> element.none()
       },
-      ..controls
+      ..list.append(controls, [heading_actions(model, design)])
     ]),
     case design.tab {
       Architecture ->
         case proposal, showing {
           Some(proposed), True -> proposed_diagram(model, proposed)
-          _, _ -> current_diagram(model)
+          _, _ -> current_diagram(model, design)
         }
       UiUx ->
         case proposal, showing {
           Some(proposed), True -> proposed_drawing(model, proposed)
-          _, _ ->
-            case model.drawing {
-              Some(drawing) -> screens(model, drawing)
-              None ->
-                case model.design_error {
-                  "" -> element.none()
-                  message ->
-                    html.p([attribute.role("alert")], [
-                      html.text(message),
-                    ])
-                }
-            }
+          _, _ -> current_screens(model, design)
         }
     },
     note_box(model),
@@ -1287,7 +1400,7 @@ fn clear_history_error(model: Model) -> Model {
 
 fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
   let model = Model(..model, selected: [])
-  case model.drawing {
+  case preview_drawing(model) {
     Some(drawing) ->
       case render.first_screen(drawing) {
         Some(screen) -> #(
@@ -1301,7 +1414,7 @@ fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
 }
 
 fn preview_click(model: Model, id: String) -> #(Model, Effect(Msg)) {
-  case model.preview, model.drawing {
+  case model.preview, preview_drawing(model) {
     Some(_), Some(drawing) ->
       case render.link_target(drawing, id) {
         Some(target) -> #(Model(..model, preview: Some(target)), effect.none())
@@ -1456,22 +1569,7 @@ fn proposal_controls(model: Model, choices: Bool) -> List(Element(Msg)) {
     ]
     False -> []
   }
-  let label = case model.show_changes {
-    True -> "Hide changes"
-    False -> "Show changes"
-  }
-  list.append(switch, [
-    html.button(
-      [
-        attribute.class("design-changes"),
-        attribute.attribute("aria-pressed", bool_text(model.show_changes)),
-        attribute.attribute("aria-label", label),
-        attribute.attribute("title", label),
-        event.on_click(ToggleChanges),
-      ],
-      [html.text("🔍")],
-    ),
-  ])
+  list.append(switch, [changes_control(model)])
 }
 
 fn bool_text(value: Bool) -> String {
@@ -1519,9 +1617,13 @@ fn proposal_answered(before: Model, after: Model) -> Bool {
   }
 }
 
-fn current_diagram(model: Model) -> Element(Msg) {
+fn current_diagram(model: Model, design: Design) -> Element(Msg) {
   case model.drawing {
-    Some(drawing) -> diagram.draw(drawing, dict.new(), diagram_selection(model))
+    Some(drawing) ->
+      case current_marks(model, design, drawing) {
+        Some(marked) -> marked_diagram(model, marked)
+        None -> diagram.draw(drawing, dict.new(), diagram_selection(model))
+      }
     None ->
       case model.design_error {
         "" -> element.none()
@@ -1607,7 +1709,7 @@ fn live(model: Model, event: Dynamic) -> #(Model, Effect(Msg)) {
     list.flatten([
       case updated.designs == model.designs && !answered {
         True -> []
-        False -> [reload(updated)]
+        False -> [reload(model, updated)]
       },
       case follows {
         True -> [effect.map(panel_fx, Panel)]
@@ -1702,6 +1804,13 @@ fn note_box(model: Model) -> Element(Msg) {
       html.div(
         [attribute.class("design-note"), attribute.data("note-box", "")],
         [
+          html.div(
+            [
+              attribute.class("design-note-handle"),
+              attribute.data("note-handle", ""),
+            ],
+            [html.text("Move")],
+          ),
           html.label([attribute.attribute("for", "design-note-text")], [
             html.text("Note"),
           ]),
@@ -1733,4 +1842,342 @@ fn diagram_selection(model: Model) -> diagram.Selection(Msg) {
     on_click: ElementClicked,
     on_clear: ClearSelection,
   )
+}
+
+/// The expanded entries whose history has to be fetched again: the open one,
+/// and any whose newest version changed.
+fn history_ids(before: Model, model: Model) -> List(String) {
+  let open = case open_design(model) {
+    Some(design) ->
+      case list.contains(model.expanded, design.id) {
+        True -> [design.id]
+        False -> []
+      }
+    None -> []
+  }
+  list.fold(model.expanded, open, fn(ids, id) {
+    case list.contains(ids, id) || !version_changed(before, model, id) {
+      True -> ids
+      False -> list.append(ids, [id])
+    }
+  })
+}
+
+fn version_changed(before: Model, after: Model, id: String) -> Bool {
+  case design_version(before, id), design_version(after, id) {
+    Ok(old), Ok(new) -> old != new
+    _, _ -> False
+  }
+}
+
+fn design_version(model: Model, id: String) -> Result(Int, Nil) {
+  case list.find(model.designs, fn(design) { design.id == id }) {
+    Ok(design) -> Ok(design.version)
+    Error(_) -> Error(Nil)
+  }
+}
+
+fn title_control(model: Model, title: String, editable: Bool) -> Element(Msg) {
+  case model.renaming, editable {
+    Some(draft), True ->
+      html.input([
+        attribute.class("design-title-input"),
+        attribute.value(draft),
+        attribute.autofocus(True),
+        attribute.attribute("aria-label", "Design title"),
+        event.on_input(RenameText),
+        event.on_change(RenameSaved),
+        event.on_keydown(RenameKey),
+        event.on_blur(RenameCancel),
+      ])
+    _, True ->
+      html.button(
+        [attribute.class("design-title"), event.on_click(RenameStart)],
+        [html.text(title)],
+      )
+    _, False -> html.text(title)
+  }
+}
+
+fn heading_actions(model: Model, design: Design) -> Element(Msg) {
+  case model.confirm_delete {
+    True ->
+      html.div(
+        [
+          attribute.class("design-confirm"),
+          attribute.role("alertdialog"),
+        ],
+        [
+          html.span([], [
+            html.text("Delete this design and all its versions?"),
+          ]),
+          html.button(
+            [attribute.class("design-danger"), event.on_click(Delete)],
+            [html.text("Delete")],
+          ),
+          html.button(
+            [attribute.class("design-choice"), event.on_click(DeleteCancel)],
+            [html.text("Cancel")],
+          ),
+        ],
+      )
+    False ->
+      html.div([attribute.class("design-heading-actions")], [
+        html.button(
+          [
+            attribute.class("design-delete"),
+            attribute.attribute("aria-label", "Delete " <> design.title),
+            event.on_click(DeleteAsk),
+          ],
+          [html.text("Delete")],
+        ),
+      ])
+  }
+}
+
+fn rename(model: Model, title: String) -> #(Model, Effect(Msg)) {
+  case model.open, string.trim(title) {
+    id, title if id != "" && title != "" -> {
+      let body =
+        json.object([#("title", json.string(title))])
+        |> json.to_string
+      #(
+        Model(..model, renaming: None),
+        post("/designs/" <> id <> "/rename", body, fn(text) {
+          Renamed(id, text)
+        }),
+      )
+    }
+    _, _ -> #(Model(..model, renaming: None), effect.none())
+  }
+}
+
+fn renamed(model: Model, id: String, text: String) -> #(Model, Effect(Msg)) {
+  #(
+    load_design(Model(..model, renaming: None), id, text),
+    get("/designs", DesignsLoaded),
+  )
+}
+
+fn delete_design(model: Model) -> #(Model, Effect(Msg)) {
+  case model.open {
+    "" -> #(Model(..model, confirm_delete: False), effect.none())
+    id -> #(
+      Model(..model, confirm_delete: False),
+      effect.from(fn(send) {
+        request("", "/designs/" <> id, "DELETE", "{}", fn(text) {
+          send(Deleted(id, text))
+        })
+      }),
+    )
+  }
+}
+
+fn deleted(model: Model, id: String, text: String) -> #(Model, Effect(Msg)) {
+  case reason(text) {
+    Some(_) -> #(
+      Model(
+        ..model,
+        confirm_delete: False,
+        error: failure(text, "The design could not be deleted."),
+      ),
+      effect.none(),
+    )
+    None -> {
+      let was_open = model.open == id
+      let model = forget_deleted_notes(loaded(model, text), id)
+      let model = case was_open {
+        True ->
+          Model(
+            ..model,
+            open: "",
+            drawing: None,
+            selected: [],
+            viewed: None,
+            preview: None,
+            design_error: "",
+            renaming: None,
+          )
+        False -> model
+      }
+      let model = Model(..model, confirm_delete: False, undo: Some(id))
+      let timer =
+        effect.from(fn(send) { after(undo_ms, fn() { send(UndoExpired(id)) }) })
+      let changed = case was_open {
+        True -> effect.batch([event.emit("design", json.string("")), timer])
+        False -> timer
+      }
+      #(model, changed)
+    }
+  }
+}
+
+fn undo_delete(model: Model, id: String) -> #(Model, Effect(Msg)) {
+  #(model, post("/designs/" <> id <> "/undo", "{}", fn(text) { Undone(text) }))
+}
+
+fn undone(model: Model, text: String) -> #(Model, Effect(Msg)) {
+  #(Model(..loaded(model, text), undo: None), effect.none())
+}
+
+fn forget_deleted_notes(model: Model, id: String) -> Model {
+  Model(..model, panel: panel.forget_design(model.panel, id))
+}
+
+@external(javascript, "./api.mjs", "after")
+fn after(ms: Int, callback: fn() -> Nil) -> Nil
+
+/// How long the Undo button stays after a delete.
+const undo_ms = 8000
+
+@external(javascript, "./api.mjs", "drag_note_box")
+fn drag_note_box(root: Dynamic, moved: fn() -> Nil) -> Nil
+
+fn load_previous(model: Model, id: String, number: Int, text: String) -> Model {
+  case showing_version(model, id, number) {
+    False -> model
+    True ->
+      case json.parse(text, decode.at(["design"], render.design_decoder())) {
+        Ok(drawing) -> Model(..model, previous: Some(#(id, number, drawing)))
+        Error(_) -> Model(..model, previous: None)
+      }
+  }
+}
+
+fn showing_version(model: Model, id: String, number: Int) -> Bool {
+  case model.viewed {
+    Some(viewed) -> viewed.id == id && viewed.number == number
+    None ->
+      case open_design(model) {
+        Some(design) -> design.id == id && design.version == number
+        None -> False
+      }
+  }
+}
+
+fn current_previous_request(model: Model) -> Effect(Msg) {
+  case model.viewed, open_design(model) {
+    None, Some(design) -> previous_request(model, design.id, design.version)
+    _, _ -> effect.none()
+  }
+}
+
+fn previous_request(model: Model, id: String, number: Int) -> Effect(Msg) {
+  case previous_version(model, id, number) {
+    Some(previous) ->
+      get(version_path(id, previous), fn(text) {
+        PreviousLoaded(id, number, text)
+      })
+    None -> effect.none()
+  }
+}
+
+/// The next-older version in the history, or the number before when the
+/// history is not loaded.
+fn previous_version(model: Model, id: String, number: Int) -> Option(Int) {
+  case history_of(model, id) {
+    Some(history) -> older_version(history.versions, number)
+    None ->
+      case number > 1 {
+        True -> Some(number - 1)
+        False -> None
+      }
+  }
+}
+
+fn older_version(versions: List(Version), number: Int) -> Option(Int) {
+  list.fold(versions, None, fn(older, version) {
+    case version.number < number {
+      True ->
+        case older {
+          Some(found) if found > version.number -> older
+          _ -> Some(version.number)
+        }
+      False -> older
+    }
+  })
+}
+
+fn version_screens(
+  model: Model,
+  viewed: Viewed,
+  drawing: render.Design,
+) -> Element(Msg) {
+  case version_marks(model, viewed, drawing) {
+    Some(marked) -> marked_screens(model, marked)
+    None -> screens(model, drawing)
+  }
+}
+
+fn version_marks(
+  model: Model,
+  viewed: Viewed,
+  drawing: render.Design,
+) -> Option(changes.Marked) {
+  case model.show_changes, model.previous {
+    True, Some(#(previous_id, previous_number, previous))
+      if previous_id == viewed.id && previous_number == viewed.number
+    ->
+      case previous_version(model, viewed.id, viewed.number) {
+        Some(_) -> Some(changes.mark(previous, drawing))
+        None -> None
+      }
+    _, _ -> None
+  }
+}
+
+fn preview_drawing(model: Model) -> Option(render.Design) {
+  case viewed_for(model) {
+    Some(viewed) -> viewed.drawing
+    None -> model.drawing
+  }
+}
+
+fn changes_control(model: Model) -> Element(Msg) {
+  let label = case model.show_changes {
+    True -> "Hide changes"
+    False -> "Show changes"
+  }
+  html.button(
+    [
+      attribute.class("design-changes"),
+      attribute.attribute("aria-pressed", bool_text(model.show_changes)),
+      attribute.attribute("aria-label", label),
+      attribute.attribute("title", label),
+      event.on_click(ToggleChanges),
+    ],
+    [html.text("🔍")],
+  )
+}
+
+fn current_screens(model: Model, design: Design) -> Element(Msg) {
+  case model.drawing {
+    Some(drawing) ->
+      case current_marks(model, design, drawing) {
+        Some(marked) -> marked_screens(model, marked)
+        None -> screens(model, drawing)
+      }
+    None ->
+      case model.design_error {
+        "" -> element.none()
+        message -> html.p([attribute.role("alert")], [html.text(message)])
+      }
+  }
+}
+
+fn current_marks(
+  model: Model,
+  design: Design,
+  drawing: render.Design,
+) -> Option(changes.Marked) {
+  case model.show_changes, model.previous {
+    True, Some(#(previous_id, previous_number, previous))
+      if previous_id == design.id && previous_number == design.version
+    ->
+      case previous_version(model, design.id, design.version) {
+        Some(_) -> Some(changes.mark(previous, drawing))
+        None -> None
+      }
+    _, _ -> None
+  }
 }

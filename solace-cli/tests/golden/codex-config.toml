@@ -8,7 +8,6 @@ developer_instructions = "The tool is the MCP tool `solace`. If you have `exec`,
 shell_tool = false
 unified_exec = false
 apply_patch_freeform = false
-multi_agent = false
 apps = false
 plugins = false
 goals = false
@@ -20,6 +19,8 @@ in_app_browser = false
 hooks = false
 memories = false
 tool_suggest = false
+[agents]
+enabled = false
 [mcp_servers.solace]
 command = "/bin/solace"
 args = ["mcp", "--budget", "32000"]

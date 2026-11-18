@@ -32,6 +32,10 @@ marked `allowed_in_reviews = true`.
                                 human to first add it in the task's Scope tab
                                 and then answer; no option's wording says that
                                 pressing it adds the project
+  task decision                 propose an entry for DECISIONS.md: a `## <title>`
+                                line, what was decided, and a `Why:` line, or
+                                `## D-<n> <title>` to change that record; the
+                                human approves it, and only then is it applied
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task.
                                 A work run is refused while a draft holds unsaved

@@ -326,3 +326,21 @@ fn an_answer_reply_names_a_settings_proposal_by_its_file() {
     assert_eq!(t["runs"][0]["reply"], expected);
 }
 
+#[test]
+fn an_answered_decision_proposal_wakes_its_discussion() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("Discuss", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"running"}]);
+    let question = json!({"id":"d1","text":"Record decision \"A\"","options":["Approve","Reject"],
+        "settings":{"decision":{"title":"A","body":"Do A.\nWhy: a."}}});
+    message(&w, &mut t, &json!({"kind":"settings","task":"t1","run":"r1","question":question})).unwrap();
+    assert_eq!(t["runs"][0]["state"], "waiting");
+    t["questions"][0]["answer"] = json!("Approved and added D-1 A");
+    continue_answered(&mut t);
+    assert_eq!(t["runs"][0]["state"], "running");
+    assert_eq!(t["runs"][0]["reply"]["questions"][0]["answer"], "Approved and added D-1 A");
+    message(&w, &mut t, &json!({"kind":"agent","task":"t1","run":"r1","command":"note","text":"Noted."})).unwrap();
+    continue_answered(&mut t);
+    assert_eq!(t["runs"][0]["state"], "waiting", "a discussion waiting for a note stays waiting");
+}
+

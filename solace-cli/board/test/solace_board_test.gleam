@@ -2306,3 +2306,42 @@ pub fn a_finished_run_in_a_live_list_picks_finished_test() {
   board.tasks_sound([], [ended], False, True, True)
   |> should.equal("")
 }
+
+/// A workspace lane's cards sit in one stack, which the browser keeps under
+/// the column bar; a stack too tall for the visible area scrolls with its
+/// lane. The single-project board keeps its cards in the columns as before.
+pub fn columns_hold_their_cards_in_view_test() {
+  let model = deps_board() |> put_task("a", "1", "Held", "planning", "")
+  let html = board.view(model) |> element.to_string
+  html |> string.contains("<div class=\"stack\">") |> should.be_true
+  let css =
+    html
+    |> string.split("</style>")
+    |> list.first
+    |> result.unwrap("")
+  css
+  |> string.contains(
+    ".lane .stack{position:sticky;top:var(--lane-bar,38px);z-index:4}",
+  )
+  |> should.be_true
+  css
+  |> string.contains(".lane .stack.tall{position:static}")
+  |> should.be_true
+  // A project on its own has no column bar to hold cards under.
+  let #(one, _) = board.init(Nil)
+  let #(one, _) =
+    board.update(
+      one,
+      board.ProjectsLoaded(
+        "{\"workspace\":false,\"projects\":[{\"dir\":\".\",\"label\":\"shop\",\"name\":\"app\",\"base\":\"\"}],\"found\":[]}",
+      ),
+    )
+  let html = board.view(one) |> element.to_string
+  html |> string.contains("class=\"stack\"") |> should.be_false
+  html
+  |> string.split("</style>")
+  |> list.first
+  |> result.unwrap("")
+  |> string.contains(".lane .stack")
+  |> should.be_false
+}

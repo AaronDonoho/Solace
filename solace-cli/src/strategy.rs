@@ -45,6 +45,8 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "To propose one, send `strategy task|feature|milestone` (the id to edit, none to create) ",
     "and the request's fields as a JSON object in `text`, ",
     "or `strategy vision` with the new vision in `text`, alone in its call; ",
+    "or `strategy decision` with one entry in `text`: a `## <title>` line, what was decided, and a `Why:` line, ",
+    "or `## D-<n> <title>` to change that record; ",
     "the call returns on the human's answer or next message, and says which; a proposal stays open until answered, and an approval's reply gives the new record's id. ",
     "The fields: a task `title`, `body`, `feature`, `milestone`, `dependsOn` (task ids), ",
     "with `scope` (the workspace's project folders, listed in the brief) only when creating; ",
@@ -86,8 +88,6 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "so anything the human should keep goes in a `strategy note`. ",
     "Keep replying until a call says the run has ended, then stop.",
 );
-/// How many decision titles a strategy run's brief lists, the latest.
-const RECENT_DECISIONS: usize = 10;
 /// A strategy run's prompt: its role, the record it started on, the vision, decision titles and notes.
 pub(super) fn strategy_brief(top: &Path, run: &Value, involvement: &str, detail: &str, asking: &str) -> String {
     let mut out = format!(
@@ -123,7 +123,7 @@ pub(super) fn strategy_brief(top: &Path, run: &Value, involvement: &str, detail:
     // The workspace's skills (D-27): role skills in full, the rest listed.
     out += &skills::section_for(&[top], own.then_some(top), "strategy");
     out += &format!("A proposed task's `scope` takes only these project folders: {}.\n", projects.join(", "));
-    out += &recent_decisions(top, own);
+    out += &crate::decisions::section(top, "strategy");
     let notes: Vec<String> = run["notes"]
         .as_array()
         .map(|ns| {
@@ -517,7 +517,7 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
             "strategy show note <task> <notes> [--from <n>] | ",
             "strategy show run <task> <run> [<steps>|all] [--from <n>] or --failed | ",
             "strategy note, with the reply in `text` | strategy wait | ",
-            "strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
+            "strategy task|feature|milestone [<id>], strategy vision or strategy decision, with the proposal in `text`",
         )),
     }
 }
@@ -663,9 +663,10 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "The element is the primitive: a design is screens or diagrams and the elements in them, not files, modules or symbols. ",
     "An architecture design's diagram is a top-level `flow` element holding `node` and `edge` elements: ",
     "a node has a `label` and description, and an edge names the `from` and `to` nodes. ",
-    "You change a design only through a proposal the human accepts; a proposal is never applied by itself. ",
-    "An Approve answer means the design was saved and names its version; a refusal means the design changed after you proposed it, ",
-    "so propose it again; a Reject answer means nothing was saved. ",
+    "Every change you propose is checked and saved at once as a new version with your run as its source; there is no Accept or Reject. ",
+    "Read a design with `design show <id>` before you change it: a design that gained a version since you read it is refused, ",
+    "so read it again and propose again. An invalid change is refused and nothing is saved; ",
+    "a change identical to the saved design saves no version. ",
     "Ground what you propose in the designs, code and decisions you read, and say plainly what is uncertain ",
     "rather than filling it in. ",
     "When something is missing, make the smallest grounded assumption, name it in one line, and ask only when ",
@@ -680,7 +681,8 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "(a task's notes with `strategy show note`, its run log with `strategy show run`); ",
     "add `--project <folder>` for a project below the root. ",
     "Propose a change with `design propose [<id>]`: the id of the design to change, or none to create one, ",
-    "and the operations as a JSON object in `text`; it is alone in its call and waits for the human's answer, as `design note` does. ",
+    "and the operations as a JSON object in `text`; it is alone in its call and replies at once with the saved version. ",
+    "A proposal does not wait; `design note` waits for the human. ",
     "Cite code by name (`lockdown.dispatch`), not `file:line`: line numbers move. ",
     "Name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
     "written bare and never inside backticks: a bare reference renders as a link with the record's title. ",
@@ -694,29 +696,6 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "Text outside `design note` shows only in this run's live transcript on the page. ",
     "Keep replying until a call says the run has ended, then stop.",
 );
-
-/// The most recent decision titles for a workspace brief, and how to read the rest.
-fn recent_decisions(top: &Path, own: bool) -> String {
-    let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
-    let titles: Vec<String> =
-        decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
-    if titles.is_empty() {
-        return String::new();
-    }
-    let how = if own {
-        "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one"
-    } else {
-        "titles only: the file is in no project, so this run can't read it"
-    };
-    // The most recent only, so the brief stays short as decisions accumulate.
-    let earlier = titles.len().saturating_sub(RECENT_DECISIONS);
-    let rest = match earlier {
-        0 => String::new(),
-        n if own => format!("\n… {n} earlier decisions: `grep D-` lists them."),
-        n => format!("\n… {n} earlier decisions not shown."),
-    };
-    format!("\nRecent decisions (titles from DECISIONS.md; {how}):\n{}{rest}\n", titles[earlier..].join("\n"))
-}
 
 /// A design run's prompt: its role, the vision, personas, decision titles and notes.
 /// Kept short, and it names only the commands the run can use (D-240).
@@ -735,7 +714,7 @@ pub(super) fn design_brief(top: &Path, run: &Value, _involvement: &str, _detail:
     }
     out += &super::briefs::personas_section(top);
     let own = workspace::members(top).unwrap_or_default().iter().any(|p| p == ".");
-    out += &recent_decisions(top, own);
+    out += &crate::decisions::section(top, "design");
     // The workspace's skills (D-27), through the designer role's kind.
     out += &skills::section_for(&[top], own.then_some(top), "design");
     let notes: Vec<String> = run["notes"]
@@ -915,16 +894,10 @@ pub(crate) fn design_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn 
             if text.trim().is_empty() {
                 return err("E7001", "design propose needs the operations in `text`");
             }
-            // Checked now as the copy would be; applied only when the human accepts.
-            let question = tasks::strategy::design_proposal(top, rid, id, &text)?;
-            let sent = tasks::send(top, json!({"kind":"strategy_propose","run":rid,"question":question}))?;
-            if !tasks::applied(top, &sent) {
-                return Ok(format!("{}\n", tasks::QUEUED));
-            }
-            if tasks::rejected(top, &sent) {
-                return err("E7001", REJECTED);
-            }
-            wait_design(top, rid, Some(super::delivery::wait_limit()))
+            // Each change is checked and saved as a version now; there is no
+            // Accept or Reject.
+            let reply = tasks::strategy::design_proposal(top, rid, id, &text)?;
+            Ok(format!("{reply}\n"))
         }
         ["design", "wait"] => wait_design(top, rid, Some(super::delivery::wait_limit())),
         _ => usage("design note, with the reply in `text` | design wait | design propose [<id>], with the operations in `text`"),

@@ -1,4 +1,5 @@
 import design
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -68,9 +69,9 @@ pub fn each_tab_lists_only_its_own_designs_test() {
       ),
     )
   assert design.designs_for(model, design.Architecture)
-    == [design.Design("fedcba9876543210", "Plan", design.Architecture)]
+    == [design.Design("fedcba9876543210", "Plan", design.Architecture, 0)]
   assert design.designs_for(model, design.UiUx)
-    == [design.Design("0123456789abcdef", "Home", design.UiUx)]
+    == [design.Design("0123456789abcdef", "Home", design.UiUx, 0)]
 }
 
 pub fn a_tab_with_no_designs_says_so_test() {
@@ -89,9 +90,9 @@ pub fn picking_a_design_opens_it_test() {
   let #(model, _) =
     design.update(model, design.SelectDesign("0123456789abcdef"))
   assert design.open_design(model)
-    == Some(design.Design("0123456789abcdef", "Home", design.UiUx))
+    == Some(design.Design("0123456789abcdef", "Home", design.UiUx, 0))
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Home</h2>")
+  assert string.contains(html, "Home</button>")
 }
 
 pub fn an_address_round_trips_the_open_design_test() {
@@ -147,7 +148,7 @@ pub fn a_live_design_change_updates_the_list_test() {
       ),
     )
   assert design.designs_for(model, design.Architecture)
-    == [design.Design("fedcba9876543210", "Plan", design.Architecture)]
+    == [design.Design("fedcba9876543210", "Plan", design.Architecture, 0)]
 }
 
 pub fn an_address_design_loads_before_the_list_test() {
@@ -158,7 +159,7 @@ pub fn an_address_design_loads_before_the_list_test() {
     design.update(model, design.DesignLoaded(id, a_ui_design("screen")))
   let #(model, _) = design.update(model, design.DesignsLoaded(a_design_list()))
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Home</h2>")
+  assert string.contains(html, "Home</button>")
   assert string.contains(html, "data-design-id=\"screen\"")
 }
 
@@ -173,7 +174,7 @@ pub fn a_design_loads_and_draws_test() {
   let #(model, _) =
     design.update(model, design.DesignLoaded(id, a_ui_design("screen")))
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Home</h2>")
+  assert string.contains(html, "Home</button>")
   assert string.contains(html, "data-design-id=\"screen\"")
   assert string.contains(html, "data-design-id=\"content\"")
   assert list.length(string.split(html, "data-design-id=\"screen\"")) == 2
@@ -196,7 +197,7 @@ pub fn a_failed_design_load_shows_a_message_test() {
       ),
     )
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Home</h2>")
+  assert string.contains(html, "Home</button>")
   assert string.contains(html, "This design could not be loaded.")
   assert design.designs_for(model, design.UiUx) != []
 }
@@ -417,7 +418,11 @@ fn a_design_list_of(designs: List(#(String, String))) -> String {
   <> string.join(
     list.map(designs, fn(design) {
       let #(id, title) = design
-      "{\"id\":\"" <> id <> "\",\"title\":\"" <> title <> "\",\"tab\":\"ui\"}"
+      "{\"id\":\""
+      <> id
+      <> "\",\"title\":\""
+      <> title
+      <> "\",\"tab\":\"ui\",\"version\":0}"
     }),
     ",",
   )
@@ -521,7 +526,7 @@ pub fn clicking_a_version_opens_its_design_test() {
   let #(model, request) = design.update(model, design.ViewVersion(id, 1))
   assert request != effect.none()
   assert design.open_design(model)
-    == Some(design.Design(id, "Home", design.UiUx))
+    == Some(design.Design(id, "Home", design.UiUx, 0))
 }
 
 pub fn a_restore_adds_a_version_test() {
@@ -1061,7 +1066,7 @@ pub fn an_architecture_design_draws_its_flow_test() {
   let #(model, _) =
     design.update(model, design.DesignLoaded(id, an_architecture_design()))
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Plan</h2>")
+  assert string.contains(html, "Plan</button>")
   assert string.contains(html, "data-design-id=\"flow\"")
   assert string.contains(html, "data-design-id=\"start\"")
   assert string.contains(html, "data-design-id=\"end\"")
@@ -1089,7 +1094,7 @@ pub fn an_architecture_load_failure_shows_the_servers_reason_test() {
       ),
     )
   let html = element.to_string(design.view(model))
-  assert string.contains(html, "<h2>Plan</h2>")
+  assert string.contains(html, "Plan</button>")
   assert string.contains(html, "unknown")
   assert !string.contains(html, "E7023")
   assert !string.contains(html, "data-design-id")
@@ -1120,16 +1125,24 @@ pub fn an_architecture_version_draws_its_flow_test() {
   assert string.contains(html, "data-design-id=\"start\"")
   assert string.contains(html, "data-design-id=\"step\"")
   assert !string.contains(html, "Restore version 1")
+  assert !string.contains(html, "class=\"design-changes\"")
+  assert !string.contains(html, ">Preview<")
   let #(model, _) = design.update(model, design.ViewVersion(id, 2))
   let different =
     "{\"number\":2,\"time\":1600000000,\"source\":{\"kind\":\"human\"},\"design\":"
     <> string.replace(an_architecture_design(), "Start", "Begin")
     <> "}"
   let #(model, _) = design.update(model, design.VersionLoaded(id, 2, different))
-  assert string.contains(
-    element.to_string(design.view(model)),
-    "Restore version 2",
-  )
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 2, a_version_at(1, an_architecture_design())),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "class=\"design-changes\"")
+  assert string.contains(html, "design-change-changed")
+  assert !string.contains(html, ">Preview<")
+  assert string.contains(html, "Restore version 2")
 }
 
 fn a_create_proposal_model() -> design.Model {
@@ -1498,4 +1511,384 @@ fn tag_of(html: String, id: String) -> String {
       }
     Error(_) -> ""
   }
+}
+
+fn a_design_list_versioned(version: Int) -> String {
+  "{\"designs\":[{\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"version\":"
+  <> int.to_string(version)
+  <> "}]}"
+}
+
+pub fn a_live_version_change_refreshes_an_expanded_entry_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(1)),
+    )
+  let #(model, _) = design.update(model, design.CaughtUp)
+  let #(model, _) = design.update(model, design.ToggleHistory(id))
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(id, a_version_list()))
+  let #(model, request) =
+    design.update(model, design.Live(a_design_list_versioned(2)))
+  assert request != effect.none()
+  assert list.contains(model.expanded, id)
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(id, a_version_list_with_four()))
+  assert string.contains(element.to_string(design.view(model)), "Version 4")
+}
+
+pub fn a_live_version_change_refreshes_an_expanded_entry_with_an_open_design_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(1)),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) = design.update(model, design.CaughtUp)
+  let #(model, _) = design.update(model, design.ToggleHistory(id))
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(id, a_version_list()))
+  let #(model, request) =
+    design.update(model, design.Live(a_design_list_versioned(2)))
+  assert request != effect.none()
+  assert list.contains(model.expanded, id)
+  assert design.open_design(model)
+    == Some(design.Design(id, "Home", design.UiUx, 2))
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(id, a_version_list_with_four()))
+  assert string.contains(element.to_string(design.view(model)), "Version 4")
+}
+
+pub fn the_title_becomes_a_text_box_and_saves_the_new_title_test() {
+  let model = a_design_with_history()
+  let #(model, _) = design.update(model, design.RenameStart)
+  assert model.renaming == Some("Home")
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "design-title-input",
+  )
+  let #(model, request) = design.update(model, design.RenameSaved("Homepage"))
+  assert request != effect.none()
+  assert model.renaming == None
+  let #(model, _) = design.update(model, design.RenameStart)
+  let #(model, _) = design.update(model, design.RenameKey("Escape"))
+  assert model.renaming == None
+}
+
+pub fn delete_asks_then_closes_the_design_and_undo_brings_it_back_test() {
+  let id = "0123456789abcdef"
+  let model = a_design_with_history()
+  let #(model, _) = design.update(model, design.DeleteAsk)
+  assert model.confirm_delete
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "Delete this design and all its versions?",
+  )
+  let #(model, request) = design.update(model, design.Delete)
+  assert request != effect.none()
+  assert !model.confirm_delete
+  let #(model, _) =
+    design.update(model, design.Deleted(id, a_design_list_of([])))
+  assert model.open == ""
+  assert model.undo == Some(id)
+  assert design.open_design(model) == None
+  assert string.contains(element.to_string(design.view(model)), "Undo</button>")
+  let #(model, request) = design.update(model, design.UndoDelete(id))
+  assert request != effect.none()
+  let #(model, _) = design.update(model, design.Undone(a_design_list()))
+  assert model.undo == None
+  assert list.any(design.designs_for(model, design.UiUx), fn(design) {
+    design.id == id
+  })
+  let #(model, _) =
+    design.update(model, design.Deleted(id, a_design_list_of([])))
+  assert string.contains(element.to_string(design.view(model)), "Undo</button>")
+  let #(model, _) = design.update(model, design.UndoExpired(id))
+  assert model.undo == None
+  assert !string.contains(
+    element.to_string(design.view(model)),
+    "Undo</button>",
+  )
+}
+
+pub fn deleting_a_design_drops_its_waiting_notes_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Move it")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  assert model.panel.notes != []
+  let #(model, _) =
+    design.update(model, design.Deleted(id, a_design_list_of([])))
+  assert model.panel.notes == []
+}
+
+pub fn deleting_one_design_keeps_another_designs_history_test() {
+  let a = "0123456789abcdef"
+  let b = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(a))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(a, a_ui_design("screen")))
+  let #(model, _) = design.update(model, design.ToggleHistory(b))
+  let #(model, _) =
+    design.update(model, design.HistoryLoaded(b, a_version_list()))
+  let #(model, _) =
+    design.update(model, design.Deleted(a, a_design_list_of([#(b, "Plan")])))
+  assert model.open == ""
+  assert list.contains(model.expanded, b)
+  assert list.any(model.histories, fn(history) { history.id == b })
+  assert list.any(design.designs_for(model, design.UiUx), fn(design) {
+    design.id == b
+  })
+}
+
+pub fn deleting_another_design_keeps_an_open_proposals_changes_test() {
+  let a = "0123456789abcdef"
+  let b = "fedcba9876543210"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(b))
+  let #(model, _) =
+    design.update(model, design.Panel(panel.Replied(True, a_create_run())))
+  assert string.contains(element.to_string(design.view(model)), "New")
+  let #(model, _) =
+    design.update(model, design.Deleted(a, a_design_list_of([#(b, "Plan")])))
+  assert model.open == b
+  assert string.contains(element.to_string(design.view(model)), "New")
+}
+
+pub fn a_failed_delete_keeps_the_design_open_test() {
+  let id = "0123456789abcdef"
+  let model = a_design_with_history()
+  let #(model, _) = design.update(model, design.DeleteAsk)
+  let #(model, _) =
+    design.update(
+      model,
+      design.Deleted(
+        id,
+        "{\"code\":\"E7001\",\"message\":\"E7001 the design could not be deleted\"}",
+      ),
+    )
+  assert model.open == id
+  assert model.undo == None
+  assert !model.confirm_delete
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "could not be deleted",
+  )
+}
+
+pub fn loading_a_list_keeps_a_note_for_a_design_it_does_not_list_test() {
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.Panel(panel.NoteText("Keep me")),
+    )
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote("deadbeefdeadbeef", ["gone"])),
+    )
+  let #(model, _) = design.update(model, design.DesignsLoaded(a_design_list()))
+  assert model.panel.notes
+    == [panel.Note("deadbeefdeadbeef", ["gone"], "Keep me")]
+}
+
+pub fn a_live_version_change_reloads_the_open_design_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(1)),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) = design.update(model, design.CaughtUp)
+  let #(_, request) =
+    design.update(model, design.Live(a_design_list_versioned(2)))
+  assert request != effect.none()
+}
+
+pub fn the_note_panel_is_see_through_and_movable_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let page = element.to_string(design.view(model))
+  assert string.contains(
+    page,
+    "border:2px solid #c2410c;opacity:0.5;box-shadow",
+  )
+  assert string.contains(page, "class=\"design-note-handle\"")
+  assert string.contains(page, "data-note-handle>Move</div>")
+  assert string.contains(page, ">Move<")
+}
+
+pub fn the_add_note_button_uses_the_shared_button_look_test() {
+  let #(model, _) =
+    design.update(a_preview_model(), design.ElementClicked("go", False))
+  let page = element.to_string(design.view(model))
+  assert string.contains(page, solace_task.control_styles)
+  assert string.contains(
+    page,
+    ".design-note button{align-self:flex-end;padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}",
+  )
+  assert !string.contains(page, ".design-note button:disabled")
+  assert !string.contains(page, "background:#c2410c;border:1px solid #c2410c")
+}
+
+fn a_version_at(number: Int, drawing: String) -> String {
+  "{\"number\":"
+  <> int.to_string(number)
+  <> ",\"time\":1600000000,\"source\":{\"kind\":\"human\"},\"design\":"
+  <> drawing
+  <> "}"
+}
+
+pub fn every_version_after_the_first_shows_changes_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(a_design_with_history(), design.ViewVersion(id, 2))
+  let #(model, _) =
+    design.update(
+      model,
+      design.VersionLoaded(id, 2, a_version_at(2, a_ui_design("second"))),
+    )
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 2, a_version_at(1, a_ui_design("first"))),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "class=\"design-changes\"")
+  assert string.contains(html, "aria-label=\"Hide changes\"")
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-added design-wireframe\" data-design-id=\"second\"",
+  )
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-removed design-wireframe\" data-design-id=\"first\"",
+  )
+  let #(model, _) = design.update(model, design.ViewVersion(id, 1))
+  let #(model, _) =
+    design.update(
+      model,
+      design.VersionLoaded(id, 1, a_version_at(1, a_ui_design("first"))),
+    )
+  let html = element.to_string(design.view(model))
+  assert !string.contains(html, "class=\"design-changes\"")
+}
+
+pub fn the_open_design_shows_changes_against_the_previous_version_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(2)),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_ui_design("second")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 2, a_version_at(1, a_ui_design("first"))),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "class=\"design-changes\"")
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-added design-wireframe\" data-design-id=\"second\"",
+  )
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-removed design-wireframe\" data-design-id=\"first\"",
+  )
+  let #(single, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(1)),
+    )
+  let #(single, _) = design.update(single, design.SelectDesign(id))
+  let #(single, _) =
+    design.update(single, design.DesignLoaded(id, a_ui_design("only")))
+  let html = element.to_string(design.view(single))
+  assert !string.contains(html, "class=\"design-changes\"")
+}
+
+pub fn a_history_version_previews_its_own_screens_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(a_design_with_history(), design.ViewVersion(id, 2))
+  let #(model, _) =
+    design.update(
+      model,
+      design.VersionLoaded(id, 2, a_version_at(2, a_linked_design())),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, ">Preview<")
+  assert string.contains(html, "data-design-id=\"one\"")
+  assert string.contains(html, "data-design-id=\"two\"")
+  let #(model, _) = design.update(model, design.Preview)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"one\"")
+  assert !string.contains(html, "data-design-id=\"two\"")
+  assert string.contains(html, ">Exit preview<")
+  let #(model, _) = design.update(model, design.PreviewClick("go"))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"two\"")
+  assert !string.contains(html, "data-design-id=\"one\"")
+}
+
+pub fn a_previous_version_for_an_older_shown_version_marks_no_changes_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list_versioned(1)),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_ui_design("first")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 1, a_version_at(0, a_ui_design("zeroth"))),
+    )
+  let #(model, _) =
+    design.update(model, design.DesignsLoaded(a_design_list_versioned(3)))
+  let html = element.to_string(design.view(model))
+  assert !string.contains(html, "data-design-id=\"zeroth\"")
+  assert !string.contains(html, "class=\"design-element design-change-removed")
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_ui_design("third")))
+  let html = element.to_string(design.view(model))
+  assert !string.contains(html, "class=\"design-element design-change-added")
+  assert !string.contains(html, "class=\"design-element design-change-removed")
+  let #(model, _) =
+    design.update(
+      model,
+      design.PreviousLoaded(id, 3, a_version_at(2, a_ui_design("second"))),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "class=\"design-changes\"")
+  assert string.contains(
+    html,
+    "class=\"design-element design-change-removed design-wireframe\" data-design-id=\"second\"",
+  )
+  assert !string.contains(html, "data-design-id=\"first\"")
 }

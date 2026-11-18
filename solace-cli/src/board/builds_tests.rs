@@ -338,11 +338,14 @@ fn a_failed_build_restores_the_version_files() {
     let root = Scratch::new().with(&[
         ("solace.toml", "projects = [\"app\"]\n"),
         ("app/solace.toml", "[build]\nsteps = [{ name = \"fail\", run = [\"sh\", \"-c\", \"false\"] }]\n"),
+        ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"),
         ("app/gleam.toml", "name = \"app\"\nversion = \"0.1.0\"\n"),
+        ("app/Cargo.lock", "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n"),
     ]);
     let started = start(&root, &json!({"version": "0.2.0"})).unwrap();
     assert_eq!(started["version"], "0.2.0");
-    assert_eq!(started["versionFiles"][0]["before"], "version = \"0.1.0\"");
+    let files = started["versionFiles"].as_array().unwrap();
+    assert!(files.iter().any(|f| f["file"] == "Cargo.lock" && f["before"] == "version = \"0.1.0\"" && f["after"] == "version = \"0.2.0\""));
     let id = started["id"].as_str().unwrap();
     let end = Instant::now() + Duration::from_secs(10);
     while get(&root, id).unwrap()["state"] == "running" && Instant::now() < end {
@@ -352,6 +355,10 @@ fn a_failed_build_restores_the_version_files() {
     assert_eq!(build["state"], "failed");
     assert_eq!(build["versionsRestored"], true);
     assert_eq!(fs::read_to_string(root.join("app/gleam.toml")).unwrap(), "name = \"app\"\nversion = \"0.1.0\"\n");
+    assert_eq!(
+        fs::read_to_string(root.join("app/Cargo.lock")).unwrap(),
+        "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n"
+    );
 }
 
 #[test]
@@ -457,4 +464,53 @@ fn an_interrupted_build_restores_the_version_files() {
     let build = get(&root, "b1").unwrap();
     assert_eq!(build["state"], "failed");
     assert_eq!(build["versionsRestored"], true);
+}
+
+#[test]
+fn a_build_records_outputs_named_for_its_version() {
+    let _serial = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"app\"]\n"),
+        (
+            "app/solace.toml",
+            concat!(
+                "[build]\n",
+                "outputs = [\"out-{version}.js\"]\n",
+                "steps = [{ name = \"build\", run = [\"sh\", \"-c\", \"grep -q 'version = \\\"0.2.0\\\"' gleam.toml && printf built > out-0.2.0.js\"] }]\n"
+            ),
+        ),
+        ("app/gleam.toml", "name = \"app\"\nversion = \"0.1.0\"\n"),
+        ("app/out-0.1.0.js", "old\n"),
+    ]);
+    let started = start(&root, &json!({"version": "0.2.0"})).unwrap();
+    let id = started["id"].as_str().unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while get(&root, id).unwrap()["state"] == "running" && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(get(&root, id).unwrap()["state"], "passed");
+    let release = crate::jsonx::read_opt(&root.join("build-output/0.2.0/release.json")).unwrap();
+    let paths: Vec<&str> = release["artifacts"].as_array().unwrap().iter().map(|a| a["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["app/out-0.2.0.js"]);
+}
+
+#[test]
+fn a_build_with_a_refused_version_runs_no_step() {
+    let _serial = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"app\"]\n"),
+        (
+            "app/solace.toml",
+            concat!(
+                "[build]\n",
+                "outputs = [\"out.js\"]\n",
+                "steps = [{ name = \"build\", run = [\"sh\", \"-c\", \"printf ran > ran\"] }]\n"
+            ),
+        ),
+        ("app/gleam.toml", "name = \"app\"\nversion = \"0.1.0\"\n"),
+    ]);
+    let e = start(&root, &json!({"version": "1.2"})).unwrap_err();
+    assert!(e.0.contains("not semver"), "{}", e.0);
+    assert!(!root.join("app/ran").exists());
+    assert!(listed(&root).is_empty());
 }

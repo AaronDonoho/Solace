@@ -79,7 +79,6 @@ pub type Msg {
   Send
   Answer(String, String)
   End
-  Stop
   Replied(Bool, String)
   Show(String)
   Loaded(Int, String, String)
@@ -256,8 +255,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Start -> start(model)
     Send -> send(model)
     Answer(qid, option) -> answer(model, qid, option)
-    End -> finish(model, True)
-    Stop -> finish(model, False)
+    End -> finish(model)
     // The reply's run is shown, and its transcript fetched again.
     Replied(clears, text) ->
       case json.parse(text, plan_panel.decoder()) {
@@ -507,7 +505,6 @@ pub fn view(model: Model) -> Element(Msg) {
       on_answer: Answer,
       on_show: Show,
       on_end: End,
-      on_stop: Stop,
       at_bottom: model.at_bottom,
       new_message: model.new_message,
       on_scroll: Scrolled,
@@ -562,16 +559,12 @@ fn answer(model: Model, qid: String, option: String) -> #(Model, Effect(Msg)) {
   }
 }
 
-fn finish(model: Model, ending: Bool) -> #(Model, Effect(Msg)) {
+fn finish(model: Model) -> #(Model, Effect(Msg)) {
   case shown(model) {
     Some(run) ->
       send_request(
         model,
-        plan_panel.run_path(settings(), run.id)
-          <> case ending {
-          True -> "/end"
-          False -> "/stop"
-        },
+        plan_panel.run_path(settings(), run.id) <> "/end",
         json.object([]),
         False,
       )
@@ -1033,4 +1026,13 @@ fn without(notes: List(Note), sent: Note) -> List(Note) {
     [first, ..rest] if first == sent -> rest
     [first, ..rest] -> [first, ..without(rest, sent)]
   }
+}
+
+/// Drops notes that point into `id`, so a deleted design cannot stop the next
+/// message.
+pub fn forget_design(model: Model, id: String) -> Model {
+  Model(
+    ..model,
+    notes: list.filter(model.notes, fn(note) { note.design != id }),
+  )
 }

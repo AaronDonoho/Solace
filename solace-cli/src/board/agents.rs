@@ -635,7 +635,7 @@ const ZONE_DIRS: [&str; 2] = ["/usr/share/zoneinfo", "/var/db/timezone/zoneinfo"
 /// `UTC` and `GMT` need no process. A zone this computer does not know has no
 /// offset: `date +%z` answers `+0000` for one, as if it were UTC. A zone
 /// name must be a zone file: a folder such as `America` is not one.
-pub(super) fn zone_offset(zone: Option<&str>, at: i64) -> Option<i64> {
+pub(crate) fn zone_offset(zone: Option<&str>, at: i64) -> Option<i64> {
     if matches!(zone, Some("UTC" | "GMT")) {
         return Some(0);
     }

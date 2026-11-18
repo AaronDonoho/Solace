@@ -384,3 +384,14 @@ fn a_table_style_dependency_is_a_source_part() {
     assert!(names.contains(&"table/src".to_string()), "{names:?}");
     assert!(!names.iter().any(|name| name.starts_with("commented/")), "{names:?}");
 }
+
+/// D-251: the desktop bundles are named for the version a build writes.
+#[test]
+fn the_desktop_outputs_are_named_for_the_built_version() {
+    let top = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let app = of(top, "solace-app").unwrap().unwrap();
+    assert_eq!(
+        outputs_at(&app.outputs, "0.1.1"),
+        ["target/release/bundle/deb/Solace_0.1.1_amd64.deb", "target/release/bundle/appimage/Solace_0.1.1_amd64.AppImage",]
+    );
+}

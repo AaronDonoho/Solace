@@ -133,7 +133,7 @@ pub type Question {
     text: String,
     options: List(String),
     answer: String,
-    settings: Option(#(String, String)),
+    settings: Option(QuestionSettings),
   )
 }
 
@@ -269,7 +269,7 @@ pub type Model {
     model_source: ModelSource,
     text: String,
     /// Whether the human opened the Notes tab's editor, through Add note or a
-    /// saved draft. A discussion or a waiting question opens it separately.
+    /// saved draft. A discussion opens it separately.
     writing: Bool,
     /// Whether the note editor's send waits for its reply: its send is
     /// disabled meanwhile, so one click makes one request.
@@ -1084,11 +1084,9 @@ fn question_decoder() -> decode.Decoder(Question) {
   use settings <- decode.optional_field(
     "settings",
     None,
-    decode.optional({
-      use base <- decode.field("base", decode.string)
-      use proposed <- decode.field("proposed", decode.string)
-      decode.success(#(base, proposed))
-    }),
+    decode.optional(
+      decode.one_of(settings_file_decoder(), [decision_decoder()]),
+    ),
   )
   decode.success(Question(id, text, options, answer, settings))
 }
@@ -1643,10 +1641,11 @@ fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
     writing,
     list.map(list.reverse(t.questions), fn(q) {
       let #(diff, other) = case q.settings {
-        Some(#(current, proposed)) -> #(
+        Some(SettingsFile(current, proposed)) -> #(
           [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
           "Reject with the editor's text",
         )
+        Some(DecisionEntry(_, _)) -> #([], "Reject with the editor's text")
         None -> #([], ui_label("answer"))
       }
       let free_text = case q.settings {
@@ -1677,9 +1676,9 @@ fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
 }
 
 /// Newest first, under the Add note button while the editor is closed, and
-/// under the editor once it opens: for Add note, a saved draft, a discussion
-/// still going, or a question still waiting. Each note keeps its position,
-/// which names it to the API.
+/// under the editor once it opens: for Add note, a saved draft, or a
+/// discussion still going. Each note keeps its position, which names it to
+/// the API.
 fn notes_view(model: Model, t: Task) -> List(Element(Msg)) {
   let open = note_editor_open(model, t)
   let notes =
@@ -4795,13 +4794,32 @@ fn confirm_view(model: Model, t: Task) -> Element(Msg) {
 }
 
 /// Whether the Notes tab shows its editor without Add note: the human opened
-/// it, a discussion is still going, or a question is still waiting.
+/// it, or a discussion is still going.
 fn note_editor_open(model: Model, t: Task) -> Bool {
-  let waiting = case first_unanswered(t) {
-    Some(_) -> True
-    None -> False
-  }
   model.writing
-  || waiting
   || list.any(t.runs, fn(r) { r.kind == "discuss" && r.state != "ended" })
+}
+
+/// A question's proposal details: a settings file's change, or an entry for
+/// DECISIONS.md that is added when it is approved.
+pub type QuestionSettings {
+  /// The settings file as it is and as it would become.
+  SettingsFile(base: String, proposed: String)
+  /// A decision's title and entry body.
+  DecisionEntry(title: String, body: String)
+}
+
+fn settings_file_decoder() -> decode.Decoder(QuestionSettings) {
+  use base <- decode.field("base", decode.string)
+  use proposed <- decode.field("proposed", decode.string)
+  decode.success(SettingsFile(base, proposed))
+}
+
+fn decision_decoder() -> decode.Decoder(QuestionSettings) {
+  use decision <- decode.field("decision", {
+    use title <- decode.field("title", decode.string)
+    use body <- decode.field("body", decode.string)
+    decode.success(#(title, body))
+  })
+  decode.success(DecisionEntry(decision.0, decision.1))
 }

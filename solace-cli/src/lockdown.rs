@@ -162,6 +162,13 @@ pub fn dispatch(
                 patch_with_draft(store, v, Some(id), &raw, budget, replaced)
             })());
         }
+        // The decision log lives at the board's top; read it from any project.
+        if a[0] == "read" && a.get(1).is_some_and(|p| crate::file_name(Path::new(p)) == crate::decisions::FILE) {
+            let top = crate::scope::top(root);
+            if top != *root {
+                return Some(read_part(&top, crate::decisions::FILE, &a[2..], budget).map(|(text, _)| text));
+            }
+        }
         // D-102: `files` and `read` take a list of paths, answered in order;
         // `write` and `remove` change one file and refuse a list.
         // A `--lines` or `--tail` range belongs to a single path.
@@ -296,6 +303,16 @@ pub fn dispatch(
                         if t == "protected" {
                             if in_skills(v, &name) {
                                 return error("E6002", &name, "skills are the humans' house rules: `read` them; agents can't change them");
+                            }
+                            if name == crate::decisions::FILE {
+                                return error(
+                                    "E6002",
+                                    &name,
+                                    concat!(
+                                        "the decision log changes only through an approved decision: in a run, `task decision` ",
+                                        "proposes one with a `## <title>` line, what was decided, and a `Why:` line"
+                                    ),
+                                );
                             }
                             return error(
                                 "E6002",
@@ -444,7 +461,7 @@ pub fn dispatch(
             }
             store.materialize(&store.index()?)?;
             let fingerprint = (a[0] == "run")
-                .then(|| recipe::last_step_outputs(v, a.get(1).copied().unwrap_or("")))
+                .then(|| recipe::last_step_outputs(root, v, a.get(1).copied().unwrap_or("")))
                 .flatten()
                 .map(|outputs| (outputs, recipe::source_hashes(&scope::top(root), root)));
             let out = command(root, &argv, timeout, budget, a[0] != "format", a[0] == "build" && language::is_rust(root))?;
@@ -486,7 +503,6 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 "shell_tool",
                 "unified_exec",
                 "apply_patch_freeform",
-                "multi_agent",
                 "apps",
                 "plugins",
                 "goals",
@@ -501,6 +517,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
             ] {
                 config += &format!("{f} = false\n");
             }
+            config += "[agents]\nenabled = false\n";
             config += &format!(
                 concat!(
                     "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\n",
@@ -2382,11 +2399,11 @@ mod tests {
             "base":"old\n",
             "proposed":"new\n",
         }});
-        crate::board::settings::apply_settings(&root.0, &mut outside).unwrap();
+        crate::board::settings::apply_settings(&root.0, "t1", &mut outside).unwrap();
         assert!(outside["answer"].as_str().unwrap().starts_with("Not applied:"), "{outside}");
         assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
         let mut design_path = serde_json::json!({"settings":{"file":"designs/.gitignore","base":"old\n","proposed":"new\n"}});
-        crate::board::settings::apply_settings(&root.0, &mut design_path).unwrap();
+        crate::board::settings::apply_settings(&root.0, "t1", &mut design_path).unwrap();
         assert!(design_path["answer"].as_str().unwrap().starts_with("Not applied:"), "{design_path}");
         assert_eq!(fs::read_to_string(&design).unwrap(), "old\n");
     }
@@ -2433,6 +2450,18 @@ mod tests {
         let v: toml::Value = open.parse().unwrap();
         assert_eq!(call(&s, &v, &["write", "build-output/new.txt"], "new\n", None).unwrap(), "Wrote build-output/new.txt (1 line)\n");
         assert_eq!(fs::read_to_string(root.join("build-output/new.txt")).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn the_decision_log_is_protected_and_readable() {
+        let (s, v) = fixture();
+        std::fs::write(s.root.join("DECISIONS.md"), "# Decisions\n").unwrap();
+        assert_eq!(crate::lockdown::paths::tier(&s.root, &v, "DECISIONS.md", None), "protected");
+        assert!(crate::lockdown::settings::settings_file(&s.root, "DECISIONS.md"));
+        assert!(call(&s, &v, &["read", "DECISIONS.md"], "", None).unwrap().contains("# Decisions"));
+        let e = call(&s, &v, &["write", "DECISIONS.md"], "## Title\nDo it.\nWhy: x\n", None).unwrap_err();
+        assert!(e.0.contains("decision log") && e.0.contains("`Why:` line"), "{}", e.0);
+        assert!(call(&s, &v, &["remove", "DECISIONS.md"], "", None).is_err());
     }
 }
 

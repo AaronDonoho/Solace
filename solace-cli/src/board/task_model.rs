@@ -574,13 +574,22 @@ fn continue_answered(t: &mut Value) {
     if !t["paused_from"].is_null() || t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null()) {
         return;
     }
-    // A discussion waits for the human's note, not an answer: delivery wakes it.
-    let Some(i) = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting" && r["kind"] != "discuss") else {
+    // A discussion waits for the human's note, not an answer: delivery wakes it,
+    // unless it waits on its own proposal.
+    let Some(i) = t["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|r| r["state"] == "waiting" && (r["kind"] != "discuss" || r["awaits_answer"] == true))
+    else {
         return;
     };
     // The answers go straight to the waiting agent, in any column and any workflow:
     // no workflow action is looked up, and nothing is moved, stamped or replaced.
     t["runs"][i]["state"] = json!("running");
+    if let Some(run) = t["runs"][i].as_object_mut() {
+        run.remove("awaits_answer");
+    }
     let reply = answer_reply(t, &t["runs"][i]);
     t["runs"][i]["reply"] = reply;
     t["attention"] = Value::Null;
@@ -990,6 +999,7 @@ pub(crate) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     notes.remove(i);
                 }
                 ("POST", ["questions", qid]) => {
+                    let title = t["title"].as_str().unwrap_or("").to_string();
                     let q = t["questions"]
                         .as_array_mut()
                         .unwrap()
@@ -1006,7 +1016,7 @@ pub(crate) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     }
                     q["answer"] = json!(answer);
                     if !q["settings"].is_null() && answer == "Approve" {
-                        apply_settings(root, q)?;
+                        apply_settings(root, &title, q)?;
                     }
                     continue_answered(&mut t);
                 }
@@ -1450,6 +1460,10 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
             t["runs"][i]["answers_before"] = json!(answered(t));
             t["questions"].as_array_mut().unwrap().push(m["question"].clone());
             t["runs"][i]["state"] = json!("waiting");
+            // A discussion otherwise waits for a note; this wait ends with the answer.
+            if t["runs"][i]["kind"] == "discuss" {
+                t["runs"][i]["awaits_answer"] = json!(true);
+            }
             hold(t, "an agent proposed a settings change");
             on_event(w, t, "asked")?;
         }

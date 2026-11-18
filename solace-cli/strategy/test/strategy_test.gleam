@@ -38,7 +38,7 @@ pub fn one_tab_is_selected_test() {
   let html = element.to_string(strategy.view(strategy.new(strategy.Tasks)))
   assert list.length(string.split(html, "aria-selected=\"true\"")) == 2
   assert string.contains(html, "id=\"tab-features\"")
-  assert list.length(string.split(html, " hidden")) == 5
+  assert list.length(string.split(html, " hidden")) == 6
 }
 
 fn step(model: strategy.Model, msg: strategy.Msg) -> strategy.Model {
@@ -1320,10 +1320,9 @@ pub fn new_messages_follow_the_human_or_wait_test() {
 }
 
 /// The run bar sits above the conversation, the message box below it. An
-/// open run's bar has End, Stop, Earlier runs and New run, and its box is the
+/// open run's bar has End, Earlier runs and New run, and its box is the
 /// markdown editor, which styles as it is written, with Send; an ended run's
-/// bar has no End or Stop and there is no box; with no run shown, the box
-/// starts one.
+/// bar has no End and there is no box; with no run shown, the box starts one.
 pub fn the_run_bar_holds_the_run_controls_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let open = shown(step(planned(), strategy.ShowPlan("r3")))
@@ -1331,7 +1330,6 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     "class=\"plan-bar\"",
     "Waiting for you · fake",
     ">End</button>",
-    ">Stop</button>",
     "Earlier runs",
     ">New run</button>",
     "class=\"plan-body\"",
@@ -1343,6 +1341,7 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     "class=\"composer-action\"",
   ])
   assert !string.contains(open, ">Send</button>")
+  assert !string.contains(open, ">Stop</button>")
   assert !string.contains(open, ">Preview</button>")
   assert !string.contains(open, "Runs on this")
   let ended = shown(step(planned(), strategy.ShowPlan("r0")))
@@ -1543,6 +1542,7 @@ pub fn tabs_have_no_heading_of_their_own_test() {
   assert !string.contains(page, ">Tasks</h")
   assert !string.contains(page, ">Vision</h")
   assert !string.contains(page, ">Personas</h")
+  assert !string.contains(page, ">Decisions</h")
   assert !string.contains(page, ">Features</h")
   assert !string.contains(page, ">Roadmap</h")
   // The plan panel's heading names the panel, not a tab, and stays.
@@ -4467,4 +4467,30 @@ pub fn ctrl_or_cmd_enter_saves_from_every_strategy_editor_test() {
     |> step(strategy.NewTaskOpen)
     |> step(strategy.NewTaskTitle(" "))
   assert key(untitled, "new-task-text", True, False).task_saving == None
+}
+
+pub fn decisions_tab_lists_records_and_opens_one_test() {
+  assert strategy.tabs()
+    |> list.map(strategy.label)
+    |> string.join(" ")
+    == "Vision Personas Decisions Features Roadmap Tasks"
+  let #(model, _) =
+    strategy.update(
+      strategy.new(strategy.Decisions),
+      strategy.DecisionsLoaded(
+        "{\"decisions\":[{\"id\":\"D-2\",\"title\":\"Two\",\"text\":\"## D-2 Two\\nWhy: x\"},{\"id\":\"D-1\",\"title\":\"One\",\"text\":\"## D-1 One\\nWhy: y\"}]}",
+      ),
+    )
+  assert model.decisions
+    == [
+      strategy.Decision("D-2", "Two", "## D-2 Two\nWhy: x"),
+      strategy.Decision("D-1", "One", "## D-1 One\nWhy: y"),
+    ]
+  let page = element.to_string(strategy.view(model))
+  assert in_order(page, ["D-2 Two", "D-1 One"])
+  let model = step(model, strategy.ShowDecision("D-2"))
+  assert model.decision_open == Some("D-2")
+  assert element.to_string(strategy.view(model))
+    |> string.contains("Why: x")
+  assert step(model, strategy.ShowDecision("D-2")).decision_open == None
 }

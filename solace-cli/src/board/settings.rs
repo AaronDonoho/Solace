@@ -78,8 +78,24 @@ pub fn propose_settings(
     wait_reply(s, tid, rid)
 }
 
-/// Applies an approved settings question, unless the file changed since.
-pub(crate) fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
+/// Applies an approved settings question from task `title`, unless the file changed since.
+pub(crate) fn apply_settings(root: &Path, title: &str, q: &mut Value) -> Result<(), Failure> {
+    if let Some(d) = q["settings"].get("decision") {
+        let entry = crate::decisions::Entry {
+            title: d["title"].as_str().unwrap_or("").to_string(),
+            body: d["body"].as_str().unwrap_or("").to_string(),
+            edit: d["edit"].as_u64().map(|n| n as u32),
+        };
+        let origin = format!("board task \"{title}\"");
+        match crate::decisions::append(&scope::top(root), &entry, "human", &origin, d["base"].as_str()) {
+            Ok(id) => {
+                let what = if entry.edit.is_some() { "changed" } else { "added" };
+                q["answer"] = json!(format!("Approved and {what} {id}"));
+            }
+            Err(e) => q["answer"] = json!(format!("Not applied: {}", e.0)),
+        }
+        return Ok(());
+    }
     let file = q["settings"]["file"].as_str().unwrap_or("solace.toml").to_string();
     let dir = match q["settings"]["project"].as_str() {
         Some(project) => scope::path(&scope::top(root), project),
@@ -122,4 +138,38 @@ pub(crate) fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> 
     }
     q["answer"] = json!("Approved and written");
     Ok(())
+}
+
+/// A run's `write DECISIONS.md`: the entry it proposes is added only when a
+/// human approves it, with its number chosen then.
+pub fn propose_decision(s: &Store, tid: &str, rid: &str, text: &str, reason: Option<&str>, guard: Vec<fs::File>) -> Out {
+    let entry = crate::decisions::entry(text)?;
+    let t = task(&s.root, tid)?;
+    let w = flow(&s.root)?;
+    let top = scope::top(&s.root);
+    let base = entry.edit.map(|n| crate::decisions::current(&top, n)).transpose()?;
+    let why = reason.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("\n\n{r}")).unwrap_or_default();
+    let what = match (entry.edit, &base) {
+        (Some(n), Some(current)) => {
+            format!("Change decision D-{n}{why}\n\nCurrent:\n{current}\n\nProposed:\n## D-{n} {}\n{}", entry.title, entry.body)
+        }
+        _ => format!("Record decision \"{}\"{why}\n\n{}", entry.title, entry.body),
+    };
+    let question = json!({
+        "id": unique_id(),
+        "text": what,
+        "options": ["Approve", "Reject"],
+        "settings": {"decision": {"title": entry.title, "body": entry.body, "edit": entry.edit, "base": base}},
+    });
+    let m = json!({"kind":"settings","task":tid,"run":rid,"question":question});
+    message(&w, &mut t.clone(), &m)?;
+    let sent = tasks::send(&top, m)?;
+    drop(guard);
+    if !tasks::applied(&top, &sent) {
+        return Ok(format!("{}\n", tasks::QUEUED));
+    }
+    if tasks::rejected(&top, &sent) {
+        return err("E7001", REJECTED);
+    }
+    wait_reply(s, tid, rid)
 }

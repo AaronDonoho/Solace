@@ -174,15 +174,10 @@ pub(crate) fn continuation_brief(
                 Err(e) => out += &format!("\nReview context unavailable: {}. Run `task diff` to see the whole task and assess it.\n", e.0),
             }
         }
-        // A discussion runs no checks, so it gets the decision titles instead of the verification record.
-        if kind == "discuss" {
-            let decisions = fs::read_to_string(scope::top(root).join("DECISIONS.md")).unwrap_or_default();
-            let titles: Vec<String> =
-                decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
-            if !titles.is_empty() {
-                out += &format!("\nDecisions (DECISIONS.md; `grep D-<n>` then `read` for a record):\n{}\n", titles.join("\n"));
-            }
-        } else if let Some(checks) = t["verification"].as_object() {
+        // A discussion runs no checks.
+        if kind != "discuss"
+            && let Some(checks) = t["verification"].as_object()
+        {
             let current = review_state(&s, t).ok().and_then(|v| v["context"].as_str().map(str::to_string));
             out += "\nLast recorded verification (rerun stale checks before claiming success):\n";
             for (command, v) in checks {
@@ -203,6 +198,9 @@ pub(crate) fn continuation_brief(
                 out += &format!("{dir}: {id}: {} ({}): view `view --draft {id} --project {dir}`\n", json!(args), drafts::status(current));
             }
         }
+    }
+    if matches!(kind, "work" | "investigate" | "review" | "discuss") {
+        out += &crate::decisions::section(&scope::top(root), kind);
     }
     let workspace = scope::top(root);
     out += &vision_section(&workspace, kind);

@@ -268,6 +268,18 @@ impl Board {
                 let number = crate::design::number(&body["version"])?;
                 return crate::design::restore(&self.top, &view::percent_decode(id), number);
             }
+            ("POST", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/rename")).is_some() => {
+                let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/rename")).unwrap_or("");
+                return crate::design::rename(&self.top, &view::percent_decode(id), body["title"].as_str().unwrap_or(""));
+            }
+            ("POST", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/undo")).is_some() => {
+                let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/undo")).unwrap_or("");
+                return crate::design::undelete(&self.top, &view::percent_decode(id));
+            }
+            ("DELETE", p) if p.starts_with("/designs/") => {
+                let id = view::percent_decode(&p["/designs/".len()..]);
+                return crate::design::delete(&self.top, &id);
+            }
             ("GET", p) if p.starts_with("/designs/") => {
                 let id = view::percent_decode(&p["/designs/".len()..]);
                 return crate::design::show(&self.top, &id);
@@ -960,10 +972,16 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
             let design_runs = strategy.len() >= 2 && strategy[..2] == ["design", "runs"];
-            if matches!(strategy[0], "milestones" | "features" | "personas") || strategy == ["vision"] || runs || design_runs {
+            if matches!(strategy[0], "milestones" | "features" | "personas")
+                || strategy == ["vision"]
+                || strategy == ["decisions"]
+                || runs
+                || design_runs
+            {
                 let result = match read_body(&mut req, BODY_LIMIT) {
                     Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| match strategy[0] {
                         "vision" => tasks::vision_api(&board.top, req.method().as_str(), v),
+                        "decisions" => tasks::strategy::decisions_api(&board.top, req.method().as_str(), v),
                         "personas" => tasks::personas_api(&board.top, req.method().as_str(), &strategy[1..], v),
                         "design" => {
                             let started = req.method().as_str() == "POST" && strategy.len() == 2;

@@ -137,7 +137,7 @@ pub(crate) fn record(top: &Path, build: &Value) -> Result<(), Failure> {
     let mut artifacts = vec![];
     for project in projects(build) {
         let Some(recipe) = crate::recipe::of(top, &project)? else { continue };
-        for output in &recipe.outputs {
+        for output in &crate::recipe::resolved(top, &recipe) {
             let rel = relative(&project, output);
             let bytes = fs::read(crate::scope::path(top, &project).join(output))
                 .map_err(|_| Failure(format!("E7001 release output {rel} is missing"), 1))?;

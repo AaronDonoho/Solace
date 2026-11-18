@@ -4714,21 +4714,55 @@ pub fn a_live_run_hides_agent_buttons_test() {
   ended |> string.contains(">Back to planning</button>") |> should.be_true
 }
 
-/// A question waiting for an answer opens the Notes editor without Add note;
-/// once it is answered the plus returns.
-pub fn the_notes_editor_opens_for_a_waiting_question_test() {
-  let waiting =
+pub fn decision_question_shows_its_text_without_a_diff_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Record decision A\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"decision\":{\"title\":\"A\",\"body\":\"Do A.\"}}}]}",
+    )
+  let #(model, _) = task.update(model, task.Tab("questions"))
+  let rendered = html(model)
+  rendered |> string.contains("Record decision A") |> should.be_true
+  rendered |> string.contains(">Approve</button>") |> should.be_true
+  rendered |> string.contains(">Reject</button>") |> should.be_true
+  rendered |> string.contains("class=\"diff\"") |> should.be_false
+}
+
+/// A waiting question opens the answer editor on Questions; Notes keeps its
+/// Add note button and no editor.
+pub fn a_waiting_question_opens_only_the_questions_editor_test() {
+  let model =
     loaded(
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[]}],\"runs\":[]}",
     )
-  let #(waiting, _) = task.update(waiting, task.Tab("notes"))
-  body(waiting) |> string.contains("id=\"note-text\"") |> should.be_true
-  body(waiting) |> string.contains("class=\"add-note\"") |> should.be_false
-  let answered =
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes) |> string.contains("class=\"add-note\"") |> should.be_true
+  body(notes) |> string.contains("id=\"note-text\"") |> should.be_false
+  let #(questions, _) = task.update(model, task.Tab("questions"))
+  body(questions) |> string.contains("id=\"note-text\"") |> should.be_true
+}
+
+/// A discussion waiting on the human opens the Notes editor; Questions has no
+/// editor.
+pub fn a_discussion_opens_only_the_notes_editor_test() {
+  let model =
     loaded(
-      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[],\"answer\":\"Because\"}],\"runs\":[]}",
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
     )
-  let #(answered, _) = task.update(answered, task.Tab("notes"))
-  body(answered) |> string.contains("id=\"note-text\"") |> should.be_false
-  body(answered) |> string.contains("class=\"add-note\"") |> should.be_true
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes) |> string.contains("id=\"note-text\"") |> should.be_true
+  let #(questions, _) = task.update(model, task.Tab("questions"))
+  body(questions) |> string.contains("id=\"note-text\"") |> should.be_false
+}
+
+/// A waiting question and a discussion together each open their tab's editor.
+pub fn a_question_and_a_discussion_open_their_own_editors_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[]}],\"runs\":[{\"id\":\"r\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
+    )
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes) |> string.contains("id=\"note-text\"") |> should.be_true
+  body(notes) |> string.contains("class=\"add-note\"") |> should.be_false
+  let #(questions, _) = task.update(model, task.Tab("questions"))
+  body(questions) |> string.contains("id=\"note-text\"") |> should.be_true
 }

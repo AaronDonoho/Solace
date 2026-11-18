@@ -122,6 +122,7 @@ pub type Model {
     versions: List(VersionFile),
     versions_agree: Bool,
     version: String,
+    newest: String,
     versions_error: String,
     release: Option(Release),
     desktop: Bool,
@@ -203,6 +204,7 @@ pub fn initial() -> Model {
     versions: [],
     versions_agree: True,
     version: "",
+    newest: "",
     versions_error: "",
     release: None,
     desktop: False,
@@ -302,12 +304,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     VersionsLoaded(text) ->
       case json.parse(text, versions_decoder()) {
-        Ok(ProposedVersions(files, agree, proposal)) -> #(
+        Ok(ProposedVersions(files, agree, proposal, newest)) -> #(
           Model(
             ..model,
             versions: files,
             versions_agree: agree,
             version: proposal,
+            newest: newest,
             versions_error: "",
           ),
           effect.none(),
@@ -854,7 +857,7 @@ fn build_view(model: Model) -> List(Element(Msg)) {
   ]
 }
 
-fn start_disabled(model: Model) -> Bool {
+pub fn start_disabled(model: Model) -> Bool {
   model.starting
   || is_running(model.build)
   || model.version == ""
@@ -1471,7 +1474,12 @@ pub type VersionFile {
 }
 
 pub type ProposedVersions {
-  ProposedVersions(files: List(VersionFile), agree: Bool, proposal: String)
+  ProposedVersions(
+    files: List(VersionFile),
+    agree: Bool,
+    proposal: String,
+    newest: String,
+  )
 }
 
 fn versions_view(model: Model) -> Element(Msg) {
@@ -1488,6 +1496,13 @@ fn versions_view(model: Model) -> Element(Msg) {
     case model.versions_error {
       "" -> element.none()
       message -> error_box(message)
+    },
+    case older(model.version, model.newest) {
+      True ->
+        html.p([attribute.class("version-warning")], [
+          html.text("This version is older than the newest release."),
+        ])
+      False -> element.none()
     },
     html.ul(
       [attribute.class("version-files")],
@@ -1521,5 +1536,34 @@ fn versions_decoder() -> decode.Decoder(ProposedVersions) {
   use files <- decode.field("versions", decode.list(version_file_decoder()))
   use agree <- decode.field("agree", decode.bool)
   use proposal <- decode.field("proposal", decode.string)
-  decode.success(ProposedVersions(files, agree, proposal))
+  use newest <- decode.field("newest", decode.string)
+  decode.success(ProposedVersions(files, agree, proposal, newest))
+}
+
+type Version =
+  #(Int, Int, Int)
+
+fn semver(version: String) -> Option(Version) {
+  case string.split(version, ".") {
+    [major, minor, patch] ->
+      case int.parse(major), int.parse(minor), int.parse(patch) {
+        Ok(major), Ok(minor), Ok(patch) -> Some(#(major, minor, patch))
+        _, _, _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// Whether `version` is valid semver and older than the newest release.
+fn older(version: String, newest: String) -> Bool {
+  case semver(version), semver(newest) {
+    Some(#(major, minor, patch)), Some(#(new_major, new_minor, new_patch)) ->
+      major < new_major
+      || major == new_major
+      && minor < new_minor
+      || major == new_major
+      && minor == new_minor
+      && patch < new_patch
+    _, _ -> False
+  }
 }

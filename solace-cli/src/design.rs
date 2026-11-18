@@ -269,7 +269,13 @@ pub(crate) fn list(top: &std::path::Path) -> Result<Value, Failure> {
         }
         match read_file(&path, &name) {
             Ok(design) => {
-                designs.push(serde_json::json!({"id": design["id"], "title": design["title"], "tab": design["tab"]}));
+                let id = design["id"].as_str().unwrap_or_default();
+                designs.push(serde_json::json!({
+                    "id": design["id"],
+                    "title": design["title"],
+                    "tab": design["tab"],
+                    "version": saved_version(top, id),
+                }));
             }
             Err(e) => invalid.push(serde_json::json!({"file": name, "reason": e.0})),
         }
@@ -317,32 +323,12 @@ pub(crate) enum Source<'a> {
 /// Saves `design` as its workspace's current design, appending a version when
 /// its content differs from the saved one. A differing current design, and the
 /// text of one that can't be parsed, are first kept as a `repo` version.
-pub(crate) fn save(top: &std::path::Path, design: &Value, source: Source<'_>) -> Result<(), Failure> {
+pub(crate) fn save(top: &std::path::Path, design: &Value, source: Source<'_>) -> Result<Option<u64>, Failure> {
     validate(design)?;
-    let id = design["id"].as_str().unwrap_or_default();
     let data = top.join(DATA_DIR);
     std::fs::create_dir_all(&data)?;
     let _lock = crate::fsx::lock_file(&data.join("lock"))?;
-    let dir = top.join(DESIGNS_DIR);
-    let current = read_current(&dir, id)?;
-    if current.design.as_ref() == Some(design) {
-        return Ok(());
-    }
-    let versions = versions_dir(top, id);
-    let first = next_version(&versions)?;
-    let latest = if first > 1 { crate::jsonx::read(&versions.join(format!("{}.json", first - 1))).ok() } else { None };
-    let latest_design = latest.as_ref().and_then(|version| version.get("design"));
-    let design_is_latest = latest_design == Some(design);
-    let latest_raw = if current.raw.is_some() { most_recent_raw(&versions, first)? } else { None };
-    let number = keep_current(&versions, first, &current, latest_design, latest_raw.as_deref())?;
-    let source = match source {
-        Source::Human => serde_json::json!({"kind": "human"}),
-        Source::DesignRun(id) => serde_json::json!({"kind": "run", "id": id}),
-    };
-    if number != first || !design_is_latest {
-        append_design(&versions, number, &source, design)?;
-    }
-    crate::jsonx::replace_pretty(&dir, &format!("{id}.json"), design)
+    save_locked(top, design, source)
 }
 
 fn next_version(dir: &std::path::Path) -> Result<u64, Failure> {
@@ -668,22 +654,7 @@ fn open(top: &std::path::Path, id: &str) -> Result<Value, (u16, Failure)> {
 
 /// `design list | show <id> [--from <element>]`: the workspace's designs, read as the designs page reads them.
 pub(crate) fn command(top: &std::path::Path, args: &[&str], budget: usize) -> Result<String, Failure> {
-    match args {
-        ["list"] => {
-            let designs = list(top)?;
-            Ok(limited(pretty(&designs), budget, "use `design show <id>` for one design."))
-        }
-        ["show", id, rest @ ..] => {
-            let id = id.strip_prefix("design:").unwrap_or(id);
-            let from = from_flag(rest)?;
-            match show(top, id) {
-                Ok(design) => show_page(&design, id, from, budget),
-                Err(e) if e.0.starts_with(UNKNOWN) => Err(Failure(format!("{}; use `design list` to list designs", e.0), e.1)),
-                Err(e) => Err(e),
-            }
-        }
-        _ => crate::failure::usage("design list | design show <id> [--from <element>]; the id may be written `design:<id>`"),
-    }
+    command_with_version(top, args, budget).map(|(text, _)| text)
 }
 
 fn pretty(value: &Value) -> String {
@@ -1089,4 +1060,256 @@ pub(crate) fn resolve_note(top: &std::path::Path, value: &Value) -> Result<Value
         "text": text,
         "elements": elements,
     }))
+}
+
+/// The newest saved version of a design, or zero when it has no history.
+fn saved_version(top: &std::path::Path, id: &str) -> u64 {
+    next_version(&versions_dir(top, id)).map(|next| next.saturating_sub(1)).unwrap_or(0)
+}
+
+/// Where deleted designs wait for Undo, beneath a design's own data.
+const DELETED_DIR: &str = "deleted";
+
+/// How long a deleted design stays available to Undo.
+const UNDO_SECONDS: u64 = 24 * 60 * 60;
+
+/// Renames `id` through the save path, so the old title stays in its versions.
+/// A blank title is refused by validation.
+pub(crate) fn rename(top: &std::path::Path, id: &str, title: &str) -> Result<Value, Failure> {
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    let mut design = show(top, id)?;
+    let title = title.trim();
+    if design["title"].as_str() == Some(title) {
+        return Ok(design);
+    }
+    design["title"] = serde_json::json!(title);
+    save_locked(top, &design, Source::Human)?;
+    Ok(design)
+}
+
+/// Whether `id` has been deleted and not put back by Undo.
+pub(crate) fn deleted(top: &std::path::Path, id: &str) -> bool {
+    deleted_at(top, id).is_some()
+}
+
+/// Removes `id` and all its versions from the workspace, keeping them in the
+/// trash so `undelete` can put them back. Takes the save lock, so a delete
+/// cannot interleave with a save.
+pub(crate) fn delete(top: &std::path::Path, id: &str) -> Result<Value, Failure> {
+    if !valid_id(id) {
+        return Err(unknown(id));
+    }
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    purge_trash(&data);
+    let file = top.join(DESIGNS_DIR).join(format!("{id}.json"));
+    let versions = versions_dir(top, id);
+    if !file.is_file() && !versions.is_dir() {
+        return Err(unknown(id));
+    }
+    let trash = trash_dir(top, id);
+    if trash.exists() {
+        std::fs::remove_dir_all(&trash)?;
+    }
+    std::fs::create_dir_all(&trash)?;
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for (from, to) in [(file, trash.join("design.json")), (versions, trash.join(VERSIONS_DIR))] {
+        if !from.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            for (from, to) in moved.iter().rev() {
+                let _ = std::fs::rename(to, from);
+            }
+            let _ = std::fs::remove_dir_all(&trash);
+            return Err(e.into());
+        }
+        moved.push((from, to));
+    }
+    let time = crate::now();
+    crate::jsonx::replace_pretty(&trash, "deleted.json", &serde_json::json!({"time": time}))?;
+    if let Err(e) = remember_deleted(&data, id, time) {
+        for (from, to) in moved.iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
+        let _ = std::fs::remove_dir_all(&trash);
+        return Err(e);
+    }
+    list(top)
+}
+
+/// Puts a deleted design and its versions back. A design saved again under the
+/// same id is left alone: Undo never overwrites it.
+pub(crate) fn undelete(top: &std::path::Path, id: &str) -> Result<Value, Failure> {
+    if !valid_id(id) {
+        return Err(unknown(id));
+    }
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    purge_trash(&data);
+    let trash = trash_dir(top, id);
+    if !trash.is_dir() {
+        return Err(unknown(id));
+    }
+    let file = top.join(DESIGNS_DIR).join(format!("{id}.json"));
+    let versions = versions_dir(top, id);
+    if file.is_file() || versions.is_dir() {
+        return Err(Failure(format!("E7023 design {id} was saved again; undo would overwrite it"), 1));
+    }
+    std::fs::create_dir_all(top.join(DESIGNS_DIR))?;
+    if let Some(parent) = versions.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for (from, to) in [(trash.join("design.json"), file), (trash.join(VERSIONS_DIR), versions)] {
+        if !from.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            for (from, to) in moved.iter().rev() {
+                let _ = std::fs::rename(to, from);
+            }
+            return Err(e.into());
+        }
+        moved.push((from, to));
+    }
+    std::fs::remove_dir_all(&trash)?;
+    forget_deleted(&data, id)?;
+    list(top)
+}
+
+pub(crate) fn trash_dir(top: &std::path::Path, id: &str) -> std::path::PathBuf {
+    top.join(DATA_DIR).join(DELETED_DIR).join(id)
+}
+
+/// Drops deleted designs whose Undo window has passed.
+pub(crate) fn purge_trash(data: &std::path::Path) {
+    let dir = data.join(DELETED_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else { continue };
+        let Ok(age) = std::time::SystemTime::now().duration_since(modified) else { continue };
+        if age.as_secs() > UNDO_SECONDS {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Saves `design` under the save lock after `guard` agrees. The guard sees the
+/// same locked state the save writes from.
+pub(crate) fn save_guarded(
+    top: &std::path::Path,
+    design: &Value,
+    source: Source<'_>,
+    guard: impl FnOnce() -> Result<(), Failure>,
+) -> Result<Option<u64>, Failure> {
+    validate(design)?;
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    guard()?;
+    save_locked(top, design, source)
+}
+
+fn save_locked(top: &std::path::Path, design: &Value, source: Source<'_>) -> Result<Option<u64>, Failure> {
+    validate(design)?;
+    let id = design["id"].as_str().unwrap_or_default();
+    let dir = top.join(DESIGNS_DIR);
+    let current = read_current(&dir, id)?;
+    if current.design.as_ref() == Some(design) {
+        return Ok(None);
+    }
+    let versions = versions_dir(top, id);
+    let first = next_version(&versions)?;
+    let latest = if first > 1 { crate::jsonx::read(&versions.join(format!("{}.json", first - 1))).ok() } else { None };
+    let latest_design = latest.as_ref().and_then(|version| version.get("design"));
+    let design_is_latest = latest_design == Some(design);
+    let latest_raw = if current.raw.is_some() { most_recent_raw(&versions, first)? } else { None };
+    let number = keep_current(&versions, first, &current, latest_design, latest_raw.as_deref())?;
+    let source = match source {
+        Source::Human => serde_json::json!({"kind": "human"}),
+        Source::DesignRun(id) => serde_json::json!({"kind": "run", "id": id}),
+    };
+    let wrote = if number != first || !design_is_latest {
+        append_design(&versions, number, &source, design)?;
+        Some(number)
+    } else {
+        None
+    };
+    crate::jsonx::replace_pretty(&dir, &format!("{id}.json"), design)?;
+    Ok(wrote)
+}
+
+/// Deleted ids and their delete times, kept after their trash is purged so a
+/// proposal made before a delete can never bring the design back.
+const DELETIONS_FILE: &str = "deletions.json";
+
+/// When `id` was last deleted, in seconds since the epoch.
+pub(crate) fn deleted_at(top: &std::path::Path, id: &str) -> Option<u64> {
+    deletion_record(&top.join(DATA_DIR)).get(id).and_then(Value::as_u64)
+}
+
+fn deletion_record(data: &std::path::Path) -> Value {
+    crate::jsonx::read(&data.join(DELETIONS_FILE)).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn remember_deleted(data: &std::path::Path, id: &str, time: u64) -> Result<(), Failure> {
+    let mut record = deletion_record(data);
+    if !record.is_object() {
+        record = serde_json::json!({});
+    }
+    record[id] = serde_json::json!(time);
+    crate::jsonx::replace_pretty(data, DELETIONS_FILE, &record)
+}
+
+fn forget_deleted(data: &std::path::Path, id: &str) -> Result<(), Failure> {
+    let mut record = deletion_record(data);
+    let Some(object) = record.as_object_mut() else { return Ok(()) };
+    if object.remove(id).is_none() {
+        return Ok(());
+    }
+    crate::jsonx::replace_pretty(data, DELETIONS_FILE, &record)
+}
+
+/// The newest saved version of `id`, or null when it has none.
+pub(crate) fn newest_version(top: &std::path::Path, id: &str) -> Result<Value, Failure> {
+    Ok(versions(top, id)?.as_array().and_then(|versions| versions.first()).map(|version| version["number"].clone()).unwrap_or(Value::Null))
+}
+
+/// One design and the newest version of its content, read under the save lock
+/// so a save cannot put a newer version beside content it does not describe.
+pub(crate) fn show_with_version(top: &std::path::Path, id: &str) -> Result<(Value, Value), Failure> {
+    if !valid_id(id) {
+        return Err(unknown(id));
+    }
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    let design = open(top, id).map_err(|(_, failure)| failure)?;
+    let version = newest_version(top, id)?;
+    Ok((design, version))
+}
+
+/// `design list | show <id> [--from <element>]`, and the version a show displayed.
+pub(crate) fn command_with_version(top: &std::path::Path, args: &[&str], budget: usize) -> Result<(String, Option<Value>), Failure> {
+    match args {
+        ["list"] => {
+            let designs = list(top)?;
+            Ok((limited(pretty(&designs), budget, "use `design show <id>` for one design."), None))
+        }
+        ["show", id, rest @ ..] => {
+            let id = id.strip_prefix("design:").unwrap_or(id);
+            let from = from_flag(rest)?;
+            match show_with_version(top, id) {
+                Ok((design, version)) => Ok((show_page(&design, id, from, budget)?, Some(version))),
+                Err(e) if e.0.starts_with(UNKNOWN) => Err(Failure(format!("{}; use `design list` to list designs", e.0), e.1)),
+                Err(e) => Err(e),
+            }
+        }
+        _ => crate::failure::usage("design list | design show <id> [--from <element>]; the id may be written `design:<id>`"),
+    }
 }

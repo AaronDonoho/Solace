@@ -518,10 +518,15 @@ fn a_design_change_is_announced_with_its_list() {
     assert_eq!(last(), json!({"designs": []}));
     save(&top, &design(), Source::Human).unwrap();
     announce_change(&top, &mut seen);
-    assert_eq!(last(), json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "ui"}]}));
+    assert_eq!(last(), json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "ui", "version": 1}]}));
+    let mut revised = design();
+    revised["elements"][0]["children"][0]["properties"]["text"] = json!("Revised");
+    save(&top, &revised, Source::Human).unwrap();
+    announce_change(&top, &mut seen);
+    assert_eq!(last(), json!({"designs": [{"id": "0123456789abcdef", "title": "Home", "tab": "ui", "version": 2}]}));
     announce_change(&top, &mut seen);
     let count: i64 = crate::tasks::events(&top).unwrap().query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
-    assert_eq!(count, 2, "an unchanged list is not announced again");
+    assert_eq!(count, 3, "an unchanged list is not announced again");
 }
 
 #[test]
@@ -1381,4 +1386,95 @@ fn removing_a_node_with_its_edges_passes() {
     apply(&mut d, &[json!({"op":"remove","id":"step"}), json!({"op":"remove","id":"end"})]).unwrap();
     validate(&d).unwrap();
     assert_eq!(d["elements"][0]["children"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_deleted_design_is_gone_with_its_versions_and_undo_restores_them() {
+    let top = crate::testing::Scratch::new();
+    save(&top, &design(), Source::Human).unwrap();
+    let mut revised = design();
+    revised["title"] = json!("Homepage");
+    save(&top, &revised, Source::Human).unwrap();
+    let mut other = design();
+    other["id"] = json!("fedcba9876543210");
+    other["title"] = json!("Other");
+    save(&top, &other, Source::Human).unwrap();
+    let listed = delete(&top, "0123456789abcdef").unwrap();
+    assert_eq!(listed["designs"].as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed["designs"][0]["id"], json!("fedcba9876543210"));
+    assert!(show(&top, "0123456789abcdef").unwrap_err().0.starts_with("E7023"));
+    assert!(versions(&top, "0123456789abcdef").unwrap_err().0.starts_with("E7023"));
+    assert!(deleted_at(&top, "0123456789abcdef").is_some());
+    assert_eq!(show(&top, "fedcba9876543210").unwrap(), other);
+    assert_eq!(versions(&top, "fedcba9876543210").unwrap().as_array().unwrap().len(), 1);
+    let back = undelete(&top, "0123456789abcdef").unwrap();
+    assert_eq!(back["designs"][0]["title"], json!("Homepage"));
+    assert_eq!(show(&top, "0123456789abcdef").unwrap(), revised);
+    assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 2);
+    assert!(deleted_at(&top, "0123456789abcdef").is_none());
+}
+
+#[test]
+fn undo_does_not_overwrite_a_design_saved_again() {
+    let top = crate::testing::Scratch::new();
+    save(&top, &design(), Source::Human).unwrap();
+    delete(&top, "0123456789abcdef").unwrap();
+    let mut again = design();
+    again["title"] = json!("Saved again");
+    save(&top, &again, Source::Human).unwrap();
+    let refused = undelete(&top, "0123456789abcdef").unwrap_err();
+    assert!(refused.0.starts_with("E7023") && refused.0.contains("saved again"), "{}", refused.0);
+    assert_eq!(show(&top, "0123456789abcdef").unwrap(), again);
+}
+
+#[test]
+fn an_unknown_design_cannot_be_deleted_or_undone() {
+    let top = crate::testing::Scratch::new();
+    assert!(delete(&top, "0123456789abcdef").unwrap_err().0.starts_with("E7023"));
+    assert!(undelete(&top, "0123456789abcdef").unwrap_err().0.starts_with("E7023"));
+    assert!(delete(&top, "nope").unwrap_err().0.starts_with("E7023"));
+}
+
+#[test]
+fn renaming_saves_a_version_and_keeps_the_old() {
+    let top = crate::testing::Scratch::new();
+    save(&top, &design(), Source::Human).unwrap();
+    let renamed = rename(&top, "0123456789abcdef", "  Homepage  ").unwrap();
+    assert_eq!(renamed["title"], json!("Homepage"));
+    assert_eq!(show(&top, "0123456789abcdef").unwrap()["title"], json!("Homepage"));
+    assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 2);
+    assert_eq!(version(&top, "0123456789abcdef", 1).unwrap()["design"]["title"], json!("Home"));
+    assert_eq!(rename(&top, "0123456789abcdef", "Homepage").unwrap()["title"], json!("Homepage"));
+    assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_blank_rename_is_refused_and_changes_nothing() {
+    let top = crate::testing::Scratch::new();
+    save(&top, &design(), Source::Human).unwrap();
+    let refused = rename(&top, "0123456789abcdef", "   ").unwrap_err();
+    assert!(refused.0.starts_with("E7033"), "{}", refused.0);
+    assert_eq!(show(&top, "0123456789abcdef").unwrap(), design());
+    assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 1);
+    assert!(rename(&top, "fedcba9876543210", "Other").unwrap_err().0.starts_with("E7023"));
+}
+
+#[test]
+fn rename_keeps_a_change_written_while_it_waits_for_the_save_lock() {
+    let top = crate::testing::Scratch::new();
+    save(&top, &design(), Source::Human).unwrap();
+    let lock = crate::fsx::lock_file(&top.join(".solace/design/lock")).unwrap();
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| rename(&top, "0123456789abcdef", "Homepage").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut changed = design();
+        changed["elements"][0]["children"][0]["properties"]["text"] = json!("Welcome");
+        crate::jsonx::replace_pretty(&top.join(DESIGNS_DIR), "0123456789abcdef.json", &changed).unwrap();
+        drop(lock);
+        handle.join().unwrap();
+    });
+    let saved = show(&top, "0123456789abcdef").unwrap();
+    assert_eq!(saved["title"], json!("Homepage"));
+    assert_eq!(saved["elements"][0]["children"][0]["properties"]["text"], json!("Welcome"));
+    assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 3);
 }

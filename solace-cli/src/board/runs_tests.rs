@@ -565,11 +565,17 @@ fn a_harmless_warning_does_not_hide_a_real_error() {
     let warning = "Model metadata for `gpt-9` not found. Defaulting to fallback metadata.";
     std::fs::write(&log, format!("{}\n{}", json!({"type":"error","message":warning}), json!({"type":"error","message":"boom"}))).unwrap();
     let entries = transcript(&log);
-    assert!(entries.iter().any(|e| e["text"].as_str() == Some(warning)));
+    let warning_entry = entries.iter().find(|e| e["text"].as_str() == Some(warning)).unwrap();
+    assert_eq!(warning_entry["kind"], "output");
     assert_eq!(exit_error(&entries), Some("boom"));
     assert_eq!(last_words(&entries).as_deref(), Some("boom"));
     assert!(!has_blocking_agent_error(&[json!({"kind":"error","text":warning})]));
     assert!(has_blocking_agent_error(&entries));
+    std::fs::write(&log, json!({"type":"item.completed","item":{"type":"error","message":warning}}).to_string()).unwrap();
+    let entries = transcript(&log);
+    assert_eq!(entries, [json!({"kind":"output","text":warning})]);
+    assert_eq!(exit_error(&entries), None);
+    assert_eq!(last_words(&entries), None);
 }
 
 /// A warning alone, or before a final message, is never a run's failure reason.
