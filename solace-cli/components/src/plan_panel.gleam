@@ -474,7 +474,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
 /// The panel's look; colors come from the page's custom properties.
 pub const styles =
   ".plan{position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:var(--space-3) var(--space-4) 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:var(--space-3)}
-.plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 calc(-1 * var(--space-4));padding:0 var(--space-4) var(--space-3)}
+.plan>header,.plan-bar,.plan-compose{flex:none}.plan-agent-body{display:contents}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 calc(-1 * var(--space-4));padding:0 var(--space-4) var(--space-3)}
 .plan-bar{border-bottom:1px solid var(--edge);padding:0 0 var(--space-2);margin-bottom:var(--space-1)}.plan-bar .plan-context{margin:var(--space-1) 0}.plan-bar select{"
   <> solace_task.small_control
   <> ";padding:var(--space-1) var(--space-2);max-width:100%}
@@ -781,7 +781,7 @@ fn on_page(context: Context) -> Context {
 
 /// The panel a page docks beside its content.
 pub fn view(base: String, settings: Settings, p: Panel(msg)) -> Element(msg) {
-  frame(base, settings, p, element.none())
+  frame(base, settings, p, element.none(), [], None)
 }
 
 /// The marker a page puts beside a record whose run is open.
@@ -887,7 +887,7 @@ pub fn view_with_notes(
   p: Panel(msg),
   notes: Element(msg),
 ) -> Element(msg) {
-  frame(base, settings, p, notes)
+  frame(base, settings, p, notes, [], None)
 }
 
 fn frame(
@@ -895,6 +895,8 @@ fn frame(
   settings: Settings,
   p: Panel(msg),
   notes: Element(msg),
+  tabs: List(Tab(msg)),
+  content: Option(Element(msg)),
 ) -> Element(msg) {
   html.aside(
     [
@@ -933,7 +935,7 @@ fn frame(
       ]),
       case p.collapsed {
         True -> element.none()
-        False -> bar(settings, p)
+        False -> tab_bar(tabs)
       },
       case p.collapsed {
         True ->
@@ -941,19 +943,75 @@ fn frame(
             html.text(summary(settings, p)),
           ])
         False ->
-          html.div(
-            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
-            body(base, settings, p),
-          )
+          case content {
+            Some(view) -> html.div([attribute.class("plan-body")], [view])
+            None ->
+              html.div([attribute.class("plan-agent-body")], [
+                bar(settings, p),
+                html.div(
+                  [
+                    attribute.class("plan-body"),
+                    event.on("scroll", scrolled(p)),
+                  ],
+                  body(base, settings, p),
+                ),
+              ])
+          }
       },
-      case p.collapsed {
-        True -> element.none()
-        False -> notes
+      case content, p.collapsed {
+        None, False -> notes
+        _, _ -> element.none()
       },
-      case p.collapsed {
-        True -> element.none()
-        False -> compose(base, settings, p)
+      case content, p.collapsed {
+        None, False -> compose(base, settings, p)
+        _, _ -> element.none()
       },
     ],
   )
+}
+
+/// One tab at the top of the panel, and what choosing it sends.
+pub type Tab(msg) {
+  Tab(label: String, selected: Bool, on_click: msg)
+}
+
+/// The panel with tabs at its top. When `content` is set it replaces the
+/// agent's run bar, conversation, notes and message box.
+pub fn view_with_notes_and_tabs(
+  base: String,
+  settings: Settings,
+  p: Panel(msg),
+  tabs: List(Tab(msg)),
+  content: Option(Element(msg)),
+  notes: Element(msg),
+) -> Element(msg) {
+  frame(base, settings, p, notes, tabs, content)
+}
+
+fn tab_bar(tabs: List(Tab(msg))) -> Element(msg) {
+  case tabs {
+    [] -> element.none()
+    _ ->
+      html.div(
+        [
+          attribute.class("plan-tabs"),
+          attribute.role("tablist"),
+        ],
+        list.map(tabs, fn(tab) {
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.class("plan-tab"),
+              attribute.role("tab"),
+              attribute.attribute("aria-selected", case tab.selected {
+                True -> "true"
+                False -> "false"
+              }),
+              event.on_click(tab.on_click),
+            ],
+            [html.text(tab.label)],
+          )
+        }),
+      )
+  }
 }

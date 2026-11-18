@@ -41,7 +41,6 @@ use crate::lockdown::files::listed;
 use crate::lockdown::files::measure;
 use crate::lockdown::files::move_files;
 #[cfg(test)] use crate::lockdown::files::GREP_SYNTAX;
-use crate::lockdown::files::grep;
 pub(super) use crate::lockdown::files::change_file;
 pub(super) use crate::lockdown::files::move_args;
 pub(super) use crate::lockdown::files::carry_file;
@@ -130,7 +129,7 @@ pub fn dispatch(
         return Some(out);
     }
     if a[0] == "grep" {
-        return Some(grep(root, v, &a[1..].join(" "), budget));
+        return Some(files::grep_words(root, v, &a[1..], budget));
     }
     if a[0] == "move" {
         return Some((|| {
@@ -892,7 +891,7 @@ mod tests {
         fs::create_dir_all(s.root.join("docs")).unwrap();
         let many: String = (1..=14).map(|n| format!("needle {n}\n")).collect();
         fs::write(s.root.join("docs/many.md"), &many).unwrap();
-        let got = grep(&s.root, &v, "needle --in docs/many.md", 10_000).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in docs/many.md", 10_000).unwrap();
         assert!(got.starts_with("docs/many.md (14 matches, showing 10)\n"), "{got}");
         assert_eq!(got.matches("needle").count(), 10, "{got}");
         assert!(got.contains("    10: needle 10\n") && !got.contains("needle 11"), "{got}");
@@ -901,14 +900,14 @@ mod tests {
         for n in 0..45 {
             fs::write(s.root.join(format!("docs/f{n:02}.md")), "needle\n").unwrap();
         }
-        let got = grep(&s.root, &v, "needle", 100_000).unwrap();
+        let got = grep_text(&s.root, &v, "needle", 100_000).unwrap();
         assert_eq!(got.matches(".md\n").count(), 40, "{got}");
         assert!(got.ends_with("… 5 more files match, not shown; narrow with `--in <path>`.\n"), "{got}");
         // Files of about 1 KB each against a budget of 3,000: whole files only.
         for n in 0..45 {
             fs::write(s.root.join(format!("docs/f{n:02}.md")), format!("needle {}\n", "w".repeat(150)).repeat(6)).unwrap();
         }
-        let got = grep(&s.root, &v, "needle", 3_000).unwrap();
+        let got = grep_text(&s.root, &v, "needle", 3_000).unwrap();
         let shown = got.matches(".md\n").count();
         assert!(got.len() <= 3_000 && (1..40).contains(&shown), "{} {shown}", got.len());
         assert!(got.ends_with(&format!("… {} more files match, not shown; narrow with `--in <path>`.\n", 45 - shown)), "{got}");
@@ -921,23 +920,23 @@ mod tests {
             fs::write(s.root.join(format!("docs/g{n}.md")), (1..=30).map(|k| format!("needle {k}\n")).collect::<String>()).unwrap();
         }
         // Two of the three fit the budget, so the tail names one file.
-        let got = grep(&s.root, &v, "needle", 600).unwrap();
+        let got = grep_text(&s.root, &v, "needle", 600).unwrap();
         assert_eq!(got.matches("docs/g").count(), 2, "{got}");
         assert!(got.ends_with("… 1 more file matches, not shown; narrow with `--in <path>`.\n"), "{got}");
         // A budget below one file shows none and says so.
-        let got = grep(&s.root, &v, "needle", 100).unwrap();
+        let got = grep_text(&s.root, &v, "needle", 100).unwrap();
         assert_eq!(got, "… the budget fits no file; 3 files match, narrow with `--in <path>`.\n");
         // `--in` already names the only place searched, so the tail can't
         // repeat it: it points at the rest of the call and `--context`.
-        let got = grep(&s.root, &v, "needle --in docs --context 1", 100).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in docs --context 1", 100).unwrap();
         assert_eq!(got, "… the budget fits no file; 3 files match, run grep alone in the call, or drop `--context`.\n");
-        let got = grep(&s.root, &v, "needle --in docs --context 1", 500).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in docs --context 1", 500).unwrap();
         assert_eq!(got.matches("docs/g").count(), 1, "{got}");
         assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call, or drop `--context`.\n"), "{got}");
         // `--in` without `--context`: the tail names only the rest of the call.
-        let got = grep(&s.root, &v, "needle --in docs", 100).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in docs", 100).unwrap();
         assert_eq!(got, "… the budget fits no file; 3 files match, run grep alone in the call.\n");
-        let got = grep(&s.root, &v, "needle --in docs", 500).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in docs", 500).unwrap();
         assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call.\n"), "{got}");
     }
     /// A reply that shows a line cut at either end ends with one footer.
@@ -951,7 +950,7 @@ mod tests {
             for (n, text) in files {
                 fs::write(s.root.join("cuts").join(n), text).unwrap();
             }
-            let got = grep(&s.root, &v, query, 100_000).unwrap();
+            let got = grep_text(&s.root, &v, query, 100_000).unwrap();
             fs::remove_dir_all(s.root.join("cuts")).unwrap();
             got
         };
@@ -990,7 +989,7 @@ mod tests {
         // 250 fits a.md's block with the "more files" line (204), not the old
         // footer room for b.md's cut (388); b.md with its own footer room
         // (361) is left out, so the reply shows a.md and carries no footer.
-        let got = grep(&s.root, &v, "needle --in cuts", 250).unwrap();
+        let got = grep_text(&s.root, &v, "needle --in cuts", 250).unwrap();
         fs::remove_dir_all(s.root.join("cuts")).unwrap();
         assert!(got.contains("needle one\n") && got.contains("needle three\n"), "{got}");
         assert!(got.contains("1 more file matches"), "{got}");
@@ -1936,7 +1935,7 @@ mod tests {
         let root = Scratch::new()
             .with(&[("solace.toml", "projects = [\"core\"]\n"), ("core/gleam.toml", "name = \"core\"\nversion = \"1.0.0\"\n")]);
         let v = settings(&root).unwrap();
-        let e = grep(&root, &v, "needle --in gleam.toml", 10_000).unwrap_err().0;
+        let e = grep_text(&root, &v, "needle --in gleam.toml", 10_000).unwrap_err().0;
         assert!(e.contains("it is in project core: add --project core"), "{e}");
     }
 
@@ -2462,6 +2461,22 @@ mod tests {
         let e = call(&s, &v, &["write", "DECISIONS.md"], "## Title\nDo it.\nWhy: x\n", None).unwrap_err();
         assert!(e.0.contains("decision log") && e.0.contains("`Why:` line"), "{}", e.0);
         assert!(call(&s, &v, &["remove", "DECISIONS.md"], "", None).is_err());
+    }
+
+    #[test]
+    fn grep_in_takes_a_quoted_path_with_a_space() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 20000\n".parse().unwrap();
+        fs::create_dir_all(s.root.join("docs")).unwrap();
+        fs::write(s.root.join("docs/a b.md"), "needle\n").unwrap();
+        let got = call(&s, &v, &["grep", "needle", "--in", "docs/a b.md"], "", None).unwrap();
+        assert_eq!(got, "docs/a b.md\n     1: needle\n");
+    }
+
+    /// A test's grep query split into the words the command line hands grep.
+    fn grep_text(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
+        let words: Vec<&str> = query.split_whitespace().collect();
+        crate::lockdown::files::grep_words(root, v, &words, budget)
     }
 }
 

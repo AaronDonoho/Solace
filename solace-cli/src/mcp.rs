@@ -598,6 +598,29 @@ mod tests {
         let text = out["content"][0]["text"].as_str().unwrap();
         assert!(!text.contains("repaired:") && !text.contains("E7031"), "{text}");
     }
+
+    #[test]
+    fn a_quoted_file_name_with_a_space_is_one_path() {
+        let p = crate::testing::project(&[("a b.md", "old\n")]);
+        let command = concat!(
+            "read \"a b.md\"\n",
+            "write \"a b.md\"\n",
+            "read \"a b.md\"\n",
+            "files \"a b.md\"\n",
+            "grep needle --in \"a b.md\"\n",
+            "move \"a b.md\" \"c d.md\"\n",
+            "read \"c d.md\"\n",
+            "remove \"c d.md\""
+        );
+        let msg = json!({"params": {"arguments": {"command": command, "text": "needle\n"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = with_root(&p.root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert_eq!(out["isError"], json!(false), "{text}");
+        assert!(text.contains("needle"), "{text}");
+        assert!(text.contains("Moved a b.md to c d.md"), "{text}");
+        assert!(text.contains("Removed c d.md"), "{text}");
+    }
 }
 
 /// Whether the command lines hold a patch, which belongs in `text`.

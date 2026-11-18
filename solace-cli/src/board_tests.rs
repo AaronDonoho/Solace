@@ -878,7 +878,8 @@ fn revert_restores_every_project_before_checking_any() {
 }
 
 /// D-123: a run starts in the project of its task that holds the most
-/// symbols the task names; on a tie, or with none, at home. A resumed
+/// symbols the task names; on a tie, or with none, at home. A task's text
+/// includes its notes (D-260). A resumed
 /// conversation keeps its recorded project; one saved before projects were
 /// recorded restarts at the home, where its session began.
 #[test]
@@ -926,8 +927,21 @@ fn a_run_starts_where_the_named_symbols_are() {
     assert_eq!(start_project(&a, &debt(found)), "b", "a Tech Debt task starts where its findings point");
     assert_eq!(
         start_project(&a, &debt(json!([{"author": "agent", "text": "`plan.answer` is fine."}]))),
-        "a",
-        "a Tech Debt task's other notes are not findings"
+        "b",
+        "a Tech Debt task's other notes rank too"
+    );
+    assert_eq!(
+        start_project(
+            &a,
+            &json!({
+                "title": "T",
+                "body": "No names here",
+                "scope": ["a", "b"],
+                "notes": [{"author": "agent", "text": "`plan.answer` matters."}],
+            })
+        ),
+        "b",
+        "an ordinary task's notes guide its start project"
     );
     assert_eq!(start_project(&a, &t("Change `plan.answer`.")), "b", "an ordinary task ranks as before");
 }
@@ -1403,16 +1417,21 @@ fn the_reference_guides_maintainable_code() {
         .and_then(|(_, rest)| rest.split_once("\n\nCommands in full"))
         .map(|(review, _)| review)
         .expect("review checklist");
+    let step = step.split_whitespace().collect::<Vec<_>>().join(" ");
+    let review = review.split_whitespace().collect::<Vec<_>>().join(" ");
     for rule in [
         "Reuse existing code before adding new code, extracting common patterns",
         "small, stateless, self-documenting functions",
         "modules and functions small and focused around one domain or component",
-        "clear names for new symbols",
-        "the module that owns its concern",
-        "task:2414798176c466e4",
+        "Put new code in the module that owns its concern",
+        concat!(
+            "A bug fix's test must fail on the old code. Don't remove a test or change ",
+            "its expected value unless the task says to; if you do, say why in the summary.",
+        ),
     ] {
         assert!(step.contains(rule), "workflow step 2: missing {rule}");
     }
+    assert!(!REFERENCE.contains("2414798176c466e4"), "reference names a board-only refactor task");
     for rule in [
         "thoughts, decisions and directives out of code comments and the UI",
         "details or decisions of implementation or development out of the UI",
@@ -1420,6 +1439,7 @@ fn the_reference_guides_maintainable_code() {
         assert!(step.contains(rule), "workflow step 2: missing {rule}");
     }
     for rule in [
+        "Flag a removed or weakened test, an expected value changed without reason, and a bug fix whose test would pass on the old code",
         "Flag duplication and large modules",
         "minor ones as tech debt",
         "cross-domain concerns in the same module",
@@ -1429,6 +1449,7 @@ fn the_reference_guides_maintainable_code() {
     ] {
         assert!(review.contains(rule), "review checklist: missing {rule}");
     }
+    assert!(!step.contains("clear names"), "workflow step 2: the old clear-name rule remains");
 }
 
 /// A malformed settings file is reported, not read as a missing toolchain.
@@ -3362,5 +3383,23 @@ fn a_work_brief_lists_recent_decisions_and_how_to_propose() {
         } else {
             assert!(brief.contains("`task decision`"), "{kind}: {brief}");
         }
+    }
+}
+
+/// A strategy brief asks before a request that clearly contradicts a record, at every asking setting.
+#[test]
+fn strategy_briefs_check_for_a_clear_contradiction() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let run = json!({"context":{"kind":"page"},"notes":[]});
+    for asking in ["often", "balanced", "rarely"] {
+        let brief = strategy_brief(&top, &run, "engineer", "standard", asking);
+        assert!(brief.contains("check the request against the decisions, the vision, its feature and the plan"), "{asking}: {brief}");
+        assert!(
+            brief.contains("If doing it would undo or break what one of them states, not merely differ in detail"),
+            "{asking}: {brief}"
+        );
+        assert!(brief.contains("ask in a `strategy note` first") && brief.contains("change the request"), "{asking}: {brief}");
+        assert!(!brief.contains("task ask") && !brief.contains("task decision"), "{asking}: {brief}");
     }
 }

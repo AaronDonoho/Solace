@@ -528,3 +528,97 @@ fn design_rename_delete_and_undo_routes() {
     assert!(blank.0.starts_with("E7033"), "{}", blank.0);
 }
 
+#[test]
+fn design_edit_route_saves_each_operation_as_a_human_version() {
+    let root = crate::testing::Scratch::new();
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let original = json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": "0123456789abcdef",
+        "title": "Home",
+        "tab": "ui",
+        "elements": [{
+            "id": "screen",
+            "type": "screen",
+            "properties": {"width": "fill", "height": "fill"},
+            "children": [
+                {"id": "heading", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Home"}},
+                {"id": "note", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Note"}}
+            ]
+        }]
+    });
+    crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+    let edit =
+        |operations: Value| board.projects_api("POST", "/designs/0123456789abcdef/edit", &json!({"operations": operations})).unwrap();
+    let mut expected = original.clone();
+    let add = json!([{
+        "op": "add",
+        "parent": "screen",
+        "index": 0,
+        "element": {"id": "body", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Body"}}
+    }]);
+    let added = edit(add.clone());
+    crate::design::apply(&mut expected, add.as_array().unwrap()).unwrap();
+    assert_eq!(added, expected);
+    let set = json!([{"op": "set", "id": "heading", "field": "properties", "property": "text", "value": "Welcome"}]);
+    let changed = edit(set.clone());
+    crate::design::apply(&mut expected, set.as_array().unwrap()).unwrap();
+    assert_eq!(changed, expected);
+    let moved = json!([{"op": "move", "id": "note", "parent": "screen", "index": 0}]);
+    let moved_design = edit(moved.clone());
+    crate::design::apply(&mut expected, moved.as_array().unwrap()).unwrap();
+    assert_eq!(moved_design, expected);
+    let removed = json!([{"op": "remove", "id": "body"}]);
+    let removed_design = edit(removed.clone());
+    crate::design::apply(&mut expected, removed.as_array().unwrap()).unwrap();
+    assert_eq!(removed_design, expected);
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap(), expected);
+    let versions = board.projects_api("GET", "/designs/0123456789abcdef/versions", &json!({})).unwrap();
+    assert_eq!(versions.as_array().unwrap().len(), 5, "{versions}");
+    for version in versions.as_array().unwrap() {
+        assert_eq!(version["source"]["kind"], "human", "{version}");
+    }
+}
+
+#[test]
+fn a_refused_design_edit_saves_nothing() {
+    let root = crate::testing::Scratch::new();
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let original = json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": "0123456789abcdef",
+        "title": "Home",
+        "tab": "ui",
+        "elements": [{
+            "id": "screen",
+            "type": "screen",
+            "properties": {"width": "fill", "height": "fill"},
+            "children": [
+                {"id": "heading", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Home"}}
+            ]
+        }]
+    });
+    crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+    let invalid = board
+        .projects_api(
+            "POST",
+            "/designs/0123456789abcdef/edit",
+            &json!({"operations": [{"op": "set", "id": "heading", "field": "properties", "property": "width", "value": "sideways"}]}),
+        )
+        .unwrap_err();
+    assert!(invalid.0.starts_with("E7033") && invalid.0.contains("\"heading\""), "{}", invalid.0);
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap(), original);
+    let missing = board
+        .projects_api("POST", "/designs/0123456789abcdef/edit", &json!({"operations": [{"op": "remove", "id": "ghost"}]}))
+        .unwrap_err();
+    assert!(missing.0.starts_with("E7033") && missing.0.contains("\"ghost\""), "{}", missing.0);
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef", &json!({})).unwrap(), original);
+    let unknown = board.projects_api("POST", "/designs/fedcba9876543210/edit", &json!({"operations": []})).unwrap_err();
+    assert!(unknown.0.starts_with("E7023"), "{}", unknown.0);
+    let malformed = board.projects_api("POST", "/designs/0123456789abcdef/edit", &json!({})).unwrap_err();
+    assert!(malformed.0.starts_with("E7001"), "{}", malformed.0);
+    let unchanged = board.projects_api("POST", "/designs/0123456789abcdef/edit", &json!({"operations": []})).unwrap();
+    assert_eq!(unchanged, original);
+    assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef/versions", &json!({})).unwrap().as_array().unwrap().len(), 1);
+}
+

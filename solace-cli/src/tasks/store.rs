@@ -294,22 +294,24 @@ pub fn events(top: &Path) -> Result<Connection, Failure> {
 /// Appends `data` to the task log. The file or removal it reports is already
 /// done, so a failed append doesn't fail the change (a client would retry it and
 /// repeat a note or action): the board catches up from the files when it next
-/// connects (D-78).
-pub(crate) fn log(top: &Path, project: &str, data: &Value) {
+/// connects (D-78). Says whether the event was written, so an announcement can
+/// try again.
+pub(crate) fn log(top: &Path, project: &str, data: &Value) -> bool {
     let db = match events(top) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("the task log did not take a change: {}", e.0);
-            return;
+            return false;
         }
     };
     if let Err(e) = db.execute("INSERT INTO events(project,data) VALUES (?1,?2)", params![project, data.to_string()]) {
         eprintln!("the task log did not take a change: {e}");
-        return;
+        return false;
     }
     if let Err(e) = prune_event_log(&db) {
         eprintln!("the task log did not prune: {}", e.0);
     }
+    true
 }
 
 /// Writes task `t`, returning what to log and the features that follow it.

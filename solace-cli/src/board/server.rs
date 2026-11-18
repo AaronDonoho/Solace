@@ -268,6 +268,13 @@ impl Board {
                 let number = crate::design::number(&body["version"])?;
                 return crate::design::restore(&self.top, &view::percent_decode(id), number);
             }
+            ("POST", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/edit")).is_some() => {
+                let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/edit")).unwrap_or("");
+                let Some(operations) = body["operations"].as_array() else {
+                    return err("E7001", "a design edit needs `operations` as a list: add, remove, move or set");
+                };
+                return crate::design::edit(&self.top, &view::percent_decode(id), operations);
+            }
             ("POST", p) if p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/rename")).is_some() => {
                 let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/rename")).unwrap_or("");
                 return crate::design::rename(&self.top, &view::percent_decode(id), body["title"].as_str().unwrap_or(""));

@@ -1,4 +1,6 @@
 import design
+import editing
+import gleam/dict
 import gleam/int
 import gleam/json
 import gleam/list
@@ -1730,8 +1732,9 @@ pub fn the_note_panel_is_see_through_and_movable_test() {
   let page = element.to_string(design.view(model))
   assert string.contains(
     page,
-    "border:2px solid #c2410c;opacity:0.5;box-shadow",
+    "background:color-mix(in srgb,var(--paper) 60%,transparent);border:2px solid #c2410c;box-shadow",
   )
+  assert !string.contains(page, "border:2px solid #c2410c;opacity")
   assert string.contains(page, "class=\"design-note-handle\"")
   assert string.contains(page, "data-note-handle>Move</div>")
   assert string.contains(page, ">Move<")
@@ -1891,4 +1894,773 @@ pub fn a_previous_version_for_an_older_shown_version_marks_no_changes_test() {
     "class=\"design-element design-change-removed design-wireframe\" data-design-id=\"second\"",
   )
   assert !string.contains(html, "data-design-id=\"first\"")
+}
+
+fn a_button_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":300}},\"children\":[{\"id\":\"go\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Go\"}}]}]}"
+}
+
+fn an_editing_model() -> design.Model {
+  let #(model, _) = design.update(a_selected_model(), design.EditStart)
+  model
+}
+
+fn waiting_json(model: design.Model, id: String) -> String {
+  case dict.get(model.waiting, id) {
+    Ok(changes) -> json.to_string(editing.operations(changes))
+    Error(_) -> "{}"
+  }
+}
+
+@external(javascript, "./draft_storage.mjs", "install")
+fn install_edits() -> Nil
+
+@external(javascript, "./draft_storage.mjs", "restore")
+fn restore_edits() -> Nil
+
+pub fn changing_a_text_and_a_color_waits_for_save_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) =
+    design.update(model, design.EditProperty("style", "fill", "#123456"))
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"op\":\"set\"")
+  assert string.contains(body, "\"property\":\"label\"")
+  assert string.contains(body, "\"value\":\"Go now\"")
+  assert string.contains(body, "\"property\":\"fill\"")
+  assert string.contains(body, "\"value\":\"#123456\"")
+  assert list.length(string.split(body, "\"op\":\"set\"")) == 3
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "Go now")
+  assert string.contains(html, "background:#123456")
+}
+
+pub fn a_refused_save_keeps_the_drawing_and_waiting_changes_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let saved = model.drawing
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let waiting = waiting_json(model, id)
+  let #(model, _) = design.update(model, design.SaveEdits)
+  let #(model, _) =
+    design.update(
+      model,
+      design.EditsSaved(
+        id,
+        "{\"code\":\"E7001\",\"message\":\"E7001 that label is too long\"}",
+        [editing.text_change("go", "properties", "label", "Go now")],
+      ),
+    )
+  assert model.drawing == saved
+  assert waiting_json(model, id) == waiting
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "that label is too long",
+  )
+}
+
+pub fn waiting_changes_survive_a_reload_and_another_design_test() {
+  install_edits()
+  let id = "0123456789abcdef"
+  let other = "fedcba9876543210"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let waiting = waiting_json(model, id)
+  let #(reloaded, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(reloaded, _) = design.update(reloaded, design.SelectDesign(id))
+  let #(reloaded, _) =
+    design.update(reloaded, design.DesignLoaded(id, a_button_design()))
+  assert waiting_json(reloaded, id) == waiting
+  let #(elsewhere, _) = design.update(reloaded, design.SelectDesign(other))
+  let #(back, _) = design.update(elsewhere, design.SelectDesign(id))
+  let #(back, _) =
+    design.update(back, design.DesignLoaded(id, a_button_design()))
+  assert waiting_json(back, id) == waiting
+  restore_edits()
+}
+
+pub fn the_panel_has_edit_and_agent_tabs_test() {
+  let model = an_editing_model()
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, ">Edit</button>")
+  assert string.contains(html, ">Agent</button>")
+  assert string.contains(html, "id=\"design-text\"")
+  let #(model, _) = design.update(model, design.EditTab)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "id=\"edit-properties-label\"")
+  assert !string.contains(html, "id=\"design-text\"")
+  let #(model, _) = design.update(model, design.AgentTab)
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "id=\"design-text\"",
+  )
+}
+
+pub fn a_refused_rename_keeps_the_drawing_test() {
+  let id = "0123456789abcdef"
+  let model = a_design_with_history()
+  let saved = model.drawing
+  let #(model, _) = design.update(model, design.RenameSaved("Homepage"))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Renamed(
+        id,
+        "{\"code\":\"E7001\",\"message\":\"E7001 the title was refused\"}",
+      ),
+    )
+  assert model.drawing == saved
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "the title was refused",
+  )
+}
+
+pub fn whole_number_properties_save_as_numbers_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) = design.update(model, design.ElementClicked("screen", False))
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "width", "200"))
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "gap", "8"))
+  let #(model, _) =
+    design.update(model, design.EditProperty("style", "size", "16"))
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"value\":{\"fixed\":200}")
+  assert string.contains(body, "\"value\":8")
+  assert string.contains(body, "\"value\":16")
+  assert !string.contains(body, "\"value\":\"8\"")
+  assert !string.contains(body, "\"value\":\"16\"")
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "width:200.0px")
+  assert string.contains(html, "gap:8.0px")
+  assert string.contains(html, "font-size:16.0px")
+}
+
+pub fn a_save_keeps_a_change_made_while_it_was_in_flight_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let sent = [editing.text_change("go", "properties", "label", "Go now")]
+  let #(model, _) = design.update(model, design.SaveEdits)
+  let #(model, _) =
+    design.update(model, design.EditProperty("style", "fill", "#123456"))
+  let #(model, _) =
+    design.update(model, design.EditsSaved(id, a_button_design(), sent))
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"property\":\"fill\"")
+  assert !string.contains(body, "\"property\":\"label\"")
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "background:#123456",
+  )
+}
+
+pub fn a_save_reply_after_opening_another_design_clears_its_changes_test() {
+  let id = "0123456789abcdef"
+  let other = "fedcba9876543210"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let sent = [editing.text_change("go", "properties", "label", "Go now")]
+  let #(model, _) = design.update(model, design.SelectDesign(other))
+  let #(model, _) =
+    design.update(model, design.EditsSaved(id, a_button_design(), sent))
+  assert !string.contains(waiting_json(model, id), "\"property\":\"label\"")
+}
+
+pub fn a_short_hex_color_fills_the_swatch_test() {
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("style", "fill", "#abc"))
+  let #(model, _) = design.update(model, design.EditTab)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "id=\"edit-style-fill-pick\"")
+  assert string.contains(html, "value=\"#aabbcc\"")
+}
+
+pub fn whole_number_changes_survive_a_reload_test() {
+  install_edits()
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) = design.update(model, design.ElementClicked("screen", False))
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "width", "200"))
+  let waiting = waiting_json(model, id)
+  let #(reloaded, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(reloaded, _) = design.update(reloaded, design.SelectDesign(id))
+  let #(reloaded, _) =
+    design.update(reloaded, design.DesignLoaded(id, a_button_design()))
+  assert waiting_json(reloaded, id) == waiting
+  restore_edits()
+}
+
+fn a_selected_model() -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_button_design()))
+  let #(model, _) = design.update(model, design.ElementClicked("go", False))
+  model
+}
+
+pub fn done_editing_asks_with_waiting_changes_test() {
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) = design.update(model, design.EditDone)
+  assert model.edit_mode
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "role=\"alertdialog\"")
+  assert string.contains(html, "Save")
+  assert string.contains(html, "Discard")
+  assert string.contains(html, "Keep editing")
+}
+
+pub fn done_editing_without_changes_turns_it_off_test() {
+  let model = an_editing_model()
+  let #(model, _) = design.update(model, design.EditDone)
+  assert !model.edit_mode
+  let html = element.to_string(design.view(model))
+  assert !string.contains(html, "Keep editing")
+  assert !string.contains(html, "Done editing")
+}
+
+pub fn saving_from_the_exit_prompt_saves_one_version_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) =
+    design.update(model, design.EditProperty("style", "fill", "#123456"))
+  let sent = [
+    editing.text_change("go", "properties", "label", "Go now"),
+    editing.text_change("go", "style", "fill", "#123456"),
+  ]
+  let #(model, _) = design.update(model, design.EditDone)
+  let #(model, _) = design.update(model, design.EditSave)
+  assert !model.confirm_exit
+  assert model.edit_mode
+  let #(model, _) =
+    design.update(model, design.EditsSaved(id, a_button_design(), sent))
+  assert !model.edit_mode
+  assert waiting_json(model, id) == "{\"operations\":[]}"
+}
+
+pub fn a_refused_exit_prompt_save_keeps_editing_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let waiting = waiting_json(model, id)
+  let sent = [editing.text_change("go", "properties", "label", "Go now")]
+  let #(model, _) = design.update(model, design.EditDone)
+  let #(model, _) = design.update(model, design.EditSave)
+  let #(model, _) =
+    design.update(
+      model,
+      design.EditsSaved(
+        id,
+        "{\"code\":\"E7001\",\"message\":\"E7001 that label is too long\"}",
+        sent,
+      ),
+    )
+  assert model.edit_mode
+  assert !model.confirm_exit
+  assert waiting_json(model, id) == waiting
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "that label is too long",
+  )
+}
+
+pub fn discarding_from_the_exit_prompt_turns_edit_mode_off_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) = design.update(model, design.EditDone)
+  let #(model, _) = design.update(model, design.EditDiscard)
+  assert !model.edit_mode
+  assert !model.confirm_exit
+  assert waiting_json(model, id) == "{\"operations\":[]}"
+  assert !string.contains(element.to_string(design.view(model)), "Keep editing")
+}
+
+pub fn keeping_editing_closes_the_prompt_test() {
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) = design.update(model, design.EditDone)
+  let #(model, _) = design.update(model, design.EditCancel)
+  assert model.edit_mode
+  assert !model.confirm_exit
+  assert !string.contains(element.to_string(design.view(model)), "Keep editing")
+}
+
+pub fn a_property_change_outside_edit_mode_adds_nothing_test() {
+  let id = "0123456789abcdef"
+  let model = a_selected_model()
+  let #(model, _) = design.update(model, design.EditTab)
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  assert !model.edit_mode
+  assert waiting_json(model, id) == "{\"operations\":[]}"
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "id=\"edit-properties-label\"")
+  assert string.contains(html, "disabled")
+}
+
+pub fn a_design_with_waiting_changes_opens_in_edit_mode_test() {
+  install_edits()
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(edited, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  assert waiting_json(edited, id) != "{\"operations\":[]}"
+  let #(reloaded, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(reloaded, _) = design.update(reloaded, design.SelectDesign(id))
+  let #(reloaded, _) =
+    design.update(reloaded, design.DesignLoaded(id, a_button_design()))
+  assert reloaded.edit_mode
+  restore_edits()
+}
+
+pub fn a_live_reload_keeps_edit_mode_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_button_design()))
+  assert model.edit_mode
+}
+
+pub fn the_panel_save_keeps_edit_mode_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let sent = [editing.text_change("go", "properties", "label", "Go now")]
+  let #(model, _) = design.update(model, design.SaveEdits)
+  let #(model, _) =
+    design.update(model, design.EditsSaved(id, a_button_design(), sent))
+  assert model.edit_mode
+  assert !model.confirm_exit
+  assert waiting_json(model, id) == "{\"operations\":[]}"
+}
+
+pub fn the_exit_save_after_discarding_turns_edit_mode_off_test() {
+  let id = "0123456789abcdef"
+  let model = an_editing_model()
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Go now"))
+  let #(model, _) = design.update(model, design.EditDone)
+  assert model.confirm_exit
+  let #(model, _) = design.update(model, design.DiscardEdits)
+  let #(model, _) = design.update(model, design.EditSave)
+  assert !model.leaving
+  assert !model.edit_mode
+  assert !model.confirm_exit
+  assert waiting_json(model, id) == "{\"operations\":[]}"
+}
+
+fn a_moving_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"one\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"},\"children\":[{\"id\":\"bar\",\"type\":\"row\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"},\"children\":[{\"id\":\"go\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Go\"}},{\"id\":\"stop\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Stop\"}}]},{\"id\":\"body\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Hi\"}}]},{\"id\":\"two\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"},\"children\":[]}]}"
+}
+
+fn a_moving_model(edit: Bool) -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_moving_design()))
+  case edit {
+    True -> design.update(model, design.EditStart).0
+    False -> model
+  }
+}
+
+/// Drags `id` to `x`, `y` over the moving design's drawn bounds and drops it.
+fn drag(model: design.Model, id: String, x: Float, y: Float) -> design.Model {
+  let bounds = [
+    #("one", 0.0, 0.0, 400.0, 300.0),
+    #("bar", 10.0, 50.0, 390.0, 100.0),
+    #("go", 20.0, 60.0, 100.0, 90.0),
+    #("stop", 110.0, 60.0, 190.0, 90.0),
+    #("body", 10.0, 110.0, 390.0, 140.0),
+    #("two", 0.0, 320.0, 400.0, 620.0),
+  ]
+  let #(model, _) = design.update(model, design.DragStarted(id))
+  let #(model, _) = design.update(model, design.Dragged(x, y, bounds))
+  let #(model, _) = design.update(model, design.Dropped)
+  model
+}
+
+pub fn dragging_an_element_earlier_in_its_row_waits_as_one_move_test() {
+  let model = drag(a_moving_model(True), "stop", 30.0, 75.0)
+  assert waiting_json(model, "0123456789abcdef")
+    == "{\"operations\":[{\"op\":\"move\",\"id\":\"stop\",\"parent\":\"bar\",\"index\":0}]}"
+  let html = element.to_string(design.view(model))
+  assert before(html, "data-design-id=\"stop\"", "data-design-id=\"go\"")
+}
+
+pub fn dragging_an_element_into_another_screen_waits_as_one_move_test() {
+  let model = drag(a_moving_model(True), "go", 200.0, 400.0)
+  assert waiting_json(model, "0123456789abcdef")
+    == "{\"operations\":[{\"op\":\"move\",\"id\":\"go\",\"parent\":\"two\",\"index\":0}]}"
+  let html = element.to_string(design.view(model))
+  assert before(html, "data-design-id=\"two\"", "data-design-id=\"go\"")
+}
+
+pub fn a_screen_dragged_over_a_row_moves_among_the_screens_test() {
+  let model = drag(a_moving_model(True), "two", 30.0, 75.0)
+  assert waiting_json(model, "0123456789abcdef")
+    == "{\"operations\":[{\"op\":\"move\",\"id\":\"two\",\"parent\":null,\"index\":0}]}"
+}
+
+pub fn a_refused_drop_adds_nothing_and_restores_the_design_test() {
+  let model = a_moving_model(True)
+  let saved = element.to_string(design.view(model))
+  let #(dragging, _) = design.update(model, design.DragStarted("body"))
+  let #(dragging, _) =
+    design.update(
+      dragging,
+      design.Dragged(500.0, 700.0, [#("one", 0.0, 0.0, 400.0, 300.0)]),
+    )
+  assert element.to_string(design.view(dragging)) == saved
+  let #(dropped, _) = design.update(dragging, design.Dropped)
+  assert waiting_json(dropped, "0123456789abcdef") == "{\"operations\":[]}"
+  assert element.to_string(design.view(dropped)) == saved
+}
+
+pub fn a_drop_where_the_element_already_is_adds_nothing_test() {
+  let model = drag(a_moving_model(True), "go", 30.0, 75.0)
+  assert waiting_json(model, "0123456789abcdef") == "{\"operations\":[]}"
+}
+
+pub fn a_drag_outside_edit_mode_moves_nothing_test() {
+  let model = drag(a_moving_model(False), "stop", 30.0, 75.0)
+  assert waiting_json(model, "0123456789abcdef") == "{\"operations\":[]}"
+  let html = element.to_string(design.view(model))
+  assert before(html, "data-design-id=\"go\"", "data-design-id=\"stop\"")
+}
+
+pub fn edit_mode_drags_move_elements_and_offers_no_notes_test() {
+  let #(viewing, _) =
+    design.update(a_moving_model(False), design.ElementClicked("go", False))
+  let html = element.to_string(design.view(viewing))
+  assert string.contains(html, "data-region")
+  assert !string.contains(html, "data-move")
+  assert string.contains(html, "data-note-box")
+  let #(editing, _) = design.update(viewing, design.EditStart)
+  let html = element.to_string(design.view(editing))
+  assert string.contains(html, "data-move")
+  assert !string.contains(html, "data-region")
+  assert !string.contains(html, "data-note-box")
+}
+
+pub fn a_waiting_move_survives_a_reload_and_is_saved_with_other_changes_test() {
+  install_edits()
+  let id = "0123456789abcdef"
+  let model = drag(a_moving_model(True), "stop", 30.0, 75.0)
+  let #(model, _) = design.update(model, design.ElementClicked("go", False))
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Start"))
+  let waiting = waiting_json(model, id)
+  assert waiting
+    == "{\"operations\":[{\"op\":\"move\",\"id\":\"stop\",\"parent\":\"bar\",\"index\":0},{\"op\":\"set\",\"id\":\"go\",\"field\":\"properties\",\"property\":\"label\",\"value\":\"Start\"}]}"
+  let reloaded = a_moving_model(False)
+  assert waiting_json(reloaded, id) == waiting
+  let html = element.to_string(design.view(reloaded))
+  assert before(html, "data-design-id=\"stop\"", "data-design-id=\"go\"")
+  restore_edits()
+}
+
+/// Drags a side or corner of `id` to a drawn size and lets go.
+fn resize_drag(
+  model: design.Model,
+  id: String,
+  side: String,
+  width: Float,
+  height: Float,
+) -> design.Model {
+  let #(model, _) =
+    design.update(model, design.Resized(id, side, width, height))
+  let #(model, _) = design.update(model, design.ResizeDropped)
+  model
+}
+
+pub fn resizing_a_side_sets_one_fixed_size_and_a_corner_sets_both_test() {
+  let id = "0123456789abcdef"
+  let #(dragging, _) =
+    design.update(
+      an_editing_model(),
+      design.Resized("go", "right", 240.4, 90.0),
+    )
+  assert string.contains(
+    element.to_string(design.view(dragging)),
+    "width:240.0px",
+  )
+  assert !string.contains(waiting_json(dragging, id), "\"op\"")
+  let side = resize_drag(an_editing_model(), "go", "right", 240.4, 90.0)
+  let body = waiting_json(side, id)
+  assert string.contains(body, "\"property\":\"width\"")
+  assert string.contains(body, "\"value\":{\"fixed\":240}")
+  assert !string.contains(body, "\"property\":\"height\"")
+  let corner =
+    resize_drag(an_editing_model(), "go", "bottom-right", 240.0, 120.6)
+  let body = waiting_json(corner, id)
+  assert string.contains(body, "\"property\":\"width\"")
+  assert string.contains(body, "\"value\":{\"fixed\":240}")
+  assert string.contains(body, "\"property\":\"height\"")
+  assert string.contains(body, "\"value\":{\"fixed\":121}")
+}
+
+pub fn a_resize_to_zero_or_less_adds_nothing_and_restores_the_design_test() {
+  let id = "0123456789abcdef"
+  let before = element.to_string(design.view(an_editing_model()))
+  let zero = resize_drag(an_editing_model(), "go", "right", 0.0, 90.0)
+  assert !string.contains(waiting_json(zero, id), "\"op\"")
+  assert element.to_string(design.view(zero)) == before
+  let negative = resize_drag(an_editing_model(), "go", "bottom", 80.0, -4.0)
+  assert !string.contains(waiting_json(negative, id), "\"op\"")
+  assert element.to_string(design.view(negative)) == before
+}
+
+pub fn a_resize_outside_edit_mode_or_with_several_selected_changes_nothing_test() {
+  let id = "0123456789abcdef"
+  let outside = resize_drag(a_selected_model(), "go", "right", 240.0, 90.0)
+  assert !string.contains(waiting_json(outside, id), "\"op\"")
+  let #(multi, _) =
+    design.update(an_editing_model(), design.ElementClicked("screen", True))
+  let multi = resize_drag(multi, "go", "right", 240.0, 90.0)
+  assert !string.contains(waiting_json(multi, id), "\"op\"")
+}
+
+pub fn resize_handles_show_only_for_one_selected_element_in_edit_mode_test() {
+  assert !string.contains(
+    element.to_string(design.view(a_selected_model())),
+    "data-resize",
+  )
+  assert string.contains(
+    element.to_string(design.view(an_editing_model())),
+    "data-resize",
+  )
+  let #(multi, _) =
+    design.update(an_editing_model(), design.ElementClicked("screen", True))
+  assert !string.contains(element.to_string(design.view(multi)), "data-resize")
+}
+
+fn an_architecture_editing_model(id: String) -> design.Model {
+  let #(model, _) = design.update(an_architecture_model(), design.EditStart)
+  let #(model, _) = design.update(model, design.ElementClicked(id, False))
+  let #(model, _) = design.update(model, design.EditTab)
+  model
+}
+
+pub fn changing_a_node_label_in_an_architecture_diagram_waits_and_redraws_test() {
+  let id = "fedcba9876543210"
+  let model = an_architecture_editing_model("start")
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Begin"))
+  let #(model, _) =
+    design.update(
+      model,
+      design.EditProperty("properties", "description", "The beginning"),
+    )
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"op\":\"set\"")
+  assert string.contains(body, "\"id\":\"start\"")
+  assert string.contains(body, "\"property\":\"label\"")
+  assert string.contains(body, "\"value\":\"Begin\"")
+  assert string.contains(body, "\"property\":\"description\"")
+  assert string.contains(body, "\"value\":\"The beginning\"")
+  assert list.length(string.split(body, "\"op\":\"set\"")) == 3
+  let html = element.to_string(design.view(model))
+  assert drawn_text(html, "design-node-label", "Begin")
+  assert drawn_text(html, "design-node-description", "The beginning")
+}
+
+pub fn changing_an_edge_label_in_an_architecture_diagram_waits_and_redraws_test() {
+  let id = "fedcba9876543210"
+  let model = an_architecture_editing_model("step")
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Then"))
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"op\":\"set\"")
+  assert string.contains(body, "\"id\":\"step\"")
+  assert string.contains(body, "\"property\":\"label\"")
+  assert string.contains(body, "\"value\":\"Then\"")
+  assert list.length(string.split(body, "\"op\":\"set\"")) == 2
+  let html = element.to_string(design.view(model))
+  assert drawn_text(html, "design-edge-label", "Then")
+}
+
+pub fn an_architecture_edit_lists_only_node_and_edge_fields_test() {
+  let node_html =
+    element.to_string(design.view(an_architecture_editing_model("start")))
+  assert string.contains(node_html, "edit-properties-label")
+  assert string.contains(node_html, "edit-properties-description")
+  assert !string.contains(node_html, "edit-properties-width")
+  assert !string.contains(node_html, "edit-properties-height")
+  assert !string.contains(node_html, "edit-style-")
+  let edge_html =
+    element.to_string(design.view(an_architecture_editing_model("step")))
+  assert string.contains(edge_html, "edit-properties-label")
+  assert !string.contains(edge_html, "edit-properties-description")
+  assert !string.contains(edge_html, "edit-properties-width")
+  assert !string.contains(edge_html, "edit-properties-height")
+  assert !string.contains(edge_html, "edit-style-")
+}
+
+pub fn a_refused_architecture_save_keeps_the_diagram_and_waiting_changes_test() {
+  let id = "fedcba9876543210"
+  let model = an_architecture_editing_model("start")
+  let saved = model.drawing
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "label", "Begin"))
+  let waiting = waiting_json(model, id)
+  let #(model, _) = design.update(model, design.SaveEdits)
+  let #(model, _) =
+    design.update(
+      model,
+      design.EditsSaved(
+        id,
+        "{\"code\":\"E7001\",\"message\":\"E7001 that label is too long\"}",
+        [editing.text_change("start", "properties", "label", "Begin")],
+      ),
+    )
+  assert model.drawing == saved
+  assert waiting_json(model, id) == waiting
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "that label is too long",
+  )
+}
+
+fn drawn_text(html: String, class: String, text: String) -> Bool {
+  case string.split_once(html, "class=\"" <> class <> "\"") {
+    Ok(#(_, after)) ->
+      case string.split_once(after, ">") {
+        Ok(#(_, content)) -> string.starts_with(content, text)
+        Error(_) -> False
+      }
+    Error(_) -> False
+  }
+}
+
+pub fn a_live_list_is_not_replaced_by_an_older_list_test() {
+  let #(model, _) = design.update(design.new(design.UiUx), design.CaughtUp)
+  let #(model, _) =
+    design.update(
+      model,
+      design.Live(
+        a_design_list_of([
+          #("0123456789abcdef", "Home"),
+          #("1122334455667788", "New"),
+        ]),
+      ),
+    )
+  let #(model, _) = design.update(model, design.DesignsLoaded(a_design_list()))
+  assert design.designs_for(model, design.UiUx)
+    == [
+      design.Design("0123456789abcdef", "Home", design.UiUx, 0),
+      design.Design("1122334455667788", "New", design.UiUx, 0),
+    ]
+}
+
+pub fn an_older_list_after_a_rename_keeps_a_live_design_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) = design.update(model, design.CaughtUp)
+  let #(model, _) =
+    design.update(
+      model,
+      design.Live(
+        a_design_list_of([
+          #(id, "Home revised"),
+          #("1122334455667788", "New"),
+        ]),
+      ),
+    )
+  let #(model, _) =
+    design.update(model, design.Renamed(id, a_ui_design("screen")))
+  let #(model, _) = design.update(model, design.DesignsLoaded(a_design_list()))
+  assert design.designs_for(model, design.UiUx)
+    == [
+      design.Design(id, "Home revised", design.UiUx, 0),
+      design.Design("1122334455667788", "New", design.UiUx, 0),
+    ]
+}
+
+pub fn an_older_delete_reply_keeps_a_live_design_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) = design.update(design.new(design.UiUx), design.CaughtUp)
+  let #(model, _) =
+    design.update(
+      model,
+      design.Live(
+        a_design_list_of([
+          #(id, "Home"),
+          #("1122334455667788", "New"),
+        ]),
+      ),
+    )
+  let #(model, _) = design.update(model, design.Deleted(id, a_design_list()))
+  assert design.designs_for(model, design.UiUx)
+    == [
+      design.Design(id, "Home", design.UiUx, 0),
+      design.Design("1122334455667788", "New", design.UiUx, 0),
+    ]
+}
+
+pub fn an_older_undo_reply_keeps_a_live_design_test() {
+  let #(model, _) = design.update(design.new(design.UiUx), design.CaughtUp)
+  let #(model, _) =
+    design.update(
+      model,
+      design.Live(
+        a_design_list_of([
+          #("0123456789abcdef", "Home"),
+          #("1122334455667788", "New"),
+        ]),
+      ),
+    )
+  let #(model, _) = design.update(model, design.Undone(a_design_list()))
+  assert design.designs_for(model, design.UiUx)
+    == [
+      design.Design("0123456789abcdef", "Home", design.UiUx, 0),
+      design.Design("1122334455667788", "New", design.UiUx, 0),
+    ]
 }

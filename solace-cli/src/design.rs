@@ -428,14 +428,17 @@ pub(crate) fn listed(top: &std::path::Path) -> Result<Value, Failure> {
 
 /// Announces the workspace's designs to open pages when they differ from
 /// `seen`, and keeps `seen` up to date. The first read announces too, so a
-/// change between a page's load and the watcher's start is not missed.
+/// change between a page's load and the watcher's start is not missed. A
+/// notice that cannot be written leaves `seen` unchanged, so a later check
+/// tries again.
 pub(crate) fn announce_change(top: &std::path::Path, seen: &mut Option<Value>) {
     let Ok(current) = listed(top) else { return };
     if seen.as_ref() == Some(&current) {
         return;
     }
-    *seen = Some(current.clone());
-    crate::tasks::store::log(top, "", &serde_json::json!({"designs": current}));
+    if crate::tasks::store::log(top, "", &serde_json::json!({"designs": current.clone()})) {
+        *seen = Some(current);
+    }
 }
 
 struct Current {
@@ -1312,4 +1315,16 @@ pub(crate) fn command_with_version(top: &std::path::Path, args: &[&str], budget:
         }
         _ => crate::failure::usage("design list | design show <id> [--from <element>]; the id may be written `design:<id>`"),
     }
+}
+
+/// Applies a human's `operations` to design `id` through the save path.
+/// Nothing is saved unless every operation applies and the result validates.
+pub(crate) fn edit(top: &std::path::Path, id: &str, operations: &[Value]) -> Result<Value, Failure> {
+    let data = top.join(DATA_DIR);
+    std::fs::create_dir_all(&data)?;
+    let _lock = crate::fsx::lock_file(&data.join("lock"))?;
+    let mut design = show(top, id)?;
+    apply(&mut design, operations)?;
+    save_locked(top, &design, Source::Human)?;
+    Ok(design)
 }

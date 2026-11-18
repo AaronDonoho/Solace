@@ -131,7 +131,11 @@ pub(crate) fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>,
     let mut names: HashSet<String> = params.iter().cloned().collect();
     for (start, end) in segments {
         let text = lines[start..end].join("\n");
-        let hit = whole || seeds.iter().any(|l| (start..end).contains(l)) || !roots(&text).is_disjoint(&names) || marked_in(&text, marks);
+        let data_marks: HashSet<String> =
+            marks.iter().filter(|m| m.starts_with('.') || !is_function_mark(ix, m) || calls_mark(&text, m)).cloned().collect();
+        let data_hit =
+            whole || seeds.iter().any(|l| (start..end).contains(l)) || !roots(&text).is_disjoint(&names) || marked_in(&text, &data_marks);
+        let hit = data_hit || marked_in(&text, marks);
         let head = text.trim_start();
         if let Some(rest) = head.strip_prefix("let ").or_else(|| head.strip_prefix("use ")) {
             let (pattern, value) = rest.split_once(if head.starts_with("use ") { "<-" } else { "=" }).unwrap_or((rest, ""));
@@ -240,8 +244,10 @@ pub(crate) fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>,
                     }
                     out
                 }
-                // passed as a value, or unsure: every parameter
-                None => ps.iter().map(|p| p.1.clone()).collect(),
+                // passed as a value: a function beside tainted data receives
+                // its parameters; a sibling of the changed function receives none
+                None if data_hit => ps.iter().map(|p| p.1.clone()).collect(),
+                None => vec![],
             };
             if !tainted.is_empty() && !t.calls.contains(&(g, tainted.clone())) {
                 t.calls.push((g, tainted));
@@ -507,4 +513,29 @@ pub fn gleam_flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
         }
     }
     impact
+}
+
+/// Whether a mark names only functions: a changed function passed as a value,
+/// not data flowing into a sibling argument.
+fn is_function_mark(ix: &Index, mark: &str) -> bool {
+    let name = mark.rsplit('.').next().unwrap_or(mark);
+    let mut found = false;
+    for s in ix.syms.iter().filter(|s| s.name == name) {
+        if s.kind != Kind::Fn {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+/// Whether a statement calls or pipes into a marked name rather than only
+/// passing it as a value.
+fn calls_mark(text: &str, mark: &str) -> bool {
+    let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    text.match_indices(mark).any(|(p, _)| {
+        !ident(text[..p].chars().next_back())
+            && !ident(text[p + mark.len()..].chars().next())
+            && (text[p + mark.len()..].trim_start().starts_with('(') || text[..p].trim_end().ends_with("|>"))
+    })
 }

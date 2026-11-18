@@ -136,6 +136,7 @@ fn draw_node(
   parent_height: DrawnSize,
   on_click: Option(fn(String, Bool) -> message),
   selecting: Bool,
+  resizable: Bool,
   wireframe: Bool,
   selected: List(String),
   marks: Dict(String, Change),
@@ -173,6 +174,20 @@ fn draw_node(
     Ok(number) -> [attribute.data("note", number)]
     Error(_) -> []
   }
+  let resizing = resizable && list.contains(selected, node.id)
+  let resize_marker = case resizing {
+    True -> [attribute.data("resize", "")]
+    False -> []
+  }
+  let resize_styles = case resizing {
+    True -> [#("position", "relative"), #("overflow", "visible")]
+    False -> []
+  }
+  let handles = case resizing {
+    True -> [resize_handles()]
+    False -> []
+  }
+  let tags = list.append(resize_marker, list.append(marker, click))
   let attributes = [
     attribute.class(class),
     attribute.data("design-id", node.id),
@@ -181,45 +196,94 @@ fn draw_node(
         size_styles(node, parent, width, height),
         kind_styles(theme, kind),
         overrides_styles(theme, node.overrides),
+        resize_styles,
       ]),
     ),
-    ..list.append(marker, click)
+    ..tags
   ]
   case kind {
-    Text(text) -> html.div(attributes, [html.text(text.content)])
-    Heading(heading) ->
+    Text(text) ->
+      html.div(attributes, list.append([html.text(text.content)], handles))
+    Heading(heading) -> {
+      let content = [html.text(heading.text)]
       case heading.level {
-        1 -> html.h1(attributes, [html.text(heading.text)])
-        2 -> html.h2(attributes, [html.text(heading.text)])
-        _ -> html.h3(attributes, [html.text(heading.text)])
+        1 -> html.h1(attributes, list.append(content, handles))
+        2 -> html.h2(attributes, list.append(content, handles))
+        _ -> html.h3(attributes, list.append(content, handles))
       }
-    Button(button) -> html.button(attributes, [html.text(button.label)])
+    }
+    Button(button) ->
+      html.button(attributes, list.append([html.text(button.label)], handles))
     TextInput(input) ->
-      html.input(
-        list.append(attributes, [
-          attribute.attribute("type", "text"),
-          attribute.attribute("placeholder", input.placeholder),
-        ]),
-      )
-    ImagePlaceholder(image) -> html.div(attributes, [html.text(image.label)])
+      case resizing {
+        False ->
+          html.input(
+            list.append(attributes, [
+              attribute.attribute("type", "text"),
+              attribute.attribute("placeholder", input.placeholder),
+            ]),
+          )
+        True ->
+          html.div(
+            [
+              attribute.class(class <> " design-resize-frame"),
+              attribute.data("design-id", node.id),
+              attribute.styles(
+                list.flatten([
+                  size_styles(node, parent, width, height),
+                  [#("display", "flex"), #("box-sizing", "border-box")],
+                  resize_styles,
+                ]),
+              ),
+              ..tags
+            ],
+            [
+              html.input([
+                attribute.class("design-element"),
+                attribute.styles(
+                  list.flatten([
+                    kind_styles(theme, kind),
+                    overrides_styles(theme, node.overrides),
+                    [
+                      #("flex", "1 1 auto"),
+                      #("width", "100%"),
+                      #("height", "100%"),
+                      #("min-width", "0"),
+                      #("min-height", "0"),
+                    ],
+                  ]),
+                ),
+                attribute.attribute("type", "text"),
+                attribute.attribute("placeholder", input.placeholder),
+              ]),
+              ..handles
+            ],
+          )
+      }
+    ImagePlaceholder(image) ->
+      html.div(attributes, list.append([html.text(image.label)], handles))
     _ ->
       html.div(
         attributes,
-        list.map(node.children, fn(child) {
-          draw_node(
-            theme,
-            child,
-            child_axis(kind),
-            width,
-            height,
-            on_click,
-            selecting,
-            wireframe,
-            selected,
-            marks,
-            markers,
-          )
-        }),
+        list.append(
+          list.map(node.children, fn(child) {
+            draw_node(
+              theme,
+              child,
+              child_axis(kind),
+              width,
+              height,
+              on_click,
+              selecting,
+              resizable,
+              wireframe,
+              selected,
+              marks,
+              markers,
+            )
+          }),
+          handles,
+        ),
       )
   }
 }
@@ -757,6 +821,7 @@ pub fn draw_with(theme: Theme, node: Node) -> Element(message) {
     None,
     False,
     False,
+    False,
     [],
     dict.new(),
     dict.new(),
@@ -1014,6 +1079,7 @@ pub fn draw_preview_with(
     Some(fn(id, _) { on_click(id) }),
     False,
     False,
+    False,
     [],
     dict.new(),
     dict.new(),
@@ -1118,6 +1184,7 @@ pub fn draw_marked_with(
     None,
     False,
     False,
+    False,
     [],
     marks,
     dict.new(),
@@ -1181,6 +1248,7 @@ fn draw_selectable_with(
     DrawnFill,
     Some(on_click),
     True,
+    False,
     True,
     selected,
     dict.new(),
@@ -1223,6 +1291,7 @@ fn draw_marked_selectable_with(
     DrawnFill,
     Some(on_click),
     True,
+    False,
     True,
     selected,
     marks,
@@ -1274,4 +1343,108 @@ fn wireframe_class(kind: Kind, wireframe: Bool) -> String {
     True, Column(Container(variant: Plain, ..)) -> " design-wireframe"
     _, _ -> ""
   }
+}
+
+/// Draw one element outside Preview, with resize handles on the selected id.
+pub fn draw_selectable_resizable(
+  node: Node,
+  selected: List(String),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_node(
+    default_theme(),
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    Some(on_click),
+    True,
+    True,
+    True,
+    selected,
+    dict.new(),
+    markers,
+  )
+}
+
+/// Draw one marked element outside Preview, with resize handles on the
+/// selected id.
+pub fn draw_marked_selectable_resizable(
+  node: Node,
+  selected: List(String),
+  marks: Dict(String, Change),
+  markers: Dict(String, String),
+  on_click: fn(String, Bool) -> message,
+) -> Element(message) {
+  draw_node(
+    default_theme(),
+    node,
+    Down,
+    DrawnFill,
+    DrawnFill,
+    Some(on_click),
+    True,
+    True,
+    True,
+    selected,
+    marks,
+    markers,
+  )
+}
+
+fn resize_handle_styles(side: String) -> List(#(String, String)) {
+  let shared = [
+    #("position", "absolute"),
+    #("width", "8px"),
+    #("height", "8px"),
+    #("background", "#c2410c"),
+  ]
+  let place = case side {
+    "top-left" -> [#("left", "-4px"), #("top", "-4px")]
+    "top" -> [#("left", "calc(50% - 4px)"), #("top", "-4px")]
+    "top-right" -> [#("right", "-4px"), #("top", "-4px")]
+    "left" -> [#("left", "-4px"), #("top", "calc(50% - 4px)")]
+    "right" -> [#("right", "-4px"), #("top", "calc(50% - 4px)")]
+    "bottom-left" -> [#("left", "-4px"), #("bottom", "-4px")]
+    "bottom" -> [#("left", "calc(50% - 4px)"), #("bottom", "-4px")]
+    "bottom-right" -> [#("right", "-4px"), #("bottom", "-4px")]
+    _ -> []
+  }
+  list.append(shared, place)
+}
+
+fn resize_handles() -> Element(message) {
+  html.span(
+    [
+      attribute.class("design-resize-layer"),
+      attribute.styles([
+        #("position", "absolute"),
+        #("inset", "0"),
+        #("pointer-events", "none"),
+        #("z-index", "4"),
+      ]),
+    ],
+    list.map(
+      [
+        "top-left",
+        "top",
+        "top-right",
+        "left",
+        "right",
+        "bottom-left",
+        "bottom",
+        "bottom-right",
+      ],
+      fn(side) {
+        html.span(
+          [
+            attribute.class("design-resize-handle"),
+            attribute.styles(resize_handle_styles(side)),
+          ],
+          [],
+        )
+      },
+    ),
+  )
 }

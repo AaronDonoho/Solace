@@ -63,18 +63,19 @@ Opening another design, tab or history version clears it, as do entering or
 leaving Preview, switching Proposed/Current and a live reload that removes a
 selected element.
 
-Outside Preview, dragging across a drawn canvas selects every element wholly
-inside the box shown while dragging. An element only partly inside is not
-selected; when a parent and its children are all wholly inside, every one is
-selected. A plain drag replaces the selection, and Ctrl-drag (Cmd-drag on a Mac)
-adds the region's elements. A drag that covers nothing clears the selection.
+Outside Preview and edit mode, dragging across a drawn canvas selects every
+element wholly inside the box shown while dragging. An element only partly
+inside is not selected; when a parent and its children are all wholly inside,
+every one is selected. A plain drag replaces the selection, and Ctrl-drag
+(Cmd-drag on a Mac) adds the region's elements. A drag that covers nothing
+clears the selection.
 
 ## Notes
 
-With one or more elements selected outside Preview on either tab, a small note
-box sits beside them. Typing a note and pressing Add note stores the open
-design's id, the selected element ids and the text. The note waits on the page
-and is never saved into the design.
+With one or more elements selected outside Preview and edit mode, on either
+tab, a small note box sits beside them. Typing a note and pressing Add note
+stores the open design's id, the selected element ids and the text. The note
+waits on the page and is never saved into the design.
 
 Waiting notes appear in the agent panel in the order they were added, each with
 its elements, its text and an × to remove it. The open design's noted elements
@@ -99,6 +100,70 @@ token or a positive number of pixels, and `padding` takes a spacing token or a
 non-negative number of pixels. The renderer draws overrides after the component
 and its variant, so an override wins. Any other property or a value outside
 these forms is refused.
+
+## Editing
+
+Edit mode on either tab decides when a human can change the saved current
+design. The Edit button beside the design's title turns it on, and the same
+button then reads Done editing. Clicking selects an element in both modes.
+Outside edit mode, dragging across the canvas selects the elements inside the
+box, notes can be added, and the Edit tab lists the selected element's
+properties read-only. In edit mode, dragging an element moves it, and no note
+box is offered. A design with waiting changes opens in edit mode.
+
+On either tab, click one element in the saved current design to select it. On
+the UI/UX tab, the right panel's Edit tab lists the properties that element's
+type holds, plus its style overrides. In edit mode, changing a field redraws
+the design at once and adds a waiting change; nothing is sent to the server
+yet. Choices use dropdowns, and colors offer a swatch picker beside a box for a
+theme color name or a hex color. Clearing a style value clears that override.
+
+On the Architecture tab, a node lists Label and Description, and an edge lists
+Label. Changes wait for Save like any other edit, and the diagram redraws with
+the new text before Save. Node positions come from the automatic layout, so
+there is nothing to drag into place.
+
+On the UI/UX tab in edit mode, a selected element shows small square handles on
+its sides and corners. Dragging the left or right handle changes its width, the
+top or bottom handle its height, and a corner changes both. A drag always sets
+a fixed size, rounded to whole pixels; Fill and Hug are set in the Edit tab.
+The size waits for Save like any other edit. A drag that ends at zero or less
+is dropped, and the element goes back to the size it had before the drag. A
+size the server refuses when you save shows its message and keeps the waiting
+changes.
+
+On the UI/UX tab in edit mode, drag an element to move it earlier or later
+among its siblings or into another screen, row or column. A faded copy follows
+the pointer while the other elements move aside, so the design shows how it
+will look after the drop.
+The element goes where the pointer is: over the near or far half of a sibling
+it goes before or after it, and over a container's free space it joins that
+container. Screens only move among screens. Dropping adds one waiting move,
+`{"op":"move","id","parent","index"}`, where `parent` is `null` for the top
+level and `index` counts the parent's children without the moved element. A
+drop the design rules refuse, such as a screen inside a row or an element
+outside every screen, adds nothing and the element goes back; so does a drop
+where the element already was.
+
+Save sends every waiting change for the open design as one
+`POST /designs/{id}/edit`, so it becomes one version. The saved design is drawn
+and the waiting changes are cleared. Discard drops them. Waiting changes are
+kept per design in the browser and survive switching designs, tabs or versions,
+leaving the page, and reloading or closing the app; none of those asks before
+leaving.
+
+Press Done editing with waiting changes and Solace asks Save, Discard or Keep
+editing. Save sends one version and leaves edit mode once it succeeds. Discard
+drops the changes and leaves edit mode. Keep editing closes the prompt and stays
+in edit mode. If the server refuses a save, its message shows, the waiting
+changes stay and edit mode stays on.
+
+Editing is offered only for the saved current design on both tabs; old
+versions, the Proposed view and Preview stay read-only. The panel's Agent tab
+keeps the design agent's runs, notes and message box, and the design agent can
+change a design whether or not edit mode is on.
+
+There is no text editor for the design's data.
 
 ## Preview
 

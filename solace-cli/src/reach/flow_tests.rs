@@ -176,3 +176,59 @@ fn unqualified_imports_count_as_writing_the_symbol() {
     let make = ix.syms.iter().position(|s| s.name == "make").unwrap();
     assert_eq!(names(&ix, &gleam_flow(&ix, &[(make, vec![0, 1])])), ["plain.a", "renamed.b", "aliased.c"]);
 }
+
+#[test]
+fn a_sibling_function_value_is_not_tainted() {
+    let ix = crate::index::test_index(&[
+        ("src", "listy", "pub fn map(items, f) {\n  f(items)\n}"),
+        (
+            "src",
+            "page",
+            concat!(
+                "pub type Model {\n  Model(selected: Int)\n}\n\n",
+                "pub fn view(m: Model) -> Int {\n  m.selected\n}\n\n",
+                "pub fn init(m: Model) -> Model {\n  update(m, 1)\n}\n\n",
+                "pub fn update(m: Model, n: Int) -> Model {\n  Model(selected: n)\n}\n\n",
+                "pub fn helper(n: Int) -> Int {\n  n + 1\n}\n\n",
+                "pub fn apply(items) {\n  listy.map(items, helper)\n}\n\n",
+                "pub fn register() -> Int {\n  component(init, update, view)\n}\n\n",
+                "pub fn main() {\n  register()\n}\n\n",
+                "pub fn component(a, b, c) {\n  1\n}\n"
+            ),
+        ),
+        ("src", "report", "import page\n\npub fn show(m: page.Model) -> Int {\n  m.selected\n}"),
+    ]);
+    let view = ix.syms.iter().position(|s| s.name == "view").unwrap();
+    let impact = gleam_flow(&ix, &[(view, vec![1])]);
+    assert_eq!(names(&ix, &impact), ["page.register", "page.main"], "a sibling gets nothing");
+    assert!(impact.fields.is_empty(), "{:?}", impact.fields);
+    let apply = ix.syms.iter().position(|s| s.name == "apply").unwrap();
+    let helper = ix.syms.iter().position(|s| s.name == "helper").unwrap();
+    let t = taint(&ix, &records(&ix), apply, &HashSet::new(), &HashSet::new(), &["items".into()]);
+    assert!(t.calls.contains(&(helper, vec!["n".to_string()])), "a function beside tainted data gets its parameters: {:?}", t.calls);
+}
+
+#[test]
+fn a_called_function_mark_still_carries_data() {
+    let ix = crate::index::test_index(&[
+        ("src", "listy", "pub fn map(items, f) {\n  f(items)\n}"),
+        (
+            "src",
+            "page",
+            concat!(
+                "pub fn view(n: Int) -> Int {\n  n + 1\n}\n\n",
+                "pub fn helper(n: Int) -> Int {\n  n + 1\n}\n\n",
+                "pub fn apply(n: Int) {\n  listy.map(view(n), helper)\n}\n\n",
+                "pub fn apply_pipe(n: Int) {\n  n |> view |> listy.map(helper)\n}"
+            ),
+        ),
+    ]);
+    let apply = ix.syms.iter().position(|s| s.name == "apply").unwrap();
+    let helper = ix.syms.iter().position(|s| s.name == "helper").unwrap();
+    let marks: HashSet<String> = ["view".to_string()].into();
+    let t = taint(&ix, &records(&ix), apply, &HashSet::new(), &marks, &[]);
+    assert!(t.calls.contains(&(helper, vec!["n".to_string()])), "the changed function's result reaches the helper: {:?}", t.calls);
+    let apply_pipe = ix.syms.iter().position(|s| s.name == "apply_pipe").unwrap();
+    let t = taint(&ix, &records(&ix), apply_pipe, &HashSet::new(), &marks, &[]);
+    assert!(t.calls.contains(&(helper, vec!["n".to_string()])), "a piped changed function reaches the helper: {:?}", t.calls);
+}

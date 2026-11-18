@@ -82,3 +82,15 @@ fn every_line_gets_the_room_the_headers_leave() {
     assert!(out.contains(&"x".repeat(budget - headers[0].len())), "{out}");
 }
 
+/// A quoted name with spaces is one word, without its quotes; an unclosed
+/// quote keeps today's split instead of swallowing the rest of the line.
+#[test]
+fn command_words_keep_a_quoted_name_whole() {
+    assert_eq!(command_words("read \"a b.md\" --lines 1..3"), ["read", "a b.md", "--lines", "1..3"]);
+    assert_eq!(command_words("read 'a b.md'"), ["read", "a b.md"]);
+    assert_eq!(command_words("grep \"a|b\" --in notes.md"), ["grep", "a|b", "--in", "notes.md"]);
+    assert_eq!(command_words("grep \"a  b\""), ["grep", "a  b"]);
+    assert_eq!(command_words("read \"a b"), ["read", "\"a", "b"]);
+    assert_eq!(command_words("grep don't can't"), ["grep", "don't", "can't"]);
+}
+

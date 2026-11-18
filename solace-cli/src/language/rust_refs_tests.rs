@@ -1461,3 +1461,40 @@ fn an_index_build_starts_the_next_parse_at_the_beginning() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn inspect_context_keeps_a_possible_use_out_of_the_callers() {
+    let (_root, store) = store_of(
+        concat!(
+            "pub struct A;\n\nimpl A {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn go(a: &A) -> i32 {\n    a.show()\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[test]\n    fn calls_go() {\n        assert_eq!(go(&A), 1);\n    }\n}\n",
+        ),
+        &[],
+    );
+    let out = store.inspect(&["crate.A::show"], true, None, usize::MAX).unwrap();
+    assert!(out.contains("== Possible uses (1): only type inference could settle these (solace refs crate.A::show) =="), "{out}");
+    assert!(!out.contains("-- crate.go\n"), "{out}");
+    let out = store.inspect(&["crate.go"], true, None, usize::MAX).unwrap();
+    assert!(out.contains("== Possibly uses (1): only type inference could settle these ==\n  crate.A::show\n"), "{out}");
+    assert!(!out.contains("-- crate.A::show\n"), "{out}");
+}
+
+#[test]
+fn inspect_context_caps_possibly_used_names() {
+    let mut lib = String::new();
+    for n in 0..25 {
+        lib += &format!("pub struct A{n};\n\nimpl A{n} {{\n    pub fn show(&self) -> i32 {{\n        {n}\n    }}\n}}\n\n");
+    }
+    lib += "pub fn go(a: &A0) -> i32 {\n    a.show()\n}\n";
+    let (_root, store) = store_of(&lib, &[]);
+    let out = store.inspect(&["crate.go"], true, None, usize::MAX).unwrap();
+    let section = out
+        .split("== Possibly uses (25): only type inference could settle these ==\n  ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no possible-uses section in {out}"));
+    let names = section.lines().next().unwrap();
+    assert_eq!(names.split(", ").count(), 20, "{out}");
+    assert_eq!(section.lines().nth(1), Some("  …and 5 more"), "{out}");
+}

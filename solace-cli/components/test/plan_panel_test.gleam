@@ -199,3 +199,38 @@ pub fn notes_draw_in_the_panel_and_a_start_carries_them_test() {
     )
   assert string.contains(body, "\"notes\":[{\"text\":\"A note\"}]")
 }
+
+pub fn tabs_show_at_the_top_and_replace_the_agent_body_test() {
+  let tabs = [
+    plan_panel.Tab("Edit", True, Nil),
+    plan_panel.Tab("Agent", False, Nil),
+  ]
+  let edit = plan_panel.marker(settings().labels)
+  let page =
+    element.to_string(plan_panel.view_with_notes_and_tabs(
+      "",
+      settings(),
+      panel(),
+      tabs,
+      Some(edit),
+      element.none(),
+    ))
+  assert string.contains(page, "class=\"plan-tabs\"")
+  assert string.contains(page, ">Edit</button>")
+  assert string.contains(page, "class=\"planning\"")
+  assert !string.contains(page, "plan-compose")
+  let agent =
+    element.to_string(plan_panel.view_with_notes_and_tabs(
+      "",
+      settings(),
+      panel(),
+      [
+        plan_panel.Tab("Edit", False, Nil),
+        plan_panel.Tab("Agent", True, Nil),
+      ],
+      None,
+      element.none(),
+    ))
+  assert string.contains(agent, ">Agent</button>")
+  assert string.contains(agent, "plan-compose")
+}

@@ -1478,3 +1478,19 @@ fn rename_keeps_a_change_written_while_it_waits_for_the_save_lock() {
     assert_eq!(saved["elements"][0]["children"][0]["properties"]["text"], json!("Welcome"));
     assert_eq!(versions(&top, "0123456789abcdef").unwrap().as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn a_failed_design_announcement_is_retried() {
+    let top = crate::testing::Scratch::new();
+    let blocked = crate::board::task_model::store_dir(&top).join("events.db");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let mut seen = None;
+    announce_change(&top, &mut seen);
+    assert_eq!(seen, None);
+    std::fs::remove_dir(&blocked).unwrap();
+    announce_change(&top, &mut seen);
+    assert_eq!(seen, Some(json!([])));
+    let data: String =
+        crate::tasks::events(&top).unwrap().query_row("SELECT data FROM events ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&data).unwrap(), json!({"designs": []}));
+}

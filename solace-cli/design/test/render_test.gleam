@@ -1527,3 +1527,69 @@ pub fn wireframe_outline_yields_to_change_and_selection_markings_test() {
     ".design-wireframe{outline:1px dotted",
   )
 }
+
+pub fn resizable_elements_draw_handles_above_their_content_test() {
+  let container =
+    render.Container(
+      render.Fill,
+      render.Fill,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Plain,
+    )
+  let row =
+    node("row", render.Row(container), [
+      node(
+        "text",
+        render.Text(render.TextProperties(
+          render.Hug,
+          render.Hug,
+          render.TextLeft,
+          "Body",
+          render.Body,
+        )),
+        [],
+      ),
+    ])
+  let html =
+    element.to_string(
+      render.draw_selectable_resizable(row, ["row"], dict.new(), fn(id, _) {
+        id
+      }),
+    )
+  assert string.contains(html, "data-resize")
+  assert string.contains(html, "class=\"design-resize-layer\"")
+  assert list.length(string.split(html, "class=\"design-resize-handle\"")) == 9
+  assert !string.contains(html, "background-image")
+  assert !string.contains(
+    element.to_string(render.draw(row)),
+    "design-resize-handle",
+  )
+}
+
+pub fn a_selected_text_input_draws_resize_handles_test() {
+  let html =
+    element.to_string(
+      render.draw_selectable_resizable(
+        node(
+          "name",
+          render.TextInput(render.InputProperties(
+            render.Hug,
+            render.Hug,
+            "Name",
+          )),
+          [],
+        ),
+        ["name"],
+        dict.new(),
+        fn(id, _) { id },
+      ),
+    )
+  assert string.contains(html, "data-design-id=\"name\"")
+  assert string.contains(html, "design-resize-frame")
+  assert string.contains(html, "<input")
+  assert string.contains(html, "placeholder=\"Name\"")
+  assert list.length(string.split(html, "class=\"design-resize-handle\"")) == 9
+}

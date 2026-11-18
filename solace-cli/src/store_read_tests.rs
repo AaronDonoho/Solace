@@ -843,3 +843,50 @@ fn a_cut_rust_outline_names_what_it_left_out() {
     assert!(!out.contains("pub fn f29() -> i32"), "{out}");
     assert!(out.contains("items not shown") && out.contains("f29"), "{out}");
 }
+
+/// A fixture used by many tests: the context reply caps the list, says how
+/// many it left out, and still fits the budget.
+#[test]
+fn inspect_context_caps_a_test_fixtures_users() {
+    let mut lib = "pub struct Fixture;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n".to_string();
+    for n in 0..25 {
+        lib += &format!("    #[test]\n    fn t{n}() {{\n        let _ = Fixture;\n    }}\n");
+    }
+    lib += "}\n";
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", lib.as_str())]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.inspect(&["crate.Fixture"], true, None, crate::cli::BUDGET).unwrap();
+    assert!(out.len() <= crate::cli::BUDGET, "{} bytes", out.len());
+    assert!(out.contains("== Tests that use it (25) =="), "{out}");
+    assert!(out.contains("…and 4 more (solace refs crate.Fixture)"), "{out}");
+}
+
+/// A symbol's own test module is listed before smaller tests elsewhere.
+#[test]
+fn inspect_context_shows_a_symbols_own_test_module_first() {
+    let a = concat!(
+        "pub fn f() -> i32 {\n",
+        "    1\n",
+        "}\n\n",
+        "#[cfg(test)]\nmod tests {\n",
+        "    use super::*;\n\n",
+        "    #[test]\n    fn own_test() {\n",
+        "        assert_eq!(f(), 1);\n",
+        "        assert_eq!(f(), 1);\n",
+        "        assert_eq!(f(), 1);\n",
+        "    }\n}\n",
+    );
+    let mut b = "pub fn use_f() -> i32 {\n    crate::a::f()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n".to_string();
+    for n in 0..22 {
+        b += &format!("    #[test]\n    fn b{n}() {{\n        assert_eq!(crate::a::f(), 1);\n    }}\n");
+    }
+    b += "}\n";
+    let lib = "pub mod a;\npub mod b;\n";
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", lib), ("src/a.rs", a), ("src/b.rs", b.as_str())]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.inspect(&["a.f"], true, None, crate::cli::BUDGET).unwrap();
+    assert!(out.contains("\n  a.tests::own_test\n"), "{out}");
+    assert!(out.contains("…and 2 more (solace refs a.f)"), "{out}");
+}

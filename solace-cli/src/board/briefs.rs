@@ -229,8 +229,8 @@ pub(crate) fn continuation_brief(
 }
 
 /// The reply `session start --task` gives task `t`'s agent, with `task_text`'s
-/// ranking of the task's title, description and, for a Tech Debt task, its
-/// findings, in `here`, the project its run works in (D-151, D-228);
+/// ranking of the task's title, description and notes, in `here`, the project
+/// its run works in (D-151, D-260);
 /// none when that folder has no store, or when building it fails, which is
 /// logged so the brief's plain start line can be traced. The brief carries
 /// the reference above this reply.
@@ -360,7 +360,7 @@ fn marked_tests(top: &Path, t: &Value) -> (Vec<Value>, Vec<String>) {
 /// The review role's direction in a task brief.
 fn review_role(read_only: &str, verify: &str, debt: &str) -> String {
     format!(
-        "Review the changes this task made and give feedback. Red-team the changes: assume they don't work until you prove they meet the task's goal and acceptance criteria and break nothing they reach. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt only when fixing them clearly pays off: code repeated once or twice isn't tech debt by itself, and don't push for an abstraction unless it clearly pays for itself. Don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt under the same bar. Judge an edge case by what happens if it occurs, not by how likely it is. If it could lose or corrupt data, give a wrong result, expose what it shouldn't, or break what a user sees, it blocks when it fails the task's goal or acceptance criteria, and otherwise goes in `### Tech debt`. If no user or data would notice its outcome, it is not a concern: leave it out. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Flag user-interface details the task didn't ask for, including labels, wording, indicators, colors, new buttons or screens, and layout. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria, has real bugs, or takes a direction that could be hazardous. If the direction is wrong, or a follow-up task is warranted, say so plainly in a `### Summary` right after the assessment label. Follow the assessment with findings and verification, including any checks not performed. Findings hold only what blocks this task or explains the assessment. Every item to fix later goes in the `### Tech debt` section and nowhere else: an item anywhere else is never filed or fixed. List nothing for later action that isn't to be fixed.{debt}"
+        "Review the changes this task made and give feedback. Red-team the changes: assume they don't work until you prove they meet the task's goal and acceptance criteria and break nothing they reach. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag a removed or weakened test, an expected value changed without reason, and a bug fix whose test would pass on the old code. Flag duplication and large modules, filing minor ones as tech debt only when fixing them clearly pays off: code repeated once or twice isn't tech debt by itself, and don't push for an abstraction unless it clearly pays for itself. Don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt under the same bar. Judge an edge case by what happens if it occurs, not by how likely it is. If it could lose or corrupt data, give a wrong result, expose what it shouldn't, or break what a user sees, it blocks when it fails the task's goal or acceptance criteria, and otherwise goes in `### Tech debt`. If no user or data would notice its outcome, it is not a concern: leave it out. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Flag user-interface details the task didn't ask for, including labels, wording, indicators, colors, new buttons or screens, and layout. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Choose **Needs work** only when the change doesn't meet the task's goal or acceptance criteria, has real bugs, or takes a direction that could be hazardous. If the direction is wrong, or a follow-up task is warranted, say so plainly in a `### Summary` right after the assessment label. Follow the assessment with findings and verification, including any checks not performed. Findings hold only what blocks this task or explains the assessment. Every item to fix later goes in the `### Tech debt` section and nowhere else: an item anywhere else is never filed or fixed. List nothing for later action that isn't to be fixed.{debt}"
     )
 }
 
@@ -374,14 +374,14 @@ fn discussion_role(read_only: &str, verify: &str) -> String {
 /// The work role's direction in a task brief.
 fn work_role(start: &str, ask: &str, settings: &str, tests: &str) -> String {
     format!(
-        "Make the change this task describes. If the notes hold a review's feedback (it begins with **Assessment:**), the latest review is part of this task, whatever its assessment, unless a later human note says otherwise: fix what its findings say to change and every `### Tech debt` item in the projects this task can change. In the `task done` summary, name each item you left unfixed and why. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Prove each acceptance criterion through the entry point - for example: a request through the server's routing, not the function behind it; a save confirmed by a fresh read. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+        "{CONTRADICTION_CHECK}Make the change this task describes. If the notes hold a review's feedback (it begins with **Assessment:**), the latest review is part of this task, whatever its assessment, unless a later human note says otherwise: fix what its findings say to change and every `### Tech debt` item in the projects this task can change. In the `task done` summary, name each item you left unfixed and why. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Prove each acceptance criterion through the entry point - for example: a request through the server's routing, not the function behind it; a save confirmed by a fresh read. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. A bug fix's test must fail on the old code. Don't remove a test or change its expected value unless the task says to; if you do, say why in the summary. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. {NAMING} Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
     )
 }
 
 /// The investigation role's direction in a task brief.
 fn investigation_role(read_only: &str, define: &str, start: &str, ask: &str) -> String {
     format!(
-        "Investigate this task before any work on it: answer what it asks, or find out what the change involves. Report the required behavior, constraints and acceptance criteria, each criterion a result a worker or reviewer can confirm (what a test, command or page shows). Settle each risk you can by reading, checking or, when it doesn't change what the human gets, making the call; list a risk only when you can't settle it, and say why. Report anything you didn't check. Name the symbols, modules and non-source files that need attention when that helps define the work. Don't prescribe implementation, edits or submission shape. The human never edits files or runs commands; any needed change, a settings change included, is the worker's to make. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {define} {start} {ask} Finish with `task done`, the report in `text`."
+        "{CONTRADICTION_CHECK}Investigate this task before any work on it: answer what it asks, or find out what the change involves. Report the required behavior, constraints and acceptance criteria, each criterion a result a worker or reviewer can confirm (what a test, command or page shows). Settle each risk you can by reading, checking or, when it doesn't change what the human gets, making the call; list a risk only when you can't settle it, and say why. Report anything you didn't check. Name the symbols, modules and non-source files that need attention when that helps define the work. Don't prescribe implementation, edits or submission shape. The human never edits files or runs commands; any needed change, a settings change included, is the worker's to make. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {define} {start} {ask} Finish with `task done`, the report in `text`."
     )
 }
 
@@ -973,7 +973,9 @@ fn asking_section(asking: &str, note: &str, involvement: &str) -> String {
         }
         _ => ("Balanced", "ask when a wrong guess would mean redoing work or would change what the human sees".to_string()),
     };
-    format!("When to ask ({title}): {guidance}. This never stops you from asking when something conflicts with a decision or the vision.")
+    format!(
+        "When to ask ({title}): {guidance}. This never stops you from asking when the task clearly contradicts a decision, the vision, its feature or another task."
+    )
 }
 
 /// How a choice the agent made instead of asking is recorded.
@@ -1007,8 +1009,8 @@ pub(crate) fn personas_section(top: &Path) -> String {
     out
 }
 
-/// The task's title, description and, for a Tech Debt task, its findings, as
-/// `session start --task` ranks them (D-151, D-228).
+/// The task's title, description and notes, as `session start --task` ranks
+/// them (D-151, D-260); a Tech Debt task leaves out its shared description.
 pub(crate) fn task_text(t: &Value) -> String {
     let text = |k: &str| t[k].as_str().unwrap_or("").trim().to_string();
     let tech_debt = t["techDebt"] == true;
@@ -1017,9 +1019,12 @@ pub(crate) fn task_text(t: &Value) -> String {
     if !tech_debt || body != crate::board::reviews::TECH_DEBT_BODY {
         out.push_str(&body);
     }
-    if tech_debt {
-        out.push('\n');
-        out.push_str(&crate::board::reviews::tech_debt_findings(t));
+    let notes = crate::board::reviews::notes_text(t);
+    if !notes.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&notes);
     }
     out
 }
@@ -1132,3 +1137,20 @@ fn design_sections(top: &Path, t: &Value, kind: &str) -> String {
     }
     out
 }
+
+/// What to check before acting: a task that would undo or break a record asks first.
+const CONTRADICTION_CHECK: &str = "Before planning or changing anything, check the task against the decisions, the vision, its feature and the tasks you can read. If doing it would undo or break what one of them states, not merely differ in detail, ask first: name both sides in the human's terms, with options to go ahead (then propose the changed decision), change the task, or drop it. ";
+
+pub(crate) const NAMING: &str = concat!(
+    "Naming: names are codebase vocabulary, not local descriptions; every name tells readers whether two things are the same concept or different ones, so it must tell the truth. ",
+    "Scale effort to scope: local variables need little thought; exported types, modules, APIs and schemas need these rules. ",
+    "Same concept, same name: search for the concept and its synonyms in code, tests and docs before naming; reuse established terms and patterns, and let existing usage beat style preferences. ",
+    "Different concept, different name: don't reuse a name for something that differs from what it already means, and don't introduce a name (`UserRecord` beside `User`) unless it marks a real domain distinction. ",
+    "New concepts take domain words from the user's request, spec or domain rather than invented terminology. ",
+    "Name what it is, not its history or implementation: prefer `getSession()` over `getUserFromRedisCache()`, and don't use `V2`, `new`, `improved`, `legacy` or task-derived names as substitutes for meaningful names; use them only when the distinction is itself part of the concept or interface. ",
+    "Use the simplest unambiguous name: longer is not more precise, and avoid `Manager` or `Processor` when a meaningful term exists. ",
+    "Existing names: if the codebase has competing terms, first check whether they mark a real distinction; if not, follow the nearest established usage rather than introducing another synonym. ",
+    "Don't rename unless the existing name is misleading or the task requires it. When you rename, update code, tests and docs together. ",
+    "Renaming public or persisted names (API fields, schema columns, config keys, serialized names, event names) is a breaking change; treat it as one. ",
+    "In your summary, note any new terms you introduced and inconsistencies you found."
+);

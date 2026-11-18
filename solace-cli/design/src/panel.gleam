@@ -1036,3 +1036,65 @@ pub fn forget_design(model: Model, id: String) -> Model {
     notes: list.filter(model.notes, fn(note) { note.design != id }),
   )
 }
+
+/// The panel with an Edit tab and an Agent tab. The page supplies the edit
+/// view and maps the agent's messages into its own.
+pub fn view_tabbed(
+  model: Model,
+  edit: Element(msg),
+  editing: Bool,
+  on_edit: msg,
+  on_agent: msg,
+  lift: fn(Msg) -> msg,
+) -> Element(msg) {
+  let agent =
+    plan_panel.Panel(
+      runs: model.runs,
+      context: plan_panel.page,
+      shown: shown(model),
+      entries: model.entries,
+      collapsed: model.collapsed,
+      width: model.width,
+      max_width: plan_panel.max_width(window_width()),
+      text: model.text,
+      sending: model.sending,
+      error: model.error,
+      refreshing: model.refreshing,
+      models: model.models,
+      model: model.model,
+      effort: model.effort,
+      name: fn(_, _) { "" },
+      on_collapse: lift(Collapse),
+      on_drag: fn(x) { lift(Drag(x)) },
+      on_key: fn(key) { lift(Key(key)) },
+      on_text: fn(text) { lift(Text(text)) },
+      on_format: fn(before, after) { lift(Format(before, after)) },
+      on_block: fn(block) { lift(Block(block)) },
+      on_model: fn(name) { lift(ModelPicked(name)) },
+      on_effort: fn(effort) { lift(Effort(effort)) },
+      on_try_again: lift(TryAgain),
+      on_start: lift(Start),
+      on_send: lift(Send),
+      on_answer: fn(qid, option) { lift(Answer(qid, option)) },
+      on_show: fn(id) { lift(Show(id)) },
+      on_end: lift(End),
+      at_bottom: model.at_bottom,
+      new_message: model.new_message,
+      on_scroll: fn(bottom) { lift(Scrolled(bottom)) },
+      on_newest: lift(Newest),
+    )
+  plan_panel.view_with_notes_and_tabs(
+    "",
+    settings(),
+    agent,
+    [
+      plan_panel.Tab("Edit", editing, on_edit),
+      plan_panel.Tab("Agent", !editing, on_agent),
+    ],
+    case editing {
+      True -> Some(edit)
+      False -> None
+    },
+    element.map(notes_view(model), lift),
+  )
+}

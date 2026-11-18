@@ -497,14 +497,26 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         "Reuse existing code before adding new code, extracting common patterns",
         "small, stateless, self-documenting functions",
         "small and focused around one domain or component",
-        "clear names for new symbols",
-        "the module that owns its concern",
-        "task:2414798176c466e4",
+        "Put new code in the module that owns its concern",
+        "A bug fix's test must fail on the old code",
+        "Don't remove a test or change its expected value unless the task says to",
     ] {
         assert!(work.contains(rule), "work: missing {rule}");
         assert!(!review.contains(rule), "review: unexpected {rule}");
     }
+    for kind in ["review", "investigate", "discuss"] {
+        let prompt = brief(&t, kind, "engineer");
+        for rule in [
+            "Put new code in the module that owns its concern",
+            "A bug fix's test must fail on the old code",
+            "Don't remove a test or change its expected value unless the task says to",
+        ] {
+            assert!(!prompt.contains(rule), "{kind}: unexpected {rule}");
+        }
+        assert!(!prompt.contains("2414798176c466e4"), "{kind}: stale refactor task reference");
+    }
     for rule in [
+        "Flag a removed or weakened test, an expected value changed without reason, and a bug fix whose test would pass on the old code",
         "Flag duplication and large modules",
         "minor ones as tech debt",
         "cross-domain concerns in the same module",
@@ -638,6 +650,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     for kind in ["review", "discuss"] {
         assert_eq!(brief(&wide, kind, "engineer").matches(crate::scope::ASK_FOR_PROJECT).count(), 0, "{kind}: unexpected scope rule");
     }
+    assert!(!work.contains("clear names for new symbols"), "work: the old clear-name rule remains");
 }
 
 /// D-182: a work brief names the commands each project marks `test = true`,
@@ -1024,7 +1037,7 @@ fn detail_and_asking_briefs_follow_their_settings() {
         "{rarely}"
     );
     for prompt in [&often, &balanced, &rarely] {
-        assert!(prompt.contains("conflicts with a decision or the vision"), "{prompt}");
+        assert!(prompt.contains("clearly contradicts a decision, the vision, its feature or another task"), "{prompt}");
     }
     for kind in ["work", "investigate", "review", "discuss"] {
         assert!(super::brief(&t, kind, "engineer", "concise", "rarely").contains("How much to write (Concise)"), "{kind}");
@@ -1249,8 +1262,11 @@ fn tech_debt_findings_fill_three_slots() {
     assert!(!next.contains("TECH_DEBT_ASK") && !next.contains("TECH_DEBT_BODY"), "{next}");
 }
 
+/// D-260: every task's notes join its title and description in the ranking.
+/// A Tech Debt task still leaves out its shared description, and a finding is
+/// read without the line naming its task and run.
 #[test]
-fn task_text_keeps_an_edited_description_and_ignores_notes_off_tech_debt() {
+fn task_text_keeps_an_edited_description_and_reads_every_tasks_notes() {
     use crate::board::reviews::TECH_DEBT_BODY;
     let edited = json!({
         "title": "Tech Debt",
@@ -1280,7 +1296,7 @@ fn task_text_keeps_an_edited_description_and_ignores_notes_off_tech_debt() {
             },
         ],
     });
-    assert_eq!(task_text(&ordinary), "Ordinary\nA normal description.");
+    assert_eq!(task_text(&ordinary), "Ordinary\nA normal description.\n`app.other`: split it.\n`app.third`: name it.");
 }
 
 #[test]
@@ -1386,5 +1402,121 @@ fn design_links_need_a_word_boundary() {
     assert_eq!(ids("design:0123456789abcdef"), ["0123456789abcdef"]);
     assert_eq!(ids("`design:0123456789abcdef`design:fedcba9876543210"), ["fedcba9876543210"]);
     assert_eq!(ids("design:0123456789abcdef design:0123456789abcdef"), ["0123456789abcdef"]);
+}
+
+/// A work or investigation brief asks before a task that clearly contradicts a record.
+#[test]
+fn work_and_investigation_briefs_check_for_a_clear_contradiction() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    let bar = "If doing it would undo or break what one of them states, not merely differ in detail";
+    for kind in ["work", "investigate"] {
+        for asking in ["often", "balanced", "rarely"] {
+            let b = super::brief(&t, kind, "engineer", "standard", asking);
+            assert!(
+                b.contains("check the task against the decisions, the vision, its feature and the tasks you can read"),
+                "{kind}/{asking}: {b}"
+            );
+            assert!(b.contains(bar), "{kind}/{asking}: {b}");
+            assert!(b.contains("name both sides in the human's terms"), "{kind}/{asking}: {b}");
+            for option in ["go ahead", "change the task", "drop it"] {
+                assert!(b.contains(option), "{kind}/{asking} {option}: {b}");
+            }
+        }
+    }
+    for kind in ["review", "discuss"] {
+        for asking in ["often", "balanced", "rarely"] {
+            let b = super::brief(&t, kind, "engineer", "standard", asking);
+            assert!(!b.contains(bar), "{kind}/{asking}: {b}");
+            assert!(!b.contains("check the task against the decisions"), "{kind}/{asking}: {b}");
+        }
+    }
+}
+
+#[test]
+fn the_work_brief_has_the_naming_section() {
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [],
+    });
+    let golden = concat!(
+        "Naming: names are codebase vocabulary, not local descriptions; every name tells readers whether two things are the same concept or different ones, so it must tell the truth. ",
+        "Scale effort to scope: local variables need little thought; exported types, modules, APIs and schemas need these rules. ",
+        "Same concept, same name: search for the concept and its synonyms in code, tests and docs before naming; reuse established terms and patterns, and let existing usage beat style preferences. ",
+        "Different concept, different name: don't reuse a name for something that differs from what it already means, and don't introduce a name (`UserRecord` beside `User`) unless it marks a real domain distinction. ",
+        "New concepts take domain words from the user's request, spec or domain rather than invented terminology. ",
+        "Name what it is, not its history or implementation: prefer `getSession()` over `getUserFromRedisCache()`, and don't use `V2`, `new`, `improved`, `legacy` or task-derived names as substitutes for meaningful names; use them only when the distinction is itself part of the concept or interface. ",
+        "Use the simplest unambiguous name: longer is not more precise, and avoid `Manager` or `Processor` when a meaningful term exists. ",
+        "Existing names: if the codebase has competing terms, first check whether they mark a real distinction; if not, follow the nearest established usage rather than introducing another synonym. ",
+        "Don't rename unless the existing name is misleading or the task requires it. When you rename, update code, tests and docs together. ",
+        "Renaming public or persisted names (API fields, schema columns, config keys, serialized names, event names) is a breaking change; treat it as one. ",
+        "In your summary, note any new terms you introduced and inconsistencies you found."
+    );
+    let work = brief(&t, "work", "engineer");
+    assert_eq!(work.matches(golden).count(), 1, "work: naming section must appear exactly once\n{work}");
+    for kind in ["investigate", "review", "discuss"] {
+        let prompt = brief(&t, kind, "engineer");
+        assert!(!prompt.contains("Same concept, same name"), "{kind}: unexpected naming guidance\n{prompt}");
+        assert!(!prompt.contains("breaking change"), "{kind}: unexpected naming guidance\n{prompt}");
+    }
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let task = api(&s.root, "POST", "/tasks", json!({"title": "A naming task"})).unwrap();
+    let fresh = continuation_brief(&task, &json!({"id": "r1", "kind": "work"}), false, &p.root, &p.root, false, "engineer").0;
+    assert!(!fresh.contains("clear names for new symbols"), "fresh work brief: the old clear-name rule remains\n{fresh}");
+    assert_eq!(fresh.matches(golden).count(), 1, "fresh work brief: naming section must appear exactly once");
+}
+
+/// D-260: a note's named code leads an ordinary task's first call.
+#[test]
+fn a_notes_named_code_leads_an_ordinary_tasks_first_call() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n\npub fn other() -> Int {\n  2\n}\n")]);
+    let t = json!({
+        "id": "t1",
+        "title": "Ordinary",
+        "body": "A normal description.",
+        "notes": [{"author": "agent", "text": "`app.other` handles it."}],
+    });
+    let ranked = task_text(&t);
+    assert!(ranked.contains("app.other"), "{ranked}");
+    let reply = session_reply(&t, &p.root).expect("a reply");
+    let next = reply.lines().find(|l| l.starts_with("Next:")).expect(&reply);
+    assert!(next.contains("app.other"), "{next}");
+}
+
+/// D-260: on a Tech Debt task, a note's named code outranks a title that
+/// names something else. The opaque symbol matches the title, so the test
+/// fails without the note.
+#[test]
+fn a_tech_debt_tasks_notes_lead_its_first_call_past_a_misleading_title() {
+    let p = testing::project(&[
+        ("src/reach/flow.gleam", "pub fn taint() -> Int {\n  1\n}\n"),
+        ("src/opaque.gleam", "pub fn opaque_type() -> Int {\n  2\n}\n"),
+    ]);
+    let t = json!({
+        "id": "t1",
+        "title": "notes: keep note box contents opaque",
+        "body": crate::board::reviews::TECH_DEBT_BODY,
+        "techDebt": true,
+        "notes": [{
+            "author": "agent",
+            "text": "The fix lives in `reach::flow.taint`.",
+        }],
+    });
+    let reply = session_reply(&t, &p.root).expect("a reply");
+    let next = reply.lines().find(|l| l.starts_with("Next:")).expect(&reply);
+    assert!(next.contains("flow.taint"), "{next}");
 }
 

@@ -1533,27 +1533,6 @@ const REVIEW_FINDING_PREFIX: &str = "Tech debt from the review of task:";
 
 const WORK_FINDING_PREFIX: &str = "Tech debt from the work on task:";
 
-/// The content of the `solace` notes that filing wrote as task `t`'s tech
-/// debt, without the line naming the task and run each came from (D-112).
-pub(crate) fn tech_debt_findings(t: &Value) -> String {
-    let mut out = String::new();
-    for note in t["notes"].as_array().into_iter().flatten() {
-        if note["author"] != "solace" {
-            continue;
-        }
-        let Some(text) = note["text"].as_str() else { continue };
-        let Some((head, body)) = text.split_once("\n\n") else { continue };
-        if !head.starts_with(REVIEW_FINDING_PREFIX) && !head.starts_with(WORK_FINDING_PREFIX) {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(body);
-    }
-    out
-}
-
 /// Where a task keeps an unreadable file's text as it arrived, so the diff
 /// survives the store replacing the file.
 pub fn after_file(root: &Path, tid: &str, name: &str) -> PathBuf {
@@ -1663,4 +1642,31 @@ pub(crate) fn before_of(s: &Store, tid: &str) -> Result<Vec<(String, Value)>, Fa
             Ok((key, serde_json::from_str(&data).map_err(|e| Failure(e.to_string(), 1))?))
         })
         .collect()
+}
+
+/// The text `task_text` ranks from a task's notes (D-260): every note's text,
+/// with a finding's line naming its task and run left out and Solace's own
+/// bookkeeping left out.
+pub(crate) fn notes_text(t: &Value) -> String {
+    let mut out = String::new();
+    for note in t["notes"].as_array().into_iter().flatten() {
+        let Some(text) = note["text"].as_str() else { continue };
+        let body = if note["author"] == "solace" {
+            let Some((head, body)) = text.split_once("\n\n") else { continue };
+            if !head.starts_with(REVIEW_FINDING_PREFIX) && !head.starts_with(WORK_FINDING_PREFIX) {
+                continue;
+            }
+            body
+        } else {
+            text.trim()
+        };
+        if body.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(body);
+    }
+    out
 }

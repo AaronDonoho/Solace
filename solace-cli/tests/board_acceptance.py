@@ -239,6 +239,27 @@ class Board(unittest.TestCase):
         self.assertIn('`### Summary` heading', prompt)
         self.assertNotIn('How to talk to the human (Collaborator)', prompt)
 
+    def test_a_work_brief_checks_for_a_clear_contradiction(self):
+        # A task that contradicts a logged decision ends in a question, not changes.
+        (self.root/'DECISIONS.md').write_text(
+            '# Decisions\n## D-1 Backlog stays\nBacklog remains for planning.\nWhy: planning needs it.\n'
+        )
+        t = self.assign([{
+            'command':'task ask',
+            'text':'This task removes the Backlog column, but D-1 keeps Backlog for planning.',
+            'options':['Go ahead','Change the task','Drop it'],
+        }])
+        rid = t['runs'][-1]['id']
+        t = self.wait(t, lambda x:(x['attention'] or {}).get('hold'))
+        prompt = (self.root/'.solace'/(rid+'.prompt')).read_text()
+        self.assertIn('If doing it would undo or break what one of them states, not merely differ in detail', prompt)
+        self.assertIn("name both sides in the human's terms", prompt)
+        self.assertEqual(
+            t['questions'][-1]['text'],
+            'This task removes the Backlog column, but D-1 keeps Backlog for planning.'
+        )
+        self.assertEqual(t['changes'], [])
+
     def review(self, t, steps=None, model='fake'):
         if steps is not None:
             self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps(steps)})

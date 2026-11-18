@@ -1640,3 +1640,37 @@ Amends D-251 point 2: on the Delivery page, a version that is valid semver and h
 
 Why: an older version is usually a typo, but rebuilding an older release line on purpose should stay possible.
 
+## D-258 A human's design change is saved through the edit route
+(human, board task "edit: save a human's change", 2026-11-17)
+Adds Spec 15 §1, §4 and §6 (D-240, D-241, D-243; board task "edit: save a human's change", 2026-11-17). Part of the design: direct editing feature.
+1. A human edits a design with `POST /designs/{id}/edit` and `{operations}`, the same element operations a design run proposes (D-241 point 2). The operations are applied to the design as it is saved now, under the save lock, and the result is checked with `design.validate`. It is saved through the design save path as a new version whose source is the human, and the reply is the saved design.
+2. A malformed request is `E7001` (409), an unknown design is `E7023` (404), and an operation on an element the design does not have, or a result that fails validation, is `E7033` (409), naming the element. Nothing is saved. A change identical to the saved design saves no version.
+3. A human's save makes a design run's read, and so any waiting proposal, stale: the run's next change, or an older waiting proposal answered Approve, is refused with `E7026`.
+Why: the page can edit a design without an agent, and one set of element operations serves proposals, direct editing and later undo.
+
+## D-259 A human's design edits wait for Save and are made in edit mode, in the panel's Edit tab
+(human, board task "edit: change a selected element", 2026-11-17)
+Changed by (human, board task "edit: toggle edit mode", 2026-11-17)
+Changed by (human, board task "edit: move an element by dragging", 2026-11-17)
+Changed by (human, board task "edit: move an element by dragging", 2026-11-17)
+Part of the design: direct editing feature; builds on D-258.
+
+1. A human's direct changes to a design show on the drawing at once but are not saved until Save. Save sends every waiting change for that design as one `POST /designs/{id}/edit`, so it becomes one version. Discard drops them.
+2. Waiting changes are kept per design in the browser. They survive switching designs, tabs or versions, leaving the Design page, and reloading or closing the app, until Save or Discard. Navigating away never asks.
+3. Save applies the changes on top of the newest saved version. A refusal shows the server's message, and both the saved design and the waiting changes stay as they were.
+4. The Design page's right panel has two tabs: one for editing (the selected element's properties now, and drag-and-drop components later) and one for the agent. The panel keeps one Hide button and one resize edge, and the Strategy page's panel is unchanged.
+5. A human changes a design directly only in edit mode, which an Edit button beside the design's title turns on and off. Outside edit mode the Edit tab shows the selected element's properties read-only. Clicking selects an element in both modes. Dragging is decided by the mode: outside edit mode a drag selects the elements in a box and notes can be added; in edit mode a drag on an element moves it, and notes are not offered. A design with waiting changes opens in edit mode. Edit mode is the human's alone: the design agent proposes and makes changes whether or not edit mode is on.
+6. Turning edit mode off with waiting changes shows Solace's in-app prompt with Save, Discard and Keep editing; edit mode ends only once no changes wait. With none waiting, it turns off without asking.
+7. While an element is dragged, the other elements move aside so the design shows how it will look after the drop. A drop adds one waiting move, saved with the other changes. A drop the design rules refuse adds nothing, and the element goes back.
+
+Why: one Save per batch keeps version history usable when edits are frequent, and work survives a reload; one panel with tabs keeps the canvas wide; an explicit edit mode keeps a human's accidental changes off the design without slowing the agent, while navigating away stays free because the edits are kept; tying drag to the mode keeps moving and selecting from competing, and live reflow shows the result while dragging.
+
+## D-260 A run's first read follows its task's notes
+(human, board task "notes: keep note box contents opaque", 2026-11-18)
+Amends D-228 point 1 and D-151 point 1.
+
+1. `session start --task` ranks every task on its title, its description, and the text of its notes. A Tech Debt task leaves out the shared Tech Debt description, as before, and its findings are read without the line naming the task and run they came from.
+2. The run's start project follows the same text, as D-228 point 2 chose for findings.
+
+Why: Investigations, answers and reviews in the notes name the code a run needs. A title can name something else entirely: a Tech Debt task without a feature is titled after the task that filed it. The cost is small, since session start already reads the whole codebase.
+

@@ -3053,4 +3053,89 @@ mod tests {
         assert!(e.0.starts_with("E7026"), "{}", e.0);
         assert_eq!(crate::design::show(&root, id).unwrap(), changed);
     }
+
+    /// A human's save through the edit route adds a version, so the run's read is stale.
+    #[test]
+    fn a_human_edit_makes_a_design_runs_change_stale() {
+        let root = root();
+        let rid = design_run(&root);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"},
+                "children": [
+                    {"id": "heading", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Home"}}
+                ]
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        record_read(&root, &rid, id);
+        let board = std::sync::Arc::new(crate::board::server::Board::new(root.to_path_buf(), 0));
+        let edited = board
+            .projects_api(
+                "POST",
+                &format!("/designs/{id}/edit"),
+                &json!({"operations": [{"op": "set", "id": "heading", "field": "properties", "property": "text", "value": "Welcome"}]}),
+            )
+            .unwrap();
+        assert_eq!(edited["elements"][0]["children"][0]["properties"]["text"], json!("Welcome"));
+        let operations = json!([{"op": "set", "id": "heading", "field": "properties", "property": "text", "value": "Again"}]);
+        let e = super::strategy::design_proposal(&root, &rid, Some(id), &json!({"operations": operations}).to_string()).unwrap_err();
+        assert!(e.0.starts_with("E7026") && e.0.contains("again"), "{}", e.0);
+        assert_eq!(crate::design::show(&root, id).unwrap(), edited);
+        assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 2);
+    }
+
+    /// An older run's waiting proposal cannot be approved after a human's edit.
+    #[test]
+    fn a_legacy_design_proposal_is_refused_after_a_human_edit() {
+        let root = root();
+        let rid = design_run(&root);
+        let id = "0123456789abcdef";
+        let original = json!({
+            "schemaVersion": crate::design::SCHEMA_VERSION,
+            "id": id,
+            "title": "Home",
+            "tab": "ui",
+            "elements": [{
+                "id": "root",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"},
+                "children": [
+                    {"id": "heading", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Home"}}
+                ]
+            }]
+        });
+        crate::design::save(&root, &original, crate::design::Source::Human).unwrap();
+        let mut proposed = original.clone();
+        proposed["title"] = json!("Proposed");
+        let question = json!({
+            "id": "q1",
+            "text": format!("Change design {id}"),
+            "options": ["Approve", "Reject"],
+            "proposal": {"kind": "design", "id": id, "operations": [], "design": proposed, "created": crate::now(), "base": 1},
+            "answer": null
+        });
+        apply(&root, &json!({"id": "dp1", "kind": "strategy_propose", "run": rid.clone(), "question": question})).unwrap();
+        let board = std::sync::Arc::new(crate::board::server::Board::new(root.to_path_buf(), 0));
+        board
+            .projects_api(
+                "POST",
+                &format!("/designs/{id}/edit"),
+                &json!({"operations": [{"op": "set", "id": "heading", "field": "properties", "property": "text", "value": "Welcome"}]}),
+            )
+            .unwrap();
+        let (said, _) = design_answer(&root, &rid, "q1", "Approve");
+        assert!(said.starts_with("Not applied: E7026"), "{said}");
+        let saved = crate::design::show(&root, id).unwrap();
+        assert_eq!(saved["title"], json!("Home"));
+        assert_eq!(saved["elements"][0]["children"][0]["properties"]["text"], json!("Welcome"));
+        assert_eq!(crate::design::versions(&root, id).unwrap().as_array().unwrap().len(), 2);
+    }
 }

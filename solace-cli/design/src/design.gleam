@@ -2,13 +2,16 @@
 
 import changes
 import diagram
-import gleam/dict
+import editing
+import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
+import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import lustre
 import lustre/attribute
@@ -17,6 +20,7 @@ import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
+import moving
 import panel
 import plan_panel
 import region
@@ -38,6 +42,9 @@ pub type Model {
   Model(
     tab: Tab,
     designs: List(Design),
+    /// Whether a live list has replaced the designs, so a later list reply
+    /// is older and must not replace it.
+    live_listed: Bool,
     /// The design id in the address, "" for none.
     open: String,
     drawing: Option(render.Design),
@@ -66,12 +73,28 @@ pub type Model {
     show_changes: Bool,
     /// The agent panel's state, shared by both tabs.
     panel: panel.Model,
+    /// Waiting changes per design, keyed by design id.
+    waiting: Dict(String, List(editing.Change)),
+    /// Whether the panel shows the edit tab rather than the agent.
+    edit_tab: Bool,
+    /// Whether the human can change the open design's properties.
+    edit_mode: Bool,
+    /// Whether the prompt to leave edit mode with waiting changes shows.
+    confirm_exit: Bool,
+    /// Whether a save from the exit prompt ends edit mode when it succeeds.
+    leaving: Bool,
+    /// Why the last save was refused.
+    edit_error: String,
     /// The title being edited, None when the title is not a text box.
     renaming: Option(String),
     /// Whether the delete confirmation is shown.
     confirm_delete: Bool,
     /// The design the Undo button brings back, while it shows.
     undo: Option(String),
+    /// The element being dragged in edit mode.
+    dragging: Option(Drag),
+    /// The selected element's border being dragged in edit mode.
+    resizing: Option(Resize),
   )
 }
 
@@ -123,6 +146,29 @@ pub type Msg {
   ToggleChanges
   /// A message for the agent panel.
   Panel(panel.Msg)
+  /// Shows the panel's edit tab.
+  EditTab
+  /// Shows the panel's agent tab.
+  AgentTab
+  /// The Edit button turns edit mode on.
+  EditStart
+  /// The Edit button turns edit mode off, asking first when changes wait.
+  EditDone
+  /// The exit prompt's Keep editing button.
+  EditCancel
+  /// The exit prompt's Save button.
+  EditSave
+  /// The exit prompt's Discard button.
+  EditDiscard
+  /// A property input, from a text box, a choice or a color picker.
+  EditProperty(String, String, String)
+  /// Saves the open design's waiting changes.
+  SaveEdits
+  /// Drops the open design's waiting changes.
+  DiscardEdits
+  /// The reply to a save, with the design it was asked for and the changes
+  /// it sent.
+  EditsSaved(String, String, List(editing.Change))
   /// The saved design's title is clicked, turning it into a text box.
   RenameStart
   /// The title text box's text changed.
@@ -149,6 +195,22 @@ pub type Msg {
   Undone(String)
   /// The undo window closed for this design.
   UndoExpired(String)
+  /// In edit mode, a drag on this element began.
+  DragStarted(String)
+  /// The pointer moved during an element drag, with each drawn element's
+  /// id and bounds.
+  Dragged(Float, Float, List(#(String, Float, Float, Float, Float)))
+  /// The dragged element was let go.
+  Dropped
+  /// The element drag ended without a drop.
+  DragCancelled
+  /// A drag on a selected element's side or corner, with its id, side and
+  /// drawn size.
+  Resized(String, String, Float, Float)
+  /// The resize drag was let go.
+  ResizeDropped
+  /// The resize drag ended without a drop.
+  ResizeCancelled
 }
 
 pub fn tabs() -> List(Tab) {
@@ -215,6 +277,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         viewed: None,
         previous: None,
         preview: None,
+        edit_mode: False,
+        confirm_exit: False,
+        leaving: False,
       ),
       event.emit("tab", json.string(tab_name(tab))),
     )
@@ -231,6 +296,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           viewed: None,
           previous: None,
           preview: None,
+          edit_mode: False,
+          confirm_exit: False,
+          leaving: False,
         )
       #(model, load(model))
     }
@@ -247,6 +315,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           viewed: None,
           previous: None,
           preview: None,
+          edit_mode: False,
+          confirm_exit: False,
+          leaving: False,
         )
       #(model, load(model))
     }
@@ -262,6 +333,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           viewed: None,
           previous: None,
           preview: None,
+          edit_mode: False,
+          confirm_exit: False,
+          leaving: False,
         )
       #(
         model,
@@ -272,10 +346,26 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       )
     }
     DesignLoaded(id, text) -> {
-      let model = load_design(model, id, text)
+      let loaded = load_pending(load_design(model, id, text), id)
+      let model = case id == model.open {
+        True ->
+          Model(
+            ..loaded,
+            edit_mode: loaded.edit_mode || waiting_for(loaded, id) != [],
+            confirm_exit: loaded.confirm_exit,
+          )
+        False -> loaded
+      }
+      let model = Model(..model, edit_error: "")
       #(model, current_previous_request(model))
     }
-    DesignsLoaded(text) -> #(loaded(model, text), effect.none())
+    DesignsLoaded(text) -> #(
+      case model.live_listed {
+        True -> model
+        False -> loaded(model, text)
+      },
+      effect.none(),
+    )
     ToggleHistory(id) -> toggle_history(model, id)
     HistoryLoaded(id, text) -> #(load_history(model, id, text), effect.none())
     ViewVersion(id, number) -> view_version(model, id, number)
@@ -329,6 +419,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.map(panel_fx, Panel),
           effect.before_paint(fn(send, root) {
             watch_region(root, send)
+            watch_moves(root, send)
+            watch_resizes(root, send)
             drag_note_box(root, fn() { Nil })
             send(Panel(panel.Attached(root)))
           }),
@@ -402,12 +494,63 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       let #(state, fx) = panel.update(model.panel, msg)
       #(Model(..model, panel: state), effect.map(fx, Panel))
     }
+    EditTab -> #(Model(..model, edit_tab: True), effect.none())
+    AgentTab -> #(Model(..model, edit_tab: False), effect.none())
+    EditStart -> #(Model(..model, edit_mode: True), effect.none())
+    EditDone ->
+      case model.edit_mode, waiting_for(model, model.open) {
+        True, [] -> #(
+          Model(..model, edit_mode: False, confirm_exit: False),
+          effect.none(),
+        )
+        True, _ -> #(Model(..model, confirm_exit: True), effect.none())
+        False, _ -> #(model, effect.none())
+      }
+    EditCancel -> #(Model(..model, confirm_exit: False), effect.none())
+    EditSave ->
+      case waiting_for(model, model.open) {
+        [] -> #(
+          Model(..model, edit_mode: False, confirm_exit: False, leaving: False),
+          effect.none(),
+        )
+        _ -> {
+          let #(model, fx) =
+            save_edits(Model(..model, confirm_exit: False, leaving: True))
+          #(model, fx)
+        }
+      }
+    EditDiscard -> {
+      let #(model, fx) = discard_edits(model)
+      #(Model(..model, edit_mode: False, confirm_exit: False), fx)
+    }
+    EditProperty(field, property, value) ->
+      edit_property(model, field, property, value)
+    SaveEdits -> save_edits(model)
+    DiscardEdits -> discard_edits(model)
+    EditsSaved(id, text, sent) -> #(
+      edits_saved(model, id, text, sent),
+      effect.none(),
+    )
+    DragStarted(id) -> #(start_drag(model, id), effect.none())
+    Dragged(x, y, positions) -> #(
+      drag_to(model, x, y, positions),
+      effect.none(),
+    )
+    Dropped -> #(drop(model), effect.none())
+    DragCancelled -> #(Model(..model, dragging: None), effect.none())
+    Resized(id, side, width, height) -> #(
+      resize(model, id, side, width, height),
+      effect.none(),
+    )
+    ResizeDropped -> #(resize_drop(model), effect.none())
+    ResizeCancelled -> #(Model(..model, resizing: None), effect.none())
   }
 }
 
 pub fn view(model: Model) -> Element(Msg) {
   html.div([attribute.class("design")], [
     html.style([], view_styles),
+    html.style([], edit_styles),
     html.div(
       [
         attribute.class("tabs"),
@@ -431,7 +574,14 @@ pub fn view(model: Model) -> Element(Msg) {
         )
       }),
     ),
-    element.map(panel.view(model.panel), Panel),
+    panel.view_tabbed(
+      model.panel,
+      edit_panel(model),
+      model.edit_tab,
+      EditTab,
+      AgentTab,
+      Panel,
+    ),
     ..list.map(tabs(), fn(tab) {
       html.section(
         [
@@ -537,7 +687,7 @@ const view_styles =
 .design-changes{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
 .design-changes[aria-pressed=true]{background:var(--edge);color:var(--paper);border-color:var(--edge)}
 .design-screens{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);height:100%}
-.design-note{position:absolute;top:var(--space-3);right:var(--space-3);z-index:4;display:flex;flex-direction:column;gap:var(--space-2);width:min(280px,80vw);padding:var(--space-3);background:var(--paper);border:2px solid #c2410c;opacity:0.5;box-shadow:0 4px 16px rgba(0,0,0,.18)}
+.design-note{position:absolute;top:var(--space-3);right:var(--space-3);z-index:4;display:flex;flex-direction:column;gap:var(--space-2);width:min(280px,80vw);padding:var(--space-3);background:color-mix(in srgb,var(--paper) 60%,transparent);border:2px solid #c2410c;box-shadow:0 4px 16px rgba(0,0,0,.18)}
 .design-note-handle{align-self:stretch;padding:var(--space-1) 0;font-size:13px;color:var(--soft);cursor:grab;user-select:none}
 .design-note label{font-size:13px;color:var(--soft)}
 .design-note input{padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line)}
@@ -604,6 +754,7 @@ pub fn new(tab: Tab) -> Model {
   Model(
     tab,
     [],
+    False,
     "",
     None,
     [],
@@ -623,8 +774,16 @@ pub fn new(tab: Tab) -> Model {
     True,
     True,
     panel.new(),
+    dict.new(),
+    False,
+    False,
+    False,
+    False,
+    "",
     None,
     False,
+    None,
+    None,
     None,
   )
 }
@@ -681,7 +840,15 @@ fn loaded(model: Model, text: String) -> Model {
 fn apply(model: Model, event: Dynamic) -> #(Model, Bool) {
   let model = case decode.run(event, designs_decoder()) {
     Ok(designs) ->
-      refresh_open(Model(..model, designs: designs, loading: False, error: ""))
+      refresh_open(
+        Model(
+          ..model,
+          designs: designs,
+          live_listed: True,
+          loading: False,
+          error: "",
+        ),
+      )
     Error(_) -> model
   }
   let #(panel, refresh_models) = panel.live(model.panel, event)
@@ -726,6 +893,7 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
       connected: True,
       caught_up: False,
       replay: [],
+      live_listed: False,
       loading: True,
       error: "",
     )
@@ -796,6 +964,9 @@ fn refresh_open(model: Model) -> Model {
         viewed: None,
         previous: None,
         preview: None,
+        edit_mode: False,
+        confirm_exit: False,
+        leaving: False,
       )
   }
 }
@@ -1095,6 +1266,9 @@ fn view_version(
       previous: None,
       preview: None,
       selected: [],
+      edit_mode: False,
+      confirm_exit: False,
+      leaving: False,
     )
   let open_requests = case changed {
     True -> [event.emit("design", json.string(id)), load(model)]
@@ -1360,6 +1534,18 @@ fn current_canvas(model: Model, design: Design) -> List(Element(Msg)) {
       },
       ..list.append(controls, [heading_actions(model, design)])
     ]),
+    case model.edit_error {
+      "" -> element.none()
+      message ->
+        html.p([attribute.class("design-edit-error"), attribute.role("alert")], [
+          html.text(message),
+        ])
+    },
+    case model.drawing, model.design_error {
+      Some(_), message if message != "" ->
+        html.p([attribute.role("alert")], [html.text(message)])
+      _, _ -> element.none()
+    },
     case design.tab {
       Architecture ->
         case proposal, showing {
@@ -1452,7 +1638,11 @@ fn preview_button(model: Model) -> Element(Msg) {
   }
 }
 
-fn screens(model: Model, drawing: render.Design) -> Element(Msg) {
+fn screens(
+  model: Model,
+  drawing: render.Design,
+  resizable: Bool,
+) -> Element(Msg) {
   case model.preview {
     Some(id) ->
       case render.screen(drawing, id) {
@@ -1460,22 +1650,36 @@ fn screens(model: Model, drawing: render.Design) -> Element(Msg) {
           html.div([attribute.class("design-screens")], [
             render.draw_preview(screen, PreviewClick),
           ])
-        None -> all_screens(model, drawing)
+        None -> all_screens(model, drawing, resizable)
       }
-    None -> all_screens(model, drawing)
+    None -> all_screens(model, drawing, resizable)
   }
 }
 
-fn all_screens(model: Model, drawing: render.Design) -> Element(Msg) {
+fn all_screens(
+  model: Model,
+  drawing: render.Design,
+  resizable: Bool,
+) -> Element(Msg) {
   let markers = panel.markers(model.panel, model.open)
   html.div(
     [
       attribute.class("design-screens"),
-      attribute.data("region", ""),
+      canvas_gesture(model),
       event.on_click(ClearSelection),
     ],
     list.map(drawing.elements, fn(node) {
-      render.draw_selectable(node, model.selected, markers, ElementClicked)
+      case resizable {
+        True ->
+          render.draw_selectable_resizable(
+            node,
+            model.selected,
+            markers,
+            ElementClicked,
+          )
+        False ->
+          render.draw_selectable(node, model.selected, markers, ElementClicked)
+      }
     }),
   )
 }
@@ -1508,12 +1712,16 @@ fn create_proposal(model: Model, tab: Tab) -> Option(render.Design) {
 fn proposed_drawing(model: Model, proposed: render.Design) -> Element(Msg) {
   case model.show_changes, model.drawing {
     True, Some(current) ->
-      marked_screens(model, changes.mark(current, proposed))
-    _, _ -> screens(model, proposed)
+      marked_screens(model, changes.mark(current, proposed), False)
+    _, _ -> screens(model, proposed, False)
   }
 }
 
-fn marked_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
+fn marked_screens(
+  model: Model,
+  marked: changes.Marked,
+  resizable: Bool,
+) -> Element(Msg) {
   case model.preview {
     Some(id) ->
       case render.screen(marked.design, id) {
@@ -1521,28 +1729,43 @@ fn marked_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
           html.div([attribute.class("design-screens")], [
             render.draw_preview(screen, PreviewClick),
           ])
-        None -> marked_all_screens(model, marked)
+        None -> marked_all_screens(model, marked, resizable)
       }
-    None -> marked_all_screens(model, marked)
+    None -> marked_all_screens(model, marked, resizable)
   }
 }
 
-fn marked_all_screens(model: Model, marked: changes.Marked) -> Element(Msg) {
+fn marked_all_screens(
+  model: Model,
+  marked: changes.Marked,
+  resizable: Bool,
+) -> Element(Msg) {
   let markers = panel.markers(model.panel, model.open)
   html.div(
     [
       attribute.class("design-screens"),
-      attribute.data("region", ""),
+      canvas_gesture(model),
       event.on_click(ClearSelection),
     ],
     list.map(marked.design.elements, fn(node) {
-      render.draw_marked_selectable(
-        node,
-        model.selected,
-        marked.marks,
-        markers,
-        ElementClicked,
-      )
+      case resizable {
+        True ->
+          render.draw_marked_selectable_resizable(
+            node,
+            model.selected,
+            marked.marks,
+            markers,
+            ElementClicked,
+          )
+        False ->
+          render.draw_marked_selectable(
+            node,
+            model.selected,
+            marked.marks,
+            markers,
+            ElementClicked,
+          )
+      }
     }),
   )
 }
@@ -1596,8 +1819,9 @@ fn create_canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
           }
         UiUx ->
           case model.show_changes {
-            True -> marked_all_screens(model, changes.all_added(proposed))
-            False -> all_screens(model, proposed)
+            True ->
+              marked_all_screens(model, changes.all_added(proposed), False)
+            False -> all_screens(model, proposed, False)
           }
       },
     ]
@@ -1619,11 +1843,13 @@ fn proposal_answered(before: Model, after: Model) -> Bool {
 
 fn current_diagram(model: Model, design: Design) -> Element(Msg) {
   case model.drawing {
-    Some(drawing) ->
+    Some(saved) -> {
+      let drawing = editing.apply(waiting_for(model, design.id), saved)
       case current_marks(model, design, drawing) {
         Some(marked) -> marked_diagram(model, marked)
         None -> diagram.draw(drawing, dict.new(), diagram_selection(model))
       }
+    }
     None ->
       case model.design_error {
         "" -> element.none()
@@ -1776,13 +2002,11 @@ fn listen_region(
 
 fn watch_region(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
   listen_region(root, fn(start_x, start_y, end_x, end_y, positions, multi) {
-    let bounds =
-      list.map(positions, fn(position) {
-        let #(id, left, top, right, bottom) = position
-        #(id, region.Rect(left, top, right, bottom))
-      })
     let ids =
-      region.ids_inside(region.between(start_x, start_y, end_x, end_y), bounds)
+      region.ids_inside(
+        region.between(start_x, start_y, end_x, end_y),
+        element_rects(positions),
+      )
     send(RegionSelected(ids, multi))
   })
 }
@@ -1799,8 +2023,8 @@ fn place_note_box(selected: List(String)) -> Effect(Msg) {
 }
 
 fn note_box(model: Model) -> Element(Msg) {
-  case model.preview, model.selected, model.open {
-    None, [_, ..], open if open != "" ->
+  case model.preview, model.selected, model.open, model.edit_mode {
+    None, [_, ..], open, False if open != "" ->
       html.div(
         [attribute.class("design-note"), attribute.data("note-box", "")],
         [
@@ -1831,7 +2055,7 @@ fn note_box(model: Model) -> Element(Msg) {
           ),
         ],
       )
-    _, _, _ -> element.none()
+    _, _, _, _ -> element.none()
   }
 }
 
@@ -1900,8 +2124,8 @@ fn title_control(model: Model, title: String, editable: Bool) -> Element(Msg) {
 }
 
 fn heading_actions(model: Model, design: Design) -> Element(Msg) {
-  case model.confirm_delete {
-    True ->
+  case model.confirm_delete, model.confirm_exit {
+    True, _ ->
       html.div(
         [
           attribute.class("design-confirm"),
@@ -1921,17 +2145,70 @@ fn heading_actions(model: Model, design: Design) -> Element(Msg) {
           ),
         ],
       )
-    False ->
-      html.div([attribute.class("design-heading-actions")], [
-        html.button(
+    False, True ->
+      html.div(
+        [
+          attribute.class("design-confirm"),
+          attribute.role("alertdialog"),
+        ],
+        [
+          html.span([], [
+            html.text("Save your changes before leaving edit mode?"),
+          ]),
+          html.button(
+            [attribute.class("design-choice"), event.on_click(EditSave)],
+            [html.text("Save")],
+          ),
+          html.button(
+            [attribute.class("design-choice"), event.on_click(EditDiscard)],
+            [html.text("Discard")],
+          ),
+          html.button(
+            [attribute.class("design-choice"), event.on_click(EditCancel)],
+            [html.text("Keep editing")],
+          ),
+        ],
+      )
+    False, False ->
+      html.div(
+        [attribute.class("design-heading-actions")],
+        list.flatten([
+          case editable_design(model) {
+            Some(_) -> [
+              html.button(
+                [
+                  attribute.class("design-choice"),
+                  attribute.attribute("aria-pressed", case model.edit_mode {
+                    True -> "true"
+                    False -> "false"
+                  }),
+                  event.on_click(case model.edit_mode {
+                    True -> EditDone
+                    False -> EditStart
+                  }),
+                ],
+                [
+                  html.text(case model.edit_mode {
+                    True -> "Done editing"
+                    False -> "Edit"
+                  }),
+                ],
+              ),
+            ]
+            None -> []
+          },
           [
-            attribute.class("design-delete"),
-            attribute.attribute("aria-label", "Delete " <> design.title),
-            event.on_click(DeleteAsk),
+            html.button(
+              [
+                attribute.class("design-delete"),
+                attribute.attribute("aria-label", "Delete " <> design.title),
+                event.on_click(DeleteAsk),
+              ],
+              [html.text("Delete")],
+            ),
           ],
-          [html.text("Delete")],
-        ),
-      ])
+        ]),
+      )
   }
 }
 
@@ -1953,10 +2230,20 @@ fn rename(model: Model, title: String) -> #(Model, Effect(Msg)) {
 }
 
 fn renamed(model: Model, id: String, text: String) -> #(Model, Effect(Msg)) {
-  #(
-    load_design(Model(..model, renaming: None), id, text),
-    get("/designs", DesignsLoaded),
-  )
+  case render.decode(text) {
+    Ok(_) -> #(
+      load_design(Model(..model, renaming: None), id, text),
+      get("/designs", DesignsLoaded),
+    )
+    Error(_) -> #(
+      Model(
+        ..model,
+        renaming: None,
+        design_error: failure(text, "The title was refused."),
+      ),
+      effect.none(),
+    )
+  }
 }
 
 fn delete_design(model: Model) -> #(Model, Effect(Msg)) {
@@ -1985,7 +2272,7 @@ fn deleted(model: Model, id: String, text: String) -> #(Model, Effect(Msg)) {
     )
     None -> {
       let was_open = model.open == id
-      let model = forget_deleted_notes(loaded(model, text), id)
+      let model = forget_deleted_notes(loaded_keeping_live(model, text), id)
       let model = case was_open {
         True ->
           Model(
@@ -2017,7 +2304,7 @@ fn undo_delete(model: Model, id: String) -> #(Model, Effect(Msg)) {
 }
 
 fn undone(model: Model, text: String) -> #(Model, Effect(Msg)) {
-  #(Model(..loaded(model, text), undo: None), effect.none())
+  #(Model(..loaded_keeping_live(model, text), undo: None), effect.none())
 }
 
 fn forget_deleted_notes(model: Model, id: String) -> Model {
@@ -2104,8 +2391,8 @@ fn version_screens(
   drawing: render.Design,
 ) -> Element(Msg) {
   case version_marks(model, viewed, drawing) {
-    Some(marked) -> marked_screens(model, marked)
-    None -> screens(model, drawing)
+    Some(marked) -> marked_screens(model, marked, False)
+    None -> screens(model, drawing, False)
   }
 }
 
@@ -2152,11 +2439,16 @@ fn changes_control(model: Model) -> Element(Msg) {
 
 fn current_screens(model: Model, design: Design) -> Element(Msg) {
   case model.drawing {
-    Some(drawing) ->
+    Some(saved) -> {
+      let drawing =
+        dragged(model, editing.apply(waiting_for(model, design.id), saved))
+      let drawing = resize_preview(model, drawing)
+      let resizable = model.edit_mode && one_selected(model)
       case current_marks(model, design, drawing) {
-        Some(marked) -> marked_screens(model, marked)
-        None -> screens(model, drawing)
+        Some(marked) -> marked_screens(model, marked, resizable)
+        None -> screens(model, drawing, resizable)
       }
+    }
     None ->
       case model.design_error {
         "" -> element.none()
@@ -2179,5 +2471,674 @@ fn current_marks(
         None -> None
       }
     _, _ -> None
+  }
+}
+
+const edit_styles =
+  ".design-edit{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-1) 0}
+.design-edit h3{margin:0}
+.design-edit-field{display:flex;flex-direction:column;gap:var(--space-1)}
+.design-edit-field label{font-size:13px;color:var(--soft)}
+.design-edit-field input,.design-edit-field select{box-sizing:border-box;width:100%;padding:var(--space-1) var(--space-2);font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line)}
+.design-edit-color{display:flex;gap:var(--space-2);align-items:center}
+.design-edit-color input[type=color]{flex:none;width:44px;padding:0}
+.design-edit-color input[type=text]{flex:1;min-width:0}
+.design-edit-actions{display:flex;gap:var(--space-2);margin-top:var(--space-2)}
+.design-edit-actions button{padding:var(--space-1) var(--space-2);font:inherit;cursor:pointer}
+.design-edit-actions button:disabled{color:var(--soft);cursor:default}
+.design-edit-error{color:#a12b1f}
+.design-edit-hint{color:var(--soft)}
+"
+
+fn waiting_for(model: Model, id: String) -> List(editing.Change) {
+  case dict.get(model.waiting, id) {
+    Ok(changes) -> changes
+    Error(_) -> []
+  }
+}
+
+fn load_pending(model: Model, id: String) -> Model {
+  case dict.get(model.waiting, id) {
+    Ok(_) -> model
+    Error(_) ->
+      Model(..model, waiting: dict.insert(model.waiting, id, editing.load(id)))
+  }
+}
+
+fn editable_design(model: Model) -> Option(render.Design) {
+  case
+    model.tab,
+    model.open,
+    model.drawing,
+    model.viewed,
+    model.preview,
+    model.view_proposal
+  {
+    UiUx, id, Some(drawing), None, None, showing_proposal if id != "" ->
+      case showing_proposal, proposal_for(model, id) {
+        True, Some(_) -> None
+        _, _ -> Some(drawing)
+      }
+    Architecture, id, Some(drawing), None, None, showing_proposal if id != "" ->
+      case showing_proposal, proposal_for(model, id) {
+        True, Some(_) -> None
+        _, _ -> Some(drawing)
+      }
+    _, _, _, _, _, _ -> None
+  }
+}
+
+fn editable_node(model: Model) -> Option(render.Node) {
+  case drawn_for_editing(model), model.selected {
+    Some(drawing), [id] -> editing.node(drawing, id)
+    _, _ -> None
+  }
+}
+
+fn edit_property(
+  model: Model,
+  field: String,
+  property: String,
+  value: String,
+) -> #(Model, Effect(Msg)) {
+  case model.edit_mode, editable_node(model) {
+    False, _ -> #(model, effect.none())
+    True, Some(node) ->
+      case change_for(node.id, field, property, value) {
+        Some(change) -> {
+          let id = model.open
+          let changes = editing.with_change(waiting_for(model, id), change)
+          editing.store(id, changes)
+          #(
+            Model(
+              ..model,
+              waiting: dict.insert(model.waiting, id, changes),
+              edit_error: "",
+            ),
+            effect.none(),
+          )
+        }
+        None -> #(model, effect.none())
+      }
+    True, None -> #(model, effect.none())
+  }
+}
+
+fn change_for(
+  id: String,
+  field: String,
+  property: String,
+  value: String,
+) -> Option(editing.Change) {
+  case field {
+    "style" ->
+      case value {
+        "" -> Some(editing.clear_change(id, field, property))
+        _ ->
+          case property {
+            "size" | "padding" ->
+              case parsed_number(value) {
+                Some(number) ->
+                  Some(editing.number_change(id, field, property, number))
+                None -> Some(editing.text_change(id, field, property, value))
+              }
+            _ -> Some(editing.text_change(id, field, property, value))
+          }
+      }
+    _ ->
+      case property {
+        "width" | "height" ->
+          case value {
+            "" -> None
+            "fill" | "hug" ->
+              Some(editing.text_change(id, field, property, value))
+            _ ->
+              case parsed_number(value) {
+                Some(number) ->
+                  Some(editing.fixed_change(id, field, property, number))
+                None -> None
+              }
+          }
+        "gap" | "padding" ->
+          case value {
+            "" -> None
+            _ ->
+              case parsed_number(value) {
+                Some(number) ->
+                  Some(editing.number_change(id, field, property, number))
+                None -> Some(editing.text_change(id, field, property, value))
+              }
+          }
+        "level" ->
+          case int.parse(value) {
+            Ok(number) ->
+              Some(editing.integer_change(id, field, property, number))
+            Error(_) -> None
+          }
+        _ -> Some(editing.text_change(id, field, property, value))
+      }
+  }
+}
+
+fn save_edits(model: Model) -> #(Model, Effect(Msg)) {
+  case model.open, waiting_for(model, model.open) {
+    "", _ -> #(model, effect.none())
+    _, [] -> #(Model(..model, edit_error: ""), effect.none())
+    id, changes -> #(
+      Model(..model, edit_error: ""),
+      post(
+        "/designs/" <> id <> "/edit",
+        json.to_string(editing.operations(changes)),
+        fn(text) { EditsSaved(id, text, changes) },
+      ),
+    )
+  }
+}
+
+fn discard_edits(model: Model) -> #(Model, Effect(Msg)) {
+  case model.open {
+    "" -> #(model, effect.none())
+    id -> {
+      editing.store(id, [])
+      #(
+        Model(
+          ..model,
+          waiting: dict.insert(model.waiting, id, []),
+          edit_error: "",
+          leaving: False,
+        ),
+        effect.none(),
+      )
+    }
+  }
+}
+
+fn edits_saved(
+  model: Model,
+  id: String,
+  text: String,
+  sent: List(editing.Change),
+) -> Model {
+  case render.decode(text) {
+    Ok(_) -> {
+      let waiting =
+        list.filter(waiting_for(model, id), fn(change) {
+          !list.contains(sent, change)
+        })
+      editing.store(id, waiting)
+      let model =
+        Model(..model, waiting: dict.insert(model.waiting, id, waiting))
+      case id == model.open {
+        True ->
+          load_design(
+            Model(
+              ..model,
+              edit_error: "",
+              edit_mode: case model.leaving && waiting == [] {
+                True -> False
+                False -> model.edit_mode
+              },
+              confirm_exit: False,
+              leaving: False,
+            ),
+            id,
+            text,
+          )
+        False -> model
+      }
+    }
+    Error(_) ->
+      case id == model.open {
+        True ->
+          Model(
+            ..model,
+            edit_error: failure(text, "The change was refused."),
+            leaving: False,
+          )
+        False -> model
+      }
+  }
+}
+
+fn edit_panel(model: Model) -> Element(Msg) {
+  let changes = waiting_for(model, model.open)
+  let dirty = changes != []
+  let fields = case editable_node(model) {
+    Some(node) -> [
+      html.h3([], [html.text(editing.type_name(node.kind))]),
+      ..list.map(editing.properties(node), fn(field) {
+        edit_field(field, model.edit_mode)
+      })
+    ]
+    None -> [
+      html.p([attribute.class("design-edit-hint")], [
+        html.text("Select one element in the saved design to edit it."),
+      ]),
+    ]
+  }
+  let error = case model.edit_error {
+    "" -> []
+    message -> [
+      html.p([attribute.class("design-edit-error"), attribute.role("alert")], [
+        html.text(message),
+      ]),
+    ]
+  }
+  let actions = case dirty {
+    False -> []
+    True -> [
+      html.div([attribute.class("design-edit-actions")], [
+        html.button([attribute.type_("button"), event.on_click(SaveEdits)], [
+          html.text("Save"),
+        ]),
+        html.button([attribute.type_("button"), event.on_click(DiscardEdits)], [
+          html.text("Discard"),
+        ]),
+      ]),
+    ]
+  }
+  html.div(
+    [attribute.class("design-edit")],
+    list.flatten([fields, error, actions]),
+  )
+}
+
+fn edit_field(field: editing.Property, enabled: Bool) -> Element(Msg) {
+  let id = "edit-" <> field.field <> "-" <> field.property
+  let locked = attribute.disabled(!enabled)
+  let control = case field.control {
+    editing.TextControl ->
+      html.input([
+        attribute.id(id),
+        attribute.type_("text"),
+        attribute.value(field.value),
+        locked,
+        event.on_input(fn(value) {
+          EditProperty(field.field, field.property, value)
+        }),
+      ])
+    editing.NumberControl ->
+      html.input([
+        attribute.id(id),
+        attribute.type_("number"),
+        attribute.value(field.value),
+        locked,
+        event.on_input(fn(value) {
+          EditProperty(field.field, field.property, value)
+        }),
+      ])
+    editing.Choice(options) ->
+      html.select(
+        [
+          attribute.id(id),
+          locked,
+          event.on_input(fn(value) {
+            EditProperty(field.field, field.property, value)
+          }),
+        ],
+        list.map(options, fn(option) {
+          html.option(
+            [
+              attribute.value(option.0),
+              attribute.selected(option.0 == field.value),
+            ],
+            option.1,
+          )
+        }),
+      )
+    editing.ColorControl ->
+      html.div([attribute.class("design-edit-color")], [
+        html.input([
+          attribute.id(id <> "-pick"),
+          attribute.type_("color"),
+          attribute.value(hex_color(field.value)),
+          locked,
+          event.on_input(fn(value) {
+            EditProperty(field.field, field.property, value)
+          }),
+        ]),
+        html.input([
+          attribute.id(id),
+          attribute.type_("text"),
+          attribute.value(field.value),
+          attribute.attribute("placeholder", "Theme color or #hex"),
+          locked,
+          event.on_input(fn(value) {
+            EditProperty(field.field, field.property, value)
+          }),
+        ]),
+      ])
+    editing.TextSizeControl | editing.SpacingControl ->
+      html.input([
+        attribute.id(id),
+        attribute.type_("text"),
+        attribute.value(field.value),
+        attribute.attribute("placeholder", "Token or number"),
+        locked,
+        event.on_input(fn(value) {
+          EditProperty(field.field, field.property, value)
+        }),
+      ])
+  }
+  html.div([attribute.class("design-edit-field")], [
+    html.label([attribute.attribute("for", id)], [html.text(field.label)]),
+    control,
+  ])
+}
+
+fn hex_color(value: String) -> String {
+  case string.starts_with(value, "#") {
+    True -> expand_hex(value)
+    False ->
+      case render.theme_color(render.default_theme(), value) {
+        "" -> "#000000"
+        hex -> hex
+      }
+  }
+}
+
+fn parsed_number(value: String) -> Option(Float) {
+  case int.parse(value) {
+    Ok(whole) -> Some(int.to_float(whole))
+    Error(_) ->
+      case float.parse(value) {
+        Ok(decimal) -> Some(decimal)
+        Error(_) -> None
+      }
+  }
+}
+
+fn expand_hex(value: String) -> String {
+  case string.split(value, "") {
+    ["#", red, green, blue] ->
+      "#" <> red <> red <> green <> green <> blue <> blue
+    _ -> value
+  }
+}
+
+/// An element drag: the element, and where it would land if dropped now.
+pub type Drag {
+  Drag(id: String, place: Option(moving.Place))
+}
+
+fn start_drag(model: Model, id: String) -> Model {
+  case model.edit_mode, drawn_for_editing(model) {
+    True, Some(design) ->
+      case moving.place_of(design, id) {
+        Some(place) -> Model(..model, dragging: Some(Drag(id, Some(place))))
+        None -> model
+      }
+    _, _ -> model
+  }
+}
+
+fn drag_to(
+  model: Model,
+  x: Float,
+  y: Float,
+  positions: List(#(String, Float, Float, Float, Float)),
+) -> Model {
+  case model.dragging, drawn_for_editing(model) {
+    Some(drag), Some(design) -> {
+      let place =
+        moving.drop_place(design, drag.id, x, y, element_rects(positions))
+      Model(..model, dragging: Some(Drag(..drag, place: place)))
+    }
+    _, _ -> model
+  }
+}
+
+/// Ends a drag, adding a waiting move when the element lands somewhere new
+/// that the design rules allow.
+fn drop(model: Model) -> Model {
+  let ended = Model(..model, dragging: None)
+  case model.dragging, drawn_for_editing(model) {
+    Some(Drag(id, Some(place))), Some(design) ->
+      case moving.place_of(design, id) == Some(place) {
+        False if model.open != "" ->
+          case moving.move(design, id, place) {
+            Ok(_) -> {
+              let changes =
+                editing.with_change(
+                  waiting_for(model, model.open),
+                  editing.Move(id, place),
+                )
+              editing.store(model.open, changes)
+              Model(
+                ..ended,
+                waiting: dict.insert(model.waiting, model.open, changes),
+                edit_error: "",
+              )
+            }
+            Error(_) -> ended
+          }
+        _ -> ended
+      }
+    _, _ -> ended
+  }
+}
+
+/// The editable design with its waiting changes applied.
+fn drawn_for_editing(model: Model) -> Option(render.Design) {
+  option.map(editable_design(model), fn(saved) {
+    editing.apply(waiting_for(model, model.open), saved)
+  })
+}
+
+/// The drawing with the dragged element shown where it would land.
+fn dragged(model: Model, drawing: render.Design) -> render.Design {
+  case model.dragging {
+    Some(Drag(id, Some(place))) ->
+      result.unwrap(moving.move(drawing, id, place), drawing)
+    _ -> drawing
+  }
+}
+
+/// In edit mode a drag moves an element; otherwise it selects a region.
+fn canvas_gesture(model: Model) -> attribute.Attribute(Msg) {
+  case model.edit_mode && editable_design(model) != None {
+    True -> attribute.data("move", "")
+    False -> attribute.data("region", "")
+  }
+}
+
+fn element_rects(
+  positions: List(#(String, Float, Float, Float, Float)),
+) -> List(#(String, region.Rect)) {
+  list.map(positions, fn(position) {
+    let #(id, left, top, right, bottom) = position
+    #(id, region.Rect(left, top, right, bottom))
+  })
+}
+
+fn watch_moves(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
+  listen_move(
+    root,
+    fn(id) { send(DragStarted(id)) },
+    fn(x, y, positions) { send(Dragged(x, y, positions)) },
+    fn() { send(Dropped) },
+    fn() { send(DragCancelled) },
+  )
+}
+
+@external(javascript, "./api.mjs", "listen_move")
+fn listen_move(
+  root: Dynamic,
+  started: fn(String) -> Nil,
+  moved: fn(Float, Float, List(#(String, Float, Float, Float, Float))) -> Nil,
+  dropped: fn() -> Nil,
+  cancelled: fn() -> Nil,
+) -> Nil
+
+/// A selected element's side or corner being dragged.
+pub type Side {
+  Left
+  Right
+  Top
+  Bottom
+  TopLeft
+  TopRight
+  BottomLeft
+  BottomRight
+}
+
+/// A resize drag: the element, the side or corner dragged, and its drawn size.
+pub type Resize {
+  Resize(id: String, side: Side, width: Float, height: Float)
+}
+
+/// Starts or moves a resize drag on the one selected editable element.
+fn resize(
+  model: Model,
+  id: String,
+  side: String,
+  width: Float,
+  height: Float,
+) -> Model {
+  case
+    model.edit_mode,
+    model.selected,
+    resize_side(side),
+    editable_node(model)
+  {
+    True, [selected], Some(side), Some(_) if selected == id ->
+      Model(..model, resizing: Some(Resize(id, side, width, height)))
+    _, _, _, _ -> model
+  }
+}
+
+/// Ends a resize drag, adding a waiting fixed size when the design rules
+/// allow it, and otherwise leaving the element at its earlier size.
+fn resize_drop(model: Model) -> Model {
+  let ended = Model(..model, resizing: None)
+  case model.resizing, model.open {
+    Some(Resize(id, side, width, height)), open if open != "" ->
+      case resize_changes(id, side, width, height) {
+        [] -> ended
+        changes -> {
+          let all =
+            list.fold(changes, waiting_for(model, open), editing.with_change)
+          editing.store(open, all)
+          Model(
+            ..ended,
+            waiting: dict.insert(model.waiting, open, all),
+            edit_error: "",
+          )
+        }
+      }
+    _, _ -> ended
+  }
+}
+
+/// The drawing with a resize drag's size shown before it is dropped.
+fn resize_preview(model: Model, drawing: render.Design) -> render.Design {
+  case model.resizing {
+    Some(Resize(id, side, width, height)) ->
+      editing.apply(resize_changes(id, side, width, height), drawing)
+    None -> drawing
+  }
+}
+
+fn resize_changes(
+  id: String,
+  side: Side,
+  width: Float,
+  height: Float,
+) -> List(editing.Change) {
+  case
+    fixed_size_changes(id, "width", width, width_side(side)),
+    fixed_size_changes(id, "height", height, height_side(side))
+  {
+    Ok(widths), Ok(heights) -> list.append(widths, heights)
+    _, _ -> []
+  }
+}
+
+fn fixed_size_changes(
+  id: String,
+  property: String,
+  value: Float,
+  needed: Bool,
+) -> Result(List(editing.Change), Nil) {
+  case needed {
+    False -> Ok([])
+    True ->
+      case float.round(value) {
+        whole if whole > 0 ->
+          Ok([
+            editing.fixed_change(
+              id,
+              "properties",
+              property,
+              int.to_float(whole),
+            ),
+          ])
+        _ -> Error(Nil)
+      }
+  }
+}
+
+fn width_side(side: Side) -> Bool {
+  case side {
+    Left | Right | TopLeft | TopRight | BottomLeft | BottomRight -> True
+    Top | Bottom -> False
+  }
+}
+
+fn height_side(side: Side) -> Bool {
+  case side {
+    Top | Bottom | TopLeft | TopRight | BottomLeft | BottomRight -> True
+    Left | Right -> False
+  }
+}
+
+fn resize_side(name: String) -> Option(Side) {
+  case name {
+    "left" -> Some(Left)
+    "right" -> Some(Right)
+    "top" -> Some(Top)
+    "bottom" -> Some(Bottom)
+    "top-left" -> Some(TopLeft)
+    "top-right" -> Some(TopRight)
+    "bottom-left" -> Some(BottomLeft)
+    "bottom-right" -> Some(BottomRight)
+    _ -> None
+  }
+}
+
+fn one_selected(model: Model) -> Bool {
+  case model.selected {
+    [_] -> True
+    _ -> False
+  }
+}
+
+fn watch_resizes(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
+  listen_resize(
+    root,
+    fn(id, side, width, height) { send(Resized(id, side, width, height)) },
+    fn() { send(ResizeDropped) },
+    fn() { send(ResizeCancelled) },
+  )
+}
+
+@external(javascript, "./api.mjs", "listen_resize")
+fn listen_resize(
+  root: Dynamic,
+  resized: fn(String, String, Float, Float) -> Nil,
+  dropped: fn() -> Nil,
+  cancelled: fn() -> Nil,
+) -> Nil
+
+/// A delete or undo reply can be older than the live list, which stays the
+/// source of the list once it has arrived.
+fn loaded_keeping_live(model: Model, text: String) -> Model {
+  case model.live_listed {
+    True ->
+      case json.parse(text, designs_decoder()) {
+        Ok(_) -> refresh_open(Model(..model, loading: False, error: ""))
+        Error(_) -> Model(..model, loading: False, error: error(text))
+      }
+    False -> loaded(model, text)
   }
 }

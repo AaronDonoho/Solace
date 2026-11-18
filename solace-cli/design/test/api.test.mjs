@@ -1,7 +1,9 @@
 import { test, expect } from 'bun:test';
 import {
   drag_note_box,
+  listen_move,
   listen_region,
+  listen_resize,
   place_note_box,
 } from '../build/dev/javascript/design/api.mjs';
 
@@ -194,6 +196,169 @@ test('a drag reports its corners and the bounds of every drawn element', async (
 
     await sleep(10);
     expect(globals.find('click')).toBeUndefined();
+  } finally {
+    globals.restore();
+  }
+});
+
+function fakeMoveTarget(canvas) {
+  const ghost = {
+    style: {},
+    attributes: { 'data-design-id': 'title' },
+    removed: false,
+    querySelectorAll: () => [],
+    setAttribute(name, value) { ghost.attributes[name] = value; },
+    removeAttribute(name) { delete ghost.attributes[name]; },
+    remove() { ghost.removed = true; },
+  };
+  const element = {
+    getAttribute: name => name === 'data-design-id' ? 'title' : null,
+    getBoundingClientRect: () => ({ left: 20, top: 30, right: 80, bottom: 40 }),
+    cloneNode: () => ghost,
+  };
+  const target = {
+    closest: selector => selector === '[data-move]' ? canvas
+      : selector === '[data-design-id]' ? element : null,
+  };
+  return { ghost, target };
+}
+
+function fakeResizeTarget() {
+  const element = {
+    style: {},
+    getAttribute: name => name === 'data-design-id' ? 'title' : null,
+    getBoundingClientRect: () => ({ left: 20, top: 30, right: 80, bottom: 90 }),
+  };
+  const target = {
+    closest: selector => selector === '[data-resize]' ? element : null,
+  };
+  return { element, target };
+}
+
+test('an element drag reports its start, each position and the drop', async () => {
+  const { root, state } = fakeRoot();
+  const canvas = fakeCanvas();
+  const { ghost, target } = fakeMoveTarget(canvas);
+  const globals = fakeGlobalListeners();
+  const reports = [];
+  try {
+    listen_move(
+      root,
+      id => reports.push(['started', id]),
+      (x, y, bounds) => reports.push(['moved', x, y, bounds.toArray()]),
+      () => reports.push(['dropped']),
+      () => reports.push(['cancelled']),
+    );
+
+    state.rootListeners.pointerdown({ button: 0, clientX: 30, clientY: 35, target });
+    globals.find('pointermove').handler({ clientX: 31, clientY: 35, preventDefault: () => {} });
+    expect(reports).toEqual([]);
+
+    globals.find('pointermove').handler({ clientX: 50, clientY: 60, preventDefault: () => {} });
+    expect(reports[0]).toEqual(['started', 'title']);
+    expect(reports[1][0]).toBe('moved');
+    expect(reports[1].slice(1, 3)).toEqual([50, 60]);
+    expect(reports[1][3]).toEqual([
+      ['screen', 10, 20, 110, 70],
+      ['title', 20, 30, 80, 40],
+    ]);
+    expect(state.appended).toEqual([ghost]);
+    expect(ghost.attributes['data-design-id']).toBeUndefined();
+    expect(ghost.style).toMatchObject({ left: '40px', top: '55px', opacity: '0.5', pointerEvents: 'none' });
+    expect(state.body.style.userSelect).toBe('none');
+
+    globals.find('pointerup').handler({ clientX: 52, clientY: 62 });
+    expect(reports.slice(2).map(report => report.slice(0, 3))).toEqual([['moved', 52, 62], ['dropped']]);
+    expect(ghost.removed).toBe(true);
+    expect(state.body.style.userSelect).toBe('auto');
+    expect(globals.find('pointermove')).toBeUndefined();
+    expect(globals.find('click').options).toBe(true);
+    await sleep(10);
+    expect(globals.find('click')).toBeUndefined();
+  } finally {
+    globals.restore();
+  }
+});
+
+test('a border drag reports the element, side and drawn size', () => {
+  const { root, state } = fakeRoot();
+  const { element, target } = fakeResizeTarget();
+  const globals = fakeGlobalListeners();
+  const reports = [];
+  try {
+    listen_resize(
+      root,
+      (id, side, width, height) => reports.push([id, side, width, height]),
+      () => reports.push(['dropped']),
+      () => reports.push(['cancelled']),
+    );
+
+    state.rootListeners.pointermove({ clientX: 80, clientY: 60, target });
+    expect(element.style.cursor).toBe('ew-resize');
+    state.rootListeners.pointerdown({ button: 0, clientX: 80, clientY: 60, target });
+    globals.find('pointermove').handler({ clientX: 100, clientY: 60, preventDefault: () => {} });
+    expect(reports).toEqual([['title', 'right', 80, 60]]);
+
+    globals.find('pointerup').handler({ clientX: 100, clientY: 60 });
+    expect(reports).toEqual([
+      ['title', 'right', 80, 60],
+      ['title', 'right', 80, 60],
+      ['dropped'],
+    ]);
+    expect(globals.find('click').options).toBe(true);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('a press away from a handle starts no border drag', () => {
+  const { root, state } = fakeRoot();
+  const { target } = fakeResizeTarget();
+  const globals = fakeGlobalListeners();
+  try {
+    listen_resize(root, () => {}, () => {}, () => {});
+    state.rootListeners.pointerdown({ button: 0, clientX: 50, clientY: 60, target });
+    expect(globals.find('pointermove')).toBeUndefined();
+  } finally {
+    globals.restore();
+  }
+});
+
+test('an element press without movement stays a click, and a cancel reports no drop', () => {
+  const { root, state } = fakeRoot();
+  const canvas = fakeCanvas();
+  const { target } = fakeMoveTarget(canvas);
+  const globals = fakeGlobalListeners();
+  const reports = [];
+  try {
+    listen_move(
+      root,
+      id => reports.push(['started', id]),
+      () => reports.push(['moved']),
+      () => reports.push(['dropped']),
+      () => reports.push(['cancelled']),
+    );
+    state.rootListeners.pointerdown({ button: 0, clientX: 30, clientY: 35, target });
+    globals.find('pointerup').handler({ clientX: 31, clientY: 35 });
+    expect(reports).toEqual([]);
+    expect(globals.find('click')).toBeUndefined();
+
+    state.rootListeners.pointerdown({ button: 0, clientX: 30, clientY: 35, target });
+    globals.find('pointermove').handler({ clientX: 60, clientY: 35, preventDefault: () => {} });
+    globals.find('pointercancel').handler({});
+    expect(reports.map(report => report[0])).toEqual(['started', 'moved', 'cancelled']);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('a press outside an edit-mode canvas starts no element drag', () => {
+  const { root, state } = fakeRoot();
+  const globals = fakeGlobalListeners();
+  try {
+    listen_move(root, () => {}, () => {}, () => {}, () => {});
+    state.rootListeners.pointerdown({ button: 0, clientX: 1, clientY: 1, target: { closest: () => null } });
+    expect(globals.find('pointermove')).toBeUndefined();
   } finally {
     globals.restore();
   }

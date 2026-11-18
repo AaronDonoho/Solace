@@ -90,15 +90,16 @@ call is a turn that re-reads the conversation, so work in few calls:
    or notes.
    Reuse existing code before adding new code, extracting common patterns;
    prefer small, stateless, self-documenting functions.
-   Keep modules and functions small and focused around one domain or component,
-   and use clear names for new symbols. Put new code in the module that owns its concern,
-   within the boundaries task:2414798176c466e4 creates.
+   Keep modules and functions small and focused around one domain or component.
+   Put new code in the module that owns its concern.
    Keep thoughts, decisions and directives out of code comments and the UI, and
    details or decisions of implementation or development out of the UI.
    Make the smallest complete change: prefer the standard library and
    installed dependencies over new code; add nothing the task doesn't need.
    Complete includes its tests and every caller. Never drop validation,
    data-loss handling or security. Fix a reported bug once, at its cause.
+   A bug fix's test must fail on the old code. Don't remove a test or change
+   its expected value unless the task says to; if you do, say why in the summary.
 3. Fix only what the reply reports, then `test` again. If the reply names a
    symbol no test reaches, add a test for it. When `test` passes and every part
    of the task is changed, the code is done: finish with `task done`. `test`
@@ -154,6 +155,8 @@ Reviewing
   task's goal or acceptance criteria, and otherwise goes in `### Tech debt`;
   if no user or data would notice its outcome, it is not a concern.
   Say in a Summary when the direction is wrong or a follow-up task is warranted.
+  Flag a removed or weakened test, an expected value changed without reason,
+  and a bug fix whose test would pass on the old code.
   Flag duplication and large modules, but file minor ones as tech debt only
   when fixing them clearly pays off; code repeated once or twice isn't tech
   debt by itself.

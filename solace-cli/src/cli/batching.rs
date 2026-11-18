@@ -22,38 +22,20 @@ pub(crate) fn bare_command(command: &str) -> &str {
 }
 
 /// A command's words, with the spaces in a trait impl's `<Type as Trait>` kept
-/// in one word; an unbalanced `<` falls back to plain whitespace splitting.
+/// in one word, and a quoted name kept whole without its quotes. An unbalanced
+/// quote or `<` falls back to plain whitespace splitting.
 pub(crate) fn command_words(command: &str) -> Vec<String> {
-    let (mut words, mut word) = (Vec::new(), String::new());
-    let (mut depth, mut prev) = (0usize, '\0');
-    for c in command.chars() {
-        match c {
-            '<' => {
-                depth += 1;
-                word.push(c);
-            }
-            '>' if depth > 0 && prev != '-' => {
-                depth -= 1;
-                word.push(c);
-            }
-            c if c.is_whitespace() && depth > 0 => {
-                if !word.chars().last().is_some_and(char::is_whitespace) {
-                    word.push(' ');
-                }
-            }
-            c if c.is_whitespace() && depth == 0 => {
-                if !word.is_empty() {
-                    words.push(std::mem::take(&mut word));
-                }
-            }
-            c => word.push(c),
+    let (words, depth, quote) = words_pass(command, true);
+    if quote.is_none() && depth == 0 {
+        return words;
+    }
+    if quote.is_some() {
+        let (words, depth, _) = words_pass(command, false);
+        if depth == 0 {
+            return words;
         }
-        prev = c;
     }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    if depth == 0 { words } else { command.split_whitespace().map(String::from).collect() }
+    command.split_whitespace().map(String::from).collect()
 }
 
 /// Several commands, one per line, run in order; they share `budget`, since the
@@ -244,4 +226,58 @@ fn add_reply(out: &mut String, remembered: &mut usize, remember: bool, text: &st
     if remember {
         *remembered += text.len();
     }
+}
+
+/// One scan of `command`: a quote at the start of a word is a delimiter, and
+/// spaces inside `<…>` collapse to one. Returns the open quote and angle depth.
+fn words_pass(command: &str, track_quotes: bool) -> (Vec<String>, usize, Option<char>) {
+    let (mut words, mut word) = (Vec::new(), String::new());
+    let (mut depth, mut prev) = (0usize, '\0');
+    let mut quote = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == '\\' {
+                word.push(c);
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            } else if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        if track_quotes && word.is_empty() && (c == '"' || c == '\'') {
+            quote = Some(c);
+            continue;
+        }
+        match c {
+            '<' => {
+                depth += 1;
+                word.push(c);
+            }
+            '>' if depth > 0 && prev != '-' => {
+                depth -= 1;
+                word.push(c);
+            }
+            c if c.is_whitespace() && depth > 0 => {
+                if !word.chars().last().is_some_and(char::is_whitespace) {
+                    word.push(' ');
+                }
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            c => word.push(c),
+        }
+        prev = c;
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    (words, depth, quote)
 }

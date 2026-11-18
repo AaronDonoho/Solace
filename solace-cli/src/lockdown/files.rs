@@ -864,116 +864,6 @@ pub const GREP_SYNTAX: &str = concat!(
     "(one file or folder), `--context n` (1 to 5); `--project <folder>` picks the project"
 );
 
-/// `grep <text> [--in <path>] [--context n]`: case-insensitive search of the
-/// files Solace watches, and the protected settings. Source symbols are
-/// `find`'s; `--in <file>` also searches a text file over the watch limit,
-/// and other unwatched files aren't searched (D-52). The text is searched as
-/// written, never refused (D-109); the options count only as its last words
-/// (D-119). The reply stops at a whole file within `budget`.
-pub(crate) fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
-    let (raw, within, context) = grep_options(query.trim())?;
-    // `--in` from the Solace root into another project searches there.
-    if let Some((dir, there, rest)) = within.and_then(|p| elsewhere(root, &file_name(Path::new(p)), true)) {
-        let more = if context > 0 { format!(" --context {context}") } else { String::new() };
-        let out = grep(&there, &settings(&there)?, &format!("{raw} --in {rest}{more}"), budget)?;
-        return Ok(format!("==== {rest} ({dir}) ====\n{out}"));
-    }
-    let query = one_quoted(raw);
-    if query.is_empty() {
-        return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
-    }
-    let q = query.to_lowercase();
-    let mut rows = vec![];
-    tree_rows(root, v, root, &mut rows)?;
-    let (place, over_limit_file, over_limit_bytes) = match within {
-        Some(p) => match grep_in(root, v, p, &mut rows)? {
-            Ok(found) => found,
-            Err(not_searched) => return Ok(not_searched),
-        },
-        None => ("watched files".into(), false, None),
-    };
-    let graph = rows.iter().any(|(_, t, _)| t == "graph");
-    let mut hits = vec![];
-    for (name, _, _) in rows.into_iter().filter(|(name, t, _)| t == "watched" || t == "protected" || (over_limit_file && name == &place)) {
-        let text = if over_limit_file && name == place {
-            over_limit_bytes.as_deref().and_then(|bytes| std::str::from_utf8(bytes).ok()).map(str::to_owned)
-        } else {
-            fs::read_to_string(root.join(&name)).ok()
-        };
-        let Some(text) = text else { continue };
-        hits.extend(grep_file(&name, &text, &q, context));
-    }
-    if hits.is_empty() {
-        let source = if graph { "Source is held as symbols (use `find`).\n" } else { "" };
-        return Ok(format!("No matches for \"{query}\" in {place}.\n{}{source}", grep_hint(raw, query)));
-    }
-    let (mut out, mut shown) = (String::new(), 0);
-    let mut cut_shown = false;
-    for (k, (block, cut)) in hits.iter().enumerate() {
-        // Room for the footer, once a shown file has a cut line, and for the
-        // line that names the files left out, unless this is the last.
-        let foot = if cut_shown || *cut { GREP_CUT.len() + 1 } else { 0 };
-        let room = foot + if k + 1 == hits.len() { 0 } else { 140 };
-        if shown == 40 || out.len() + block.len() + room > budget {
-            break;
-        }
-        out += block;
-        shown += 1;
-        cut_shown |= *cut;
-    }
-    if shown < hits.len() {
-        // The files left out, named so the agent narrows (D-119 point 2): the
-        // grammar follows the count, and a budget that fits no file says so.
-        // When `--in` already names the only place searched, narrowing is
-        // circular: the tail points at the rest of the call, and names
-        // `--context` only when the agent used it.
-        let left = hits.len() - shown;
-        let more = if left == 1 { "file matches" } else { "files match" };
-        let narrow = match (within, context) {
-            (Some(_), 0) => "run grep alone in the call",
-            (Some(_), _) => "run grep alone in the call, or drop `--context`",
-            (None, _) => "narrow with `--in <path>`",
-        };
-        out += &if shown == 0 {
-            format!("… the budget fits no file; {} {more}, {narrow}.\n", left)
-        } else {
-            format!("… {} more {more}, not shown; {narrow}.\n", left)
-        };
-    }
-    // One footer for the reply, when a line it shows was cut at either end.
-    if cut_shown {
-        out += GREP_CUT;
-        out += "\n";
-    }
-    Ok(out)
-}
-
-/// The options at the end of a grep query, in either order: the text before
-/// them, `--in <path>` and `--context n` (1 to 5; 0 for none). Anywhere else
-/// they are part of the text.
-fn grep_options(raw: &str) -> Result<(&str, Option<&str>, usize), Failure> {
-    let words: Vec<&str> = raw.split_whitespace().collect();
-    let (mut n, mut within, mut context) = (words.len(), None, None);
-    while n >= 2 {
-        match words[n - 2] {
-            "--in" if within.is_none() => within = Some(words[n - 1]),
-            "--context" if context.is_none() => context = Some(words[n - 1]),
-            _ => break,
-        }
-        n -= 2;
-    }
-    // The words are slices of `raw`: the text ends where the last of them does.
-    let text = if n == 0 { "" } else { &raw[..words[n - 1].as_ptr() as usize - raw.as_ptr() as usize + words[n - 1].len()] };
-    let context = match context {
-        None => 0,
-        Some(c) => match c.parse::<usize>() {
-            Ok(c @ 1..=5) => c,
-            _ => return usage(format!("grep: --context takes a number from 1 to 5, not `{c}`")),
-        },
-    };
-    Ok((text, within, context))
-}
-
 /// Narrows `rows` to the path of `--in`, checked as `read` checks a path, and
 /// gives its name, whether it is an over-limit file named explicitly and, for
 /// one, its bytes. A path that exists but isn't searched is named instead (the
@@ -1185,4 +1075,113 @@ fn find_lower(line: &str, q: &str) -> Option<usize> {
         lower_at += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
     }
     Some(nearest)
+}
+
+/// Grep over words already split by the command line, so a quoted `--in` path
+/// with spaces stays one path.
+pub(crate) fn grep_words(root: &Path, v: &toml::Value, words: &[&str], budget: usize) -> Out {
+    let (n, within, context) = grep_word_options(words)?;
+    grep_parsed(root, v, &words[..n].join(" "), within, context, budget)
+}
+
+fn grep_parsed(root: &Path, v: &toml::Value, raw: &str, within: Option<&str>, context: usize, budget: usize) -> Out {
+    // `--in` from the Solace root into another project searches there.
+    if let Some((dir, there, rest)) = within.and_then(|p| elsewhere(root, &file_name(Path::new(p)), true)) {
+        let out = grep_parsed(&there, &settings(&there)?, raw, Some(rest.as_str()), context, budget)?;
+        return Ok(format!("==== {rest} ({dir}) ====\n{out}"));
+    }
+    let query = one_quoted(raw);
+    if query.is_empty() {
+        return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
+    }
+    let q = query.to_lowercase();
+    let mut rows = vec![];
+    tree_rows(root, v, root, &mut rows)?;
+    let (place, over_limit_file, over_limit_bytes) = match within {
+        Some(p) => match grep_in(root, v, p, &mut rows)? {
+            Ok(found) => found,
+            Err(not_searched) => return Ok(not_searched),
+        },
+        None => ("watched files".into(), false, None),
+    };
+    let graph = rows.iter().any(|(_, t, _)| t == "graph");
+    let mut hits = vec![];
+    for (name, _, _) in rows.into_iter().filter(|(name, t, _)| t == "watched" || t == "protected" || (over_limit_file && name == &place)) {
+        let text = if over_limit_file && name == place {
+            over_limit_bytes.as_deref().and_then(|bytes| std::str::from_utf8(bytes).ok()).map(str::to_owned)
+        } else {
+            fs::read_to_string(root.join(&name)).ok()
+        };
+        let Some(text) = text else { continue };
+        hits.extend(grep_file(&name, &text, &q, context));
+    }
+    if hits.is_empty() {
+        let source = if graph { "Source is held as symbols (use `find`).\n" } else { "" };
+        return Ok(format!("No matches for \"{query}\" in {place}.\n{}{source}", grep_hint(raw, query)));
+    }
+    let (mut out, mut shown) = (String::new(), 0);
+    let mut cut_shown = false;
+    for (k, (block, cut)) in hits.iter().enumerate() {
+        // Room for the footer, once a shown file has a cut line, and for the
+        // line that names the files left out, unless this is the last.
+        let foot = if cut_shown || *cut { GREP_CUT.len() + 1 } else { 0 };
+        let room = foot + if k + 1 == hits.len() { 0 } else { 140 };
+        if shown == 40 || out.len() + block.len() + room > budget {
+            break;
+        }
+        out += block;
+        shown += 1;
+        cut_shown |= *cut;
+    }
+    if shown < hits.len() {
+        // The files left out, named so the agent narrows (D-119 point 2): the
+        // grammar follows the count, and a budget that fits no file says so.
+        // When `--in` already names the only place searched, narrowing is
+        // circular: the tail points at the rest of the call, and names
+        // `--context` only when the agent used it.
+        let left = hits.len() - shown;
+        let more = if left == 1 { "file matches" } else { "files match" };
+        let narrow = match (within, context) {
+            (Some(_), 0) => "run grep alone in the call",
+            (Some(_), _) => "run grep alone in the call, or drop `--context`",
+            (None, _) => "narrow with `--in <path>`",
+        };
+        out += &if shown == 0 {
+            format!("… the budget fits no file; {} {more}, {narrow}.\n", left)
+        } else {
+            format!("… {} more {more}, not shown; {narrow}.\n", left)
+        };
+    }
+    // One footer for the reply, when a line it shows was cut at either end.
+    if cut_shown {
+        out += GREP_CUT;
+        out += "\n";
+    }
+    Ok(out)
+}
+
+/// The options at the end of a grep's words, after quotes were taken off:
+/// `--in` names one word, a path with spaces included.
+fn grep_word_options<'a>(words: &[&'a str]) -> Result<(usize, Option<&'a str>, usize), Failure> {
+    let (mut n, mut within, mut context) = (words.len(), None, None);
+    while n >= 2 {
+        match words[n - 2] {
+            "--in" if within.is_none() => within = Some(words[n - 1]),
+            "--context" if context.is_none() => context = Some(words[n - 1]),
+            _ => break,
+        }
+        n -= 2;
+    }
+    let context = context_number(context)?;
+    Ok((n, within, context))
+}
+
+fn context_number(context: Option<&str>) -> Result<usize, Failure> {
+    match context {
+        None => Ok(0),
+        Some(c) => match c.parse::<usize>() {
+            Ok(c @ 1..=5) => Ok(c),
+            _ => usage(format!("grep: --context takes a number from 1 to 5, not `{c}`")),
+        },
+    }
 }

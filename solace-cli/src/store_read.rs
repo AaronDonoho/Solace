@@ -323,10 +323,13 @@ impl Store {
                 format!("-- {q}\n{}\n", crate::index::signature(ix, &ix.syms[u]))
             }
         };
-        let used_by = ix.used_by[i].clone();
-        let (tests, callers): (Vec<usize>, Vec<usize>) = used_by.into_iter().partition(|&j| crate::is_test(ix, j));
-        if !ix.uses[i].is_empty() {
-            let mut uses = ix.uses[i].clone();
+        let (exact_users, possible_users) = crate::index::users_split(ix, i);
+        let (mut tests, mut callers): (Vec<usize>, Vec<usize>) = exact_users.into_iter().partition(|&j| crate::is_test(ix, j));
+        // Callers in the same module first, then by name, so the cap keeps the nearest ones.
+        callers.sort_by_key(|&u| (ix.syms[u].module != s.module, ix.syms[u].qname()));
+        tests.sort_by_key(|&u| (!home_test(ix, u, &s.module), ix.syms[u].text.len(), ix.syms[u].qname()));
+        let (mut uses, possible_used) = crate::index::uses_split(ix, i);
+        if !uses.is_empty() {
             uses.sort_by_key(|&u| (ix.syms[u].kind != Kind::Type, ix.syms[u].kind != Kind::Const, ix.syms[u].qname()));
             if level >= 3 {
                 let names: Vec<String> = uses.iter().map(|&u| ix.syms[u].qname()).collect();
@@ -336,6 +339,17 @@ impl Store {
                 for u in uses {
                     out += &entry(u);
                 }
+            }
+        }
+        if !possible_used.is_empty() {
+            let names: Vec<String> = possible_used.iter().take(20).map(|&u| ix.syms[u].qname()).collect();
+            out += &format!(
+                "\n== Possibly uses ({}): only type inference could settle these ==\n  {}\n",
+                possible_used.len(),
+                names.join(", ")
+            );
+            if possible_used.len() > 20 {
+                out += &format!("  …and {} more\n", possible_used.len() - 20);
             }
         }
         if !callers.is_empty() && level >= 1 {
@@ -352,6 +366,13 @@ impl Store {
             if callers.len() > 20 {
                 out += &format!("…and {} more (solace refs {})\n", callers.len() - 20, s.qname());
             }
+        }
+        if !possible_users.is_empty() {
+            out += &format!(
+                "\n== Possible uses ({}): only type inference could settle these (solace refs {}) ==\n",
+                possible_users.len(),
+                s.qname()
+            );
         }
         if !tests.is_empty() {
             // The smallest test in full, as a worked example (saves a turn of
@@ -371,9 +392,13 @@ impl Store {
                     out += &entry(h);
                 }
             }
-            let names: Vec<String> = tests.iter().filter(|&&t| Some(t) != example).map(|&t| ix.syms[t].qname()).collect();
+            let names: Vec<String> = tests.iter().filter(|&&t| Some(t) != example).take(20).map(|&t| ix.syms[t].qname()).collect();
             if !names.is_empty() {
                 out += &format!("  {}\n", names.join("\n  "));
+            }
+            let printed = names.len() + usize::from(example.is_some());
+            if tests.len() > printed {
+                out += &format!("  …and {} more (solace refs {})\n", tests.len() - printed, s.qname());
             }
         }
         if let Some(diag) =
@@ -763,9 +788,14 @@ fn evidence(text: &str, terms: &[String]) -> Vec<String> {
 /// construct or match it with every field, one line each, then the other
 /// non-test users by name (at most `cap`).
 fn type_users(ix: &Index, ty: usize, users: &[usize], tests: &[usize], cap: usize) -> String {
+    let mut users = users.to_vec();
+    let mut tests = tests.to_vec();
+    let nearby = |u: usize| (ix.syms[u].module != ix.syms[ty].module, ix.syms[u].qname());
+    users.sort_by_key(|&u| nearby(u));
+    tests.sort_by_key(|&u| (!home_test(ix, u, &ix.syms[ty].module), ix.syms[u].text.len(), ix.syms[u].qname()));
     let mut out = String::new();
     let (mut built, mut others, mut updates) = (vec![], vec![], 0);
-    for &j in users.iter().chain(tests) {
+    for &j in users.iter().chain(tests.iter()) {
         updates += crate::sites(ix, j, ty, true).len();
         let at = crate::sites(ix, j, ty, false);
         if at.is_empty() && !tests.contains(&j) {
@@ -775,7 +805,15 @@ fn type_users(ix: &Index, ty: usize, users: &[usize], tests: &[usize], cap: usiz
     }
     let q = ix.syms[ty].qname();
     if !built.is_empty() {
-        out += &format!("\n== Constructed by ({}): every field listed, so a new field breaks these ==\n{}", built.len(), built.concat());
+        let shown = built.len().min(cap);
+        out += &format!(
+            "\n== Constructed by ({}): every field listed, so a new field breaks these ==\n{}",
+            built.len(),
+            built[..shown].concat()
+        );
+        if built.len() > shown {
+            out += &format!("…and {} more (solace refs {q})\n", built.len() - shown);
+        }
         if updates > 0 {
             out += &format!("Record updates and patterns with `..` need no change; {updates} not listed.\n");
         }
@@ -1170,4 +1208,11 @@ fn unique_across(projects: &[(&Store, &Index)], name: &str) -> Option<(usize, us
         }
     }
     found
+}
+
+/// Whether a test sits in the module it tests: its own inline `mod tests`, a
+/// nested test module, or Gleam's `<module>_test`.
+fn home_test(ix: &Index, u: usize, home: &str) -> bool {
+    let module = &ix.syms[u].module;
+    module == home || module.starts_with(&format!("{home}::")) || module == &format!("{home}_test")
 }
