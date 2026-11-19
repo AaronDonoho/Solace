@@ -56,6 +56,11 @@ command not listed here is refused.
                                 `design:<id>`; a reply over the limit stops at
                                 a whole element and says which `--from` reads
                                 on from
+  design schema                 the whole format: every element type with its
+                                required and optional properties, the values
+                                each allows and a minimal example, the style
+                                overrides and design and element keys,
+                                placement rules, and each proposal operation
   view | inspect | refs | find  read code, as under Reading
   grep <text> [--in <path>] [--context n]
                                 search watched files and settings, and with

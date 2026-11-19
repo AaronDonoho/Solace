@@ -1949,7 +1949,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "b18e6d9a016d0bf3c91790262e8e893ce2e677b3bb6ef0cf22fe1985fbaf21ee");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "6bafc4e5433bf9df78301a735cece907a2ccbfa32d665b2f9d049e6188e69ebc");
 }
 
 #[test]
@@ -2898,14 +2898,17 @@ fn a_gleam_probe_stops_at_its_run_limit() {
 #[test]
 fn design_help_shows_only_design_commands() {
     let full = agent_help_for(None, false, false, true);
-    assert!(full.contains("Design runs") && full.contains("design note") && full.contains("strategy list"), "{full}");
+    assert!(
+        full.contains("Design runs") && full.contains("design note") && full.contains("design schema") && full.contains("strategy list"),
+        "{full}"
+    );
     for word in ["task ask", "submit", "`test`", "work add", "strategy note", "strategy task", "strategy vision"] {
         assert!(!full.contains(word), "{word}: {full}");
     }
     let submit = agent_help_for(Some("submit"), false, false, true);
     assert!(submit.starts_with("A design run can't run it."), "{submit}");
     let note = agent_help_for(Some("design"), false, false, true);
-    assert!(note.contains("design note") && !note.contains("strategy note"), "{note}");
+    assert!(note.contains("design note") && note.contains("design schema") && !note.contains("strategy note"), "{note}");
 }
 
 /// A submit reaches its task when a scope update briefly replaces the task file.

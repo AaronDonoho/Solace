@@ -95,7 +95,7 @@ fn each_project_kind_gets_its_default() {
     let both = Scratch::new().with(&[("package.json", "{}"), ("bun.lock", ""), ("gleam.toml", "name = \"x\"\ntarget = \"javascript\"\n")]);
     let r = default(&both, "board").unwrap();
     assert_eq!(runs(&r), ["bun install", "gleam build --target javascript"]);
-    assert!(!r.declared && r.steps.iter().all(|s| s.timeout == 120));
+    assert!(!r.declared && r.steps.iter().all(|s| s.timeout == 1200));
     let none = Scratch::new().with(&[("README.md", "")]);
     assert_eq!(default(&none, "docs"), None);
 }

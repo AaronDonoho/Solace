@@ -25,7 +25,10 @@ pub fn move(
 ) -> Result(render.Design, Nil) {
   use #(node, rest) <- result.try(take(design.elements, id))
   use elements <- result.try(insert(rest, node, place))
-  Ok(render.Design(..design, elements: elements))
+  case valid_structure(elements, None) {
+    True -> Ok(render.Design(..design, elements: elements))
+    False -> Error(Nil)
+  }
 }
 
 /// Where `id` sits now.
@@ -91,10 +94,11 @@ fn insert(
   node: render.Node,
   place: Place,
 ) -> Result(List(render.Node), Nil) {
-  case place.parent, is_screen(node.kind) {
-    None, True -> insert_at(nodes, node, place.index)
-    Some(parent), False -> insert_into(nodes, parent, node, place.index)
-    _, _ -> Error(Nil)
+  case place.parent, is_screen(node.kind), is_tab(node.kind) {
+    None, False, True -> Error(Nil)
+    None, True, False -> insert_at(nodes, node, place.index)
+    Some(parent), False, _ -> insert_into(nodes, parent, node, place.index)
+    _, _, _ -> Error(Nil)
   }
 }
 
@@ -107,11 +111,15 @@ fn insert_into(
   case nodes {
     [] -> Error(Nil)
     [first, ..rest] if first.id == parent ->
-      case holds_children(first.kind) {
+      case holds_children(first.kind) && allows_child(first.kind, node.kind) {
         True ->
-          result.map(insert_at(first.children, node, index), fn(children) {
-            [render.Node(..first, children: children), ..rest]
-          })
+          case first.kind, list.length(first.children) {
+            render.SplitPane(_), 2 -> Error(Nil)
+            _, _ ->
+              result.map(insert_at(first.children, node, index), fn(children) {
+                [render.Node(..first, children: children), ..rest]
+              })
+          }
         False -> Error(Nil)
       }
     [first, ..rest] ->
@@ -162,7 +170,13 @@ fn is_screen(kind: render.Kind) -> Bool {
 
 fn holds_children(kind: render.Kind) -> Bool {
   case kind {
-    render.Screen(_) | render.Row(_) | render.Column(_) -> True
+    render.Screen(_)
+    | render.Row(_)
+    | render.Column(_)
+    | render.Tabs(_)
+    | render.Tab(_)
+    | render.ScrollArea(_)
+    | render.SplitPane(_) -> True
     _ -> False
   }
 }
@@ -170,6 +184,11 @@ fn holds_children(kind: render.Kind) -> Bool {
 fn axis(kind: render.Kind) -> Axis {
   case kind {
     render.Row(_) -> Horizontal
+    render.SplitPane(properties) ->
+      case properties.direction {
+        render.SideBySide -> Horizontal
+        render.Stacked -> Vertical
+      }
     _ -> Vertical
   }
 }
@@ -263,4 +282,49 @@ fn past_middle(rect: region.Rect, along: Axis, x: Float, y: Float) -> Bool {
 
 fn contains(rect: region.Rect, x: Float, y: Float) -> Bool {
   x >=. rect.left && x <=. rect.right && y >=. rect.top && y <=. rect.bottom
+}
+
+fn is_tab(kind: render.Kind) -> Bool {
+  case kind {
+    render.Tab(_) -> True
+    _ -> False
+  }
+}
+
+fn allows_child(parent: render.Kind, child: render.Kind) -> Bool {
+  case parent {
+    render.Tabs(_) -> is_tab(child)
+    _ -> !is_tab(child)
+  }
+}
+
+fn valid_structure(
+  nodes: List(render.Node),
+  parent: Option(render.Kind),
+) -> Bool {
+  list.fold(nodes, True, fn(valid, node) {
+    valid
+    && case node.kind {
+      render.Tab(_) ->
+        case parent {
+          Some(render.Tabs(_)) ->
+            valid_structure(node.children, Some(node.kind))
+          _ -> False
+        }
+      render.Tabs(properties) ->
+        case node.children {
+          [] -> False
+          _ ->
+            list.any(node.children, fn(child) { is_tab(child.kind) })
+            && list.any(node.children, fn(child) {
+              child.id == properties.current
+            })
+            && valid_structure(node.children, Some(node.kind))
+        }
+      render.SplitPane(_) ->
+        list.length(node.children) == 2
+        && valid_structure(node.children, Some(node.kind))
+      _ -> valid_structure(node.children, Some(node.kind))
+    }
+  })
 }

@@ -1771,6 +1771,7 @@ class Board(unittest.TestCase):
         steps=[{'command':'strategy list'},{'command':f"strategy show task {t['id']}"},
                {'command':'view cli.HOST'},{'command':'read DECISIONS.md'},
                {'command':'design list'},{'command':f'design show {design_id}'},
+               {'command':'design schema'},
                {'command':'read ../outside'},
                {'command':'view app.one --project . --draft 1'},
                {'command':'view app.one --project plain'},
@@ -1788,19 +1789,21 @@ class Board(unittest.TestCase):
         self.assertIn('Decisions',out[3])
         self.assertIn(design_id,out[4])
         self.assertIn(design_id,out[5]);self.assertIn('Home',out[5])
-        self.assertTrue(out[6].startswith('E6006'),out[6])
-        self.assertTrue(out[7].startswith('E6007'),out[7])
-        self.assertTrue(out[8].startswith('E6013'),out[8]);self.assertIn('files, grep and read',out[8])
-        for r in out[6:9]:
+        self.assertIn('Element types',out[6])
+        self.assertTrue(out[7].startswith('E6006'),out[7])
+        self.assertTrue(out[8].startswith('E6007'),out[8])
+        self.assertTrue(out[9].startswith('E6013'),out[9]);self.assertIn('files, grep and read',out[9])
+        for r in out[7:10]:
             self.assertNotIn('task ask',r);self.assertNotIn('write and run',r);self.assertNotIn('in a board run',r)
-        for r in out[9:12]:
+        for r in out[10:13]:
             self.assertTrue(r.startswith('E7010'),r)
             self.assertNotIn('task ask',r);self.assertNotIn('strategy wait',r)
         # The tool a design run's agent sees names only what it can do.
         env={**self.env,'SOLACE_TASK':'design','SOLACE_RUN':rid}
         p=subprocess.run([BIN,'mcp'],cwd=self.root,env=env,text=True,capture_output=True,input=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'})+'\n')
         tool=json.dumps(json.loads(p.stdout)['result']['tools'][0])
-        self.assertIn('design note',tool);self.assertIn('design propose',tool);self.assertIn('strategy list',tool)
+        self.assertIn('design note',tool);self.assertIn('design propose',tool);self.assertIn('design schema',tool)
+        self.assertIn('strategy list',tool)
         for word in ['task ask','submit','`test`','session start','work add','strategy note','strategy task']:
             self.assertNotIn(word,tool)
         prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()

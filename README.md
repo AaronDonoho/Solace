@@ -1,6 +1,6 @@
 # Solace
 
-Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, by symbol, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the complete project language; a Rust Cargo package is held as symbols too: its items are read, checked and saved by name (D-168).
+Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, by symbol, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today both Gleam and a one-crate Rust Cargo package can be worked on as symbols: their items are read, checked, tested, changed and deleted by name. A Rust project can't yet be migrated, use more than one crate, or be made with `solace create` (D-168, D-178, D-192).
 
 See [PROPOSAL.md](PROPOSAL.md) for the design, [DECISIONS.md](DECISIONS.md) for settled questions, and [WORK.md](WORK.md) for progress.
 
@@ -15,18 +15,34 @@ One executable, `solace`, which contains:
 
 The benchmark harness (`bench/`), the pilots (`bench/pilot/`, `bench/pilot-large/`) and the benchmark visualizer are development tools for this repository and are not part of Solace.
 
+## The pages
+
+The menu has these pages:
+
+| Page | Address | What it's for |
+| --- | --- | --- |
+| Workspace | `/workspace` | choose a project, add or remove projects, and migrate an existing Gleam project |
+| Strategy | `/strategy` | set the vision, personas, features and roadmap, and plan tasks |
+| Design | `/design` | keep architecture and UI/UX designs, with their versions |
+| Board | `/` | hand tasks to agents and follow and review their work |
+| Contracts | `/contracts` | see an outline of what the project does, area by area |
+| Delivery | `/delivery` | build recipes, builds and releases |
+| Knowledgebase | `/knowledgebase` | read the guide to the workflow |
+| Settings | `/settings` | choose agent behavior, default models, languages and appearance |
+
 ## Install
 
 Start from a machine with nothing but a terminal. Linux and macOS are supported (Solace is developed on Linux; on Windows use WSL). Steps 1 and 2 install what Solace uses, step 3 installs what builds it, steps 4 to 6 build and install it, and step 7 is optional.
 
 ### 1. What Solace uses
 
-The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam or Erlang, projects can't build or run; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`.
+The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam and Erlang, Gleam projects can't build or run; without Rust and Cargo, Rust projects can't; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`.
 
 | Tool | What it's for | Version |
 | --- | --- | --- |
 | Gleam | formats, checks, tests and builds your projects | 1.18.1 or newer |
 | Erlang/OTP | runs Gleam projects | 29 or newer |
+| Rust and Cargo | checks, tests and builds Rust projects | current |
 | An agent | Codex CLI or Claude Code; does the work you assign | current |
 | bubblewrap | makes a migration's original folder read-only to Solace's commands, and runs Rust commands without network access, writing only `target/` and `Cargo.lock` (Linux) | current |
 | Git | keeps your project's history and lets you switch branches | current |
@@ -139,7 +155,7 @@ sudo install -m 755 solace-cli/target/release/solace /usr/local/bin/solace
 solace --help
 ```
 
-The first build takes a minute or two. The binary is self-contained (web clients and guide included); running it still needs Gleam, Erlang and an agent.
+The first build takes a minute or two. The binary is self-contained (web clients and guide included); running it still needs Gleam and Erlang for a Gleam project, Rust and Cargo for a Rust project, and an agent.
 
 ### 6. Build and install the desktop app
 
@@ -161,7 +177,7 @@ sh solace-app/scripts/sidecar.sh
 cargo tauri build
 ```
 
-The app packs the CLI binary from step 5, so run the sidecar copy first. The Build tab runs the whole recipe in order: the page bundles, the CLI, the sidecar copy, then the Tauri bundle.
+The app packs the CLI binary from step 5, so run the sidecar copy first. The Delivery page's Build tab runs the whole recipe in order: the page bundles, the CLI, the sidecar copy, then the Tauri bundle.
 
 **3. Install the app** (one line for your system):
 
@@ -198,7 +214,7 @@ Install them for the same `python3` that Solace finds on your `PATH`. If pip ref
 
 ## Use it on a project
 
-Solace wraps a Gleam project. It needs the project's `gleam.toml` because it runs `gleam` to check, test and build the code, and that file names the project and its dependencies. To start from nothing, create a new project after confirming its name and folder:
+Solace wraps a Gleam project or a one-crate Rust package. A Gleam project needs its `gleam.toml`, because Solace runs `gleam` to check, test and build the code, and that file names the project and its dependencies. A Rust package already below the root is added in place with **Add** on the Workspace page (`/workspace`), and the same page's **New project** form can make a new one. To start a Gleam project from nothing, create a new project after confirming its name and folder:
 
 ```sh
 solace create my_app # runs gleam new and sets up Solace; --yes skips confirmation
@@ -209,7 +225,7 @@ solace serve         # start the task board on http://127.0.0.1:3030 (--port to 
 
 Only `solace serve` writes tasks. With no server running, what a CLI run sends to its task (notes, questions, verification, settings proposals) waits in `.solace/tasks/inbox/` and reaches the board at the next `solace serve`.
 
-For a project you already have, run `solace serve` in its folder, open **Workspace** in the menu bar and choose **Migrate this project**. Solace makes a copy next to it, `solace-migration`, sets up the copy to use Solace, and shows what it checked. Your folder isn't changed until you choose **Switch to the copy**, which moves it to `<name>.pre-solace` and puts the copy in its place; **Switch back** undoes that. The same from the shell:
+For a Gleam project you already have, run `solace serve` in its folder, open **Workspace** in the menu bar and choose **Migrate this project**. Solace makes a copy next to it, `solace-migration`, sets up the copy to use Solace, and shows what it checked. Your folder isn't changed until you choose **Switch to the copy**, which moves it to `<name>.pre-solace` and puts the copy in its place; **Switch back** undoes that. The same from the shell:
 
 ```sh
 solace migrate --yes           # make the copy and check it
@@ -226,14 +242,14 @@ From Review, choose **reassign** to return a task to Assigned for fixes while pr
 
 ### Several projects on one board
 
-One Solace root can hold several Gleam projects in folders below it. The root folder is a project too. If it isn't a Gleam project, it's a project of plain files: its agents read, write and run declared commands on every file outside the other projects, such as docs, scripts and code in other languages. Solace sets the root up this way by itself, with its own lane, when `solace serve` starts there or a project is added below it. In the root folder:
+One Solace root can hold several Gleam and Rust projects in folders below it. The root folder is a project too. If it isn't a Gleam project, it's a project of plain files: its agents read, write and run declared commands on every file outside the other projects, such as docs, scripts and code in other languages. Solace sets the root up this way by itself, with its own lane, when `solace serve` starts there or a project is added below it. In the root folder:
 
 ```sh
 solace create my_app # create a new project below this folder after confirmation
 solace serve         # one board, with a lane per project
 ```
 
-The **Projects** section of the **Workspace** page removes projects, re-lists removed projects that still have a store, and creates new ones: choose **Language** (**Gleam** or **Rust**), give a package name, and optionally a folder; for a Gleam project, also choose the target (Erlang or JavaScript), which a Rust package doesn't have. Solace runs `gleam new` or `cargo new` (without a nested git repository inside one) and sets the project up; a new Rust project is a one-crate binary package. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the Workspace page. `solace create <name>` adds a new Gleam project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list beside the root project's own settings:
+The **Projects** section of the **Workspace** page removes projects, re-lists removed projects that still have a store, and creates new ones: choose **Language** (**Gleam** or **Rust**), give a package name, and optionally a folder; for a Gleam project, also choose the target (Erlang or JavaScript), which a Rust package doesn't have. Solace runs `gleam new` or `cargo new` (without a nested git repository inside one) and sets the project up; a new Rust project is a one-crate binary package. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the Workspace page. `solace create <name>` adds a new Gleam project to the enclosing root. To migrate several existing Gleam projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list beside the root project's own settings:
 
 ```toml
 projects = ["bench/pilot", "bench/pilot-large", "solace-cli/board"]
@@ -247,17 +263,16 @@ Every project on the board uses the root's workflow (the `[board]` section of th
 
 ### Models
 
-Solace runs models through agent programs you already have installed and signed in to: the Codex CLI for OpenAI models, and Claude Code for Claude models. It stores no credentials. The current major models are built in, so the board has a list with no configuration. A model that can't start (its program is missing, isn't signed in, or its key variable isn't set) is greyed out with the reason, and assigning it is refused.
+Solace runs models through agent programs you already have installed and signed in to: the Codex CLI for OpenAI models, and Claude Code for Claude models. It stores no agent credentials. The current major models are built in, so the board has a list with no configuration. A model that can't start (its program is missing, isn't signed in, or its key isn't set) is greyed out with the reason, and assigning it is refused.
 
 Solace also asks each agent program which models it offers, so a model the agent added shows in the list with no rebuild and no config edit. Codex answers `codex app-server`'s `model/list`, which names the efforts each model supports and its default; models Codex marks hidden are left out. A model whose agent names no default effort runs at `medium` when it offers it, else at the middle of the efforts it offers; a `[[models]]` entry's own `effort` wins. Claude Code has no command that lists models without starting one, so Solace offers its aliases — `opus`, `sonnet`, `haiku` and `fable`, each naming the latest of its family — and once a run's log names the model the agent used, the run shows it and the model's label names it. With `ANTHROPIC_API_KEY` set, Solace also reads the provider's models endpoint for the exact ids, active ones only; it stores no key and uses only the variable that is already set. The answers are asked at startup, about every 15 minutes, and when a run says its model is no longer offered, all in the background, so the board always shows the last list. A model that leaves an agent's offer keeps working for the tasks already using it, with the reason `no longer offered by …`, and isn't offered for a new run. A listed model isn't proof your account may run it: usage limits are shown separately.
 
-To add models or change the built-in ones, edit `~/.config/solace/config.toml` (or the file named by `SOLACE_CONFIG`):
+Use the **Settings** page (`/settings`) under **Agents** for agent behavior (how agents talk with you, how much they write and how readily they ask), the default model for each role, and adding, changing or removing endpoint models with their API key. The key is kept in `keys.json` beside the config.
+
+Two choices have no page. Set a task's time limit and whether the built-in models are hidden in `~/.config/solace/config.toml` (or the file named by `SOLACE_CONFIG`). A `[[models]]` entry's `key_env` is there too: it names the environment variable that holds the endpoint's key, which Solace reads when it starts the agent.
 
 ```toml
 task_timeout = 3600          # seconds an agent may work on a task; waiting for an answer doesn't count
-involvement = "collaborator" # how agents talk with you: director, collaborator or engineer
-detail = "standard"          # how much they write: concise, standard or thorough
-asking = "balanced"          # how readily they ask: often, balanced or rarely
 # presets = false            # hide the built-in models
 
 [[models]]                   # an OpenAI-compatible endpoint, through Codex
@@ -266,16 +281,9 @@ label = "Qwen3 Coder (local)"
 agent = "codex"
 model = "qwen3-coder"
 endpoint = { kind = "openai", base_url = "http://localhost:11434/v1", key_env = "LOCAL_LLM_KEY" }
-
-[[models]]                   # a Claude-compatible endpoint, through Claude Code
-id = "proxy-sonnet"
-label = "Sonnet via our proxy"
-agent = "claude"
-model = "claude-sonnet-5-5"
-endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }
 ```
 
-An entry with the same `id` as a built-in model — or as a model Solace discovered — replaces it: your config wins. `key_env` names the environment variable that holds the endpoint's key, which Solace reads when it starts the agent. Codex reaches OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it. The built-in list is in [solace-cli/src/default-models.toml](solace-cli/src/default-models.toml), and each agent's last answer is kept in `agent-models.json` beside your config file.
+An entry with the same `id` as a built-in model — or as a model Solace discovered — replaces it: your config wins. Codex reaches OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it. The built-in list is in [solace-cli/src/default-models.toml](solace-cli/src/default-models.toml), and each agent's last answer is kept in `agent-models.json` beside your config file.
 
 ### Project settings
 
@@ -329,12 +337,12 @@ Rejected submissions are retained as editable drafts. Agents use `drafts`, `view
 
 ## Current limitations
 
-- Gleam is the complete project language. A Rust Cargo package is held as symbols too: `check`, `test`, `submit`, `delete` and the reads work on it (D-168–D-173).
+- Gleam and a one-crate Rust package work the same way: `check`, `test`, `submit`, `delete` and the reads work on both (D-168–D-173). Rust projects can't yet be migrated with a copy and swap, use a workspace of several crates, or be made with `solace create` (D-178, D-192).
 - One agent works on a project at a time: assigning a task is refused while another task's agent works in any project it covers. A task changes only the projects it lists, even when it needs a path dependency of its own. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
 - The board is local only, for one person, with no authentication.
 - The Contracts page at `/contracts` opens on an outline of what the project does: its main ways in and the requests they handle, then each area (source module) with every public function described in words, what it reads or changes, and whether tests check it. One button asks an agent to describe functions that have no description. The drawing sheet beside it shows areas, entry points, logic, effects, tests and files. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.
 - Starting real agents from the board is not yet tested end to end. The tests use a fake agent.
-- There are no prebuilt releases. Solace is built from source with Cargo, and needs several tools installed besides it: Gleam and Erlang/OTP for the project, and Codex or Claude Code for agents. Making setup easier is planned.
+- There are no prebuilt Solace releases. Solace is built from source with Cargo, and needs several tools installed besides it: Gleam and Erlang/OTP for a Gleam project, Rust and Cargo for a Rust project, and Codex or Claude Code for agents. Making setup easier is planned.
 
 ## Development
 
@@ -346,7 +354,7 @@ python3 -m unittest bench.test_bench                   # benchmark harness
 cd solace-cli/board && gleam test --target javascript && bun test test/api.test.mjs
 ```
 
-The board's web client is in `solace-cli/board/` and the frontend shell that serves it, the contract view and the migration is in `solace-cli/frontend/` (both Gleam and Lustre). Building Solace rebuilds both bundles (see Install); each project's README describes its own build.
+The board's web client is in `solace-cli/board/`, and the frontend shell that serves it and every other page is in `solace-cli/frontend/` (both Gleam and Lustre). Building Solace rebuilds both bundles (see Install); each project's README describes its own build.
 
 Desktop app (`solace-app/`, Tauri v2, D-80): after a release build of `solace-cli`, run `sh solace-app/scripts/sidecar.sh` once, then `cargo tauri dev`. There is no pre-build hook, so run the sidecar copy again after each CLI release build. To replace the placeholder icon, run `(cd solace-app && cargo tauri icon path/to/logo.png)` with a square PNG of at least 512×512.
 

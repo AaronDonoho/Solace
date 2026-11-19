@@ -322,6 +322,7 @@ export function listen_move(root, started, moved, dropped, cancelled) {
 
   const ghostOf = (element, x, y) => {
     const rect = element.getBoundingClientRect();
+    const zoom = Number(element.closest?.('[data-zoom]')?.getAttribute?.('data-zoom')) || 1;
     const ghost = element.cloneNode(true);
     for (const marked of [ghost, ...(ghost.querySelectorAll?.('[data-design-id]') ?? [])]) {
       marked.removeAttribute?.('data-design-id');
@@ -329,13 +330,14 @@ export function listen_move(root, started, moved, dropped, cancelled) {
     ghost.setAttribute('data-design-ghost', '');
     ghost.style.position = 'fixed';
     ghost.style.margin = '0';
-    ghost.style.width = `${rect.right - rect.left}px`;
-    ghost.style.height = `${rect.bottom - rect.top}px`;
+    ghost.style.width = `${(rect.right - rect.left) / zoom}px`;
+    ghost.style.height = `${(rect.bottom - rect.top) / zoom}px`;
+    ghost.style.zoom = String(zoom);
     ghost.style.opacity = '0.5';
     ghost.style.pointerEvents = 'none';
     ghost.style.zIndex = '2147483647';
     doc.body.appendChild(ghost);
-    return { ghost, dx: x - rect.left, dy: y - rect.top };
+    return { ghost, dx: x - rect.left, dy: y - rect.top, zoom };
   };
 
   const removeListeners = () => {
@@ -387,8 +389,10 @@ export function listen_move(root, started, moved, dropped, cancelled) {
       gesture.ghost = ghostOf(gesture.element, gesture.startX, gesture.startY);
       started(gesture.id);
     }
-    gesture.ghost.ghost.style.left = `${x - gesture.ghost.dx}px`;
-    gesture.ghost.ghost.style.top = `${y - gesture.ghost.dy}px`;
+    gesture.ghost.ghost.style.left =
+      `${(x - gesture.ghost.dx) / gesture.ghost.zoom}px`;
+    gesture.ghost.ghost.style.top =
+      `${(y - gesture.ghost.dy) / gesture.ghost.zoom}px`;
     moved(x, y, List.fromArray(elementBounds(canvasOf(gesture))));
   }
 
@@ -542,6 +546,207 @@ export function place_note_box(root, id) {
   const top = rect.top - area.top + canvas.scrollTop + rect.height + 8;
   box.style.left = `${Math.max(0, Math.min(left, canvas.scrollWidth - boxRect.width - 8))}px`;
   box.style.top = `${Math.max(0, Math.min(top, canvas.scrollHeight - boxRect.height - 8))}px`;
+}
+
+// Ctrl + wheel over a design canvas zooms the canvas instead of the app. A
+// plain wheel still scrolls.
+let zoomRoot = null;
+export function listen_zoom(root, zoomed) {
+  if (!root || zoomRoot === root) return;
+  zoomRoot = root;
+  function onWheel(event) {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    const canvas = event.target?.closest?.('.design-canvas');
+    if (!canvas) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const area = canvas.getBoundingClientRect();
+    zoomed(
+      event.deltaY < 0 ? 1.1 : 0.9,
+      event.clientX - area.left,
+      event.clientY - area.top,
+    );
+  }
+  root.addEventListener('wheel', onWheel, { passive: false });
+}
+
+// Dragging a screen window's bottom-right handle reports its new size in the
+// design's units, so the layout follows a window the page controls.
+let windowRoot = null;
+export function listen_window(root, resized) {
+  if (!root || windowRoot === root) return;
+  windowRoot = root;
+  const doc = root.ownerDocument;
+  const body = doc?.body;
+  let gesture = null;
+
+  function onDown(event) {
+    if (event.button !== 0 || gesture) return;
+    const handle = event.target?.closest?.('[data-window-handle]');
+    const frame = handle?.closest?.('[data-window]');
+    if (!handle || !frame) return;
+    event.preventDefault();
+    const zoom = Number(frame.closest?.('[data-zoom]')?.getAttribute?.('data-zoom')) || 1;
+    const rect = frame.getBoundingClientRect();
+    gesture = {
+      x: event.clientX,
+      y: event.clientY,
+      width: rect.width / zoom,
+      height: rect.height / zoom,
+      zoom,
+      select: body?.style.userSelect ?? '',
+    };
+    if (body) body.style.userSelect = 'none';
+    globalThis.addEventListener('pointermove', onMove);
+    globalThis.addEventListener('pointerup', onUp);
+    globalThis.addEventListener('pointercancel', onUp);
+  }
+
+  function onMove(event) {
+    if (!gesture) return;
+    event.preventDefault();
+    const width = Math.max(
+      240,
+      gesture.width + (event.clientX - gesture.x) / gesture.zoom,
+    );
+    const height = Math.max(
+      160,
+      gesture.height + (event.clientY - gesture.y) / gesture.zoom,
+    );
+    resized(Math.round(width), Math.round(height));
+  }
+
+  function onUp() {
+    globalThis.removeEventListener('pointermove', onMove);
+    globalThis.removeEventListener('pointerup', onUp);
+    globalThis.removeEventListener('pointercancel', onUp);
+    if (body && gesture) body.style.userSelect = gesture.select;
+    gesture = null;
+  }
+
+  root.addEventListener('pointerdown', onDown);
+}
+
+// Holding Space or the middle button drags the canvas's scroll area, so the
+// pointer can reach a screen bigger than the space it is drawn in.
+let panRoot = null;
+export function listen_pan(root) {
+  if (!root || panRoot === root) return;
+  panRoot = root;
+  const doc = root.ownerDocument;
+  const body = doc?.body;
+  let space = false;
+  let overCanvas = false;
+  let gesture = null;
+
+  const canvasOf = event => event.target?.closest?.('.design-canvas') ?? null;
+  const inControl = event =>
+    Boolean(event.target?.closest?.('button, a, select, [role="button"]'));
+
+  function onKeyDown(event) {
+    if (event.key !== ' ' && event.code !== 'Space') return;
+    if (typing(event) || inControl(event)) return;
+    space = true;
+    if (overCanvas) event.preventDefault();
+  }
+
+  function onPointerOver(event) {
+    overCanvas = Boolean(canvasOf(event));
+  }
+
+  function onPointerOut(event) {
+    overCanvas = Boolean(event.relatedTarget?.closest?.('.design-canvas'));
+  }
+
+  function onKeyUp(event) {
+    if (event.key !== ' ' && event.code !== 'Space') return;
+    space = false;
+  }
+
+  function onBlur() {
+    space = false;
+  }
+
+  function onDown(event) {
+    if (gesture || typing(event)) return;
+    const canvas = canvasOf(event);
+    if (!canvas) return;
+    const middle = event.button === 1;
+    if (!middle && !(event.button === 0 && space)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+    gesture = {
+      canvas,
+      x: event.clientX,
+      y: event.clientY,
+      left: canvas.scrollLeft,
+      top: canvas.scrollTop,
+      select: body?.style.userSelect ?? '',
+    };
+    if (body) body.style.userSelect = 'none';
+    globalThis.addEventListener('pointermove', onMove);
+    globalThis.addEventListener('pointerup', onUp);
+    globalThis.addEventListener('pointercancel', onUp);
+  }
+
+  function onMove(event) {
+    if (!gesture) return;
+    event.preventDefault();
+    gesture.canvas.scrollLeft = gesture.left - (event.clientX - gesture.x);
+    gesture.canvas.scrollTop = gesture.top - (event.clientY - gesture.y);
+  }
+
+  function onUp() {
+    globalThis.removeEventListener('pointermove', onMove);
+    globalThis.removeEventListener('pointerup', onUp);
+    globalThis.removeEventListener('pointercancel', onUp);
+    const done = gesture;
+    if (body && done) body.style.userSelect = done.select;
+    gesture = null;
+    if (done) swallowNextClick();
+  }
+
+  function onMouseDown(event) {
+    if (event.button === 1 && canvasOf(event)) event.preventDefault();
+  }
+
+  root.addEventListener('pointerdown', onDown);
+  root.addEventListener('mousedown', onMouseDown);
+  root.addEventListener('pointerover', onPointerOver);
+  root.addEventListener('pointerout', onPointerOut);
+  globalThis.addEventListener('keydown', onKeyDown);
+  globalThis.addEventListener('keyup', onKeyUp);
+  globalThis.addEventListener('blur', onBlur);
+}
+
+// Keeps the point `x`, `y` in the canvas under the pointer while zoom changes.
+export function anchor_zoom(root, x, y, before, after) {
+  const canvas = root?.querySelector?.('.design-canvas');
+  if (!canvas || !before) return;
+  const ratio = after / before;
+  canvas.scrollLeft = (canvas.scrollLeft + x) * ratio - x;
+  canvas.scrollTop = (canvas.scrollTop + y) * ratio - y;
+}
+
+// Zooms about the canvas's middle.
+export function center_zoom(root, before, after) {
+  const canvas = root?.querySelector?.('.design-canvas');
+  if (!canvas) return;
+  anchor_zoom(
+    root,
+    canvas.clientWidth / 2,
+    canvas.clientHeight / 2,
+    before,
+    after,
+  );
+}
+
+// Reset returns the canvas to the top-left of its drawing.
+export function reset_zoom(root) {
+  const canvas = root?.querySelector?.('.design-canvas');
+  if (!canvas) return;
+  canvas.scrollLeft = 0;
+  canvas.scrollTop = 0;
 }
 
 // The shadow root before the page has rendered: the editor's tools do nothing yet.

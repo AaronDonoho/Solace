@@ -35,6 +35,7 @@ pub type Design {
     title: String,
     elements: List(Node),
     links: Dict(String, String),
+    conditions: Dict(String, List(Condition)),
   )
 }
 
@@ -51,6 +52,11 @@ pub type Kind {
   Button(ButtonProperties)
   TextInput(InputProperties)
   ImagePlaceholder(ImageProperties)
+  Component(ComponentProperties)
+  Tabs(TabsProperties)
+  Tab(TabProperties)
+  ScrollArea(ScrollAreaProperties)
+  SplitPane(SplitPaneProperties)
   Flow
   DiagramNode(DiagramNodeProperties)
   DiagramEdge(DiagramEdgeProperties)
@@ -202,6 +208,147 @@ fn draw_node(
     ..tags
   ]
   case kind {
+    Tabs(properties) -> {
+      let current =
+        list.find(node.children, fn(child) { child.id == properties.current })
+      let strip =
+        html.div(
+          [
+            attribute.class("design-tabs"),
+            attribute.styles([
+              #("display", "flex"),
+              #("flex-direction", "row"),
+              #("box-sizing", "border-box"),
+            ]),
+          ],
+          list.map(node.children, fn(child) {
+            let is_current = child.id == properties.current
+            html.div(
+              [
+                attribute.class(case is_current {
+                  True -> "design-tab-current"
+                  False -> "design-tab"
+                }),
+                attribute.styles([
+                  #("display", "flex"),
+                  #("border-bottom", case is_current {
+                    True -> "2px solid " <> theme_color(theme, "primary")
+                    False -> "2px solid transparent"
+                  }),
+                ]),
+              ],
+              [
+                draw_node(
+                  theme,
+                  child,
+                  Across,
+                  width,
+                  height,
+                  on_click,
+                  selecting,
+                  resizable,
+                  wireframe,
+                  selected,
+                  marks,
+                  markers,
+                ),
+              ],
+            )
+          }),
+        )
+      let panel = case current {
+        Ok(child) ->
+          html.div(
+            [
+              attribute.class("design-tab-panel"),
+              attribute.styles([
+                #("display", "flex"),
+                #("flex-direction", "column"),
+                #("flex", "1 1 auto"),
+                #("box-sizing", "border-box"),
+                #("min-width", "0"),
+                #("min-height", "0"),
+              ]),
+            ],
+            list.map(child.children, fn(grand) {
+              draw_node(
+                theme,
+                grand,
+                Down,
+                width,
+                height,
+                on_click,
+                selecting,
+                resizable,
+                wireframe,
+                selected,
+                marks,
+                markers,
+              )
+            }),
+          )
+        Error(_) -> html.div([attribute.class("design-tab-panel")], [])
+      }
+      html.div(attributes, list.append([strip, panel], handles))
+    }
+    Tab(properties) ->
+      html.div(attributes, list.append([html.text(properties.label)], handles))
+    SplitPane(properties) -> {
+      let along = case properties.direction {
+        SideBySide -> Across
+        Stacked -> Down
+      }
+      let regions =
+        list.index_map(node.children, fn(child, index) {
+          let region =
+            html.div(
+              [
+                attribute.class("design-split-region"),
+                attribute.styles([
+                  #("display", "flex"),
+                  #("flex", "1 1 0"),
+                  #("box-sizing", "border-box"),
+                  #("min-width", "0"),
+                  #("min-height", "0"),
+                ]),
+              ],
+              [
+                draw_node(
+                  theme,
+                  child,
+                  along,
+                  width,
+                  height,
+                  on_click,
+                  selecting,
+                  resizable,
+                  wireframe,
+                  selected,
+                  marks,
+                  markers,
+                ),
+              ],
+            )
+          case index {
+            0 -> [
+              region,
+              html.div(
+                [
+                  attribute.class("design-split-divider"),
+                  attribute.styles([
+                    #("flex", "0 0 1px"),
+                    #("background", theme_color(theme, "border")),
+                  ]),
+                ],
+                [],
+              ),
+            ]
+            _ -> [region]
+          }
+        })
+        |> list.flatten
+      html.div(attributes, list.append(regions, handles))
+    }
     Text(text) ->
       html.div(attributes, list.append([html.text(text.content)], handles))
     Heading(heading) -> {
@@ -262,6 +409,8 @@ fn draw_node(
       }
     ImagePlaceholder(image) ->
       html.div(attributes, list.append([html.text(image.label)], handles))
+    Component(properties) ->
+      html.div(attributes, list.append([html.text(properties.name)], handles))
     _ ->
       html.div(
         attributes,
@@ -291,6 +440,11 @@ fn draw_node(
 fn child_axis(kind: Kind) -> ParentAxis {
   case kind {
     Row(_) -> Across
+    SplitPane(properties) ->
+      case properties.direction {
+        SideBySide -> Across
+        Stacked -> Down
+      }
     _ -> Down
   }
 }
@@ -320,6 +474,11 @@ fn node_sizes(kind: Kind) -> #(Size, Size) {
     Button(button) -> #(button.width, button.height)
     TextInput(input) -> #(input.width, input.height)
     ImagePlaceholder(image) -> #(image.width, image.height)
+    Component(properties) -> #(properties.width, properties.height)
+    Tabs(properties) -> #(properties.width, properties.height)
+    Tab(properties) -> #(properties.width, properties.height)
+    ScrollArea(properties) -> #(properties.width, properties.height)
+    SplitPane(properties) -> #(properties.width, properties.height)
     Flow -> #(Fill, Fill)
     DiagramNode(_) -> #(Fixed(220.0), Fixed(120.0))
     DiagramEdge(_) -> #(Hug, Hug)
@@ -401,6 +560,44 @@ fn kind_styles(theme: Theme, kind: Kind) -> List(#(String, String)) {
       #("border", "1px dashed " <> theme_color(theme, "muted")),
       #("color", theme_color(theme, "muted")),
     ]
+    Component(_) -> [
+      #("display", "flex"),
+      #("box-sizing", "border-box"),
+      #("align-items", "center"),
+      #("justify-content", "center"),
+      #("border", "1px dashed " <> theme_color(theme, "muted")),
+      #("color", theme_color(theme, "muted")),
+    ]
+    Tabs(_) -> [
+      #("display", "flex"),
+      #("flex-direction", "column"),
+      #("box-sizing", "border-box"),
+      #("min-width", "0"),
+      #("min-height", "0"),
+    ]
+    Tab(_) -> [
+      #("display", "flex"),
+      #("box-sizing", "border-box"),
+      #("align-items", "center"),
+      #("justify-content", "center"),
+      #("padding", px(theme_spacing(theme, "sm"))),
+      #("color", theme_color(theme, "text")),
+    ]
+    ScrollArea(_) -> [
+      #("display", "flex"),
+      #("flex-direction", "column"),
+      #("box-sizing", "border-box"),
+      #("overflow", "auto"),
+      #("min-width", "0"),
+      #("min-height", "0"),
+    ]
+    SplitPane(properties) -> [
+      #("display", "flex"),
+      #("flex-direction", split_direction(properties.direction)),
+      #("box-sizing", "border-box"),
+      #("min-width", "0"),
+      #("min-height", "0"),
+    ]
     Flow -> [#("position", "relative")]
     DiagramNode(_) -> []
     DiagramEdge(_) -> []
@@ -461,15 +658,25 @@ pub fn design_decoder() -> decode.Decoder(Design) {
   use id <- decode.field("id", decode.string)
   use title <- decode.field("title", decode.string)
   use elements <- decode.field("elements", decode.list(node_decoder()))
+  let conditions =
+    list.fold(elements, dict.new(), fn(acc, element) {
+      list.fold(element.2, acc, fn(acc, pair) {
+        let #(screen, screen_conditions) = pair
+        dict.insert(acc, screen, screen_conditions)
+      })
+    })
   decode.success(Design(
     id,
     title,
     list.map(elements, fn(element) { element.0 }),
-    links_of(elements),
+    links_of(list.map(elements, fn(element) { #(element.0, element.1) })),
+    conditions,
   ))
 }
 
-fn node_decoder() -> decode.Decoder(#(Node, List(#(String, String)))) {
+fn node_decoder() -> decode.Decoder(
+  #(Node, List(#(String, String)), List(#(String, List(Condition)))),
+) {
   decode.recursive(fn() {
     use id <- decode.field("id", decode.string)
     use ty <- decode.field("type", decode.string)
@@ -483,15 +690,30 @@ fn node_decoder() -> decode.Decoder(#(Node, List(#(String, String)))) {
       no_overrides(),
       overrides_decoder(),
     )
+    use own_conditions <- decode.optional_field(
+      "conditions",
+      [],
+      decode.list(condition_decoder()),
+    )
     use navigates_to <- decode.field("properties", navigates_to_decoder())
     let nodes = list.map(children, fn(element) { element.0 })
     let links = list.flatten(list.map(children, fn(element) { element.1 }))
+    let child_conditions =
+      list.flatten(list.map(children, fn(element) { element.2 }))
+    let screen_conditions = case ty {
+      "screen" -> [#(id, own_conditions)]
+      _ -> []
+    }
     let links = case navigates_to {
       "" -> links
       target -> [#(id, target), ..links]
     }
     decode.then(kind_decoder(ty), fn(kind) {
-      decode.success(#(Node(id, kind, nodes, style), links))
+      decode.success(#(
+        Node(id, kind, nodes, style),
+        links,
+        list.append(screen_conditions, child_conditions),
+      ))
     })
   })
 }
@@ -529,6 +751,26 @@ fn kind_decoder(ty: String) -> decode.Decoder(Kind) {
     "image_placeholder" ->
       decode.field("properties", image_decoder(), fn(value) {
         decode.success(ImagePlaceholder(value))
+      })
+    "component" ->
+      decode.field("properties", component_decoder(), fn(value) {
+        decode.success(Component(value))
+      })
+    "tabs" ->
+      decode.field("properties", tabs_decoder(), fn(value) {
+        decode.success(Tabs(value))
+      })
+    "tab" ->
+      decode.field("properties", tab_decoder(), fn(value) {
+        decode.success(Tab(value))
+      })
+    "scroll_area" ->
+      decode.field("properties", scroll_area_decoder(), fn(value) {
+        decode.success(ScrollArea(value))
+      })
+    "split_pane" ->
+      decode.field("properties", split_pane_decoder(), fn(value) {
+        decode.success(SplitPane(value))
       })
     "flow" -> decode.success(Flow)
     "node" ->
@@ -1447,4 +1689,528 @@ fn resize_handles() -> Element(message) {
       },
     ),
   )
+}
+
+pub type TabsProperties {
+  TabsProperties(width: Size, height: Size, current: String)
+}
+
+pub type TabProperties {
+  TabProperties(width: Size, height: Size, label: String)
+}
+
+pub type ScrollAreaProperties {
+  ScrollAreaProperties(width: Size, height: Size)
+}
+
+pub type SplitPaneProperties {
+  SplitPaneProperties(width: Size, height: Size, direction: SplitDirection)
+}
+
+pub type SplitDirection {
+  SideBySide
+  Stacked
+}
+
+fn tabs_decoder() -> decode.Decoder(TabsProperties) {
+  use width <- decode.field("width", size_decoder())
+  use height <- decode.field("height", size_decoder())
+  use current <- decode.field("current", decode.string)
+  decode.success(TabsProperties(width, height, current))
+}
+
+fn tab_decoder() -> decode.Decoder(TabProperties) {
+  use width <- decode.field("width", size_decoder())
+  use height <- decode.field("height", size_decoder())
+  use label <- decode.field("label", decode.string)
+  decode.success(TabProperties(width, height, label))
+}
+
+fn scroll_area_decoder() -> decode.Decoder(ScrollAreaProperties) {
+  use width <- decode.field("width", size_decoder())
+  use height <- decode.field("height", size_decoder())
+  decode.success(ScrollAreaProperties(width, height))
+}
+
+fn split_pane_decoder() -> decode.Decoder(SplitPaneProperties) {
+  use width <- decode.field("width", size_decoder())
+  use height <- decode.field("height", size_decoder())
+  use direction <- decode.field("direction", split_direction_decoder())
+  decode.success(SplitPaneProperties(width, height, direction))
+}
+
+fn split_direction(value: SplitDirection) -> String {
+  case value {
+    SideBySide -> "row"
+    Stacked -> "column"
+  }
+}
+
+fn split_direction_decoder() -> decode.Decoder(SplitDirection) {
+  decode.then(decode.string, fn(value) {
+    case value {
+      "row" -> decode.success(SideBySide)
+      "column" -> decode.success(Stacked)
+      _ -> decode.failure(SideBySide, "split pane direction")
+    }
+  })
+}
+
+pub type ComponentProperties {
+  ComponentProperties(width: Size, height: Size, name: String)
+}
+
+fn component_decoder() -> decode.Decoder(ComponentProperties) {
+  use width <- decode.field("width", size_decoder())
+  use height <- decode.field("height", size_decoder())
+  use name <- decode.field("name", decode.string)
+  decode.success(ComponentProperties(width, height, name))
+}
+
+/// The window a screen is drawn in, in pixels.
+pub type Window {
+  Window(width: Float, height: Float)
+}
+
+/// One bound on the window and the changes it makes when it matches.
+pub type Condition {
+  Condition(when: Bound, changes: List(ConditionChange))
+}
+
+pub type Bound {
+  RatioAtLeast(Float)
+  RatioAtMost(Float)
+  WidthAtLeast(Float)
+  WidthAtMost(Float)
+  HeightAtLeast(Float)
+  HeightAtMost(Float)
+}
+
+pub type ConditionChange {
+  SetDirection(id: String, direction: SplitDirection)
+  SetProperty(id: String, property: String, value: PropertyValue)
+}
+
+pub type PropertyValue {
+  SizeProperty(Size)
+  SpacingProperty(SpacingValue)
+  ChoiceProperty(String)
+  IntProperty(Int)
+  TextProperty(String)
+  DirectionProperty(SplitDirection)
+}
+
+/// The size a screen is drawn in before the human drags it.
+pub fn default_window() -> Window {
+  Window(1000.0, 800.0)
+}
+
+/// The design with every screen's matching conditions applied.
+pub fn resolve(design: Design, window: Window) -> Design {
+  let links =
+    list.fold(design.elements, design.links, fn(links, node) {
+      case dict.get(design.conditions, node.id) {
+        Ok(conditions) ->
+          list.fold(conditions, links, fn(links, condition) {
+            case matches(condition.when, window) {
+              True ->
+                list.fold(condition.changes, links, fn(links, change) {
+                  apply_link_change(links, change)
+                })
+              False -> links
+            }
+          })
+        Error(_) -> links
+      }
+    })
+  Design(
+    ..design,
+    links: links,
+    elements: list.map(design.elements, fn(node) {
+      case dict.get(design.conditions, node.id) {
+        Ok(conditions) -> resolve_node(node, window, conditions)
+        Error(_) -> node
+      }
+    }),
+  )
+}
+
+fn resolve_node(
+  node: Node,
+  window: Window,
+  conditions: List(Condition),
+) -> Node {
+  let changes =
+    list.fold(conditions, [], fn(changes, condition) {
+      case matches(condition.when, window) {
+        True -> list.append(changes, condition.changes)
+        False -> changes
+      }
+    })
+  let kind =
+    list.fold(changes, node.kind, fn(kind, change) {
+      apply_change(node.id, kind, change)
+    })
+  Node(
+    ..node,
+    kind: kind,
+    children: list.map(node.children, fn(child) {
+      resolve_node(child, window, conditions)
+    }),
+  )
+}
+
+fn matches(bound: Bound, window: Window) -> Bool {
+  case bound {
+    RatioAtLeast(value) ->
+      window.height >. 0.0 && window.width /. window.height >=. value
+    RatioAtMost(value) ->
+      window.height >. 0.0 && window.width /. window.height <=. value
+    WidthAtLeast(value) -> window.width >=. value
+    WidthAtMost(value) -> window.width <=. value
+    HeightAtLeast(value) -> window.height >=. value
+    HeightAtMost(value) -> window.height <=. value
+  }
+}
+
+fn apply_change(id: String, kind: Kind, change: ConditionChange) -> Kind {
+  case change {
+    SetDirection(target, direction) if target == id ->
+      switch_direction(kind, direction)
+    SetProperty(target, property, value) if target == id ->
+      set_property(kind, property, value)
+    _ -> kind
+  }
+}
+
+fn switch_direction(kind: Kind, direction: SplitDirection) -> Kind {
+  case kind, direction {
+    Row(container), SideBySide -> Row(container)
+    Row(container), Stacked -> Column(container)
+    Column(container), SideBySide -> Row(container)
+    Column(container), Stacked -> Column(container)
+    _, _ -> kind
+  }
+}
+
+fn set_property(kind: Kind, property: String, value: PropertyValue) -> Kind {
+  case #(property, value) {
+    #("width", SizeProperty(size)) -> set_width(kind, size)
+    #("height", SizeProperty(size)) -> set_height(kind, size)
+    #("gap", SpacingProperty(spacing)) -> set_gap(kind, spacing)
+    #("padding", SpacingProperty(spacing)) -> set_padding(kind, spacing)
+    #("align", ChoiceProperty(choice)) -> set_align(kind, choice)
+    #("justify", ChoiceProperty(choice)) -> set_justify(kind, choice)
+    #("variant", ChoiceProperty(choice)) -> set_variant(kind, choice)
+    #("text", TextProperty(text)) -> set_text(kind, text)
+    #("label", TextProperty(text)) -> set_label(kind, text)
+    #("placeholder", TextProperty(text)) -> set_placeholder(kind, text)
+    #("name", TextProperty(text)) -> set_name(kind, text)
+    #("current", ChoiceProperty(choice)) -> set_current(kind, choice)
+    #("level", IntProperty(level)) -> set_level(kind, level)
+    #("direction", DirectionProperty(direction)) ->
+      set_direction(kind, direction)
+    _ -> kind
+  }
+}
+
+fn set_width(kind: Kind, size: Size) -> Kind {
+  case kind {
+    Screen(container) -> Screen(Container(..container, width: size))
+    Row(container) -> Row(Container(..container, width: size))
+    Column(container) -> Column(Container(..container, width: size))
+    Text(text) -> Text(TextProperties(..text, width: size))
+    Heading(heading) -> Heading(HeadingProperties(..heading, width: size))
+    Button(button) -> Button(ButtonProperties(..button, width: size))
+    TextInput(input) -> TextInput(InputProperties(..input, width: size))
+    ImagePlaceholder(image) ->
+      ImagePlaceholder(ImageProperties(..image, width: size))
+    Component(properties) ->
+      Component(ComponentProperties(..properties, width: size))
+    Tabs(properties) -> Tabs(TabsProperties(..properties, width: size))
+    Tab(properties) -> Tab(TabProperties(..properties, width: size))
+    ScrollArea(properties) ->
+      ScrollArea(ScrollAreaProperties(..properties, width: size))
+    SplitPane(properties) ->
+      SplitPane(SplitPaneProperties(..properties, width: size))
+    _ -> kind
+  }
+}
+
+fn set_height(kind: Kind, size: Size) -> Kind {
+  case kind {
+    Screen(container) -> Screen(Container(..container, height: size))
+    Row(container) -> Row(Container(..container, height: size))
+    Column(container) -> Column(Container(..container, height: size))
+    Text(text) -> Text(TextProperties(..text, height: size))
+    Heading(heading) -> Heading(HeadingProperties(..heading, height: size))
+    Button(button) -> Button(ButtonProperties(..button, height: size))
+    TextInput(input) -> TextInput(InputProperties(..input, height: size))
+    ImagePlaceholder(image) ->
+      ImagePlaceholder(ImageProperties(..image, height: size))
+    Component(properties) ->
+      Component(ComponentProperties(..properties, height: size))
+    Tabs(properties) -> Tabs(TabsProperties(..properties, height: size))
+    Tab(properties) -> Tab(TabProperties(..properties, height: size))
+    ScrollArea(properties) ->
+      ScrollArea(ScrollAreaProperties(..properties, height: size))
+    SplitPane(properties) ->
+      SplitPane(SplitPaneProperties(..properties, height: size))
+    _ -> kind
+  }
+}
+
+fn set_gap(kind: Kind, spacing: SpacingValue) -> Kind {
+  case kind {
+    Screen(container) -> Screen(Container(..container, gap: spacing))
+    Row(container) -> Row(Container(..container, gap: spacing))
+    Column(container) -> Column(Container(..container, gap: spacing))
+    _ -> kind
+  }
+}
+
+fn set_padding(kind: Kind, spacing: SpacingValue) -> Kind {
+  case kind {
+    Screen(container) -> Screen(Container(..container, padding: spacing))
+    Row(container) -> Row(Container(..container, padding: spacing))
+    Column(container) -> Column(Container(..container, padding: spacing))
+    _ -> kind
+  }
+}
+
+fn align_choice(value: String) -> Align {
+  case value {
+    "center" -> AlignCenter
+    "end" -> AlignEnd
+    "stretch" -> AlignStretch
+    _ -> AlignStart
+  }
+}
+
+fn justify_choice(value: String) -> Justify {
+  case value {
+    "center" -> JustifyCenter
+    "end" -> JustifyEnd
+    "between" -> JustifyBetween
+    "around" -> JustifyAround
+    _ -> JustifyStart
+  }
+}
+
+fn text_align_choice(value: String) -> TextAlign {
+  case value {
+    "center" -> TextCenter
+    "right" -> TextRight
+    _ -> TextLeft
+  }
+}
+
+fn text_variant_choice(value: String) -> TextVariant {
+  case value {
+    "muted" -> Muted
+    "small" -> Small
+    _ -> Body
+  }
+}
+
+fn button_variant_choice(value: String) -> ButtonVariant {
+  case value {
+    "secondary" -> Secondary
+    "ghost" -> Ghost
+    _ -> Primary
+  }
+}
+
+fn container_variant_choice(value: String) -> ContainerVariant {
+  case value {
+    "card" -> Card
+    _ -> Plain
+  }
+}
+
+fn set_align(kind: Kind, choice: String) -> Kind {
+  case kind {
+    Screen(container) ->
+      Screen(Container(..container, align: align_choice(choice)))
+    Row(container) -> Row(Container(..container, align: align_choice(choice)))
+    Column(container) ->
+      Column(Container(..container, align: align_choice(choice)))
+    Text(text) -> Text(TextProperties(..text, align: text_align_choice(choice)))
+    Heading(heading) ->
+      Heading(HeadingProperties(..heading, align: text_align_choice(choice)))
+    _ -> kind
+  }
+}
+
+fn set_justify(kind: Kind, choice: String) -> Kind {
+  case kind {
+    Screen(container) ->
+      Screen(Container(..container, justify: justify_choice(choice)))
+    Row(container) ->
+      Row(Container(..container, justify: justify_choice(choice)))
+    Column(container) ->
+      Column(Container(..container, justify: justify_choice(choice)))
+    _ -> kind
+  }
+}
+
+fn set_variant(kind: Kind, choice: String) -> Kind {
+  case kind {
+    Screen(container) ->
+      Screen(Container(..container, variant: container_variant_choice(choice)))
+    Row(container) ->
+      Row(Container(..container, variant: container_variant_choice(choice)))
+    Column(container) ->
+      Column(Container(..container, variant: container_variant_choice(choice)))
+    Text(text) ->
+      Text(TextProperties(..text, variant: text_variant_choice(choice)))
+    Button(button) ->
+      Button(ButtonProperties(..button, variant: button_variant_choice(choice)))
+    _ -> kind
+  }
+}
+
+fn set_text(kind: Kind, text: String) -> Kind {
+  case kind {
+    Text(properties) -> Text(TextProperties(..properties, content: text))
+    Heading(properties) -> Heading(HeadingProperties(..properties, text: text))
+    _ -> kind
+  }
+}
+
+fn set_label(kind: Kind, label: String) -> Kind {
+  case kind {
+    Button(properties) -> Button(ButtonProperties(..properties, label: label))
+    ImagePlaceholder(properties) ->
+      ImagePlaceholder(ImageProperties(..properties, label: label))
+    Tab(properties) -> Tab(TabProperties(..properties, label: label))
+    _ -> kind
+  }
+}
+
+fn set_placeholder(kind: Kind, placeholder: String) -> Kind {
+  case kind {
+    TextInput(properties) ->
+      TextInput(InputProperties(..properties, placeholder: placeholder))
+    _ -> kind
+  }
+}
+
+fn set_name(kind: Kind, name: String) -> Kind {
+  case kind {
+    Component(properties) ->
+      Component(ComponentProperties(..properties, name: name))
+    _ -> kind
+  }
+}
+
+fn set_current(kind: Kind, current: String) -> Kind {
+  case kind {
+    Tabs(properties) -> Tabs(TabsProperties(..properties, current: current))
+    _ -> kind
+  }
+}
+
+fn set_level(kind: Kind, level: Int) -> Kind {
+  case kind {
+    Heading(properties) ->
+      Heading(HeadingProperties(..properties, level: level))
+    _ -> kind
+  }
+}
+
+fn set_direction(kind: Kind, direction: SplitDirection) -> Kind {
+  case kind {
+    SplitPane(properties) ->
+      SplitPane(SplitPaneProperties(..properties, direction: direction))
+    _ -> kind
+  }
+}
+
+fn bound_decoder() -> decode.Decoder(Bound) {
+  decode.one_of(
+    decode.map(decode.at(["ratio", "at_least"], decode.float), RatioAtLeast),
+    [
+      decode.map(decode.at(["ratio", "at_most"], decode.float), RatioAtMost),
+      decode.map(decode.at(["width", "at_least"], decode.float), WidthAtLeast),
+      decode.map(decode.at(["width", "at_most"], decode.float), WidthAtMost),
+      decode.map(decode.at(["height", "at_least"], decode.float), HeightAtLeast),
+      decode.map(decode.at(["height", "at_most"], decode.float), HeightAtMost),
+    ],
+  )
+}
+
+fn condition_decoder() -> decode.Decoder(Condition) {
+  use when <- decode.field("when", bound_decoder())
+  use changes <- decode.field(
+    "changes",
+    decode.list(condition_change_decoder()),
+  )
+  decode.success(Condition(when, changes))
+}
+
+fn condition_change_decoder() -> decode.Decoder(ConditionChange) {
+  decode.then(decode.dynamic, fn(change) {
+    case decode.run(change, decode.at(["id"], decode.string)) {
+      Error(_) ->
+        decode.failure(
+          SetDirection("", SideBySide),
+          "a condition change with an id",
+        )
+      Ok(id) ->
+        case
+          decode.run(
+            change,
+            decode.at(["direction"], split_direction_decoder()),
+          )
+        {
+          Ok(direction) -> decode.success(SetDirection(id, direction))
+          Error(_) ->
+            case decode.run(change, decode.at(["property"], decode.string)) {
+              Error(_) ->
+                decode.failure(
+                  SetDirection(id, SideBySide),
+                  "a direction or a property and value",
+                )
+              Ok(property) ->
+                case
+                  decode.run(
+                    change,
+                    decode.at(["value"], property_value_decoder(property)),
+                  )
+                {
+                  Ok(value) -> decode.success(SetProperty(id, property, value))
+                  Error(_) ->
+                    decode.failure(
+                      SetDirection(id, SideBySide),
+                      "a value for the condition change",
+                    )
+                }
+            }
+        }
+    }
+  })
+}
+
+fn property_value_decoder(property: String) -> decode.Decoder(PropertyValue) {
+  case property {
+    "width" | "height" -> decode.map(size_decoder(), SizeProperty)
+    "gap" | "padding" -> decode.map(spacing_decoder(), SpacingProperty)
+    "level" -> decode.map(decode.int, IntProperty)
+    "direction" -> decode.map(split_direction_decoder(), DirectionProperty)
+    "text" | "label" | "placeholder" | "name" ->
+      decode.map(decode.string, TextProperty)
+    _ -> decode.map(decode.string, ChoiceProperty)
+  }
+}
+
+fn apply_link_change(
+  links: Dict(String, String),
+  change: ConditionChange,
+) -> Dict(String, String) {
+  case change {
+    SetProperty(id, "navigates_to", ChoiceProperty(target)) ->
+      dict.insert(links, id, target)
+    _ -> links
+  }
 }

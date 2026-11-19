@@ -24,6 +24,20 @@ Elements (each becomes one Lustre element):
   image_placeholder  html.div showing label, centered, 1px dashed muted
                      border, color muted; a stand-in for an image the task
                      supplies
+  component          html.div showing name, centered, 1px dashed muted
+                     border, color muted; a stand-in for a component placed
+                     in the page
+  tabs               html.div, flex column; a strip of its tab children's
+                     labels, with the current tab marked, then only the
+                     current tab's children
+  tab                one label in its parent tabs strip; its children are
+                     the panel shown when it is current
+  scroll_area        html.div of a fixed size with overflow auto; its
+                     children scroll inside it
+  split_pane         html.div, flex row when direction is row (side by
+                     side) or column when column (stacked); exactly two
+                     regions each in its own div, with a 1px divider
+                     between them
   flow, node, edge   architecture diagrams (label, description, from, to):
                      not UI, never turned into code
 
@@ -50,6 +64,7 @@ them out down. The main axis is the parent's direction.
 
 Other properties:
   text, label        the visible text
+  name               the component a stand-in represents, shown in its box
   placeholder        the input's placeholder attribute
   level              heading level, as above
   align              text and heading: text-align left, center, right

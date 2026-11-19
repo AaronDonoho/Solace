@@ -90,6 +90,7 @@ pub fn a_changed_link_marks_the_element_changed_test() {
       "Home",
       [screen("a", [text("one", "One")])],
       dict.insert(dict.new(), "one", "two"),
+      dict.new(),
     )
   let proposed =
     render.Design(
@@ -97,6 +98,7 @@ pub fn a_changed_link_marks_the_element_changed_test() {
       "Home",
       [screen("a", [text("one", "One")])],
       dict.insert(dict.new(), "one", "three"),
+      dict.new(),
     )
   let marked = changes.mark(current, proposed)
   assert dict.get(marked.marks, "one") == Ok(render.Changed)
@@ -124,7 +126,7 @@ pub fn a_marked_element_carries_its_class_test() {
 }
 
 fn design(elements: List(render.Node)) -> render.Design {
-  render.Design("d", "Home", elements, dict.new())
+  render.Design("d", "Home", elements, dict.new(), dict.new())
 }
 
 fn screen(id: String, children: List(render.Node)) -> render.Node {
@@ -270,4 +272,24 @@ pub fn moving_a_flow_node_and_edge_to_another_flow_marks_them_moved_test() {
   assert dict.get(marked.marks, "e") == Ok(render.Moved)
   assert dict.get(marked.marks, "f") == Ok(render.Removed)
   assert dict.get(marked.marks, "g") == Ok(render.Added)
+}
+
+pub fn a_changed_condition_marks_the_screen_changed_test() {
+  let current = design([screen("a", [text("one", "One")])])
+  let proposed =
+    render.Design(
+      current.id,
+      current.title,
+      current.elements,
+      current.links,
+      dict.from_list([
+        #("a", [
+          render.Condition(render.RatioAtLeast(1.1), [
+            render.SetDirection("one", render.SideBySide),
+          ]),
+        ]),
+      ]),
+    )
+  let marked = changes.mark(current, proposed)
+  assert dict.get(marked.marks, "a") == Ok(render.Changed)
 }

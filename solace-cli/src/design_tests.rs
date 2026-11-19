@@ -715,13 +715,14 @@ fn default_properties(ty: &str) -> Value {
         "button" => json!({"width": "hug", "height": "hug", "label": "Save"}),
         "text_input" => json!({"width": "hug", "height": "hug", "placeholder": "Name"}),
         "image_placeholder" => json!({"width": "hug", "height": "hug", "label": "Photo"}),
+        "component" => json!({"width": "hug", "height": "hug", "name": "Task details"}),
         _ => json!({}),
     }
 }
 
 #[test]
 fn every_default_component_validates() {
-    for ty in ["text", "heading", "button", "text_input", "image_placeholder"] {
+    for ty in ["text", "heading", "button", "text_input", "image_placeholder", "component"] {
         let mut d = design();
         d["elements"][0]["children"] = json!([{
             "id": "part",
@@ -1242,7 +1243,7 @@ fn an_element_cannot_move_inside_itself() {
 fn a_set_names_a_known_field_and_clears_a_missing_style() {
     let mut d = design();
     let e = apply(&mut d, &[json!({"op":"set","id":"heading","field":"width","property":"fill","value":"primary"})]).unwrap_err();
-    assert_eq!(e.0, "E7001 invalid operation: set field must be \"properties\" or \"style\", not \"width\"");
+    assert_eq!(e.0, "E7001 invalid operation: set field must be \"properties\", \"style\" or \"conditions\", not \"width\"");
     apply(&mut d, &[json!({"op":"set","id":"heading","field":"style","property":"fill","value":null})]).unwrap();
     assert!(d["elements"][0]["children"][0].get("style").is_none());
 }
@@ -1493,4 +1494,503 @@ fn a_failed_design_announcement_is_retried() {
     let data: String =
         crate::tasks::events(&top).unwrap().query_row("SELECT data FROM events ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&data).unwrap(), json!({"designs": []}));
+}
+
+fn in_design(example: &Value) -> Value {
+    let ty = example["type"].as_str().unwrap_or_default();
+    let design = |tab: &str, elements: Value| {
+        json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "id": "0123456789abcdef",
+            "title": "Example",
+            "tab": tab,
+            "elements": elements,
+        })
+    };
+    match ty {
+        "screen" => design("ui", json!([example])),
+        "flow" => design("architecture", json!([example])),
+        "tab" => {
+            let id = example["id"].as_str().unwrap_or_default();
+            design(
+                "ui",
+                json!([{
+                    "id": "screen",
+                    "type": "screen",
+                    "properties": {"width": "fill", "height": "fill"},
+                    "children": [{
+                        "id": "tabs",
+                        "type": "tabs",
+                        "properties": {"width": "fill", "height": "hug", "current": id},
+                        "children": [example],
+                    }],
+                }]),
+            )
+        }
+        "node" => design(
+            "architecture",
+            json!([{
+                "id": "flow",
+                "type": "flow",
+                "properties": {},
+                "children": [example],
+            }]),
+        ),
+        "edge" => {
+            let from = example["properties"]["from"].as_str().unwrap_or_default();
+            let to = example["properties"]["to"].as_str().unwrap_or_default();
+            design(
+                "architecture",
+                json!([{
+                    "id": "flow",
+                    "type": "flow",
+                    "properties": {},
+                    "children": [
+                        {"id": from, "type": "node", "properties": {"label": "From", "description": "Starts here"}},
+                        {"id": to, "type": "node", "properties": {"label": "To", "description": "Ends here"}},
+                        example,
+                    ],
+                }]),
+            )
+        }
+        _ => design(
+            "ui",
+            json!([{
+                "id": "screen",
+                "type": "screen",
+                "properties": {"width": "fill", "height": "fill"},
+                "children": [example],
+            }]),
+        ),
+    }
+}
+
+fn schema_lists_every_element_type_and_its_example_validates() {
+    let text = schema();
+    for (name, ty) in ELEMENT_TYPES {
+        assert!(text.contains(name), "{name} is missing from the schema");
+        assert!(text.contains(ty.example), "{name}'s example is missing");
+        for (property, kind) in ty.properties {
+            assert!(text.contains(property), "{name}'s property {property} is missing");
+            assert!(text.contains(&describe_kind(kind)), "{name}'s property {property} has no value description");
+        }
+        let example: Value = serde_json::from_str(ty.example).expect(name);
+        assert_eq!(example["type"], json!(name));
+        validate(&in_design(&example)).unwrap_or_else(|e| panic!("{name}: {}", e.0));
+    }
+    for key in DESIGN_KEYS {
+        assert!(text.contains(key), "design key {key} is missing");
+    }
+    assert!(text.contains("holds only `node` and `edge`"), "the flow placement rule is missing");
+    for tab in TABS {
+        assert!(text.contains(tab), "tab {tab} is missing");
+    }
+    for key in ELEMENT_KEYS {
+        assert!(text.contains(key), "element key {key} is missing");
+    }
+    for (property, kind) in STYLE_PROPERTIES {
+        assert!(text.contains(property) && text.contains(&describe_kind(kind)), "style {property} is missing");
+    }
+    for op in ["add", "remove", "move", "set"] {
+        assert!(text.contains(op), "operation {op} is missing");
+    }
+    for part in ["conditions", "at_least", "at_most", "set conditions", "later matching condition"] {
+        assert!(text.contains(part), "{part} is missing from the condition format");
+    }
+}
+
+#[test]
+fn a_tab_outside_tabs_is_refused() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "one",
+        "type": "tab",
+        "properties": {"width": "hug", "height": "hug", "label": "One"},
+    }]);
+    refusal(&d, &["element \"one\"", "inside a tabs element"]);
+}
+
+#[test]
+fn tabs_hold_only_tabs() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "tabs",
+        "type": "tabs",
+        "properties": {"width": "fill", "height": "hug", "current": "one"},
+        "children": [
+            {"id": "one", "type": "tab", "properties": {"width": "hug", "height": "hug", "label": "One"}},
+            {"id": "loose", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Loose"}},
+        ],
+    }]);
+    refusal(&d, &["element \"tabs\"", "loose", "tabs hold only tabs"]);
+}
+
+#[test]
+fn tabs_need_at_least_one_tab() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "tabs",
+        "type": "tabs",
+        "properties": {"width": "fill", "height": "hug", "current": "one"},
+        "children": [],
+    }]);
+    refusal(&d, &["element \"tabs\"", "at least one tab"]);
+}
+
+#[test]
+fn a_tabs_current_names_a_child_tab() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "tabs",
+        "type": "tabs",
+        "properties": {"width": "fill", "height": "hug"},
+        "children": [{"id": "one", "type": "tab", "properties": {"width": "hug", "height": "hug", "label": "One"}}],
+    }]);
+    refusal(&d, &["element \"tabs\"", "needs property \"current\""]);
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "tabs",
+        "type": "tabs",
+        "properties": {"width": "fill", "height": "hug", "current": "three"},
+        "children": [{"id": "one", "type": "tab", "properties": {"width": "hug", "height": "hug", "label": "One"}}],
+    }]);
+    refusal(&d, &["element \"tabs\"", "names no tab \"three\""]);
+}
+
+#[test]
+fn a_split_pane_needs_exactly_two_regions() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "split",
+        "type": "split_pane",
+        "properties": {"width": "fill", "height": "fill", "direction": "row"},
+        "children": [{"id": "left", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Left"}}],
+    }]);
+    refusal(&d, &["element \"split\"", "exactly two regions"]);
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "split",
+        "type": "split_pane",
+        "properties": {"width": "fill", "height": "fill", "direction": "row"},
+        "children": [
+            {"id": "left", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Left"}},
+            {"id": "middle", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Middle"}},
+            {"id": "right", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Right"}},
+        ],
+    }]);
+    refusal(&d, &["element \"split\"", "exactly two regions"]);
+}
+
+#[test]
+fn a_split_pane_direction_is_row_or_column() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "split",
+        "type": "split_pane",
+        "properties": {"width": "fill", "height": "fill", "direction": "diagonal"},
+        "children": [
+            {"id": "left", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Left"}},
+            {"id": "right", "type": "text", "properties": {"width": "fill", "height": "fill", "text": "Right"}},
+        ],
+    }]);
+    refusal(&d, &["element \"split\"", "direction", "row, column"]);
+}
+
+#[test]
+fn the_new_layouts_hold_no_screen_or_flow() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "scroll",
+        "type": "scroll_area",
+        "properties": {"width": "fill", "height": "fill"},
+        "children": [{"id": "inner", "type": "screen", "properties": {"width": "fill", "height": "fill"}}],
+    }]);
+    refusal(&d, &["element \"inner\"", "screen", "below the top level"]);
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "tabs",
+        "type": "tabs",
+        "properties": {"width": "fill", "height": "hug", "current": "one"},
+        "children": [{
+            "id": "one",
+            "type": "tab",
+            "properties": {"width": "hug", "height": "hug", "label": "One"},
+            "children": [{"id": "diagram", "type": "flow", "properties": {}}],
+        }],
+    }]);
+    refusal(&d, &["element \"diagram\"", "flow", "below the top level"]);
+}
+
+#[test]
+fn a_component_stand_in_needs_a_name_and_holds_no_children() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([{
+        "id": "component",
+        "type": "component",
+        "properties": {"width": "fill", "height": {"fixed": 240}},
+    }]);
+    refusal(&d, &["component", "name"]);
+    d["elements"][0]["children"][0]["properties"]["name"] = json!("Task details");
+    validate(&d).unwrap();
+    d["elements"][0]["children"][0]["children"] = json!([]);
+    refusal(&d, &["component", "can't hold children"]);
+}
+
+#[test]
+fn an_outline_names_each_kind_of_change() {
+    let mut before = design();
+    before["elements"][0]["children"].as_array_mut().unwrap().push(json!({
+        "id": "old",
+        "type": "text",
+        "properties": {"width": "hug", "height": "hug", "text": "Old"}
+    }));
+    let operations = json!([
+        {
+            "op":"add",
+            "parent":"root",
+            "index":0,
+            "element":{"id":"note","type":"text","properties":{"width":"hug","height":"hug","text":"Note"}}
+        },
+        {"op":"move","id":"heading","parent":"root","index":1},
+        {"op":"remove","id":"old"},
+        {"op":"set","id":"heading","field":"properties","property":"text","value":"Welcome"}
+    ]);
+    let mut after = before.clone();
+    apply(&mut after, operations.as_array().unwrap()).unwrap();
+    assert_eq!(
+        outline(&before, &after, operations.as_array().unwrap()),
+        concat!(
+            "Would add note (text) under root at position 0\n",
+            "Would remove old (text)\n",
+            "Would move heading (text) under root at position 1\n",
+            "Would set heading (text) properties.text to \"Welcome\"",
+        )
+    );
+    assert_eq!(outline(&before, &before, &[]), "Nothing would change");
+}
+
+#[test]
+fn a_nested_add_stores_what_separate_adds_would() {
+    let nested = json!([{
+        "op":"add",
+        "parent":"root",
+        "index":1,
+        "element":{
+            "id":"body",
+            "type":"column",
+            "properties":{"width":"fill","height":"fill","gap":8,"padding":0,"align":"stretch","justify":"start"},
+            "children":[
+                {"id":"first","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"First"}},
+                {"id":"second","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"Second"}}
+            ]
+        }
+    }]);
+    let separate = json!([
+        {
+            "op":"add",
+            "parent":"root",
+            "index":1,
+            "element":{
+                "id":"body",
+                "type":"column",
+                "properties":{"width":"fill","height":"fill","gap":8,"padding":0,"align":"stretch","justify":"start"}
+            }
+        },
+        {
+            "op":"add",
+            "parent":"body",
+            "index":0,
+            "element":{"id":"first","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"First"}}
+        },
+        {
+            "op":"add",
+            "parent":"body",
+            "index":1,
+            "element":{"id":"second","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"Second"}}
+        }
+    ]);
+    let mut a = design();
+    let mut b = design();
+    apply(&mut a, nested.as_array().unwrap()).unwrap();
+    apply(&mut b, separate.as_array().unwrap()).unwrap();
+    validate(&a).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a["elements"][0]["children"][1]["children"][0]["id"], "first");
+    assert_eq!(a["elements"][0]["children"][1]["children"][1]["id"], "second");
+}
+
+#[test]
+fn elements_without_ids_get_unique_ones() {
+    let mut d = design();
+    d["elements"][0]["children"][0]["id"] = json!("text-1");
+    let given = apply(
+        &mut d,
+        &[json!({
+            "op":"add",
+            "parent":"root",
+            "index":1,
+            "element":{
+                "type":"column",
+                "properties":{"width":"fill","height":"fill","gap":8,"padding":0,"align":"stretch","justify":"start"},
+                "children":[
+                    {"type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"First"}}
+                ]
+            }
+        })],
+    )
+    .unwrap();
+    assert_eq!(given.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), ["column-1", "text-2"]);
+    assert_eq!(given[0].parent.as_deref(), Some("root"));
+    assert_eq!(given[1].parent.as_deref(), Some("column-1"));
+    validate(&d).unwrap();
+
+    let given = apply(
+        &mut d,
+        &[json!({
+            "op":"add",
+            "index":1,
+            "element":{"type":"screen","properties":{"width":"fill","height":"fill"}}
+        })],
+    )
+    .unwrap();
+    assert_eq!(given.len(), 1);
+    assert_eq!(given[0].id, "screen-1");
+    assert_eq!(given[0].parent, None);
+    validate(&d).unwrap();
+}
+
+#[test]
+fn a_supplied_id_in_use_is_still_refused() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[json!({
+            "op":"add",
+            "parent":"root",
+            "index":1,
+            "element":{"id":"heading","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":"Other"}}
+        })],
+    )
+    .unwrap();
+    refusal(&d, &["heading", "repeated id"]);
+}
+
+#[test]
+fn a_supplied_id_taken_by_another_add_is_still_refused() {
+    let mut d = design();
+    let text = |text: &str| json!({"id":"note","type":"text","properties":{"align":"left","width":"hug","height":"hug","text":text}});
+    apply(
+        &mut d,
+        &[
+            json!({"op":"add","parent":"root","index":1,"element":text("First")}),
+            json!({"op":"add","parent":"root","index":2,"element":text("Second")}),
+        ],
+    )
+    .unwrap();
+    refusal(&d, &["note", "repeated id"]);
+}
+
+#[test]
+fn the_schema_says_an_add_may_nest_children_and_leave_out_an_id() {
+    let text = schema();
+    assert!(text.contains("children nested inside it"), "{text}");
+    assert!(text.contains("may be left out"), "{text}");
+    assert!(text.contains("only name ids the agent supplied"), "{text}");
+}
+
+#[test]
+fn a_screen_with_window_conditions_passes() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([
+        {
+            "id": "group",
+            "type": "column",
+            "properties": {"width": "fill", "height": "fill"},
+            "children": [{"id": "details", "type": "text", "properties": {"width": "fill", "height": "hug", "text": "Details"}}]
+        }
+    ]);
+    d["elements"][0]["conditions"] = json!([{
+        "when": {"ratio": {"at_least": 1.1}},
+        "changes": [
+            {"id": "group", "direction": "row"},
+            {"id": "details", "property": "height", "value": "fill"}
+        ]
+    }]);
+    validate(&d).unwrap();
+}
+
+#[test]
+fn a_bad_window_condition_is_refused() {
+    fn with(condition: Value) -> Value {
+        let mut d = design();
+        d["elements"][0]["children"] = json!([
+            {"id": "group", "type": "column", "properties": {"width": "fill", "height": "fill"}},
+            {"id": "label", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Label"}},
+            {"id": "go", "type": "button", "properties": {"width": "hug", "height": "hug", "label": "Go", "navigates_to": "root"}},
+            {"id": "tabs", "type": "tabs", "properties": {"width": "fill", "height": "hug", "current": "one"}, "children": [
+                {"id": "one", "type": "tab", "properties": {"width": "hug", "height": "hug", "label": "One"}}
+            ]}
+        ]);
+        d["elements"][0]["conditions"] = json!([condition]);
+        d
+    }
+    let cases = [
+        (json!({"when": {"depth": {"at_least": 1}}, "changes": [{"id": "group", "direction": "row"}]}), "depth"),
+        (json!({"when": {"ratio": {"above": 1}}, "changes": [{"id": "group", "direction": "row"}]}), "above"),
+        (json!({"when": {"ratio": {"at_least": 0}}, "changes": [{"id": "group", "direction": "row"}]}), "at_least"),
+        (json!({"when": {"width": {"at_most": -2}}, "changes": [{"id": "group", "direction": "row"}]}), "at_most"),
+        (json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "missing", "direction": "row"}]}), "missing"),
+        (json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "group", "property": "text", "value": "x"}]}), "group"),
+        (json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "label", "property": "height", "value": "wide"}]}), "label"),
+        (json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "label", "direction": "row"}]}), "label"),
+        (
+            json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "go", "property": "navigates_to", "value": "missing"}]}),
+            "missing",
+        ),
+        (json!({"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "tabs", "property": "current", "value": "missing"}]}), "missing"),
+    ];
+    for (condition, name) in cases {
+        refusal(&with(condition), &[name]);
+    }
+    let mut non_screen = design();
+    non_screen["elements"][0]["children"][0]["conditions"] = json!([]);
+    refusal(&non_screen, &["heading"]);
+}
+
+#[test]
+fn set_adds_changes_and_removes_a_condition() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([
+        {"id": "group", "type": "column", "properties": {"width": "fill", "height": "fill"}}
+    ]);
+    let first = json!({"when": {"width": {"at_least": 900}}, "changes": [{"id": "group", "direction": "row"}]});
+    let second = json!({"when": {"height": {"at_most": 500}}, "changes": [{"id": "group", "property": "gap", "value": 4}]});
+    apply(&mut d, &[json!({"op":"set","id":"root","field":"conditions","value":first})]).unwrap();
+    apply(&mut d, &[json!({"op":"set","id":"root","field":"conditions","value":second})]).unwrap();
+    validate(&d).unwrap();
+    assert_eq!(d["elements"][0]["conditions"].as_array().unwrap().len(), 2);
+    apply(&mut d, &[json!({"op":"set","id":"root","field":"conditions","index":0,"value":second})]).unwrap();
+    assert_eq!(d["elements"][0]["conditions"][0], second);
+    apply(&mut d, &[json!({"op":"set","id":"root","field":"conditions","index":0,"value":null})]).unwrap();
+    assert_eq!(d["elements"][0]["conditions"].as_array().unwrap().len(), 1);
+    validate(&d).unwrap();
+}
+
+#[test]
+fn set_an_invalid_condition_is_refused() {
+    let mut d = design();
+    d["elements"][0]["children"] = json!([
+        {"id": "label", "type": "text", "properties": {"width": "hug", "height": "hug", "text": "Label"}}
+    ]);
+    apply(
+        &mut d,
+        &[json!({
+            "op": "set",
+            "id": "root",
+            "field": "conditions",
+            "value": {"when": {"ratio": {"at_least": 1.1}}, "changes": [{"id": "label", "direction": "row"}]}
+        })],
+    )
+    .unwrap();
+    refusal(&d, &["label"]);
 }

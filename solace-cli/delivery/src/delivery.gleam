@@ -125,6 +125,10 @@ pub type Model {
     newest: String,
     versions_error: String,
     release: Option(Release),
+    releases: List(Release),
+    /// The human's unsaved edit of the selected release's draft.
+    notes_edit: Option(String),
+    saving_notes: Bool,
     desktop: Bool,
   )
 }
@@ -171,6 +175,20 @@ pub type Msg {
   SettingsSaved(String)
   /// The latest release, or a refusal.
   ReleasesLoaded(String)
+  /// A release picked from the Build tab's list.
+  SelectRelease(String)
+  /// Ask for this release's notes; only this action starts a notes run.
+  AskNotes(String)
+  /// The reply to asking for notes: the draft, or a refusal.
+  NotesAsked(String)
+  /// The human's edit of the selected release's draft.
+  NotesChanged(String)
+  /// Save the edited draft as the release's notes.
+  ApproveNotes
+  /// Drop the draft without storing it.
+  RejectNotes
+  /// The reply to approving or rejecting: the release, or a refusal.
+  NotesReviewed(String)
   OpenFolder
   /// The desktop app's reply to opening the folder: empty on success.
   FolderOpened(String)
@@ -207,6 +225,9 @@ pub fn initial() -> Model {
     newest: "",
     versions_error: "",
     release: None,
+    releases: [],
+    notes_edit: None,
+    saving_notes: False,
     desktop: False,
   )
 }
@@ -236,7 +257,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                     "",
                     fn(text) { send(Live(text)) },
                     fn() { send(CaughtUp) },
-                    ["build", "buildLog", "builds"],
+                    ["build", "buildLog", "builds", "releaseNotes"],
                   ),
                 ),
               )
@@ -264,6 +285,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         True -> event.emit("attention", json.null())
         False -> effect.none()
       }
+      let notes = case string.contains(text, "\"releaseNotes\"") {
+        True -> get("/releases", ReleasesLoaded)
+        False -> effect.none()
+      }
       case released(ended, next.build) {
         True -> #(
           next,
@@ -273,7 +298,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             get("/build/versions", VersionsLoaded),
           ]),
         )
-        False -> #(next, attention)
+        False -> #(next, effect.batch([attention, notes]))
       }
     }
     CaughtUp -> {
@@ -550,18 +575,92 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     ReleasesLoaded(text) ->
       case json.parse(text, releases_decoder()) {
-        Ok(releases) -> #(
-          Model(..model, release: case list.first(releases) {
-            Ok(release) -> Some(release)
-            Error(_) -> None
-          }),
-          effect.none(),
+        Ok(releases) -> {
+          let release = choose_release(releases, model.release)
+          #(
+            Model(
+              ..model,
+              releases:,
+              release:,
+              notes_edit: kept_notes_edit(
+                model.release,
+                release,
+                model.notes_edit,
+              ),
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
+      }
+    SelectRelease(version) ->
+      case
+        list.find(model.releases, fn(release) {
+          let Release(found, _, _) = release
+          found == version
+        })
+      {
+        Ok(release) -> #(Model(..model, release: Some(release)), effect.none())
+        Error(_) -> #(model, effect.none())
+      }
+    AskNotes(version) -> #(
+      Model(..model, error: ""),
+      post("/releases/" <> version <> "/notes", "{}", NotesAsked),
+    )
+    NotesAsked(text) ->
+      case json.parse(text, notes_decoder()) {
+        Ok(_) -> #(
+          Model(..model, notes_edit: None),
+          get("/releases", ReleasesLoaded),
         )
         Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
       }
+    NotesChanged(value) -> #(
+      Model(..model, notes_edit: Some(value)),
+      effect.none(),
+    )
+    ApproveNotes ->
+      case model.release {
+        Some(Release(version, _, Some(Notes(_, "draft")))) -> #(
+          Model(..model, saving_notes: True, error: ""),
+          post(
+            "/releases/" <> version <> "/notes/approve",
+            json.to_string(
+              json.object([#("text", json.string(edited_notes(model)))]),
+            ),
+            NotesReviewed,
+          ),
+        )
+        _ -> #(model, effect.none())
+      }
+    RejectNotes ->
+      case model.release {
+        Some(Release(version, _, Some(Notes(_, "draft")))) -> #(
+          Model(..model, saving_notes: True, error: ""),
+          post("/releases/" <> version <> "/notes/reject", "{}", NotesReviewed),
+        )
+        _ -> #(model, effect.none())
+      }
+    NotesReviewed(text) ->
+      case json.parse(text, release_decoder()) {
+        Ok(release) -> #(
+          Model(
+            ..model,
+            release: Some(release),
+            notes_edit: None,
+            saving_notes: False,
+            error: "",
+          ),
+          get("/releases", ReleasesLoaded),
+        )
+        Error(_) -> #(
+          Model(..model, saving_notes: False, error: refusal(text)),
+          effect.none(),
+        )
+      }
     OpenFolder ->
       case model.release {
-        Some(Release(version, _)) -> #(
+        Some(Release(version, _, _)) -> #(
           model,
           effect.from(fn(send) {
             open_folder_ffi(version, fn(text) { send(FolderOpened(text)) })
@@ -1201,6 +1300,11 @@ const view_styles =
 .log h2{margin:0;font-size:var(--h3)}
 .log pre{margin:var(--space-2) 0 0;max-height:40vh;overflow:auto;white-space:pre-wrap;background:var(--code);color:var(--ink);padding:var(--space-3);font:13px 'IBM Plex Mono',ui-monospace,monospace}
 @media (max-width:700px){.step{grid-template-columns:minmax(0,1fr) auto}.step .duration{grid-column:2;text-align:right}}
+.releases{margin:0 0 var(--space-4)}
+.release-picks{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:0 0 var(--space-3)}
+.release-actions{display:flex;gap:var(--space-2);align-items:center}
+.release-notes{margin:var(--space-3) 0 0;border-top:1px solid var(--line);padding-top:var(--space-2)}
+.release-notes h3{margin:0 0 var(--space-2);font-size:var(--h3)}
 .release{margin:0 0 var(--space-4);border:1px solid var(--edge);background:var(--paper);padding:var(--pad-card)}
 .release-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)}
 .release h2{margin:0;font-size:var(--h3)}
@@ -1393,7 +1497,7 @@ pub type Artifact {
 }
 
 pub type Release {
-  Release(version: String, artifacts: List(Artifact))
+  Release(version: String, artifacts: List(Artifact), notes: Option(Notes))
 }
 
 @external(javascript, "./api.mjs", "desktop")
@@ -1403,24 +1507,47 @@ fn desktop_ffi() -> Bool
 fn open_folder_ffi(version: String, receive: fn(String) -> Nil) -> Nil
 
 fn release_view(model: Model) -> Element(Msg) {
-  case model.release {
-    None -> element.none()
-    Some(Release(version, artifacts)) ->
-      html.section([attribute.class("release")], [
-        html.div([attribute.class("release-head")], [
-          html.h2([], [html.text("Release " <> version)]),
-          case model.desktop {
-            True ->
-              html.button([event.on_click(OpenFolder)], [
-                html.text("Open folder"),
-              ])
-            False -> element.none()
-          },
-        ]),
-        html.ul(
-          [attribute.class("artifacts")],
-          list.map(artifacts, fn(artifact) { artifact_view(version, artifact) }),
+  case model.releases {
+    [] -> element.none()
+    releases ->
+      html.section([attribute.class("releases")], [
+        html.h2([], [html.text("Releases")]),
+        html.div(
+          [attribute.class("release-picks")],
+          list.map(releases, release_button),
         ),
+        case model.release {
+          None -> element.none()
+          Some(Release(version, artifacts, notes)) ->
+            html.section([attribute.class("release")], [
+              html.div([attribute.class("release-head")], [
+                html.h2([], [html.text("Release " <> version)]),
+                html.div([attribute.class("release-actions")], [
+                  html.button(
+                    [
+                      attribute.class("ask-notes"),
+                      event.on_click(AskNotes(version)),
+                    ],
+                    [html.text("Ask for notes")],
+                  ),
+                  case model.desktop {
+                    True ->
+                      html.button([event.on_click(OpenFolder)], [
+                        html.text("Open folder"),
+                      ])
+                    False -> element.none()
+                  },
+                ]),
+              ]),
+              html.ul(
+                [attribute.class("artifacts")],
+                list.map(artifacts, fn(artifact) {
+                  artifact_view(version, artifact)
+                }),
+              ),
+              notes_view(model, notes),
+            ])
+        },
       ])
   }
 }
@@ -1453,7 +1580,12 @@ fn artifact_decoder() -> decode.Decoder(Artifact) {
 fn release_decoder() -> decode.Decoder(Release) {
   use version <- decode.field("version", decode.string)
   use artifacts <- decode.field("artifacts", decode.list(artifact_decoder()))
-  decode.success(Release(version, artifacts))
+  use notes <- decode.optional_field(
+    "notes",
+    None,
+    decode.optional(notes_decoder()),
+  )
+  decode.success(Release(version, artifacts, notes))
 }
 
 fn releases_decoder() -> decode.Decoder(List(Release)) {
@@ -1565,5 +1697,115 @@ fn older(version: String, newest: String) -> Bool {
       && minor == new_minor
       && patch < new_patch
     _, _ -> False
+  }
+}
+
+/// The draft saved beside a release.
+pub type Notes {
+  Notes(text: String, state: String)
+}
+
+fn notes_decoder() -> decode.Decoder(Notes) {
+  use text <- decode.field("text", decode.string)
+  use state <- decode.field("state", decode.string)
+  decode.success(Notes(text, state))
+}
+
+fn release_button(release: Release) -> Element(Msg) {
+  let Release(version, _, _) = release
+  html.button(
+    [
+      attribute.class("release-pick"),
+      event.on_click(SelectRelease(version)),
+    ],
+    [html.text(version)],
+  )
+}
+
+fn notes_view(model: Model, notes: Option(Notes)) -> Element(Msg) {
+  case notes {
+    None -> element.none()
+    Some(Notes(_, "draft")) ->
+      html.section([attribute.class("release-notes")], [
+        html.h3([], [html.text("Release notes")]),
+        html.textarea(
+          [attribute.class("notes-edit"), event.on_input(NotesChanged)],
+          edited_notes(model),
+        ),
+        html.div([attribute.class("notes-actions")], [
+          html.button(
+            [
+              attribute.class("approve-notes"),
+              attribute.disabled(model.saving_notes),
+              event.on_click(ApproveNotes),
+            ],
+            [
+              html.text(case model.saving_notes {
+                True -> "Saving…"
+                False -> "Approve"
+              }),
+            ],
+          ),
+          html.button(
+            [
+              attribute.class("reject-notes"),
+              attribute.disabled(model.saving_notes),
+              event.on_click(RejectNotes),
+            ],
+            [html.text("Reject")],
+          ),
+        ]),
+      ])
+    Some(Notes(text, _)) ->
+      html.section([attribute.class("release-notes")], [
+        html.h3([], [html.text("Release notes")]),
+        solace_task.md("", text),
+      ])
+  }
+}
+
+fn choose_release(
+  releases: List(Release),
+  current: Option(Release),
+) -> Option(Release) {
+  let wanted = case current {
+    Some(Release(version, _, _)) -> version
+    None -> ""
+  }
+  case
+    list.find(releases, fn(release) {
+      let Release(version, _, _) = release
+      version == wanted
+    })
+  {
+    Ok(release) -> Some(release)
+    Error(_) ->
+      case list.first(releases) {
+        Ok(release) -> Some(release)
+        Error(_) -> None
+      }
+  }
+}
+
+fn edited_notes(model: Model) -> String {
+  case model.notes_edit {
+    Some(text) -> text
+    None ->
+      case model.release {
+        Some(Release(_, _, Some(Notes(text, _)))) -> text
+        _ -> ""
+      }
+  }
+}
+
+fn kept_notes_edit(
+  current: Option(Release),
+  next: Option(Release),
+  edited: Option(String),
+) -> Option(String) {
+  case current, next {
+    Some(Release(before, _, _)), Some(Release(after, _, _)) if before == after ->
+      edited
+    _, _ -> None
   }
 }

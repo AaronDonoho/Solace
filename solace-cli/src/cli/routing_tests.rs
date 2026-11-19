@@ -159,3 +159,37 @@ fn a_design_show_with_project_before_its_id_records_the_id() {
     assert_eq!(versions[0]["source"]["id"].as_str(), Some(rid.as_str()));
 }
 
+/// A design run can ask for the whole design format.
+#[test]
+fn a_design_run_reads_the_design_format() {
+    let (root, rid) = design_test_root();
+    let args: Vec<String> = ["design", "schema"].iter().map(|s| s.to_string()).collect();
+    let shown = super::with_root(&root, || super::design_run_at(&root, &rid, &args, &mut || Ok(String::new()), 32_000)).unwrap();
+    assert!(shown.contains("Element types") && shown.contains("Proposal operations"), "{shown}");
+}
+
+/// A design run can try a change without saving a version.
+#[test]
+fn a_design_run_checks_without_saving() {
+    let (root, rid) = design_test_root();
+    let id = "0123456789abcdef";
+    let design = serde_json::json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": id,
+        "title": "Home",
+        "tab": "ui",
+        "elements": [{"id": "root", "type": "screen", "properties": {"width": "fill", "height": "fill"}}]
+    });
+    crate::design::save(&root, &design, crate::design::Source::Human).unwrap();
+    let versions = crate::design::versions(&root, id).unwrap();
+    let show: Vec<String> = ["design", "show", id].iter().map(|s| s.to_string()).collect();
+    super::with_root(&root, || super::design_run_at(&root, &rid, &show, &mut || Ok(String::new()), 4000)).unwrap();
+    let check: Vec<String> = ["design", "check", id].iter().map(|s| s.to_string()).collect();
+    let text =
+        serde_json::json!({"operations": [{"op":"set","id":"root","field":"properties","property":"width","value":"hug"}]}).to_string();
+    let reply = super::with_root(&root, || super::design_run_at(&root, &rid, &check, &mut || Ok(text.clone()), 4000)).unwrap();
+    assert_eq!(reply.trim(), "Would set root (screen) properties.width to \"hug\"");
+    assert_eq!(crate::design::show(&root, id).unwrap(), design);
+    assert_eq!(crate::design::versions(&root, id).unwrap(), versions);
+}
+

@@ -1582,6 +1582,7 @@ fn record_line(line: &str) {
     let root = Store::root().ok().or_else(|| env::current_dir().ok()).unwrap_or_default();
     let ids = context()
         .or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)))
+        .or_else(|| notes_context().map(|rid| (crate::board::roles::NOTES_RUN.into(), rid)))
         .or_else(|| design_context().map(|rid| (crate::board::roles::DESIGN_RUN.into(), rid)));
     record_line_for(&root, ids, line);
 }
@@ -1613,4 +1614,29 @@ fn codex_error_entry(message: &Value) -> Value {
         Some(text) if harmless_warning(text) => json!({"kind":"output","text":message}),
         _ => json!({"kind":"error","text":message}),
     }
+}
+
+/// A notes run's task and run ids from an agent's environment values.
+fn notes_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
+    Some((task.filter(|t| t == crate::board::roles::NOTES_RUN)?, run?))
+}
+
+/// A notes run's id, from its agent's environment.
+pub fn notes_context() -> Option<String> {
+    notes_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok()).map(|(_, rid)| rid)
+}
+
+/// Waits until notes run `rid`'s agent may act, taking no project lock.
+pub(crate) fn notes_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    super::strategy::notes_guard(top, rid, a)
+}
+
+/// `notes draft` in notes run `rid`.
+pub(crate) fn notes_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out) -> Out {
+    super::strategy::notes_command(top, rid, a, input)
+}
+
+/// Launches notes run `rid`'s agent on its own thread.
+pub(crate) fn start_notes(top: PathBuf, rid: String) {
+    super::strategy::start_notes(top, rid)
 }

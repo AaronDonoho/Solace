@@ -34,6 +34,8 @@ pub(crate) fn agent_reference(in_task: bool) -> String {
     } else if crate::board::runs::design_context().is_some() {
         // Nothing here changes code or proposes a task, so the workflow is left out.
         format!("Design runs{design}\nRun `help` for the read commands' options.\n")
+    } else if crate::board::runs::notes_context().is_some() {
+        "Notes runs: read with view, inspect, refs, find, grep, files and read, and save the draft with notes draft.\n".to_string()
     } else if strategy_context().is_some() {
         // The workflow is for changing code, which a strategy run never does.
         format!("Strategy runs{strategy}\nRun `help` for the read commands' options.\n")

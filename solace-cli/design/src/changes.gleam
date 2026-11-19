@@ -27,14 +27,20 @@ pub fn mark(current: render.Design, proposed: render.Design) -> Marked {
       proposed_ids,
     )
   Marked(
-    render.Design(proposed.id, proposed.title, elements, proposed.links),
+    render.Design(
+      proposed.id,
+      proposed.title,
+      elements,
+      proposed.links,
+      proposed.conditions,
+    ),
     marks,
   )
 }
 
 /// A design a proposal creates: every element is added.
 pub fn all_added(design: render.Design) -> Marked {
-  let empty = render.Design(design.id, design.title, [], dict.new())
+  let empty = render.Design(design.id, design.title, [], dict.new(), dict.new())
   mark(empty, design)
 }
 
@@ -99,6 +105,7 @@ fn change_of(
     old.kind != new.kind
     || old.overrides != new.overrides
     || dict.get(current.links, id) != dict.get(proposed.links, id)
+    || dict.get(current.conditions, id) != dict.get(proposed.conditions, id)
   let moved =
     moved(id, current_places, proposed_places, current_flows, proposed_flows)
   case changed, moved {

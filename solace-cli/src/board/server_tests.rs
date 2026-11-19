@@ -622,3 +622,70 @@ fn a_refused_design_edit_saves_nothing() {
     assert_eq!(board.projects_api("GET", "/designs/0123456789abcdef/versions", &json!({})).unwrap().as_array().unwrap().len(), 1);
 }
 
+fn release_draft(root: &std::path::Path, version: &str, text: &str) -> std::path::PathBuf {
+    let dir = root.join(crate::releases::folder(root)).join(version);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("release.json"), json!({"version": version, "time": 1, "artifacts": []}).to_string()).unwrap();
+    std::fs::write(dir.join("notes.json"), json!({"version": version, "state": "draft", "text": text}).to_string()).unwrap();
+    dir
+}
+
+#[test]
+fn approving_edited_release_notes_keeps_them_with_the_release() {
+    let root = crate::testing::Scratch::new();
+    release_draft(&root, "1.0.0", "old draft");
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let saved = board.projects_api("POST", "/releases/1.0.0/notes/approve", &json!({"text": "# Notes\nEdited by hand"})).unwrap();
+    assert_eq!(saved["notes"]["state"], json!("approved"));
+    assert_eq!(saved["notes"]["text"], json!("# Notes\nEdited by hand"));
+    let restarted = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let read = restarted.projects_api("GET", "/releases/1.0.0", &json!({})).unwrap();
+    assert_eq!(read["notes"]["state"], json!("approved"));
+    assert_eq!(read["notes"]["text"], json!("# Notes\nEdited by hand"));
+    assert!(crate::releases::save_draft(&root, "1.0.0", "late draft").is_err());
+    let read = restarted.projects_api("GET", "/releases/1.0.0", &json!({})).unwrap();
+    assert_eq!(read["notes"]["text"], json!("# Notes\nEdited by hand"));
+}
+
+#[test]
+fn rejecting_release_notes_stores_none_and_ends_the_open_draft_run() {
+    let root = crate::testing::Scratch::new();
+    let dir = release_draft(&root, "1.0.0", "old draft");
+    let runs = root.join(".solace/release-notes");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join("open.json"),
+        json!({
+            "id": "open",
+            "kind": crate::board::roles::NOTES_RUN,
+            "state": "running",
+            "context": {"kind": "release", "id": "1.0.0"},
+            "notes": [],
+            "questions": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    let rejected = board.projects_api("POST", "/releases/1.0.0/notes/reject", &json!({})).unwrap();
+    assert_eq!(rejected["notes"], Value::Null);
+    assert!(!dir.join("notes.json").exists());
+    let read = board.projects_api("GET", "/releases/1.0.0", &json!({})).unwrap();
+    assert_eq!(read["notes"], Value::Null);
+    assert!(crate::tasks::strategy::notes_runs(&root).into_iter().all(|run| run["state"] == "ended"));
+}
+
+#[test]
+fn rejecting_approved_notes_keeps_them_with_the_release() {
+    let root = crate::testing::Scratch::new();
+    release_draft(&root, "1.0.0", "old draft");
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    board.projects_api("POST", "/releases/1.0.0/notes/approve", &json!({"text": "# Approved"})).unwrap();
+    let refused = board.projects_api("POST", "/releases/1.0.0/notes/reject", &json!({}));
+    let e = refused.unwrap_err();
+    assert!(e.0.contains("E7023"), "{}", e.0);
+    let read = board.projects_api("GET", "/releases/1.0.0", &json!({})).unwrap();
+    assert_eq!(read["notes"]["state"], json!("approved"));
+    assert_eq!(read["notes"]["text"], json!("# Approved"));
+}
+

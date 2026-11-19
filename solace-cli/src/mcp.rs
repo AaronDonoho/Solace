@@ -14,17 +14,40 @@ use crate::board::runs::strategy_context;
 /// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
 /// and plans (D-93), so it is told only those commands.
 pub(crate) fn tool_schema() -> Value {
+    if crate::board::runs::notes_context().is_some() {
+        return json!({
+            "name": "solace",
+            "description": concat!(
+                "Draft the release notes for this run's release on the Build page. ",
+                "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` ",
+                "(`--project <folder>` for a project below the root). ",
+                "Save the finished draft with `notes draft`, its Markdown in `text`; ",
+                "keep one entry per task as `[title](task:<id>)` under its feature's title."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "One command, e.g. `notes draft` or `view app.main`"},
+                    "text": {"type": "string", "description": "The release notes as Markdown, for `notes draft`"}
+                },
+                "required": ["command"]
+            }
+        });
+    }
     if crate::board::runs::design_context().is_some() {
         return json!({
             "name": "solace",
             "description": concat!(
                 "Read this project's code, designs and plan with the human; this run changes no code. ",
                 "A design change is checked and saved at once as a new version; read a design before changing it. ",
-                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`, `design list` and `design show <id>`, ",
+                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`, `design list`, ",
+                "`design show <id>` and `design schema`, ",
                 "the plan and vision with `strategy list` and `strategy show <task|feature|milestone> <id>...` ",
                 "(a task's notes with `strategy show note`, its run log with `strategy show run`), ",
                 "and decisions with `grep` or `read` of `DECISIONS.md` ",
-                "(`--project <folder>` for a project below the root); propose a design change with ",
+                "(`--project <folder>` for a project below the root); check a change with ",
+                "`design check [<id>]`, alone or with reads; it saves nothing and replies with the first refusal ",
+                "or a short outline. Propose a design change with ",
                 "`design propose [<id>]`, alone in its call; it replies at once with the saved version. ",
                 "reply with `design note`, ",
                 "and keep waiting with `design wait`. Several reads go in one call, one per line, and run in order."
@@ -41,7 +64,7 @@ pub(crate) fn tool_schema() -> Value {
                     },
                     "text": {
                         "type": "string",
-                        "description": "The reply for `design note`; a `design propose`'s operations as a JSON object"
+                        "description": "The reply for `design note`; a `design check` or `design propose`'s operations as a JSON object"
                     }
                 },
                 "required": ["command"]

@@ -3203,6 +3203,8 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
         "there is no Accept or Reject",
         "a design that gained a version since you read it is refused",
         "invalid change is refused and nothing is saved",
+        "may carry an element with its children nested inside it",
+        "leave out an element's `id` and Solace gives it one",
         "A human's message may carry notes",
         "each names a design, one or more elements in it and some text",
         "Each element arrives with its ID, type and the elements it sits inside, top first",
@@ -3213,7 +3215,7 @@ fn a_design_brief_holds_the_design_and_the_workspace() {
     for word in ["strategy note", "strategy task", "strategy vision", "submit", "`test`", "session start", "task ask"] {
         assert!(!brief.contains(word), "{word}: {brief}");
     }
-    for word in ["design note", "design wait", "design propose", "`design list`", "`strategy list`", "`strategy show"] {
+    for word in ["design note", "design wait", "design propose", "design check", "`design list`", "`strategy list`", "`strategy show"] {
         assert!(brief.contains(word), "{word}: {brief}");
     }
 }

@@ -264,3 +264,8 @@ fn date_at(seconds: i64, offset: i64) -> String {
 fn attribution(line: &str) -> bool {
     line.starts_with('(') && line.ends_with(')') && (line.contains(", board task ") || line.contains(", strategy run "))
 }
+
+/// The date `seconds` since the epoch falls on, as a decision's attribution writes it.
+pub(crate) fn date_of(seconds: u64) -> String {
+    date_at(seconds as i64, crate::board::local_offset(seconds as i64).unwrap_or(0))
+}

@@ -138,7 +138,10 @@ pub(crate) fn read_project_with_version(dir: &str, args: &[String], budget: usiz
         return crate::lockdown::error(
             "E6007",
             command,
-            if strategy_context().is_some() || crate::board::runs::design_context().is_some() {
+            if strategy_context().is_some()
+                || crate::board::runs::design_context().is_some()
+                || crate::board::runs::notes_context().is_some()
+            {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read, design)"
             } else {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read, design) here; in a board run, \

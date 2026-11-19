@@ -29,7 +29,12 @@ pub(crate) const ROLES: [Role; 6] = [
         ),
         runs: &["investigate", "discuss"],
     },
-    Role { id: "worker", name: "Worker", purpose: "Makes the change a task describes and checks it.", runs: &["work", "new_work"] },
+    Role {
+        id: "worker",
+        name: "Worker",
+        purpose: "Makes the change a task describes and checks it.",
+        runs: &["work", "new_work", "notes"],
+    },
     Role {
         id: "reviewer",
         name: "Reviewer",
@@ -88,6 +93,7 @@ mod tests {
             ("discuss", "investigator"),
             ("work", "worker"),
             ("new_work", "worker"),
+            ("notes", "worker"),
             ("review", "reviewer"),
             (DESIGN_RUN, "designer"),
         ];
@@ -137,3 +143,6 @@ pub(crate) const STRATEGY_RUN: &str = "strategy";
 
 /// The designer's run kind: design runs record it and map back through `for_run`.
 pub(crate) const DESIGN_RUN: &str = "design";
+
+/// The notes run kind: notes runs record it and map back through `for_run`.
+pub(crate) const NOTES_RUN: &str = "notes";

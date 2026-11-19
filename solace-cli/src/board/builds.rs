@@ -379,7 +379,7 @@ fn execute(top: &Path, id: &str, n: usize) -> Result<Outcome, Failure> {
     let root = crate::scope::path(top, step["project"].as_str().unwrap_or("."));
     let run: Vec<String> =
         step["command"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-    let timeout = step["timeout"].as_u64().unwrap_or(120);
+    let timeout = step["timeout"].as_u64().unwrap_or(crate::recipe::TIMEOUT as u64);
     let path = log_path(top, id, n);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

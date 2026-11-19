@@ -34,7 +34,7 @@ fn a_question_is_told_from_a_command() {
     ] {
         assert!(crate::cli::is_question(line), "{line}");
     }
-    for line in ["view app.main", "probe --from tests.one", "design note A calm design"] {
+    for line in ["view app.main", "probe --from tests.one", "design note A calm design", "design check 0123456789abcdef"] {
         assert!(!crate::cli::is_question(line), "{line}");
     }
 }

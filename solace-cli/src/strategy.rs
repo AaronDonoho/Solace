@@ -667,6 +667,8 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "The element is the primitive: a design is screens or diagrams and the elements in them, not files, modules or symbols. ",
     "An architecture design's diagram is a top-level `flow` element holding `node` and `edge` elements: ",
     "a node has a `label` and description, and an edge names the `from` and `to` nodes. ",
+    "An `add` may carry an element with its children nested inside it; leave out an element's `id` and Solace gives it one, ",
+    "naming it in the reply, while a reference inside the same proposal names only ids you supplied. ",
     "Every change you propose is checked and saved at once as a new version with your run as its source; there is no Accept or Reject. ",
     "Read a design with `design show <id>` before you change it: a design that gained a version since you read it is refused, ",
     "so read it again and propose again. An invalid change is refused and nothing is saved; ",
@@ -680,12 +682,15 @@ pub(super) const DESIGN_ROLE: &str = concat!(
     "Don't make measurement, investigation or another step a precondition unless the human asked for it. ",
     "Keep replies conversational: use plain language, and explain any term a non-specialist may not know. ",
     "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read`, ",
-    "designs with `design list` and `design show <id>`, ",
+    "designs with `design list` and `design show <id>`, the whole format with `design schema`, ",
     "and the plan and vision with `strategy list` and `strategy show <task|feature|milestone> <id>...` ",
     "(a task's notes with `strategy show note`, its run log with `strategy show run`); ",
     "add `--project <folder>` for a project below the root. ",
     "Propose a change with `design propose [<id>]`: the id of the design to change, or none to create one, ",
     "and the operations as a JSON object in `text`; it is alone in its call and replies at once with the saved version. ",
+    "Try a change first with `design check [<id>]`: the same operations and read rule, but it saves nothing ",
+    "and replies with the first refusal or a short outline of what would be added, removed, moved and changed; ",
+    "it may share a call with reads. ",
     "A proposal does not wait; `design note` waits for the human. ",
     "Cite code by name (`lockdown.dispatch`), not `file:line`: line numbers move. ",
     "Name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
@@ -855,7 +860,7 @@ fn wait_run(top: &Path, rid: &str, limit: Option<Duration>, kind: &str) -> Out {
     }
 }
 
-/// `design note | wait | propose` in design run `rid`, which `design_guard` let act.
+/// `design note | wait | propose | check` in design run `rid`, which `design_guard` let act.
 pub(crate) fn design_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out) -> Out {
     match a {
         ["design", "note", rest @ ..] => {
@@ -879,31 +884,97 @@ pub(crate) fn design_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn 
             }
             wait_design(top, rid, Some(super::delivery::wait_limit()))
         }
-        ["design", "propose", rest @ ..] => {
+        ["design", action, rest @ ..] if matches!(*action, "propose" | "check") => {
+            let name = *action;
             if rest.first().is_some_and(|w| w.starts_with("--")) {
                 return err(
                     "E7015",
-                    concat!(
-                        "nothing was sent. Resend with `command` set to just `design propose` ",
-                        "(and the id to change) and the operations in the `text` argument",
+                    format!(
+                        "nothing was sent. Resend with `command` set to just `design {name}` \
+                         (and the id to change) and the operations in the `text` argument",
                     ),
                 );
             }
             let id = match rest {
                 [] => None,
                 [only] => Some(only.strip_prefix("design:").unwrap_or(*only)),
-                _ => return usage("design propose [<id>] with the operations as JSON in `text`"),
+                _ => return usage(format!("design {name} [<id>] with the operations as JSON in `text`")),
             };
             let text = input()?;
             if text.trim().is_empty() {
-                return err("E7001", "design propose needs the operations in `text`");
+                return err("E7001", format!("design {name} needs the operations in `text`"));
             }
-            // Each change is checked and saved as a version now; there is no
-            // Accept or Reject.
-            let reply = tasks::strategy::design_proposal(top, rid, id, &text)?;
+            let reply = if name == "check" {
+                tasks::strategy::design_check(top, rid, id, &text)?
+            } else {
+                // Each change is checked and saved as a version now; there is no
+                // Accept or Reject.
+                tasks::strategy::design_proposal(top, rid, id, &text)?
+            };
             Ok(format!("{reply}\n"))
         }
         ["design", "wait"] => wait_design(top, rid, Some(super::delivery::wait_limit())),
-        _ => usage("design note, with the reply in `text` | design wait | design propose [<id>], with the operations in `text`"),
+        _ => usage(concat!(
+            "design note, with the reply in `text` | design wait | design propose [<id>] | ",
+            "design check [<id>], with the operations in `text`",
+        )),
+    }
+}
+
+/// Launches notes run `rid`'s agent on its own thread.
+pub(super) fn start_notes(top: PathBuf, rid: String) {
+    start_workspace_agent(top, rid, notes_brief);
+}
+
+/// A notes run's prompt: the release, the draft already saved, and how to save it.
+pub(super) fn notes_brief(top: &Path, run: &Value, _involvement: &str, _detail: &str, _asking: &str) -> String {
+    let version = run["context"]["id"].as_str().unwrap_or("");
+    let saved = crate::releases::saved(top, version);
+    let draft = saved.as_ref().and_then(|n| n["text"].as_str()).unwrap_or("");
+    format!(
+        concat!(
+            "You are drafting release notes for release {version} on the Build page. ",
+            "You work only through the Solace tool: there is no shell and no file access.\n",
+            "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` ",
+            "(`--project <folder>` for a project below the root). ",
+            "The draft below is already saved from the work completed since the previous release. ",
+            "Review it and save your version with `notes draft`, its Markdown in `text`. ",
+            "Keep one entry per task, written `[title](task:<id>)`, under its feature's title, ",
+            "and add no work the draft does not list.\n\nThe draft as saved:\n{draft}\n"
+        ),
+        version = version,
+        draft = draft
+    )
+}
+
+/// Waits until notes run `rid`'s agent may act, taking no project lock.
+pub(super) fn notes_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    run_guard(top, rid, a, crate::board::roles::NOTES_RUN)
+}
+
+/// `notes draft` in notes run `rid`, which `notes_guard` let act.
+pub(super) fn notes_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out) -> Out {
+    match a {
+        ["notes", "draft", rest @ ..] => {
+            if rest.first().is_some_and(|w| w.starts_with("--")) {
+                return err(
+                    "E7015",
+                    "nothing was sent. Resend with `command` set to just `notes draft` and the Markdown in the `text` argument",
+                );
+            }
+            let text = if rest.is_empty() { input()? } else { rest.join(" ") };
+            if text.trim().is_empty() {
+                return err("E7001", "notes draft needs the Markdown in `text`");
+            }
+            let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown notes run {rid}")) };
+            let Some(version) = run["context"]["id"].as_str() else { return err("E7023", "the notes run names no release") };
+            crate::releases::save_draft(top, version, &text)?;
+            crate::tasks::strategy::update_run(top, rid, |run| {
+                crate::tasks::strategy::end_strategy(run, "finished");
+                Ok(())
+            })?;
+            Ok(format!("Saved the draft for release {version}.\n"))
+        }
+        _ => usage("notes draft, with the release notes as Markdown in `text`"),
     }
 }

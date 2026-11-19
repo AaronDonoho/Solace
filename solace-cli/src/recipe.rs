@@ -10,8 +10,8 @@ use std::path::{Component, PathBuf};
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
-/// A step's time limit, in seconds, when neither it nor its command sets one (as for `run`).
-const TIMEOUT: i64 = 120;
+/// A build step's time limit, in seconds, when neither it nor its command sets one.
+pub(crate) const TIMEOUT: i64 = 1200;
 
 /// What a project's outputs are built from (D-159): its sources, and the manifests whose
 /// contents reach the build.

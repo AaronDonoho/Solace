@@ -299,14 +299,20 @@ pub fn strategy_runs(top: &Path) -> Vec<Value> {
 pub(crate) fn put_run(top: &Path, run: &Value) -> Result<(), Failure> {
     let kind = run["kind"].as_str().unwrap_or(STRATEGY_RUN);
     jsonx::replace_pretty(&run_dir(top, kind), &format!("{}.json", run["id"].as_str().unwrap_or("")), run)?;
-    let event = if kind == crate::board::roles::DESIGN_RUN { json!({"designRun": run}) } else { json!({"strategyRun": run}) };
+    let event = match kind {
+        crate::board::roles::DESIGN_RUN => json!({"designRun": run}),
+        crate::board::roles::NOTES_RUN => return Ok(()),
+        _ => json!({"strategyRun": run}),
+    };
     log(top, "", &event);
     Ok(())
 }
 
 /// One workspace run as its file holds it, strategy or design, if there is one.
 pub(crate) fn strategy_run(top: &Path, rid: &str) -> Option<Value> {
-    run_record(top, STRATEGY_RUN, rid).or_else(|| run_record(top, crate::board::roles::DESIGN_RUN, rid))
+    run_record(top, STRATEGY_RUN, rid)
+        .or_else(|| run_record(top, crate::board::roles::NOTES_RUN, rid))
+        .or_else(|| run_record(top, crate::board::roles::DESIGN_RUN, rid))
 }
 
 /// Changes strategy run `rid` with `f`, read and written as one operation.
@@ -326,7 +332,7 @@ pub(crate) fn update_run<R: Send + 'static>(
 
 /// Ends the workspace runs a previous server left going: their agents are gone.
 pub fn end_strategy_runs(top: &Path) -> Result<(), Failure> {
-    for kind in [STRATEGY_RUN, crate::board::roles::DESIGN_RUN] {
+    for kind in [STRATEGY_RUN, crate::board::roles::DESIGN_RUN, crate::board::roles::NOTES_RUN] {
         for run in run_records(top, kind).into_iter().filter(|r| r["state"] != "ended") {
             let rid = run["id"].as_str().unwrap_or("").to_string();
             update_run(top, &rid.clone(), move |r| {
@@ -990,7 +996,13 @@ pub(crate) const DESIGN_FAMILY: Family = Family { kind: crate::board::roles::DES
 /// Where `kind`'s workspace runs are kept: strategy runs beside the plan (D-93),
 /// design runs in their own folder (D-240).
 fn run_dir(top: &Path, kind: &str) -> PathBuf {
-    if kind == crate::board::roles::DESIGN_RUN { top.join(".solace/design/runs") } else { strategy_dir(top, "runs") }
+    if kind == crate::board::roles::DESIGN_RUN {
+        top.join(".solace/design/runs")
+    } else if kind == crate::board::roles::NOTES_RUN {
+        top.join(".solace/release-notes")
+    } else {
+        strategy_dir(top, "runs")
+    }
 }
 
 /// One workspace run of `kind`, if there is one.
@@ -1082,64 +1094,36 @@ pub fn design_runs(top: &Path) -> Vec<Value> {
 /// none creates one. A design the run has not read, or that gained a version
 /// since the run read it, is refused with `E7026`.
 pub(crate) fn design_proposal(top: &Path, rid: &str, id: Option<&str>, text: &str) -> Result<String, Failure> {
-    let request = match serde_json::from_str::<Value>(text) {
-        Ok(value) if value.is_object() => value,
-        _ => return board::err("E7001", "the proposal's operations go in `text`, as a JSON object"),
-    };
-    let operations = request
-        .get("operations")
-        .and_then(Value::as_array)
-        .cloned()
-        .ok_or_else(|| Failure("E7001 a design proposal needs `operations` as a list: add, remove, move or set".into(), 1))?;
-    let allowed: &[&str] = if id.is_some() { &["operations"] } else { &["title", "tab", "operations"] };
-    if let Some(key) = request.as_object().into_iter().flat_map(|object| object.keys()).find(|key| !allowed.contains(&key.as_str())) {
-        let edit = if id.is_some() { " that edits" } else { "" };
-        return board::err("E7001", format!("a design proposal{edit} takes {}; not `{key}`", allowed.join(", ")));
-    }
+    let (request, operations) = design_request(text, id)?;
     let Some(run) = strategy_run(top, rid) else {
         return board::err("E7023", format!("unknown design run {rid}"));
     };
     match id {
         Some(id) => {
-            let mut design = crate::design::show(top, id)?;
-            let Some(read) = run["design_reads"].get(id).cloned() else {
-                return board::err("E7026", format!("read design {id} with `design show {id}` before changing it; it may have changed"));
-            };
-            if newest_design_version(top, id)? != read {
-                return board::err("E7026", format!("the design changed since you read it; read design {id} again and propose again"));
-            }
-            crate::design::apply(&mut design, &operations)?;
-            crate::design::validate(&design)?;
+            let (mut design, read) = design_to_change(top, &run, id)?;
+            let given = apply_design_change(&mut design, &operations)?;
             let saved = crate::design::save_guarded(top, &design, crate::design::Source::DesignRun(rid), || {
                 if newest_design_version(top, id)? != read {
                     return board::err("E7026", format!("the design changed since you read it; read design {id} again and propose again"));
                 }
                 Ok(())
             })?;
-            Ok(match saved {
+            let reply = match saved {
                 Some(number) => format!("Saved version {number}"),
                 None => "Nothing changed; the design was already as proposed".into(),
-            })
+            };
+            Ok(with_given_ids(reply, &given))
         }
         None => {
-            let title =
-                request["title"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `title`".into(), 1))?.to_string();
-            let tab = request["tab"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `tab`".into(), 1))?.to_string();
             let id = unique_id();
-            let mut design = json!({
-                "schemaVersion": crate::design::SCHEMA_VERSION,
-                "id": id,
-                "title": title,
-                "tab": tab,
-                "elements": []
-            });
-            crate::design::apply(&mut design, &operations)?;
-            crate::design::validate(&design)?;
+            let mut design = new_design(&request, id.clone())?;
+            let given = apply_design_change(&mut design, &operations)?;
             let saved = crate::design::save(top, &design, crate::design::Source::DesignRun(rid))?;
-            Ok(match saved {
+            let reply = match saved {
                 Some(number) => format!("Saved version {number}: created design:{id}"),
                 None => format!("Saved: created design:{id}"),
-            })
+            };
+            Ok(with_given_ids(reply, &given))
         }
     }
 }
@@ -1261,4 +1245,96 @@ fn run_origin(top: &Path, run: &Value) -> String {
         }
         _ => "strategy run on the Strategy page".into(),
     }
+}
+
+/// A design run's change checked without saving it: the same request, read
+/// rule and refusal as `design propose`, with a short outline when it passes.
+pub(crate) fn design_check(top: &Path, rid: &str, id: Option<&str>, text: &str) -> Result<String, Failure> {
+    let (request, operations) = design_request(text, id)?;
+    let Some(run) = strategy_run(top, rid) else {
+        return board::err("E7023", format!("unknown design run {rid}"));
+    };
+    let before = match id {
+        Some(id) => design_to_change(top, &run, id)?.0,
+        // A check validates a new design without assigning or saving an id.
+        None => new_design(&request, "0000000000000000".into())?,
+    };
+    let mut after = before.clone();
+    let given = apply_design_change(&mut after, &operations)?;
+    let outline = crate::design::outline(&before, &after, &operations);
+    Ok(with_given_ids(outline, &given))
+}
+
+fn design_request(text: &str, id: Option<&str>) -> Result<(Value, Vec<Value>), Failure> {
+    let request = match serde_json::from_str::<Value>(text) {
+        Ok(value) if value.is_object() => value,
+        _ => return board::err("E7001", "the proposal's operations go in `text`, as a JSON object"),
+    };
+    let operations = request
+        .get("operations")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| Failure("E7001 a design proposal needs `operations` as a list: add, remove, move or set".into(), 1))?;
+    let allowed: &[&str] = if id.is_some() { &["operations"] } else { &["title", "tab", "operations"] };
+    if let Some(key) = request.as_object().into_iter().flat_map(|object| object.keys()).find(|key| !allowed.contains(&key.as_str())) {
+        let edit = if id.is_some() { " that edits" } else { "" };
+        return board::err("E7001", format!("a design proposal{edit} takes {}; not `{key}`", allowed.join(", ")));
+    }
+    Ok((request, operations))
+}
+
+fn design_to_change(top: &Path, run: &Value, id: &str) -> Result<(Value, Value), Failure> {
+    let design = crate::design::show(top, id)?;
+    let Some(read) = run["design_reads"].get(id).cloned() else {
+        return board::err("E7026", format!("read design {id} with `design show {id}` before changing it; it may have changed"));
+    };
+    if newest_design_version(top, id)? != read {
+        return board::err("E7026", format!("the design changed since you read it; read design {id} again and propose again"));
+    }
+    Ok((design, read))
+}
+
+fn new_design(request: &Value, id: String) -> Result<Value, Failure> {
+    let title = request["title"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `title`".into(), 1))?.to_string();
+    let tab = request["tab"].as_str().ok_or_else(|| Failure("E7001 a new design proposal needs `tab`".into(), 1))?.to_string();
+    Ok(json!({
+        "schemaVersion": crate::design::SCHEMA_VERSION,
+        "id": id,
+        "title": title,
+        "tab": tab,
+        "elements": []
+    }))
+}
+
+fn apply_design_change(design: &mut Value, operations: &[Value]) -> Result<Vec<crate::design::GivenElementId>, Failure> {
+    let given = crate::design::apply(design, operations)?;
+    crate::design::validate(design)?;
+    Ok(given)
+}
+
+fn with_given_ids(reply: String, given: &[crate::design::GivenElementId]) -> String {
+    match crate::design::given_ids(given) {
+        Some(ids) => format!("{reply}\n{ids}"),
+        None => reply,
+    }
+}
+
+pub(crate) const NOTES_FAMILY: Family = Family { kind: crate::board::roles::NOTES_RUN, role: Some("worker") };
+
+/// Every release notes run, in no order.
+pub(crate) fn notes_runs(top: &Path) -> Vec<Value> {
+    run_records(top, crate::board::roles::NOTES_RUN)
+}
+
+/// Starts a notes run for release `version`, its first note `message`.
+pub(crate) fn start_notes_run(top: &Path, version: &str, message: &str) -> Result<Value, Failure> {
+    let m = family_model(&system()?, &json!({}), NOTES_FAMILY)?;
+    let id = unique_id();
+    let log = run_dir(top, crate::board::roles::NOTES_RUN).join(format!("{id}.jsonl"));
+    let mut run = json!({"id": id, "kind": crate::board::roles::NOTES_RUN, "model": m["id"],
+        "effort": m["effort"], "state": "running", "started": now(),
+        "log": log, "context": {"kind": "release", "id": version}, "notes": [], "questions": []});
+    note(&mut run, "solace", Some(&id), message);
+    put_run(top, &run)?;
+    Ok(run)
 }

@@ -36,12 +36,16 @@ pub(crate) enum ValueKind {
     Screen,
     /// The id of a node in the same flow diagram.
     Node,
+    /// The id of a tab inside the same tabs element.
+    Tab,
 }
 
 /// An element type and the properties it accepts.
 pub(crate) struct ElementType {
     /// Whether the type may hold children.
     pub(crate) children: bool,
+    /// A minimal valid element of this type, as JSON text.
+    pub(crate) example: &'static str,
     /// The properties it accepts, with each property's value kind.
     pub(crate) properties: &'static [(&'static str, ValueKind)],
     /// The properties every element of this type must state.
@@ -58,6 +62,11 @@ pub(crate) const ELEMENT_TYPES: &[(&str, ElementType)] = &[
     ("button", BUTTON),
     ("text_input", TEXT_INPUT),
     ("image_placeholder", IMAGE_PLACEHOLDER),
+    ("component", COMPONENT),
+    ("tabs", TABS_ELEMENT),
+    ("tab", TAB),
+    ("scroll_area", SCROLL_AREA),
+    ("split_pane", SPLIT_PANE),
     ("flow", FLOW),
     ("node", NODE),
     ("edge", EDGE),
@@ -65,7 +74,7 @@ pub(crate) const ELEMENT_TYPES: &[(&str, ElementType)] = &[
 
 const DESIGN_KEYS: &[&str] = &["schemaVersion", "id", "title", "tab", "elements"];
 
-const ELEMENT_KEYS: &[&str] = &["id", "type", "properties", "style", "children"];
+const ELEMENT_KEYS: &[&str] = &["id", "type", "properties", "style", "children", "conditions"];
 
 /// Checks that `design` is a valid design (D-230).
 pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
@@ -94,7 +103,7 @@ pub(crate) fn validate(design: &Value) -> Result<(), Failure> {
         .collect();
     let mut ids = HashSet::new();
     for element in elements {
-        let (id, ty) = validate_element(element, &mut ids, &screens, true, None)?;
+        let (id, ty) = validate_element(element, &mut ids, &screens, None, true, None)?;
         if tab == "ui" && ty != "screen" {
             return Err(invalid(format!("element {id:?} at the top level of a ui design must be a screen")));
         }
@@ -106,6 +115,7 @@ fn validate_element<'a>(
     value: &'a Value,
     ids: &mut HashSet<String>,
     screens: &HashSet<String>,
+    parent: Option<&str>,
     top_level: bool,
     flow: Option<&HashSet<String>>,
 ) -> Result<(&'a str, &'a str), Failure> {
@@ -126,12 +136,18 @@ fn validate_element<'a>(
     if ty == "flow" && !top_level {
         return Err(invalid(format!("{at} is a flow below the top level")));
     }
+    if ty == "tab" && parent != Some("tabs") {
+        return Err(invalid(format!("{at} of type {ty:?} must be inside a tabs element")));
+    }
     if matches!(ty, "node" | "edge") {
         if flow.is_none() {
             return Err(invalid(format!("{at} of type {ty:?} must be inside a flow")));
         }
     } else if flow.is_some() {
         return Err(invalid(format!("{at} of type {ty:?} cannot be inside a flow")));
+    }
+    if ty != "screen" && object.contains_key("conditions") {
+        return Err(invalid(format!("{at} of type {ty:?} cannot hold conditions; only a screen can")));
     }
     let properties =
         object.get("properties").and_then(Value::as_object).ok_or_else(|| invalid(format!("{at} properties must be an object")))?;
@@ -141,10 +157,7 @@ fn validate_element<'a>(
         };
         values.check(value).map_err(|why| invalid(format!("{at} property {name:?} {why}")))?;
         if let ValueKind::Screen = values {
-            let target = value.as_str().unwrap_or_default();
-            if !screens.contains(target) {
-                return Err(invalid(format!("{at} property {name:?} names no screen {target:?}")));
-            }
+            check_reference(values, value, screens, None, &at, name)?;
         }
         if let ValueKind::Node = values {
             let target = value.as_str().unwrap_or_default();
@@ -172,6 +185,12 @@ fn validate_element<'a>(
             return Err(invalid(format!("{at} of type {ty:?} can't hold children")));
         }
         let children = children.as_array().ok_or_else(|| invalid(format!("{at} children must be a list")))?;
+        if ty == "tabs" && children.is_empty() {
+            return Err(invalid(format!("{at} needs at least one tab")));
+        }
+        if ty == "split_pane" && children.len() != 2 {
+            return Err(invalid(format!("{at} needs exactly two regions, not {}", children.len())));
+        }
         let nodes: Option<HashSet<String>> = (ty == "flow").then(|| {
             children
                 .iter()
@@ -180,8 +199,24 @@ fn validate_element<'a>(
                 .collect()
         });
         for child in children {
-            validate_element(child, ids, screens, false, nodes.as_ref())?;
+            validate_element(child, ids, screens, Some(ty), false, nodes.as_ref())?;
         }
+        if ty == "tabs" {
+            if let Some(child) = children.iter().find(|child| child.get("type").and_then(Value::as_str) != Some("tab")) {
+                let child_id = child.get("id").and_then(Value::as_str).unwrap_or_default();
+                let child_ty = child.get("type").and_then(Value::as_str).unwrap_or_default();
+                return Err(invalid(format!("{at} holds {child_id:?} of type {child_ty:?}; tabs hold only tabs")));
+            }
+            let current = properties.get("current").unwrap_or(&Value::Null);
+            check_reference(&ValueKind::Tab, current, screens, Some(children.as_slice()), &at, "current")?;
+        }
+    } else if ty == "tabs" {
+        return Err(invalid(format!("{at} needs at least one tab")));
+    } else if ty == "split_pane" {
+        return Err(invalid(format!("{at} needs exactly two regions, not 0")));
+    }
+    if ty == "screen" {
+        validate_conditions(value, &at, screens)?;
     }
     Ok((id, ty))
 }
@@ -222,6 +257,10 @@ impl ValueKind {
             ValueKind::Node => match value.as_str() {
                 Some(_) => Ok(()),
                 None => Err("must name a node".to_owned()),
+            },
+            ValueKind::Tab => match value.as_str() {
+                Some(_) => Ok(()),
+                None => Err("must name a tab".to_owned()),
             },
         }
     }
@@ -357,6 +396,7 @@ const TEXT_ALIGN: &[&str] = &["left", "center", "right"];
 
 const CONTAINER: ElementType = ElementType {
     children: true,
+    example: r#"{"id":"row","type":"row","properties":{"width":"fill","height":"hug","gap":"md"}}"#,
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -373,6 +413,7 @@ const CONTAINER: ElementType = ElementType {
 
 const TEXT: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"text","type":"text","properties":{"width":"hug","height":"hug","text":"Hello"}}"#,
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -585,6 +626,7 @@ fn number_of(path: &std::path::Path) -> Option<u64> {
 
 const HEADING: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"heading","type":"heading","properties":{"width":"hug","height":"hug","text":"Title","level":2}}"#,
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -599,6 +641,7 @@ const HEADING: ElementType = ElementType {
 
 const BUTTON: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"button","type":"button","properties":{"width":"hug","height":"hug","label":"Save"}}"#,
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -612,12 +655,17 @@ const BUTTON: ElementType = ElementType {
 
 const TEXT_INPUT: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"text_input","type":"text_input","properties":{"width":"fill","height":"hug","placeholder":"Name"}}"#,
     properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("placeholder", ValueKind::Text)],
     required: &["width", "height", "placeholder"],
 };
 
 const IMAGE_PLACEHOLDER: ElementType = ElementType {
     children: false,
+    example: concat!(
+        r#"{"id":"image_placeholder","type":"image_placeholder","properties":"#,
+        r#"{"width":"fill","height":{"fixed":200},"label":"Photo"}}"#,
+    ),
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -750,6 +798,7 @@ fn cut_reply(text: String, budget: usize, why: &str) -> String {
 
 const SCREEN: ElementType = ElementType {
     children: true,
+    example: r#"{"id":"screen","type":"screen","properties":{"width":"fill","height":"fill"}}"#,
     properties: &[
         ("width", ValueKind::Size),
         ("height", ValueKind::Size),
@@ -810,19 +859,55 @@ fn check_text_size(value: &Value) -> Result<(), String> {
 }
 
 /// Applies design `operations` to `design` in place, one element at a time (D-241).
-pub(crate) fn apply(design: &mut Value, operations: &[Value]) -> Result<(), Failure> {
-    for operation in operations {
-        apply_operation(design, operation)?;
+/// An element added without an `id` gets one that the design does not already
+/// use, and `apply` returns every id it gave out.
+pub(crate) fn apply(design: &mut Value, operations: &[Value]) -> Result<Vec<GivenElementId>, Failure> {
+    fn used_ids(design: &Value, operations: &[Value]) -> HashSet<String> {
+        fn walk(element: &Value, ids: &mut HashSet<String>) {
+            if let Some(id) = element.get("id").and_then(Value::as_str) {
+                ids.insert(id.to_string());
+            }
+            if let Some(children) = element.get("children").and_then(Value::as_array) {
+                for child in children {
+                    walk(child, ids);
+                }
+            }
+        }
+        let mut ids = HashSet::new();
+        if let Some(elements) = design.get("elements").and_then(Value::as_array) {
+            for element in elements {
+                walk(element, &mut ids);
+            }
+        }
+        for operation in operations {
+            if operation.get("op").and_then(Value::as_str) == Some("add") {
+                if let Some(element) = operation.get("element") {
+                    walk(element, &mut ids);
+                }
+            }
+        }
+        ids
     }
-    Ok(())
+
+    let mut used = used_ids(design, operations);
+    let mut given = Vec::new();
+    for operation in operations {
+        apply_operation(design, operation, &mut used, &mut given)?;
+    }
+    Ok(given)
 }
 
-fn apply_operation(design: &mut Value, operation: &Value) -> Result<(), Failure> {
+fn apply_operation(
+    design: &mut Value,
+    operation: &Value,
+    used: &mut HashSet<String>,
+    given: &mut Vec<GivenElementId>,
+) -> Result<(), Failure> {
     let op = operation.as_object().ok_or_else(|| operation_error("each operation must be a JSON object"))?;
     let kind = op.get("op").and_then(Value::as_str).ok_or_else(|| operation_error("an operation needs an `op`"))?;
     let root = design["elements"].as_array_mut().ok_or_else(|| invalid("design has no list of elements"))?;
     match kind {
-        "add" => add_element(root, op),
+        "add" => add_element(root, op, used, given),
         "remove" => remove_element(root, op),
         "move" => move_element(root, op),
         "set" => set_property(root, op),
@@ -895,13 +980,19 @@ fn element_at_mut<'a>(elements: &'a mut Vec<Value>, path: &[usize]) -> Result<&'
     Ok(element)
 }
 
-fn add_element(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
-    let element = op.get("element").cloned().ok_or_else(|| operation_error("add needs an `element`"))?;
+fn add_element(
+    root: &mut Vec<Value>,
+    op: &Map<String, Value>,
+    used: &mut HashSet<String>,
+    given: &mut Vec<GivenElementId>,
+) -> Result<(), Failure> {
+    let mut element = op.get("element").cloned().ok_or_else(|| operation_error("add needs an `element`"))?;
     if !element.is_object() {
         return Err(operation_error("add's `element` must be a JSON object"));
     }
     let index = index_of(op)?;
     let parent = parent_id(op)?;
+    give_ids(&mut element, parent, used, given);
     let parent_path = match parent {
         Some(id) => element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?,
         None => Vec::new(),
@@ -952,10 +1043,13 @@ fn move_element(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Fa
 fn set_property(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Failure> {
     let id = element_id(op)?;
     let field = op.get("field").and_then(Value::as_str).ok_or_else(|| operation_error("set needs a `field`"))?;
-    let property = op.get("property").and_then(Value::as_str).ok_or_else(|| operation_error("set needs a `property`"))?;
     let value = op.get("value").ok_or_else(|| operation_error("set needs a `value`"))?;
     let path = element_path(root, id).ok_or_else(|| invalid(format!("element {id:?} does not exist")))?;
     let element = element_at_mut(root, &path)?;
+    if field == "conditions" {
+        return set_condition(element, op);
+    }
+    let property = op.get("property").and_then(Value::as_str).ok_or_else(|| operation_error("set needs a `property`"))?;
     let object = match field {
         "properties" => element
             .get_mut("properties")
@@ -971,7 +1065,7 @@ fn set_property(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Fa
             }
             element["style"].as_object_mut().ok_or_else(|| invalid(format!("element {id:?} style must be an object")))?
         }
-        other => return Err(operation_error(format!("set field must be \"properties\" or \"style\", not {other:?}"))),
+        other => return Err(operation_error(format!("set field must be \"properties\", \"style\" or \"conditions\", not {other:?}"))),
     };
     if value.is_null() {
         object.remove(property);
@@ -981,16 +1075,19 @@ fn set_property(root: &mut Vec<Value>, op: &Map<String, Value>) -> Result<(), Fa
     Ok(())
 }
 
-const FLOW: ElementType = ElementType { children: true, properties: &[], required: &[] };
+const FLOW: ElementType =
+    ElementType { children: true, example: r#"{"id":"flow","type":"flow","properties":{}}"#, properties: &[], required: &[] };
 
 const NODE: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"node","type":"node","properties":{"label":"Step","description":"What happens"}}"#,
     properties: &[("label", ValueKind::Text), ("description", ValueKind::Text)],
     required: &["label", "description"],
 };
 
 const EDGE: ElementType = ElementType {
     children: false,
+    example: r#"{"id":"edge","type":"edge","properties":{"from":"step","to":"done"}}"#,
     properties: &[("from", ValueKind::Node), ("to", ValueKind::Node), ("label", ValueKind::Text)],
     required: &["from", "to"],
 };
@@ -1313,7 +1410,10 @@ pub(crate) fn command_with_version(top: &std::path::Path, args: &[&str], budget:
                 Err(e) => Err(e),
             }
         }
-        _ => crate::failure::usage("design list | design show <id> [--from <element>]; the id may be written `design:<id>`"),
+        ["schema"] => Ok((schema(), None)),
+        _ => {
+            crate::failure::usage("design list | design show <id> [--from <element>] | design schema; the id may be written `design:<id>`")
+        }
     }
 }
 
@@ -1327,4 +1427,468 @@ pub(crate) fn edit(top: &std::path::Path, id: &str, operations: &[Value]) -> Res
     apply(&mut design, operations)?;
     save_locked(top, &design, Source::Human)?;
     Ok(design)
+}
+
+/// The design format, built from the same table `validate` checks.
+pub(crate) fn schema() -> String {
+    let mut out = String::new();
+    line(&mut out, format!("Design format (schemaVersion {SCHEMA_VERSION})"));
+    line(&mut out, "");
+    line(&mut out, format!("Design keys: {}", DESIGN_KEYS.join(", ")));
+    line(&mut out, format!("Tabs: {}", TABS.join(", ")));
+    line(&mut out, format!("Element keys: {}", ELEMENT_KEYS.join(", ")));
+    line(&mut out, "Design id: 16 lowercase hex digits; element ids: any unique text; title: any text");
+    line(&mut out, "");
+    line(
+        &mut out,
+        concat!(
+            "Every element is an object with `type`, `properties`, an optional `style` and optional `children`; ",
+            "`id` is any unique text and may be left out in an `add`, where the server gives it one.",
+        ),
+    );
+    line(&mut out, format!("Style overrides: {}", describe_properties(STYLE_PROPERTIES)));
+    line(&mut out, "");
+    line(&mut out, "Placement");
+    line(&mut out, "- `screen` and `flow` are only at the top level.");
+    line(&mut out, "- `node` and `edge` are only inside a `flow`; an edge's `from` and `to` name nodes in that flow.");
+    line(&mut out, "- A `flow` holds only `node` and `edge`.");
+    line(&mut out, "- A `tab` is only inside a `tabs` element; `tabs` holds only tabs and needs at least one.");
+    line(&mut out, "- A `tabs` element's `current` names one of its tab children.");
+    line(&mut out, "- A `split_pane` holds exactly two regions; its `direction` is `row` (side by side) or `column` (stacked).");
+    line(&mut out, "- `navigates_to` names a screen in the same design.");
+    line(&mut out, "- A `screen` may state `conditions`, a list of window conditions; no other element may.");
+    line(
+        &mut out,
+        concat!(
+            "  A condition is {\"when\": {\"ratio\" | \"width\" | \"height\": {\"at_least\" | \"at_most\": <positive number>}}, ",
+            "\"changes\": [<change>]}. A change is ",
+            "{\"id\": <element id in that screen>, \"direction\": \"row\" | \"column\"} for a row or column, or ",
+            "{\"id\": <element id in that screen>, \"property\": <name>, \"value\": <value>} for one of its properties.",
+        ),
+    );
+    line(&mut out, "  Conditions apply in list order when their bound matches; a later matching condition overrides an earlier one.");
+    line(&mut out, "- An `add` may carry an element with its children nested inside it; children keep their listed order.");
+    line(
+        &mut out,
+        concat!(
+            "- References inside the same proposal (an edge's `from`/`to`, a tabs `current`, `navigates_to`, ",
+            "or a later operation's `id`) can only name ids the agent supplied.",
+        ),
+    );
+    line(&mut out, "- A `ui` design's top level holds only screens and needs at least one.");
+    line(&mut out, "- An `architecture` design may hold screens, flows and other elements at its top level.");
+    line(&mut out, "");
+    line(&mut out, "Element types");
+    for (name, ty) in ELEMENT_TYPES {
+        let children = if ty.children { ", may hold children" } else { "" };
+        line(&mut out, format!("{name}{children}"));
+        line(&mut out, format!("  required: {}", describe_element_properties(ty, true)));
+        line(&mut out, format!("  optional: {}", describe_element_properties(ty, false)));
+        line(&mut out, format!("  example: {}", ty.example));
+        line(&mut out, "");
+    }
+    line(&mut out, "Proposal operations");
+    line(&mut out, "A proposal is a JSON object with `operations`, and `title` and `tab` when creating a design.");
+    line(
+        &mut out,
+        concat!(
+            r#"  add:    {"op": "add", "element": <element, children nested and id optional>, "#,
+            r#""parent": <element id or null>, "index": <number>}"#,
+        ),
+    );
+    line(&mut out, r#"  remove: {"op": "remove", "id": <element id>}"#);
+    line(&mut out, r#"  move:   {"op": "move", "id": <element id>, "parent": <element id or null>, "index": <number>}"#);
+    line(&mut out, r#"  set:    {"op": "set", "id": <element id>, "field": "properties" | "style", "property": <name>, "value": <value>}"#);
+    line(
+        &mut out,
+        r#"  set conditions: {"op": "set", "id": <screen id>, "field": "conditions", "index": <number>, "value": <condition>}; no index appends, an index replaces, and a null value removes that index."#,
+    );
+    line(
+        &mut out,
+        "`parent` null or absent means the top level; `index` is the position in its parent's list; a null `value` removes the property.",
+    );
+    out
+}
+
+fn line(out: &mut String, text: impl std::fmt::Display) {
+    out.push_str(&text.to_string());
+    out.push('\n');
+}
+
+fn describe_element_properties(ty: &ElementType, required: bool) -> String {
+    let items: Vec<String> = ty
+        .properties
+        .iter()
+        .filter(|(name, _)| ty.required.contains(name) == required)
+        .map(|(name, kind)| format!("{name}: {}", describe_kind(kind)))
+        .collect();
+    if items.is_empty() { "(none)".to_owned() } else { items.join("; ") }
+}
+
+fn describe_properties(properties: &[(&str, ValueKind)]) -> String {
+    properties.iter().map(|(name, kind)| format!("{name}: {}", describe_kind(kind))).collect::<Vec<_>>().join("; ")
+}
+
+fn describe_kind(kind: &ValueKind) -> String {
+    match kind {
+        ValueKind::OneOf(values) => values.join(", "),
+        ValueKind::Spacing => format!("a spacing token ({}) or a non-negative number", SPACING_TOKENS.join(", ")),
+        ValueKind::Size => "fill, hug or {\"fixed\": <positive number>}".to_owned(),
+        ValueKind::Color => format!("a color token ({}) or a #rgb or #rrggbb hex color", COLOR_TOKENS.join(", ")),
+        ValueKind::TextSize => format!("a text-size token ({}) or a positive number", TEXT_SIZE_TOKENS.join(", ")),
+        ValueKind::Text => "any text".to_owned(),
+        ValueKind::Level => "1, 2 or 3".to_owned(),
+        ValueKind::Screen => "the id of a top-level screen in the same design".to_owned(),
+        ValueKind::Node => "the id of a node in the same flow".to_owned(),
+        ValueKind::Tab => "the id of a tab inside the same tabs element".to_owned(),
+    }
+}
+
+const SPLIT_DIRECTIONS: &[&str] = &["row", "column"];
+
+const TABS_ELEMENT: ElementType = ElementType {
+    children: true,
+    example: r#"{"id":"tabs","type":"tabs","properties":{"width":"fill","height":"hug","current":"one"},"children":[{"id":"one","type":"tab","properties":{"width":"hug","height":"hug","label":"One"}},{"id":"two","type":"tab","properties":{"width":"hug","height":"hug","label":"Two"}}]}"#,
+    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("current", ValueKind::Tab)],
+    required: &["width", "height", "current"],
+};
+
+const TAB: ElementType = ElementType {
+    children: true,
+    example: r#"{"id":"one","type":"tab","properties":{"width":"hug","height":"hug","label":"One"}}"#,
+    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("label", ValueKind::Text)],
+    required: &["width", "height", "label"],
+};
+
+const SCROLL_AREA: ElementType = ElementType {
+    children: true,
+    example: r#"{"id":"scroll","type":"scroll_area","properties":{"width":"fill","height":{"fixed":240}},"children":[{"id":"scrolled","type":"text","properties":{"width":"hug","height":"hug","text":"Long content"}}]}"#,
+    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size)],
+    required: &["width", "height"],
+};
+
+const SPLIT_PANE: ElementType = ElementType {
+    children: true,
+    example: r#"{"id":"split","type":"split_pane","properties":{"width":"fill","height":"fill","direction":"row"},"children":[{"id":"left","type":"text","properties":{"width":"fill","height":"fill","text":"Left"}},{"id":"right","type":"text","properties":{"width":"fill","height":"fill","text":"Right"}}]}"#,
+    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("direction", ValueKind::OneOf(SPLIT_DIRECTIONS))],
+    required: &["width", "height", "direction"],
+};
+
+const COMPONENT: ElementType = ElementType {
+    children: false,
+    example: r#"{"id":"component","type":"component","properties":{"width":"fill","height":{"fixed":240},"name":"Task details"}}"#,
+    properties: &[("width", ValueKind::Size), ("height", ValueKind::Size), ("name", ValueKind::Text)],
+    required: &["width", "height", "name"],
+};
+
+/// A short account of what `operations` changed, one line per element added,
+/// removed, moved or changed.
+pub(crate) fn outline(before: &Value, after: &Value, operations: &[Value]) -> String {
+    type Flat = (String, Option<String>, usize, String);
+
+    fn flat(design: &Value) -> Vec<Flat> {
+        fn walk(elements: &[Value], parent: Option<&str>, out: &mut Vec<Flat>) {
+            for (index, element) in elements.iter().enumerate() {
+                let id = element.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let ty = element.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+                out.push((id.clone(), parent.map(|p| p.to_string()), index, ty));
+                if let Some(children) = element.get("children").and_then(Value::as_array) {
+                    walk(children, Some(&id), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(design.get("elements").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]), None, &mut out);
+        out
+    }
+
+    fn find<'a>(design: &'a Value, id: &str) -> Option<&'a Value> {
+        fn walk<'a>(elements: &'a [Value], id: &str) -> Option<&'a Value> {
+            for element in elements {
+                if element.get("id").and_then(Value::as_str) == Some(id) {
+                    return Some(element);
+                }
+                if let Some(children) = element.get("children").and_then(Value::as_array) {
+                    if let Some(found) = walk(children, id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        walk(design.get("elements").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]), id)
+    }
+
+    fn placement(parent: &Option<String>, index: usize) -> String {
+        match parent {
+            Some(parent) => format!("under {parent} at position {index}"),
+            None => format!("at the top level at position {index}"),
+        }
+    }
+
+    fn value_text(value: Option<&Value>) -> String {
+        value.map(|value| value.to_string()).unwrap_or_else(|| "null".into())
+    }
+
+    let old = flat(before);
+    let new = flat(after);
+    let mut lines = Vec::new();
+    for (id, parent, index, ty) in &new {
+        if !old.iter().any(|(old_id, ..)| old_id == id) {
+            lines.push(format!("Would add {id} ({ty}) {}", placement(parent, *index)));
+        }
+    }
+    for (id, _, _, ty) in &old {
+        if !new.iter().any(|(new_id, ..)| new_id == id) {
+            lines.push(format!("Would remove {id} ({ty})"));
+        }
+    }
+    let mut moved: Vec<&str> = Vec::new();
+    for operation in operations {
+        if operation.get("op").and_then(Value::as_str) == Some("move") {
+            if let Some(id) = operation.get("id").and_then(Value::as_str) {
+                if !moved.contains(&id) {
+                    moved.push(id);
+                }
+            }
+        }
+    }
+    for id in moved {
+        let Some(old_element) = old.iter().find(|(element, ..)| element.as_str() == id) else { continue };
+        let Some(new_element) = new.iter().find(|(element, ..)| element.as_str() == id) else { continue };
+        if old_element.1 != new_element.1 || old_element.2 != new_element.2 {
+            lines.push(format!("Would move {id} ({}) {}", new_element.3, placement(&new_element.1, new_element.2)));
+        }
+    }
+    for (id, _, _, ty) in &new {
+        let Some(old_element) = find(before, id) else { continue };
+        let Some(new_element) = find(after, id) else { continue };
+        for field in ["properties", "style"] {
+            let old_field = old_element.get(field).and_then(Value::as_object);
+            let new_field = new_element.get(field).and_then(Value::as_object);
+            let mut keys = std::collections::BTreeSet::new();
+            if let Some(object) = old_field {
+                keys.extend(object.keys().map(String::as_str));
+            }
+            if let Some(object) = new_field {
+                keys.extend(object.keys().map(String::as_str));
+            }
+            for key in keys {
+                let old_value = old_field.and_then(|object| object.get(key));
+                let new_value = new_field.and_then(|object| object.get(key));
+                if old_value != new_value {
+                    lines.push(format!("Would set {id} ({ty}) {field}.{key} to {}", value_text(new_value)));
+                }
+            }
+        }
+        if ty.as_str() == "screen" {
+            let old_conditions = old_element.get("conditions");
+            let new_conditions = new_element.get("conditions");
+            if old_conditions != new_conditions {
+                lines.push(format!("Would set {id} (screen) conditions to {}", value_text(new_conditions)));
+            }
+        }
+    }
+    if lines.is_empty() { "Nothing would change".into() } else { lines.join("\n") }
+}
+
+/// An id the server gave an element added without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GivenElementId {
+    pub(crate) id: String,
+    pub(crate) ty: String,
+    pub(crate) parent: Option<String>,
+}
+
+/// The ids `apply` gave out, each with its element's type and parent.
+pub(crate) fn given_ids(given: &[GivenElementId]) -> Option<String> {
+    if given.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = given
+        .iter()
+        .map(|given| match &given.parent {
+            Some(parent) => format!("{} ({}, under {parent})", given.id, given.ty),
+            None => format!("{} ({}, at the top level)", given.id, given.ty),
+        })
+        .collect();
+    Some(format!("Given ids: {}", listed.join(", ")))
+}
+
+/// Fills in an id for `element` and each child that has none, recording each one.
+fn give_ids(element: &mut Value, parent: Option<&str>, used: &mut HashSet<String>, given: &mut Vec<GivenElementId>) {
+    fn free_id(ty: &str, used: &mut HashSet<String>) -> String {
+        let mut number = 1;
+        loop {
+            let id = format!("{ty}-{number}");
+            if used.insert(id.clone()) {
+                return id;
+            }
+            number += 1;
+        }
+    }
+
+    let Some(object) = element.as_object_mut() else { return };
+    let id = match object.get("id") {
+        Some(Value::String(id)) if !id.is_empty() => id.clone(),
+        Some(_) => return,
+        None => {
+            let ty = object.get("type").and_then(Value::as_str).unwrap_or("element").to_string();
+            let id = free_id(&ty, used);
+            object.insert("id".into(), Value::String(id.clone()));
+            given.push(GivenElementId { id: id.clone(), ty, parent: parent.map(str::to_owned) });
+            id
+        }
+    };
+    if let Some(children) = object.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            give_ids(child, Some(&id), used, given);
+        }
+    }
+}
+
+const CONDITION_KEYS: &[&str] = &["when", "changes"];
+
+const WHEN_KEYS: &[&str] = &["ratio", "width", "height"];
+
+const BOUND_KEYS: &[&str] = &["at_least", "at_most"];
+
+const CHANGE_KEYS: &[&str] = &["id", "direction", "property", "value"];
+
+fn validate_conditions(screen: &Value, at: &str, screens: &HashSet<String>) -> Result<(), Failure> {
+    let Some(conditions) = screen.get("conditions") else {
+        return Ok(());
+    };
+    let conditions = conditions.as_array().ok_or_else(|| invalid(format!("{at} conditions must be a list")))?;
+    for (index, condition) in conditions.iter().enumerate() {
+        let at = format!("{at} condition {index}");
+        let object = condition.as_object().ok_or_else(|| invalid(format!("{at} must be an object")))?;
+        unknown_keys(object, CONDITION_KEYS, &at)?;
+        let when = object.get("when").and_then(Value::as_object).ok_or_else(|| invalid(format!("{at} needs a when object")))?;
+        let when_at = format!("{at} when");
+        unknown_keys(when, WHEN_KEYS, &when_at)?;
+        let subjects: Vec<&str> = WHEN_KEYS.iter().copied().filter(|name| when.contains_key(*name)).collect();
+        if subjects.len() != 1 {
+            return Err(invalid(format!("{when_at} names exactly one of ratio, width and height, not {}", subjects.len())));
+        }
+        let subject = subjects[0];
+        let bound = when[subject].as_object().ok_or_else(|| invalid(format!("{when_at} {subject} must be an object")))?;
+        let bound_at = format!("{when_at} {subject}");
+        unknown_keys(bound, BOUND_KEYS, &bound_at)?;
+        let limits: Vec<&str> = BOUND_KEYS.iter().copied().filter(|name| bound.contains_key(*name)).collect();
+        if limits.len() != 1 {
+            return Err(invalid(format!("{bound_at} names exactly one of at_least and at_most, not {}", limits.len())));
+        }
+        if !bound[limits[0]].as_f64().is_some_and(|number| number.is_finite() && number > 0.0) {
+            return Err(invalid(format!("{bound_at} {} must be a positive number", limits[0])));
+        }
+        let changes = object.get("changes").and_then(Value::as_array).ok_or_else(|| invalid(format!("{at} needs a changes list")))?;
+        if changes.is_empty() {
+            return Err(invalid(format!("{at} changes nothing")));
+        }
+        for (change_index, change) in changes.iter().enumerate() {
+            validate_condition_change(screen, screens, &format!("{at} change {change_index}"), change)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_condition_change(screen: &Value, screens: &HashSet<String>, at: &str, change: &Value) -> Result<(), Failure> {
+    let object = change.as_object().ok_or_else(|| invalid(format!("{at} must be an object")))?;
+    unknown_keys(object, CHANGE_KEYS, at)?;
+    let id = text(object, "id", at)?;
+    let target = condition_target(screen, id).ok_or_else(|| invalid(format!("{at} names no element {id:?} in this screen")))?;
+    let ty = target.get("type").and_then(Value::as_str).unwrap_or_default();
+    let Some(kind) = ELEMENT_TYPES.iter().find_map(|(name, kind)| (*name == ty).then_some(kind)) else {
+        return Err(invalid(format!("{at} names element {id:?} with unknown type {ty:?}")));
+    };
+    match (object.contains_key("direction"), object.contains_key("property")) {
+        (true, false) => {
+            if !matches!(ty, "row" | "column") {
+                return Err(invalid(format!(
+                    "{at} changes the direction of element {id:?} of type {ty:?}; only a row or column can switch"
+                )));
+            }
+            let direction = object.get("direction").and_then(Value::as_str).unwrap_or_default();
+            if !matches!(direction, "row" | "column") {
+                return Err(invalid(format!("{at} gives element {id:?} direction {direction:?}; expected row or column")));
+            }
+        }
+        (false, true) => {
+            let property = object.get("property").and_then(Value::as_str).unwrap_or_default();
+            let Some((_, value_kind)) = kind.properties.iter().find(|(name, _)| *name == property) else {
+                return Err(invalid(format!("{at} changes property {property:?}, which element {id:?} of type {ty:?} does not accept")));
+            };
+            let value =
+                object.get("value").ok_or_else(|| invalid(format!("{at} needs a value for element {id:?} property {property:?}")))?;
+            value_kind.check(value).map_err(|why| invalid(format!("{at} gives element {id:?} property {property:?} {why}")))?;
+            let children = target.get("children").and_then(Value::as_array).map(Vec::as_slice);
+            check_reference(value_kind, value, screens, children, &format!("{at} of element {id:?}"), property)?;
+        }
+        _ => {
+            return Err(invalid(format!("{at} must give element {id:?} either a direction or a property and value")));
+        }
+    }
+    Ok(())
+}
+
+fn condition_target<'a>(element: &'a Value, id: &str) -> Option<&'a Value> {
+    if element.get("id").and_then(Value::as_str) == Some(id) {
+        return Some(element);
+    }
+    element.get("children").and_then(Value::as_array)?.iter().find_map(|child| condition_target(child, id))
+}
+
+fn set_condition(element: &mut Value, op: &Map<String, Value>) -> Result<(), Failure> {
+    let value = op.get("value").ok_or_else(|| operation_error("set needs a `value`"))?;
+    let index = match op.get("index") {
+        None => None,
+        Some(index) => Some(index.as_u64().ok_or_else(|| operation_error("set conditions `index` must be a whole number"))? as usize),
+    };
+    let object = element.as_object_mut().ok_or_else(|| invalid("the element is not an object"))?;
+    let conditions = object.entry("conditions").or_insert_with(|| Value::Array(Vec::new()));
+    let conditions = conditions.as_array_mut().ok_or_else(|| invalid("element conditions must be a list"))?;
+    if value.is_null() {
+        let index = index.ok_or_else(|| operation_error("set conditions with a null value needs an `index`"))?;
+        if index >= conditions.len() {
+            return Err(operation_error(format!("set conditions index {index} is outside the {} conditions", conditions.len())));
+        }
+        conditions.remove(index);
+    } else {
+        if index.is_some_and(|index| index > conditions.len()) {
+            return Err(operation_error(format!("set conditions index is outside the {} conditions", conditions.len())));
+        }
+        match index {
+            Some(index) if index < conditions.len() => conditions[index] = value.clone(),
+            _ => conditions.push(value.clone()),
+        }
+    }
+    Ok(())
+}
+
+/// Checks that a reference property names a target that exists: a screen in
+/// the design, or a tab among `children`.
+fn check_reference(
+    kind: &ValueKind,
+    value: &Value,
+    screens: &HashSet<String>,
+    children: Option<&[Value]>,
+    at: &str,
+    property: &str,
+) -> Result<(), Failure> {
+    let name = value.as_str().unwrap_or_default();
+    let found = match kind {
+        ValueKind::Screen => screens.contains(name),
+        ValueKind::Tab => children.is_some_and(|children| {
+            children.iter().any(|child| {
+                child.get("type").and_then(Value::as_str) == Some("tab") && child.get("id").and_then(Value::as_str) == Some(name)
+            })
+        }),
+        _ => return Ok(()),
+    };
+    if found {
+        return Ok(());
+    }
+    let target = if matches!(kind, ValueKind::Screen) { "screen" } else { "tab" };
+    Err(invalid(format!("{at} property {property:?} names no {target} {name:?}")))
 }

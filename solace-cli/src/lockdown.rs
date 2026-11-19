@@ -68,7 +68,10 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
             ),
         );
     }
-    let use_ = if board::strategy_context().is_some() || crate::board::runs::design_context().is_some() {
+    let use_ = if board::strategy_context().is_some()
+        || crate::board::runs::design_context().is_some()
+        || crate::board::runs::notes_context().is_some()
+    {
         "files, grep and read"
     } else {
         "files, grep, read, write and run"

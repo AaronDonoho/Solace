@@ -124,7 +124,10 @@ fn apply_property(kind: render.Kind, change: Change) -> render.Kind {
         "label" -> set_label(kind, text(value))
         "description" -> set_description(kind, text(value))
         "placeholder" -> set_placeholder(kind, text(value))
+        "name" -> set_name(kind, text(value))
         "level" -> set_level(kind, level(value))
+        "current" -> set_current(kind, text(value))
+        "direction" -> set_direction(kind, value)
         _ -> kind
       }
     _ -> kind
@@ -291,6 +294,38 @@ fn set_size(
           render.ImagePlaceholder(
             render.ImageProperties(..properties, height: size),
           )
+        render.Component(properties), "width" ->
+          render.Component(
+            render.ComponentProperties(..properties, width: size),
+          )
+        render.Component(properties), _ ->
+          render.Component(
+            render.ComponentProperties(..properties, height: size),
+          )
+        render.Tabs(properties), "width" ->
+          render.Tabs(render.TabsProperties(..properties, width: size))
+        render.Tabs(properties), _ ->
+          render.Tabs(render.TabsProperties(..properties, height: size))
+        render.Tab(properties), "width" ->
+          render.Tab(render.TabProperties(..properties, width: size))
+        render.Tab(properties), _ ->
+          render.Tab(render.TabProperties(..properties, height: size))
+        render.ScrollArea(properties), "width" ->
+          render.ScrollArea(
+            render.ScrollAreaProperties(..properties, width: size),
+          )
+        render.ScrollArea(properties), _ ->
+          render.ScrollArea(
+            render.ScrollAreaProperties(..properties, height: size),
+          )
+        render.SplitPane(properties), "width" ->
+          render.SplitPane(
+            render.SplitPaneProperties(..properties, width: size),
+          )
+        render.SplitPane(properties), _ ->
+          render.SplitPane(
+            render.SplitPaneProperties(..properties, height: size),
+          )
         _, _ -> kind
       }
   }
@@ -419,6 +454,8 @@ fn set_label(kind: render.Kind, value: Option(String)) -> render.Kind {
           render.ImagePlaceholder(
             render.ImageProperties(..properties, label: label),
           )
+        render.Tab(properties) ->
+          render.Tab(render.TabProperties(..properties, label: label))
         render.DiagramNode(properties) ->
           render.DiagramNode(
             render.DiagramNodeProperties(..properties, label: label),
@@ -481,10 +518,13 @@ pub type Property {
 /// The properties an element's type holds, then its style overrides.
 pub fn properties(node: render.Node) -> List(Property) {
   case node.kind {
-    render.DiagramNode(_) -> kind_properties(node.kind)
-    render.DiagramEdge(_) -> kind_properties(node.kind)
+    render.DiagramNode(_) -> kind_properties(node.kind, node.children)
+    render.DiagramEdge(_) -> kind_properties(node.kind, node.children)
     _ ->
-      list.append(kind_properties(node.kind), style_properties(node.overrides))
+      list.append(
+        kind_properties(node.kind, node.children),
+        style_properties(node.overrides),
+      )
   }
 }
 
@@ -498,6 +538,11 @@ pub fn type_name(kind: render.Kind) -> String {
     render.Button(_) -> "Button"
     render.TextInput(_) -> "Text input"
     render.ImagePlaceholder(_) -> "Image placeholder"
+    render.Component(_) -> "Component"
+    render.Tabs(_) -> "Tabs"
+    render.Tab(_) -> "Tab"
+    render.ScrollArea(_) -> "Scroll area"
+    render.SplitPane(_) -> "Split pane"
     render.Flow -> "Flow"
     render.DiagramNode(_) -> "Node"
     render.DiagramEdge(_) -> "Edge"
@@ -523,7 +568,10 @@ fn find_node(nodes: List(render.Node), id: String) -> Option(render.Node) {
   }
 }
 
-fn kind_properties(kind: render.Kind) -> List(Property) {
+fn kind_properties(
+  kind: render.Kind,
+  children: List(render.Node),
+) -> List(Property) {
   let #(width, height) = sizes(kind)
   let layout = [
     property("properties", "width", "Width", TextControl, size_text(width)),
@@ -596,6 +644,35 @@ fn kind_properties(kind: render.Kind) -> List(Property) {
     render.ImagePlaceholder(properties) ->
       list.append(layout, [
         property("properties", "label", "Label", TextControl, properties.label),
+      ])
+    render.Component(properties) ->
+      list.append(layout, [
+        property("properties", "name", "Name", TextControl, properties.name),
+      ])
+    render.Tabs(properties) ->
+      list.append(layout, [
+        choice(
+          "properties",
+          "current",
+          "Current tab",
+          tab_choices(children),
+          properties.current,
+        ),
+      ])
+    render.Tab(properties) ->
+      list.append(layout, [
+        property("properties", "label", "Label", TextControl, properties.label),
+      ])
+    render.ScrollArea(_) -> layout
+    render.SplitPane(properties) ->
+      list.append(layout, [
+        choice(
+          "properties",
+          "direction",
+          "Direction",
+          split_directions,
+          split_direction_name(properties.direction),
+        ),
       ])
     render.Flow -> layout
     render.DiagramNode(properties) -> [
@@ -746,6 +823,11 @@ fn sizes(kind: render.Kind) -> #(render.Size, render.Size) {
       properties.width,
       properties.height,
     )
+    render.Component(properties) -> #(properties.width, properties.height)
+    render.Tabs(properties) -> #(properties.width, properties.height)
+    render.Tab(properties) -> #(properties.width, properties.height)
+    render.ScrollArea(properties) -> #(properties.width, properties.height)
+    render.SplitPane(properties) -> #(properties.width, properties.height)
     render.Flow -> #(render.Fill, render.Fill)
     render.DiagramNode(_) -> #(render.Fill, render.Fill)
     render.DiagramEdge(_) -> #(render.Fill, render.Fill)
@@ -1000,6 +1082,73 @@ fn set_description(kind: render.Kind, value: Option(String)) -> render.Kind {
           render.DiagramNode(
             render.DiagramNodeProperties(..properties, description: description),
           )
+        _ -> kind
+      }
+    None -> kind
+  }
+}
+
+fn set_current(kind: render.Kind, value: Option(String)) -> render.Kind {
+  case value {
+    Some(current) ->
+      case kind {
+        render.Tabs(properties) ->
+          render.Tabs(render.TabsProperties(..properties, current: current))
+        _ -> kind
+      }
+    None -> kind
+  }
+}
+
+fn set_direction(kind: render.Kind, value: Value) -> render.Kind {
+  case split_direction(value) {
+    Some(direction) ->
+      case kind {
+        render.SplitPane(properties) ->
+          render.SplitPane(
+            render.SplitPaneProperties(..properties, direction: direction),
+          )
+        _ -> kind
+      }
+    None -> kind
+  }
+}
+
+fn split_direction(value: Value) -> Option(render.SplitDirection) {
+  case value {
+    Text("row") -> Some(render.SideBySide)
+    Text("column") -> Some(render.Stacked)
+    _ -> None
+  }
+}
+
+fn split_direction_name(value: render.SplitDirection) -> String {
+  case value {
+    render.SideBySide -> "row"
+    render.Stacked -> "column"
+  }
+}
+
+const split_directions = [
+  #("row", "Side by side"),
+  #("column", "Stacked"),
+]
+
+fn tab_choices(children: List(render.Node)) -> List(#(String, String)) {
+  list.filter_map(children, fn(child) {
+    case child.kind {
+      render.Tab(tab) -> Ok(#(child.id, tab.label))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+fn set_name(kind: render.Kind, value: Option(String)) -> render.Kind {
+  case value {
+    Some(name) ->
+      case kind {
+        render.Component(properties) ->
+          render.Component(render.ComponentProperties(..properties, name: name))
         _ -> kind
       }
     None -> kind

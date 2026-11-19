@@ -2664,3 +2664,253 @@ pub fn an_older_undo_reply_keeps_a_live_design_test() {
       design.Design("1122334455667788", "New", design.UiUx, 0),
     ]
 }
+
+fn a_structural_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"tabs\",\"type\":\"tabs\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"current\":\"one\"},\"children\":[{\"id\":\"one\",\"type\":\"tab\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"One\"},\"children\":[{\"id\":\"one_body\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"First panel\"}}]},{\"id\":\"two\",\"type\":\"tab\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Two\"},\"children\":[{\"id\":\"two_body\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Second panel\"}}]}]},{\"id\":\"scroll\",\"type\":\"scroll_area\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":180}},\"children\":[{\"id\":\"scroll_body\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Scrolled\"}}]},{\"id\":\"split\",\"type\":\"split_pane\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"direction\":\"row\"},\"children\":[{\"id\":\"left\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Left\"}},{\"id\":\"right\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Right\"}}]}]}]}"
+}
+
+fn a_structural_model() -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_structural_design()))
+  model
+}
+
+pub fn a_structural_element_selects_and_offers_notes_test() {
+  let #(model, _) =
+    design.update(a_structural_model(), design.ElementClicked("tabs", False))
+  assert model.selected == ["tabs"]
+  assert string.contains(
+    element.to_string(design.view(model)),
+    "id=\"design-note-text\"",
+  )
+  let #(model, _) = design.update(model, design.ElementClicked("scroll", True))
+  assert model.selected == ["tabs", "scroll"]
+  let #(model, _) =
+    design.update(model, design.RegionSelected(["split", "left"], False))
+  assert model.selected == ["split", "left"]
+}
+
+pub fn the_edit_tab_lists_structural_element_properties_test() {
+  let model = a_structural_model()
+  list.each(
+    [
+      #("tabs", "current"),
+      #("one", "label"),
+      #("split", "direction"),
+      #("scroll", "width"),
+    ],
+    fn(check) {
+      let #(selected, _) =
+        design.update(model, design.ElementClicked(check.0, False))
+      let #(selected, _) = design.update(selected, design.EditTab)
+      let html = element.to_string(design.view(selected))
+      assert string.contains(html, "id=\"edit-properties-" <> check.1 <> "\"")
+    },
+  )
+}
+
+pub fn a_preview_tab_click_shows_its_panel_and_leaving_preview_restores_the_saved_tab_test() {
+  let #(model, _) = design.update(a_structural_model(), design.Preview)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"one_body\"")
+  assert !string.contains(html, "data-design-id=\"two_body\"")
+  let #(model, _) = design.update(model, design.PreviewClick("two"))
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"two_body\"")
+  assert !string.contains(html, "data-design-id=\"one_body\"")
+  let #(model, _) = design.update(model, design.ExitPreview)
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-design-id=\"one_body\"")
+  assert !string.contains(html, "data-design-id=\"two_body\"")
+}
+
+pub fn a_tabs_element_current_choice_lists_only_its_tab_ids_test() {
+  let assert Some(drawing) = a_structural_model().drawing
+  let assert Some(tabs) = editing.node(drawing, "tabs")
+  let assert Ok(editing.Property(
+    _,
+    "current",
+    _,
+    editing.Choice(options),
+    "one",
+  )) =
+    list.find(editing.properties(tabs), fn(field) {
+      field.property == "current"
+    })
+  assert options == [#("one", "One"), #("two", "Two")]
+}
+
+fn a_component_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"component\",\"type\":\"component\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":180},\"name\":\"Task details\"}}]}]}"
+}
+
+fn a_component_model() -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, a_component_design()))
+  model
+}
+
+pub fn a_component_stand_in_selects_and_takes_a_note_test() {
+  let #(model, _) =
+    design.update(
+      a_component_model(),
+      design.ElementClicked("component", False),
+    )
+  assert model.selected == ["component"]
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "id=\"design-note-text\"")
+  assert string.contains(html, ">Task details<")
+  let #(model, _) =
+    design.update(model, design.Panel(panel.NoteText("Shows task details")))
+  let #(model, _) =
+    design.update(
+      model,
+      design.Panel(panel.AddNote(model.open, model.selected)),
+    )
+  let html = element.to_string(design.view(model))
+  assert string.contains(html, "data-note=\"1\"")
+  assert string.contains(html, "Shows task details")
+}
+
+pub fn the_edit_tab_lists_component_sizes_and_name_test() {
+  let #(model, _) =
+    design.update(
+      a_component_model(),
+      design.ElementClicked("component", False),
+    )
+  let #(model, _) = design.update(model, design.EditTab)
+  let html = element.to_string(design.view(model))
+  list.each(["width", "height", "name"], fn(property) {
+    assert string.contains(html, "id=\"edit-properties-" <> property <> "\"")
+  })
+}
+
+pub fn changing_a_component_name_waits_for_save_and_redraws_test() {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      a_component_model(),
+      design.ElementClicked("component", False),
+    )
+  let #(model, _) = design.update(model, design.EditStart)
+  let #(model, _) =
+    design.update(model, design.EditProperty("properties", "name", "Task card"))
+  let body = waiting_json(model, id)
+  assert string.contains(body, "\"property\":\"name\"")
+  assert string.contains(body, "\"value\":\"Task card\"")
+  assert string.contains(element.to_string(design.view(model)), ">Task card<")
+}
+
+pub fn the_zoom_bar_zooms_and_resets_the_canvas_test() {
+  let #(zoomed, _) = design.update(a_selected_model(), design.ZoomIn)
+  let html = element.to_string(design.view(zoomed))
+  assert string.contains(html, "zoom:1.2")
+  assert string.contains(html, "120%")
+  assert string.contains(html, "Zoom in (Ctrl + scroll up)")
+  assert string.contains(html, "Pan with Space + drag or middle-drag")
+  let #(smaller, _) = design.update(zoomed, design.ZoomOut)
+  assert string.contains(element.to_string(design.view(smaller)), "100%")
+  let #(reset, _) = design.update(zoomed, design.ResetView)
+  assert string.contains(element.to_string(design.view(reset)), "zoom:1.0")
+}
+
+pub fn resizing_at_a_zoom_saves_the_designs_own_size_test() {
+  let id = "0123456789abcdef"
+  let model = design.Model(..an_editing_model(), zoom: 2.0)
+  let #(dragging, _) =
+    design.update(model, design.Resized("go", "right", 240.4, 90.0))
+  assert string.contains(
+    element.to_string(design.view(dragging)),
+    "width:120.0px",
+  )
+  let side = resize_drag(model, "go", "right", 240.4, 90.0)
+  let body = waiting_json(side, id)
+  assert string.contains(body, "\"property\":\"width\"")
+  assert string.contains(body, "\"value\":{\"fixed\":120}")
+}
+
+pub fn zoom_keeps_selection_and_notes_on_the_same_elements_test() {
+  let model = design.Model(..a_selected_model(), zoom: 2.0)
+  let #(clicked, _) = design.update(model, design.ElementClicked("go", False))
+  assert string.contains(
+    element.to_string(design.view(clicked)),
+    "data-note-box",
+  )
+  let #(region, _) = design.update(model, design.RegionSelected(["go"], False))
+  assert string.contains(
+    element.to_string(design.view(region)),
+    "data-note-box",
+  )
+  let #(wheeled, _) = design.update(model, design.CanvasZoomed(1.1, 0.0, 0.0))
+  assert string.contains(element.to_string(design.view(wheeled)), "220%")
+}
+
+fn window_conditions_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Board\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"conditions\":[{\"when\":{\"ratio\":{\"at_least\":1.1}},\"changes\":[{\"id\":\"group\",\"direction\":\"row\"}]}],\"children\":[{\"id\":\"group\",\"type\":\"column\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"board\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Board\"}},{\"id\":\"details\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Details\"}}]}]}]}"
+}
+
+fn window_model() -> design.Model {
+  let id = "0123456789abcdef"
+  let #(model, _) =
+    design.update(
+      design.new(design.UiUx),
+      design.DesignsLoaded(a_design_list()),
+    )
+  let #(model, _) = design.update(model, design.SelectDesign(id))
+  let #(model, _) =
+    design.update(model, design.DesignLoaded(id, window_conditions_design()))
+  model
+}
+
+fn element_styles(html: String, id: String) -> String {
+  case string.split_once(html, "data-design-id=\"" <> id <> "\"") {
+    Ok(#(_, after)) ->
+      case string.split_once(after, ">") {
+        Ok(#(attributes, _)) -> attributes
+        Error(_) -> ""
+      }
+    Error(_) -> ""
+  }
+}
+
+pub fn dragging_the_window_size_changes_the_drawn_size_and_layout_test() {
+  let #(tall_model, _) =
+    design.update(window_model(), design.WindowResized(1000.0, 1000.0))
+  let tall = element.to_string(design.view(tall_model))
+  assert string.contains(tall, "data-window-handle")
+  assert string.contains(tall, "width:1000.0px")
+  assert string.contains(element_styles(tall, "group"), "flex-direction:column")
+  let #(model, _) =
+    design.update(window_model(), design.WindowResized(1100.0, 1000.0))
+  let wide = element.to_string(design.view(model))
+  assert string.contains(wide, "width:1100.0px")
+  assert string.contains(wide, "height:1000.0px")
+  assert string.contains(element_styles(wide, "group"), "flex-direction:row")
+}
+
+pub fn selection_and_notes_still_work_after_a_window_switch_test() {
+  let #(model, _) =
+    design.update(window_model(), design.WindowResized(1100.0, 1000.0))
+  let #(model, _) =
+    design.update(model, design.ElementClicked("details", False))
+  assert model.selected == ["details"]
+  assert string.contains(element.to_string(design.view(model)), "data-note-box")
+  let #(model, _) =
+    design.update(model, design.RegionSelected(["group", "details"], False))
+  assert model.selected == ["group", "details"]
+  assert string.contains(element.to_string(design.view(model)), "data-note-box")
+}

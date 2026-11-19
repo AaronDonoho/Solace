@@ -26,6 +26,7 @@ import plan_panel
 import region
 import render
 import solace_task
+import zoom_bar
 
 /// Registers the element on its own, for `index.html`.
 pub fn main() -> Nil {
@@ -67,6 +68,8 @@ pub type Model {
     previous: Option(#(String, Int, render.Design)),
     /// The screen the click-through preview shows, if previewing.
     preview: Option(String),
+    /// The tab each tabs element shows in Preview, keyed by tabs element id.
+    preview_tabs: Dict(String, String),
     /// Whether the canvas shows an open proposal rather than the saved design.
     view_proposal: Bool,
     /// Whether the proposal's change outlines show.
@@ -95,6 +98,11 @@ pub type Model {
     dragging: Option(Drag),
     /// The selected element's border being dragged in edit mode.
     resizing: Option(Resize),
+    /// The canvas's zoom level: 1.0 draws at the design's own size.
+    zoom: Float,
+    /// The size of the window the screens are drawn in.
+    window_width: Float,
+    window_height: Float,
   )
 }
 
@@ -205,12 +213,23 @@ pub type Msg {
   /// The element drag ended without a drop.
   DragCancelled
   /// A drag on a selected element's side or corner, with its id, side and
-  /// drawn size.
+  /// size on screen.
   Resized(String, String, Float, Float)
   /// The resize drag was let go.
   ResizeDropped
   /// The resize drag ended without a drop.
   ResizeCancelled
+  /// The zoom bar's zoom in.
+  ZoomIn
+  /// The zoom bar's zoom out.
+  ZoomOut
+  /// The zoom bar's reset to the default view.
+  ResetView
+  /// Ctrl + wheel over the canvas: a factor and the pointer's offset from the
+  /// canvas's top-left corner.
+  CanvasZoomed(Float, Float, Float)
+  /// The window-size handle was dragged, with the window's new size.
+  WindowResized(Float, Float)
 }
 
 pub fn tabs() -> List(Tab) {
@@ -380,7 +399,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Restore(id, number) -> restore(model, id, number)
     Restored(id, number, text) -> restored(model, id, number, text)
     Preview -> start_preview(model)
-    ExitPreview -> #(Model(..model, preview: None, selected: []), effect.none())
+    ExitPreview -> #(
+      Model(..model, preview: None, preview_tabs: dict.new(), selected: []),
+      effect.none(),
+    )
     PreviewClick(id) -> preview_click(model, id)
     ElementClicked(id, multi) -> {
       let next = select_element(model, id, multi)
@@ -418,9 +440,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.from(fn(send) { listen_escape(fn(_) { send(Escape) }) }),
           effect.map(panel_fx, Panel),
           effect.before_paint(fn(send, root) {
+            watch_pan(root)
+            watch_zoom(root, send)
             watch_region(root, send)
             watch_moves(root, send)
             watch_resizes(root, send)
+            watch_window(root, send)
             drag_note_box(root, fn() { Nil })
             send(Panel(panel.Attached(root)))
           }),
@@ -544,6 +569,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     ResizeDropped -> #(resize_drop(model), effect.none())
     ResizeCancelled -> #(Model(..model, resizing: None), effect.none())
+    ZoomIn -> zoom_about(model, 1.2)
+    ZoomOut -> zoom_about(model, 0.833333)
+    ResetView -> reset_view(model)
+    CanvasZoomed(amount, x, y) -> zoom_at(model, amount, x, y)
+    WindowResized(width, height) -> #(
+      Model(..model, window_width: width, window_height: height),
+      effect.none(),
+    )
   }
 }
 
@@ -551,6 +584,8 @@ pub fn view(model: Model) -> Element(Msg) {
   html.div([attribute.class("design")], [
     html.style([], view_styles),
     html.style([], edit_styles),
+    html.style([], zoom_styles),
+    html.style([], zoom_bar.styles),
     html.div(
       [
         attribute.class("tabs"),
@@ -639,7 +674,10 @@ pub fn view(model: Model) -> Element(Msg) {
                 )
               None -> element.none()
             },
-            html.div([attribute.class("design-canvas")], canvas(model, tab)),
+            html.div([attribute.class("design-canvas-wrap")], [
+              html.div([attribute.class("design-canvas")], canvas(model, tab)),
+              zoom_controls(model),
+            ]),
           ]),
         ],
       )
@@ -771,6 +809,7 @@ pub fn new(tab: Tab) -> Model {
     None,
     None,
     None,
+    dict.new(),
     True,
     True,
     panel.new(),
@@ -785,6 +824,9 @@ pub fn new(tab: Tab) -> Model {
     None,
     None,
     None,
+    1.0,
+    1000.0,
+    800.0,
   )
 }
 
@@ -986,6 +1028,7 @@ fn load_design(model: Model, id: String, text: String) -> Model {
               },
               design_error: "",
               preview: keep_preview(model.preview, drawing),
+              preview_tabs: dict.new(),
             ),
           )
         Error(_) ->
@@ -995,6 +1038,7 @@ fn load_design(model: Model, id: String, text: String) -> Model {
             selected: [],
             design_error: load_failure(text),
             preview: None,
+            preview_tabs: dict.new(),
           )
       }
     False -> model
@@ -1425,7 +1469,11 @@ fn version_canvas(model: Model, viewed: Viewed) -> List(Element(Msg)) {
       Some(drawing), Some(Architecture) ->
         case version_marks(model, viewed, drawing) {
           Some(marked) -> marked_diagram(model, marked)
-          None -> diagram.draw(drawing, dict.new(), diagram_selection(model))
+          None ->
+            zoom_diagram(
+              model,
+              diagram.draw(drawing, dict.new(), diagram_selection(model)),
+            )
         }
       _, _ -> element.none()
     },
@@ -1585,7 +1633,7 @@ fn clear_history_error(model: Model) -> Model {
 }
 
 fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
-  let model = Model(..model, selected: [])
+  let model = Model(..model, selected: [], preview_tabs: dict.new())
   case preview_drawing(model) {
     Some(drawing) ->
       case render.first_screen(drawing) {
@@ -1602,9 +1650,22 @@ fn start_preview(model: Model) -> #(Model, Effect(Msg)) {
 fn preview_click(model: Model, id: String) -> #(Model, Effect(Msg)) {
   case model.preview, preview_drawing(model) {
     Some(_), Some(drawing) ->
-      case render.link_target(drawing, id) {
-        Some(target) -> #(Model(..model, preview: Some(target)), effect.none())
-        None -> #(model, effect.none())
+      case tab_parent(drawing.elements, id) {
+        Some(tabs) -> #(
+          Model(
+            ..model,
+            preview_tabs: dict.insert(model.preview_tabs, tabs, id),
+          ),
+          effect.none(),
+        )
+        None ->
+          case render.link_target(drawing, id) {
+            Some(target) -> #(
+              Model(..model, preview: Some(target)),
+              effect.none(),
+            )
+            None -> #(model, effect.none())
+          }
       }
     _, _ -> #(model, effect.none())
   }
@@ -1643,12 +1704,23 @@ fn screens(
   drawing: render.Design,
   resizable: Bool,
 ) -> Element(Msg) {
+  let drawing =
+    render.resolve(
+      drawing,
+      render.Window(model.window_width, model.window_height),
+    )
   case model.preview {
     Some(id) ->
       case render.screen(drawing, id) {
         Some(screen) ->
-          html.div([attribute.class("design-screens")], [
-            render.draw_preview(screen, PreviewClick),
+          html.div([attribute.class("design-screens"), ..zoom_attrs(model)], [
+            window_frame(
+              model,
+              render.draw_preview(
+                tabs_for_preview(model.preview_tabs, screen),
+                PreviewClick,
+              ),
+            ),
           ])
         None -> all_screens(model, drawing, resizable)
       }
@@ -1667,9 +1739,10 @@ fn all_screens(
       attribute.class("design-screens"),
       canvas_gesture(model),
       event.on_click(ClearSelection),
+      ..zoom_attrs(model)
     ],
     list.map(drawing.elements, fn(node) {
-      case resizable {
+      window_frame(model, case resizable {
         True ->
           render.draw_selectable_resizable(
             node,
@@ -1679,7 +1752,7 @@ fn all_screens(
           )
         False ->
           render.draw_selectable(node, model.selected, markers, ElementClicked)
-      }
+      })
     }),
   )
 }
@@ -1722,12 +1795,26 @@ fn marked_screens(
   marked: changes.Marked,
   resizable: Bool,
 ) -> Element(Msg) {
+  let marked =
+    changes.Marked(
+      render.resolve(
+        marked.design,
+        render.Window(model.window_width, model.window_height),
+      ),
+      marked.marks,
+    )
   case model.preview {
     Some(id) ->
       case render.screen(marked.design, id) {
         Some(screen) ->
           html.div([attribute.class("design-screens")], [
-            render.draw_preview(screen, PreviewClick),
+            window_frame(
+              model,
+              render.draw_preview(
+                tabs_for_preview(model.preview_tabs, screen),
+                PreviewClick,
+              ),
+            ),
           ])
         None -> marked_all_screens(model, marked, resizable)
       }
@@ -1746,9 +1833,10 @@ fn marked_all_screens(
       attribute.class("design-screens"),
       canvas_gesture(model),
       event.on_click(ClearSelection),
+      ..zoom_attrs(model)
     ],
     list.map(marked.design.elements, fn(node) {
-      case resizable {
+      window_frame(model, case resizable {
         True ->
           render.draw_marked_selectable_resizable(
             node,
@@ -1765,7 +1853,7 @@ fn marked_all_screens(
             markers,
             ElementClicked,
           )
-      }
+      })
     }),
   )
 }
@@ -1815,7 +1903,10 @@ fn create_canvas(model: Model, tab: Tab) -> List(Element(Msg)) {
           case model.show_changes {
             True -> marked_diagram(model, changes.all_added(proposed))
             False ->
-              diagram.draw(proposed, dict.new(), diagram_selection(model))
+              zoom_diagram(
+                model,
+                diagram.draw(proposed, dict.new(), diagram_selection(model)),
+              )
           }
         UiUx ->
           case model.show_changes {
@@ -1847,7 +1938,11 @@ fn current_diagram(model: Model, design: Design) -> Element(Msg) {
       let drawing = editing.apply(waiting_for(model, design.id), saved)
       case current_marks(model, design, drawing) {
         Some(marked) -> marked_diagram(model, marked)
-        None -> diagram.draw(drawing, dict.new(), diagram_selection(model))
+        None ->
+          zoom_diagram(
+            model,
+            diagram.draw(drawing, dict.new(), diagram_selection(model)),
+          )
       }
     }
     None ->
@@ -1862,12 +1957,19 @@ fn proposed_diagram(model: Model, proposed: render.Design) -> Element(Msg) {
   case model.show_changes, model.drawing {
     True, Some(current) ->
       marked_diagram(model, changes.mark(current, proposed))
-    _, _ -> diagram.draw(proposed, dict.new(), diagram_selection(model))
+    _, _ ->
+      zoom_diagram(
+        model,
+        diagram.draw(proposed, dict.new(), diagram_selection(model)),
+      )
   }
 }
 
 fn marked_diagram(model: Model, marked: changes.Marked) -> Element(Msg) {
-  diagram.draw(marked.design, marked.marks, diagram_selection(model))
+  zoom_diagram(
+    model,
+    diagram.draw(marked.design, marked.marks, diagram_selection(model)),
+  )
 }
 
 @external(javascript, "./api.mjs", "listen_escape")
@@ -2414,9 +2516,21 @@ fn version_marks(
 }
 
 fn preview_drawing(model: Model) -> Option(render.Design) {
-  case viewed_for(model) {
+  let drawing = case viewed_for(model) {
     Some(viewed) -> viewed.drawing
     None -> model.drawing
+  }
+  case drawing, model.preview {
+    Some(drawing), Some(_) ->
+      Some(
+        render.Design(
+          ..drawing,
+          elements: list.map(drawing.elements, fn(node) {
+            tabs_for_preview(model.preview_tabs, node)
+          }),
+        ),
+      )
+    _, _ -> drawing
   }
 }
 
@@ -2982,7 +3096,8 @@ pub type Side {
   BottomRight
 }
 
-/// A resize drag: the element, the side or corner dragged, and its drawn size.
+/// A resize drag: the element, the side or corner dragged, and its size in
+/// the design's units.
 pub type Resize {
   Resize(id: String, side: Side, width: Float, height: Float)
 }
@@ -3001,8 +3116,17 @@ fn resize(
     resize_side(side),
     editable_node(model)
   {
-    True, [selected], Some(side), Some(_) if selected == id ->
-      Model(..model, resizing: Some(Resize(id, side, width, height)))
+    True, [selected], Some(side), Some(_) if selected == id -> {
+      // The pointer moves in screen pixels; a fixed size is in design units.
+      let zoom = case model.zoom {
+        zoom if zoom >. 0.0 -> zoom
+        _ -> 1.0
+      }
+      Model(
+        ..model,
+        resizing: Some(Resize(id, side, width /. zoom, height /. zoom)),
+      )
+    }
     _, _, _, _ -> model
   }
 }
@@ -3141,4 +3265,181 @@ fn loaded_keeping_live(model: Model, text: String) -> Model {
       }
     False -> loaded(model, text)
   }
+}
+
+fn tab_parent(nodes: List(render.Node), id: String) -> Option(String) {
+  let found =
+    list.filter_map(nodes, fn(node) {
+      case node.kind, list.find(node.children, fn(child) { child.id == id }) {
+        render.Tabs(_), Ok(_) -> Ok(node.id)
+        _, _ ->
+          case tab_parent(node.children, id) {
+            Some(parent) -> Ok(parent)
+            None -> Error(Nil)
+          }
+      }
+    })
+  case found {
+    [parent, ..] -> Some(parent)
+    [] -> None
+  }
+}
+
+fn tabs_for_preview(
+  active: Dict(String, String),
+  node: render.Node,
+) -> render.Node {
+  let kind = case node.kind {
+    render.Tabs(properties) ->
+      case dict.get(active, node.id) {
+        Ok(current) ->
+          render.Tabs(render.TabsProperties(..properties, current: current))
+        Error(_) -> node.kind
+      }
+    _ -> node.kind
+  }
+  render.Node(
+    ..node,
+    kind: kind,
+    children: list.map(node.children, fn(child) {
+      tabs_for_preview(active, child)
+    }),
+  )
+}
+
+/// The canvas's zoom bar, when a design is open.
+fn zoom_controls(model: Model) -> Element(Msg) {
+  case model.open {
+    "" -> element.none()
+    _ ->
+      html.div([attribute.class("design-zoom")], [
+        zoom_bar.bar(
+          model.zoom,
+          ZoomIn,
+          ZoomOut,
+          ResetView,
+          zoom_bar.Tips(
+            "Zoom in (Ctrl + scroll up)",
+            "Zoom out (Ctrl + scroll down)",
+            "Back to the default view. Pan with Space + drag or middle-drag",
+          ),
+        ),
+      ])
+  }
+}
+
+fn zoom_attrs(model: Model) -> List(attribute.Attribute(Msg)) {
+  let zoom = float.to_string(model.zoom)
+  [attribute.data("zoom", zoom), attribute.styles([#("zoom", zoom)])]
+}
+
+fn zoom_diagram(model: Model, drawing: Element(Msg)) -> Element(Msg) {
+  html.div([attribute.class("design-diagram-zoom"), ..zoom_attrs(model)], [
+    drawing,
+  ])
+}
+
+/// Zooms to the point `x`, `y` under the pointer, which stays put.
+fn zoom_at(
+  model: Model,
+  amount: Float,
+  x: Float,
+  y: Float,
+) -> #(Model, Effect(Msg)) {
+  let before = model.zoom
+  let after = clamp_zoom(before *. amount)
+  #(
+    Model(..model, zoom: after),
+    effect.after_paint(fn(_, root) { anchor_zoom(root, x, y, before, after) }),
+  )
+}
+
+fn zoom_about(model: Model, amount: Float) -> #(Model, Effect(Msg)) {
+  let before = model.zoom
+  let after = clamp_zoom(before *. amount)
+  #(
+    Model(..model, zoom: after),
+    effect.after_paint(fn(_, root) { center_zoom(root, before, after) }),
+  )
+}
+
+fn reset_view(model: Model) -> #(Model, Effect(Msg)) {
+  #(
+    Model(..model, zoom: 1.0),
+    effect.after_paint(fn(_, root) { reset_zoom(root) }),
+  )
+}
+
+/// Keeps the canvas within what it can draw.
+fn clamp_zoom(zoom: Float) -> Float {
+  float.clamp(zoom, 0.25, 2.5)
+}
+
+@external(javascript, "./api.mjs", "anchor_zoom")
+fn anchor_zoom(
+  root: Dynamic,
+  x: Float,
+  y: Float,
+  before: Float,
+  after: Float,
+) -> Nil
+
+@external(javascript, "./api.mjs", "center_zoom")
+fn center_zoom(root: Dynamic, before: Float, after: Float) -> Nil
+
+@external(javascript, "./api.mjs", "reset_zoom")
+fn reset_zoom(root: Dynamic) -> Nil
+
+@external(javascript, "./api.mjs", "listen_pan")
+fn listen_pan(root: Dynamic) -> Nil
+
+@external(javascript, "./api.mjs", "listen_zoom")
+fn listen_zoom(root: Dynamic, zoomed: fn(Float, Float, Float) -> Nil) -> Nil
+
+fn watch_pan(root: Dynamic) -> Nil {
+  listen_pan(root)
+}
+
+fn watch_zoom(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
+  listen_zoom(root, fn(amount, x, y) { send(CanvasZoomed(amount, x, y)) })
+}
+
+const zoom_styles =
+  ".design-canvas-wrap{position:relative;flex:1;min-width:0;min-height:0;display:flex}
+.design-zoom{position:absolute;right:var(--space-3);bottom:var(--space-3);z-index:5}
+.design-zoom .zoom-bar{box-shadow:0 2px 8px rgba(0,0,0,.14)}
+.design-diagram-zoom{display:inline-block;min-width:100%;min-height:100%}
+.design-window{position:relative;flex:none;box-sizing:border-box;border:1px dashed var(--line);background:var(--paper)}
+.design-window>.design-element{width:100%;height:100%}
+.design-window-handle{position:absolute;right:0;bottom:0;z-index:6;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,var(--edge) 50%)}"
+
+fn window_frame(model: Model, content: Element(Msg)) -> Element(Msg) {
+  html.div(
+    [
+      attribute.class("design-window"),
+      attribute.data("window", ""),
+      attribute.styles([
+        #("width", float.to_string(model.window_width) <> "px"),
+        #("height", float.to_string(model.window_height) <> "px"),
+      ]),
+    ],
+    [
+      content,
+      html.span(
+        [
+          attribute.class("design-window-handle"),
+          attribute.data("window-handle", ""),
+          attribute.title("Drag to change the window size"),
+        ],
+        [],
+      ),
+    ],
+  )
+}
+
+@external(javascript, "./api.mjs", "listen_window")
+fn listen_window(root: Dynamic, resized: fn(Float, Float) -> Nil) -> Nil
+
+fn watch_window(root: Dynamic, send: fn(Msg) -> Nil) -> Nil {
+  listen_window(root, fn(width, height) { send(WindowResized(width, height)) })
 }

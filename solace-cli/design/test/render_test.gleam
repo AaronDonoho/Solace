@@ -284,7 +284,7 @@ pub fn a_screen_that_fills_takes_the_drawing_area_test() {
 pub fn a_design_decodes_for_drawing_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":300}},\"children\":[{\"id\":\"label\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"align\":\"right\",\"text\":\"Body\"}}]}]}"
-  let assert Ok(render.Design(id, title, [screen], _)) = render.decode(json)
+  let assert Ok(render.Design(id, title, [screen], _, _)) = render.decode(json)
   assert id == "0123456789abcdef"
   assert title == "Home"
   assert screen.id == "screen"
@@ -883,7 +883,7 @@ pub fn every_default_component_draws_with_its_design_id_test() {
 pub fn a_design_decodes_every_component_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"row\",\"type\":\"row\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"gap\":8,\"padding\":4,\"align\":\"center\",\"justify\":\"between\"},\"children\":[{\"id\":\"column\",\"type\":\"column\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\"},\"children\":[{\"id\":\"text\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Body\"}},{\"id\":\"heading\",\"type\":\"heading\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Title\",\"level\":2}},{\"id\":\"button\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Save\"}},{\"id\":\"input\",\"type\":\"text_input\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"placeholder\":\"Name\"}},{\"id\":\"image\",\"type\":\"image_placeholder\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Photo\"}}]}]}]}]}"
-  let assert Ok(render.Design(_, _, [screen], _)) = render.decode(json)
+  let assert Ok(render.Design(_, _, [screen], _, _)) = render.decode(json)
   let assert render.Node("screen", render.Screen(screen_container), [row], _) =
     screen
   assert screen_container
@@ -1167,7 +1167,7 @@ pub fn changing_a_token_value_changes_what_is_drawn_test() {
 pub fn a_spacing_token_is_decoded_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\",\"gap\":\"md\",\"padding\":4}}]}"
-  let assert Ok(render.Design(_, _, [screen], _)) = render.decode(json)
+  let assert Ok(render.Design(_, _, [screen], _, _)) = render.decode(json)
   let assert render.Node("screen", render.Screen(container), [], _) = screen
   assert container.gap == render.SpacingToken("md")
   assert container.padding == render.SpacingPixels(4.0)
@@ -1299,7 +1299,7 @@ pub fn each_container_variant_draws_differently_test() {
 pub fn an_unstated_variant_decodes_to_the_default_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"row\",\"type\":\"row\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\"}},{\"id\":\"text\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Body\"}},{\"id\":\"button\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Save\"}}]}]}"
-  let assert Ok(render.Design(_, _, [screen], _)) = render.decode(json)
+  let assert Ok(render.Design(_, _, [screen], _, _)) = render.decode(json)
   let assert render.Node(
     "screen",
     render.Screen(screen_container),
@@ -1438,8 +1438,8 @@ pub fn a_missing_style_draws_as_no_overrides_test() {
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"text\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Body\"}}]}"
   let empty =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"text\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Body\"},\"style\":{}}]}"
-  let assert Ok(render.Design(_, _, [first], _)) = render.decode(styleless)
-  let assert Ok(render.Design(_, _, [second], _)) = render.decode(empty)
+  let assert Ok(render.Design(_, _, [first], _, _)) = render.decode(styleless)
+  let assert Ok(render.Design(_, _, [second], _, _)) = render.decode(empty)
   let assert render.Text(_) = first.kind
   assert element.to_string(render.draw(first))
     == element.to_string(render.draw(second))
@@ -1448,7 +1448,7 @@ pub fn a_missing_style_draws_as_no_overrides_test() {
 pub fn a_decoded_style_override_is_drawn_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"button\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Save\",\"variant\":\"secondary\"},\"style\":{\"fill\":\"#ff0000\",\"size\":18,\"padding\":\"md\"}}]}"
-  let assert Ok(render.Design(_, _, [button], _)) = render.decode(json)
+  let assert Ok(render.Design(_, _, [button], _, _)) = render.decode(json)
   let styles = styles_of(element.to_string(render.draw(button)), "button")
   assert string.contains(styles, "background:#ff0000")
   assert string.contains(styles, "font-size:18.0px")
@@ -1490,7 +1490,7 @@ pub fn nested_links_use_the_nearest_target_test() {
 pub fn a_flow_design_decodes_into_nodes_and_edges_test() {
   let json =
     "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Flow\",\"tab\":\"architecture\",\"elements\":[{\"id\":\"flow\",\"type\":\"flow\",\"properties\":{},\"children\":[{\"id\":\"start\",\"type\":\"node\",\"properties\":{\"label\":\"Start\",\"description\":\"First\"}},{\"id\":\"end\",\"type\":\"node\",\"properties\":{\"label\":\"End\",\"description\":\"Last\"}},{\"id\":\"step\",\"type\":\"edge\",\"properties\":{\"from\":\"start\",\"to\":\"end\",\"label\":\"Next\"}}]}]}"
-  let assert Ok(render.Design(_, _, [flow], _)) = render.decode(json)
+  let assert Ok(render.Design(_, _, [flow], _, _)) = render.decode(json)
   let assert render.Node("flow", render.Flow, [start, end, step], _) = flow
   assert start.kind
     == render.DiagramNode(render.DiagramNodeProperties("Start", "First"))
@@ -1592,4 +1592,230 @@ pub fn a_selected_text_input_draws_resize_handles_test() {
   assert string.contains(html, "<input")
   assert string.contains(html, "placeholder=\"Name\"")
   assert list.length(string.split(html, "class=\"design-resize-handle\"")) == 9
+}
+
+pub fn tabs_draw_a_strip_and_only_the_current_panel_test() {
+  let container =
+    render.Container(
+      render.Fill,
+      render.Fill,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Plain,
+    )
+  let screen =
+    node("screen", render.Screen(container), [
+      node(
+        "tabs",
+        render.Tabs(render.TabsProperties(render.Fill, render.Hug, "one")),
+        [
+          node(
+            "one",
+            render.Tab(render.TabProperties(render.Hug, render.Hug, "One")),
+            [
+              node(
+                "one_body",
+                render.Text(render.TextProperties(
+                  render.Hug,
+                  render.Hug,
+                  render.TextLeft,
+                  "First",
+                  render.Body,
+                )),
+                [],
+              ),
+            ],
+          ),
+          node(
+            "two",
+            render.Tab(render.TabProperties(render.Hug, render.Hug, "Two")),
+            [
+              node(
+                "two_body",
+                render.Text(render.TextProperties(
+                  render.Hug,
+                  render.Hug,
+                  render.TextLeft,
+                  "Second",
+                  render.Body,
+                )),
+                [],
+              ),
+            ],
+          ),
+        ],
+      ),
+    ])
+  let html = element.to_string(render.draw(screen))
+  assert ids(html) == ["screen", "tabs", "one", "two", "one_body"]
+  assert string.contains(html, "design-tab-current")
+  assert string.contains(html, ">One<")
+  assert string.contains(html, ">Two<")
+  assert string.contains(html, ">First<")
+  assert !string.contains(html, ">Second<")
+}
+
+pub fn a_scroll_area_clips_and_scrolls_its_content_test() {
+  let container =
+    render.Container(
+      render.Fill,
+      render.Fill,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Plain,
+    )
+  let screen =
+    node("screen", render.Screen(container), [
+      node(
+        "scroll",
+        render.ScrollArea(render.ScrollAreaProperties(
+          render.Fill,
+          render.Fixed(120.0),
+        )),
+        [
+          node(
+            "long",
+            render.Text(render.TextProperties(
+              render.Hug,
+              render.Hug,
+              render.TextLeft,
+              "Long",
+              render.Body,
+            )),
+            [],
+          ),
+        ],
+      ),
+    ])
+  let html = element.to_string(render.draw(screen))
+  assert ids(html) == ["screen", "scroll", "long"]
+  let styles = styles_of(html, "scroll")
+  assert string.contains(styles, "overflow")
+  assert string.contains(styles, "auto")
+}
+
+pub fn a_split_pane_draws_two_regions_with_a_divider_test() {
+  let container =
+    render.Container(
+      render.Fill,
+      render.Fill,
+      render.SpacingPixels(0.0),
+      render.SpacingPixels(0.0),
+      render.AlignStart,
+      render.JustifyStart,
+      render.Plain,
+    )
+  let screen =
+    node("screen", render.Screen(container), [
+      node(
+        "split",
+        render.SplitPane(render.SplitPaneProperties(
+          render.Fill,
+          render.Fill,
+          render.SideBySide,
+        )),
+        [
+          node(
+            "left",
+            render.Text(render.TextProperties(
+              render.Fill,
+              render.Fill,
+              render.TextLeft,
+              "Left",
+              render.Body,
+            )),
+            [],
+          ),
+          node(
+            "right",
+            render.Text(render.TextProperties(
+              render.Fill,
+              render.Fill,
+              render.TextLeft,
+              "Right",
+              render.Body,
+            )),
+            [],
+          ),
+        ],
+      ),
+    ])
+  let html = element.to_string(render.draw(screen))
+  assert ids(html) == ["screen", "split", "left", "right"]
+  assert string.contains(html, "design-split-divider")
+  assert string.contains(styles_of(html, "split"), "flex-direction")
+  assert string.contains(styles_of(html, "split"), "row")
+}
+
+pub fn a_component_stand_in_draws_its_name_and_resizes_test() {
+  let html =
+    element.to_string(
+      render.draw_selectable_resizable(
+        node(
+          "component",
+          render.Component(render.ComponentProperties(
+            render.Fill,
+            render.Fixed(240.0),
+            "Task details",
+          )),
+          [],
+        ),
+        ["component"],
+        dict.new(),
+        fn(id, _) { id },
+      ),
+    )
+  assert string.contains(html, "data-design-id=\"component\"")
+  assert string.contains(html, ">Task details<")
+  assert string.contains(html, "design-selected")
+  assert list.length(string.split(html, "class=\"design-resize-handle\"")) == 9
+}
+
+fn conditions_design() -> String {
+  "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Board\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"conditions\":[{\"when\":{\"ratio\":{\"at_least\":1.1}},\"changes\":[{\"id\":\"group\",\"direction\":\"row\"},{\"id\":\"details\",\"property\":\"height\",\"value\":\"fill\"}]}],\"children\":[{\"id\":\"group\",\"type\":\"column\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"board\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Board\"}},{\"id\":\"details\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Details\"}}]}]}]}"
+}
+
+fn drawn_at(window: render.Window) -> String {
+  let assert Ok(design) = render.decode(conditions_design())
+  let assert Some(screen) = render.first_screen(render.resolve(design, window))
+  element.to_string(render.draw(screen))
+}
+
+pub fn a_condition_switches_a_column_to_a_row_at_the_ratio_boundary_test() {
+  let wide = drawn_at(render.Window(1100.0, 1000.0))
+  assert string.contains(styles_of(wide, "group"), "flex-direction:row")
+  assert string.contains(styles_of(wide, "details"), "flex:1 1 0")
+  let tall = drawn_at(render.Window(1099.0, 1000.0))
+  assert string.contains(styles_of(tall, "group"), "flex-direction:column")
+  assert string.contains(styles_of(tall, "details"), "flex:none")
+}
+
+pub fn later_matching_conditions_override_earlier_ones_test() {
+  let json =
+    "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Board\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"conditions\":[{\"when\":{\"width\":{\"at_least\":900}},\"changes\":[{\"id\":\"group\",\"direction\":\"row\"}]},{\"when\":{\"width\":{\"at_least\":1000}},\"changes\":[{\"id\":\"group\",\"direction\":\"column\"}]}],\"children\":[{\"id\":\"group\",\"type\":\"row\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"}}]}]}"
+  let assert Ok(design) = render.decode(json)
+  let assert Some(screen) =
+    render.first_screen(render.resolve(design, render.Window(1200.0, 800.0)))
+  let html = element.to_string(render.draw(screen))
+  assert string.contains(styles_of(html, "group"), "flex-direction:column")
+}
+
+pub fn default_window_has_a_positive_size_test() {
+  let window = render.default_window()
+  assert window.width >. 0.0
+  assert window.height >. 0.0
+}
+
+pub fn a_condition_can_change_a_link_test() {
+  let json =
+    "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Board\",\"tab\":\"ui\",\"elements\":[{\"id\":\"a\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"conditions\":[{\"when\":{\"ratio\":{\"at_least\":1.1}},\"changes\":[{\"id\":\"go\",\"property\":\"navigates_to\",\"value\":\"b\"}]}],\"children\":[{\"id\":\"go\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Go\",\"navigates_to\":\"a\"}}]},{\"id\":\"b\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"}}]}"
+  let assert Ok(design) = render.decode(json)
+  let tall = render.resolve(design, render.Window(1000.0, 1000.0))
+  assert render.link_target(tall, "go") == Some("a")
+  let wide = render.resolve(design, render.Window(1100.0, 1000.0))
+  assert render.link_target(wide, "go") == Some("b")
 }

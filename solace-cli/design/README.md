@@ -47,13 +47,25 @@ removed, changed and moved nodes and edges.
 ## Screens
 
 The renderer in `render` draws a design's element tree of screens, rows,
-columns, text, headings, buttons, inputs and image placeholders. Every drawn
-element carries a `data-design-id` attribute and a thin dotted outline, so its
-layout can be checked. Widths and heights are `fill`, `hug` or a fixed number
-of pixels; fill children can shrink inside their parent. Gaps and padding take
-a spacing token (`none`, `xs`, `sm`, `md`, `lg` or `xl`) or a number of pixels,
-and default to 0. Alignment starts at the start until the design states
-otherwise.
+columns, text, headings, buttons, inputs, image placeholders, component
+stand-ins, tabs, tab items, scroll areas and split panes. Every drawn element
+carries a `data-design-id`
+attribute and a thin dotted outline, so its layout can be checked. Widths and
+heights are `fill`, `hug` or a fixed number of pixels; fill children can shrink
+inside their parent. Gaps and padding take a spacing token (`none`, `xs`, `sm`,
+`md`, `lg` or `xl`) or a number of pixels, and default to 0. Alignment starts
+at the start until the design states otherwise.
+
+A tabs element holds tab items only, and its `current` property names one of
+them. It draws a strip of tab labels with the current one marked, then only the
+current tab's children. A scroll area holds its children in a box of its own
+size and scrolls them inside it, so the rest of the screen stays put. A split
+pane holds exactly two regions, side by side when its `direction` is `row` and
+one above the other when it is `column`, with a divider between them.
+
+A component stand-in names a component placed in the page and shows that name
+in a dashed box of its own size. It holds no children and doesn't draw the
+component's inside.
 
 Outside Preview, clicking a drawn element selects it by its `data-design-id`.
 A plain click selects only that element; Ctrl-click (Cmd-click on a Mac) adds
@@ -68,7 +80,45 @@ element wholly inside the box shown while dragging. An element only partly
 inside is not selected; when a parent and its children are all wholly inside,
 every one is selected. A plain drag replaces the selection, and Ctrl-drag
 (Cmd-drag on a Mac) adds the region's elements. A drag that covers nothing
-clears the selection.
+clears the selection. Only the current tab's children are drawn, so a region
+can select those but never the contents of another tab.
+
+## Zoom and pan
+
+The canvas has a zoom bar at its bottom-right: −, the current level, + and
+Reset. Reset returns the canvas to 100% at the top-left of the drawing. Ctrl +
+the mouse wheel zooms toward the pointer, and a plain wheel still scrolls.
+Holding Space and dragging, or dragging with the middle button, pans the
+canvas; a plain drag still selects a region or, in edit mode, moves an element.
+Each bar button shows its tip after two seconds of hovering; clicking it first
+hides the tip. The zoom level is a viewing setting: it never changes or saves
+into the design.
+
+Zoom and pan work on both tabs and in Preview. Elements are measured on screen,
+so clicking, region selection, note placement, moves and resizes give the same
+results at any zoom level and pan position. A resize saves the design's own
+size, not the size it is drawn at.
+
+## Window conditions
+
+A screen may carry a `conditions` list that changes its layout for a window
+shape or size. Each condition has a `when` bound and a `changes` list. A bound
+tests the window's width-to-height `ratio`, its `width` or its `height`, with
+`at_least` or `at_most` and a positive number. Each change names an element
+inside that screen and either gives a `row` or `column` a new `direction`
+(`row` or `column`), or sets one `property` to a `value` the element's type
+accepts. Conditions apply in list order; when several match, a later condition
+overrides an earlier one. Only a screen may carry conditions.
+
+On the UI/UX tab, each screen is drawn in a window frame. Drag the frame's
+bottom-right handle to change the window's size; the frame's size is the page's
+own and does not follow Solace's window. The drawing applies every condition
+that matches that size. The frame works with zoom and pan, so a window larger
+than the canvas can be viewed by zooming out or panning.
+
+A design agent adds a condition with
+`{"op":"set","id":<screen>,"field":"conditions","value":<condition>}`, replaces
+one by giving its `index`, and removes one with that `index` and a null `value`.
 
 ## Notes
 
@@ -133,17 +183,19 @@ size the server refuses when you save shows its message and keeps the waiting
 changes.
 
 On the UI/UX tab in edit mode, drag an element to move it earlier or later
-among its siblings or into another screen, row or column. A faded copy follows
-the pointer while the other elements move aside, so the design shows how it
-will look after the drop.
+among its siblings or into another screen, row, column, tab, scroll area or
+split pane. A faded copy follows the pointer while the other elements move
+aside, so the design shows how it will look after the drop.
 The element goes where the pointer is: over the near or far half of a sibling
 it goes before or after it, and over a container's free space it joins that
-container. Screens only move among screens. Dropping adds one waiting move,
-`{"op":"move","id","parent","index"}`, where `parent` is `null` for the top
-level and `index` counts the parent's children without the moved element. A
-drop the design rules refuse, such as a screen inside a row or an element
-outside every screen, adds nothing and the element goes back; so does a drop
-where the element already was.
+container. Screens only move among screens. Tabs hold only tab items, a tab
+cannot leave its tabs element, and a split pane takes exactly two regions.
+Dropping adds one waiting move, `{"op":"move","id","parent","index"}`, where
+`parent` is `null` for the top level and `index` counts the parent's children
+without the moved element. A drop the design rules refuse, such as a screen
+inside a row, a third region in a split pane, a non-tab in a tabs element, or
+an element outside every screen, adds nothing and the element goes back; so
+does a drop where the element already was.
 
 Save sends every waiting change for the open design as one
 `POST /designs/{id}/edit`, so it becomes one version. The saved design is drawn
@@ -174,6 +226,10 @@ element with only an `action` changes nothing when clicked. A design may put
 placeholders. `navigates_to` names a top-level screen in the same design, and a
 missing or non-screen id is refused with `E7033`, naming the element. Screens
 and text inputs take neither property.
+
+Clicking a non-current tab shows that tab's content in Preview. That switch is
+preview-only and is never saved; leaving Preview shows the design's current tab
+again.
 
 A click in Preview follows links instead of selecting.
 

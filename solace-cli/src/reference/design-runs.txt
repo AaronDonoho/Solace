@@ -12,6 +12,17 @@ inside (its parents, top first).
                                 `design:<id>`; a reply over the limit stops at
                                 a whole element and says which `--from` reads
                                 on from
+  design schema                 the whole format: every element type with its
+                                required and optional properties, the values
+                                each allows and a minimal example, the style
+                                overrides and design and element keys,
+                                placement rules, and each proposal operation
+  design check [<id>]           try a change without saving it: the same JSON
+                                object and read rule as `design propose`. It
+                                replies with the first refusal, or a short
+                                outline of the elements it would add, remove,
+                                move and change. It saves nothing, asks no
+                                question, and may share a call with reads
   design propose [<id>]         change design <id>, or create one with no id:
                                 a JSON object in `text` with operations, plus
                                 title and tab when creating. It is alone in its

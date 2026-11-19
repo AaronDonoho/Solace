@@ -87,3 +87,49 @@ pub fn outside_every_element_only_a_screen_has_a_place_test() {
   assert moving.drop_place(a_design(), "one", 500.0, 700.0, bounds())
     == Some(moving.Place(None, 1))
 }
+
+pub fn structural_moves_refuse_what_the_rules_refuse_test() {
+  let design = a_structural_design()
+  assert moving.move(design, "loose", moving.Place(Some("tabs"), 1))
+    == Error(Nil)
+  assert moving.move(design, "two", moving.Place(Some("row"), 0)) == Error(Nil)
+  assert moving.move(design, "extra", moving.Place(Some("split"), 2))
+    == Error(Nil)
+  assert case moving.move(design, "loose", moving.Place(Some("scroll"), 0)) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  assert case moving.move(design, "loose", moving.Place(Some("one"), 0)) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  assert case moving.move(design, "two", moving.Place(Some("tabs"), 0)) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  assert moving.move(design, "left", moving.Place(Some("scroll"), 0))
+    == Error(Nil)
+}
+
+fn a_structural_design() -> render.Design {
+  let assert Ok(design) =
+    render.decode(
+      "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"one\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"},\"children\":[{\"id\":\"tabs\",\"type\":\"tabs\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"current\":\"first\"},\"children\":[{\"id\":\"first\",\"type\":\"tab\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"First\"}},{\"id\":\"two\",\"type\":\"tab\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Second\"}}]},{\"id\":\"scroll\",\"type\":\"scroll_area\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"}},{\"id\":\"split\",\"type\":\"split_pane\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"direction\":\"row\"},\"children\":[{\"id\":\"left\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Left\"}},{\"id\":\"right\",\"type\":\"text\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\",\"text\":\"Right\"}}]},{\"id\":\"row\",\"type\":\"row\",\"properties\":{\"width\":\"fill\",\"height\":\"hug\"},\"children\":[{\"id\":\"loose\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Loose\"}},{\"id\":\"extra\",\"type\":\"button\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"label\":\"Extra\"}}]}]}]}",
+    )
+  design
+}
+
+pub fn a_component_stand_in_holds_nothing_but_can_move_test() {
+  let assert Ok(design) =
+    render.decode(
+      "{\"schemaVersion\":1,\"id\":\"0123456789abcdef\",\"title\":\"Home\",\"tab\":\"ui\",\"elements\":[{\"id\":\"screen\",\"type\":\"screen\",\"properties\":{\"width\":\"fill\",\"height\":\"fill\"},\"children\":[{\"id\":\"component\",\"type\":\"component\",\"properties\":{\"width\":\"fill\",\"height\":{\"fixed\":180},\"name\":\"Task details\"}},{\"id\":\"body\",\"type\":\"text\",\"properties\":{\"width\":\"hug\",\"height\":\"hug\",\"text\":\"Body\"}}]}]}",
+    )
+  assert moving.move(design, "body", moving.Place(Some("component"), 0))
+    == Error(Nil)
+  assert case
+    moving.move(design, "component", moving.Place(Some("screen"), 1))
+  {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+}

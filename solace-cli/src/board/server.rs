@@ -283,6 +283,9 @@ impl Board {
                 let id = p.strip_prefix("/designs/").and_then(|rest| rest.strip_suffix("/undo")).unwrap_or("");
                 return crate::design::undelete(&self.top, &view::percent_decode(id));
             }
+            (_, p) if p == "/releases" || p.starts_with("/releases/") => {
+                return releases_route(&self.top, method, p, body).unwrap_or_else(|| err("E7001", "unknown route"));
+            }
             ("DELETE", p) if p.starts_with("/designs/") => {
                 let id = view::percent_decode(&p["/designs/".len()..]);
                 return crate::design::delete(&self.top, &id);
@@ -965,13 +968,6 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if strategy.first() == Some(&"builds") {
                 return build_route(req, &board.top, &strategy);
             }
-            // A passed build's release record (D-247).
-            if let ("GET", ["releases"]) = (req.method().as_str(), strategy.as_slice()) {
-                return respond_json(req, crate::releases::listed(&board.top));
-            }
-            if let ("GET", ["releases", version]) = (req.method().as_str(), strategy.as_slice()) {
-                return respond_json(req, crate::releases::get(&board.top, version));
-            }
             if let ("GET", ["releases", version, rest @ ..]) = (req.method().as_str(), strategy.as_slice())
                 && !rest.is_empty()
             {
@@ -1136,6 +1132,8 @@ fn root_route(path: &str, explicit: bool) -> bool {
         || path.starts_with("/skills/")
         || path == "/designs"
         || path.starts_with("/designs/")
+        || path == "/releases"
+        || path.starts_with("/releases/")
         || path == "/setup"
         || path == "/models"
         || path.starts_with("/models/")
@@ -1318,5 +1316,24 @@ fn content_type(name: &str) -> &'static str {
         "tar" => "application/x-tar",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
+    }
+}
+
+/// The root's release routes: list, read, ask for notes, and settle them.
+fn releases_route(top: &Path, method: &str, path: &str, body: &Value) -> Option<Result<Value, Failure>> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let version = parts.get(1).map(|version| view::percent_decode(version)).unwrap_or_default();
+    match (method, parts.as_slice()) {
+        ("GET", ["releases"]) => Some(crate::releases::listed(top)),
+        ("GET", ["releases", _]) => Some(crate::releases::get(top, &version)),
+        ("POST", ["releases", _, "notes"]) => Some(crate::releases::ask(top, &version)),
+        ("POST", ["releases", _, "notes", "approve"]) => {
+            let Some(text) = body["text"].as_str() else {
+                return Some(err("E7001", "release notes need `text` as a string"));
+            };
+            Some(crate::releases::approve(top, &version, text))
+        }
+        ("POST", ["releases", _, "notes", "reject"]) => Some(crate::releases::reject(top, &version)),
+        _ => None,
     }
 }

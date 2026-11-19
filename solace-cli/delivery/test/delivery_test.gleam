@@ -204,9 +204,17 @@ pub fn filing_a_task_opens_the_prefilled_form_test() {
 
 pub fn open_folder_shows_only_in_the_desktop_app_test() {
   let release =
-    delivery.Release("b1", [delivery.Artifact("priv/app.js", 6, "abc123")])
+    delivery.Release(
+      "b1",
+      [delivery.Artifact("priv/app.js", 6, "abc123")],
+      None,
+    )
   let browser =
-    delivery.Model(..model_with(make_build([])), release: Some(release))
+    delivery.Model(
+      ..model_with(make_build([])),
+      release: Some(release),
+      releases: [release],
+    )
   let page = html(browser)
   assert string.contains(page, "Release b1")
   assert string.contains(page, "priv/app.js")
@@ -272,4 +280,70 @@ pub fn an_older_version_is_warned_and_still_builds_test() {
   assert !delivery.start_disabled(model)
   let current = delivery.Model(..model, version: "0.2.0")
   assert !string.contains(html(current), "older than the newest release")
+}
+
+pub fn an_older_release_can_be_picked_and_its_notes_draft_shown_test() {
+  let newest = delivery.Release("2.0.0", [], None)
+  let older =
+    delivery.Release(
+      "1.0.0",
+      [],
+      Some(delivery.Notes("- [Ship it](task:0123456789abcdef)", "draft")),
+    )
+  let model =
+    delivery.Model(
+      ..delivery.initial(),
+      releases: [newest, older],
+      release: Some(newest),
+    )
+  let #(picked, _) = delivery.update(model, delivery.SelectRelease("1.0.0"))
+  let page = html(picked)
+  assert string.contains(page, "Release 1.0.0")
+  assert string.contains(page, "Ship it")
+  assert string.contains(page, "task:0123456789abcdef")
+  assert string.contains(page, "Approve")
+  assert string.contains(page, "Reject")
+}
+
+pub fn a_draft_can_be_edited_and_approved_test() {
+  let draft =
+    delivery.Release("1.0.0", [], Some(delivery.Notes("old draft", "draft")))
+  let model =
+    delivery.Model(
+      ..delivery.initial(),
+      releases: [draft],
+      release: Some(draft),
+    )
+  let page = html(model)
+  assert string.contains(page, "old draft")
+  assert string.contains(page, "notes-edit")
+  assert string.contains(page, "Approve")
+  assert string.contains(page, "Reject")
+  let #(edited, _) = delivery.update(model, delivery.NotesChanged("new notes"))
+  assert edited.notes_edit == Some("new notes")
+  assert string.contains(html(edited), "new notes")
+  let #(saving, _) = delivery.update(edited, delivery.ApproveNotes)
+  assert saving.saving_notes
+  assert string.contains(html(saving), "Saving…")
+}
+
+pub fn approved_notes_show_with_the_release_test() {
+  let release =
+    delivery.Release(
+      "1.0.0",
+      [],
+      Some(delivery.Notes("- [Ship it](task:0123456789abcdef)", "approved")),
+    )
+  let model =
+    delivery.Model(
+      ..delivery.initial(),
+      releases: [release],
+      release: Some(release),
+    )
+  let page = html(model)
+  assert string.contains(page, "Release notes")
+  assert string.contains(page, "Ship it")
+  assert string.contains(page, "/task/0123456789abcdef")
+  assert !string.contains(page, "notes-edit")
+  assert !string.contains(page, "Approve")
 }

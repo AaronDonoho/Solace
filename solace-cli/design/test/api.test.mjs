@@ -1,10 +1,16 @@
 import { test, expect } from 'bun:test';
 import {
+  anchor_zoom,
+  center_zoom,
   drag_note_box,
   listen_move,
+  listen_pan,
   listen_region,
   listen_resize,
+  listen_window,
+  listen_zoom,
   place_note_box,
+  reset_zoom,
 } from '../build/dev/javascript/design/api.mjs';
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
@@ -201,7 +207,7 @@ test('a drag reports its corners and the bounds of every drawn element', async (
   }
 });
 
-function fakeMoveTarget(canvas) {
+function fakeMoveTarget(canvas, zoom = null) {
   const ghost = {
     style: {},
     attributes: { 'data-design-id': 'title' },
@@ -215,6 +221,8 @@ function fakeMoveTarget(canvas) {
     getAttribute: name => name === 'data-design-id' ? 'title' : null,
     getBoundingClientRect: () => ({ left: 20, top: 30, right: 80, bottom: 40 }),
     cloneNode: () => ghost,
+    closest: selector => selector === '[data-zoom]' && zoom
+      ? { getAttribute: () => String(zoom) } : null,
   };
   const target = {
     closest: selector => selector === '[data-move]' ? canvas
@@ -275,6 +283,31 @@ test('an element drag reports its start, each position and the drop', async () =
     expect(globals.find('click').options).toBe(true);
     await sleep(10);
     expect(globals.find('click')).toBeUndefined();
+  } finally {
+    globals.restore();
+  }
+});
+
+test('an element drag at a zoom keeps the ghost under the pointer', () => {
+  const { root, state } = fakeRoot();
+  const canvas = fakeCanvas();
+  const { ghost, target } = fakeMoveTarget(canvas, 2);
+  const globals = fakeGlobalListeners();
+  try {
+    listen_move(root, () => {}, () => {}, () => {}, () => {});
+    state.rootListeners.pointerdown({ button: 0, clientX: 30, clientY: 35, target });
+    globals.find('pointermove').handler({
+      clientX: 50,
+      clientY: 60,
+      preventDefault: () => {},
+    });
+    expect(ghost.style).toMatchObject({
+      zoom: '2',
+      width: '30px',
+      height: '5px',
+      left: '20px',
+      top: '27.5px',
+    });
   } finally {
     globals.restore();
   }
@@ -560,4 +593,232 @@ test('only a left press on a visible canvas starts a drag', async () => {
   } finally {
     globals.restore();
   }
+});
+
+test('space or the middle button drags the canvas to pan it', () => {
+  const { root, state } = fakeRoot();
+  const canvas = {
+    scrollLeft: 40,
+    scrollTop: 20,
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+    closest: () => null,
+  };
+  const target = { closest: selector => selector === '.design-canvas' ? canvas : null };
+  const globals = fakeGlobalListeners();
+  try {
+    listen_pan(root);
+
+    globals.find('keydown').handler({
+      key: ' ',
+      code: 'Space',
+      target,
+      composedPath: () => [target],
+      preventDefault: () => {},
+    });
+    state.rootListeners.pointerdown({
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      target,
+      preventDefault: () => {},
+      stopImmediatePropagation: () => {},
+    });
+    globals.find('pointermove').handler({
+      clientX: 25,
+      clientY: 30,
+      preventDefault: () => {},
+    });
+    expect(canvas.scrollLeft).toBe(25);
+    expect(canvas.scrollTop).toBe(0);
+    globals.find('pointerup').handler({});
+    const click = globals.find('click');
+    expect(click.options).toBe(true);
+    let clickPrevented = 0;
+    let clickStopped = 0;
+    click.handler({
+      preventDefault: () => { clickPrevented++; },
+      stopPropagation: () => { clickStopped++; },
+    });
+    expect([clickPrevented, clickStopped]).toEqual([1, 1]);
+    globals.find('keyup').handler({ key: ' ', code: 'Space' });
+
+    state.rootListeners.pointerdown({
+      button: 1,
+      clientX: 10,
+      clientY: 10,
+      target,
+      preventDefault: () => {},
+      stopImmediatePropagation: () => {},
+    });
+    globals.find('pointermove').handler({
+      clientX: 0,
+      clientY: 5,
+      preventDefault: () => {},
+    });
+    globals.find('pointerup').handler({});
+    expect(canvas.scrollLeft).toBe(35);
+    expect(canvas.scrollTop).toBe(5);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('space away from the canvas or on a select is left to the page', () => {
+  const { root, state } = fakeRoot();
+  const canvas = { closest: () => null };
+  const globals = fakeGlobalListeners();
+  try {
+    listen_pan(root);
+    const page = { closest: () => null };
+    let prevented = 0;
+    const press = target => globals.find('keydown').handler({
+      key: ' ',
+      code: 'Space',
+      target,
+      composedPath: () => [target],
+      preventDefault: () => { prevented++; },
+    });
+
+    press(page);
+    expect(prevented).toBe(0);
+
+    state.rootListeners.pointerover({
+      target: { closest: selector => selector === '.design-canvas' ? canvas : null },
+    });
+    const select = { closest: selector => selector.includes('select') ? select : null };
+    press(select);
+    expect(prevented).toBe(0);
+
+    press(page);
+    expect(prevented).toBe(1);
+
+    state.rootListeners.pointerout({ relatedTarget: null });
+    press(page);
+    expect(prevented).toBe(1);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('space in a field does not start a pan', () => {
+  const { root, state } = fakeRoot();
+  const canvas = {
+    scrollLeft: 0,
+    scrollTop: 0,
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+  };
+  const field = { closest: selector => selector.includes('input') ? field : null };
+  const target = { closest: selector => selector === '.design-canvas' ? canvas : null };
+  const globals = fakeGlobalListeners();
+  try {
+    listen_pan(root);
+    globals.find('keydown').handler({
+      key: ' ',
+      code: 'Space',
+      target: field,
+      composedPath: () => [field],
+      preventDefault: () => {},
+    });
+    state.rootListeners.pointerdown({
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      target: { closest: selector => selector.includes('input') ? field : selector === '.design-canvas' ? canvas : null },
+      preventDefault: () => {},
+      stopImmediatePropagation: () => {},
+    });
+    expect(canvas.scrollLeft).toBe(0);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('dragging the window handle reports the size in design units', () => {
+  const { root, state } = fakeRoot();
+  const globals = fakeGlobalListeners();
+  const frame = {
+    closest: selector => selector === '[data-zoom]' ? null : null,
+    getBoundingClientRect: () => ({ width: 1000, height: 800 }),
+  };
+  const handle = {
+    closest: selector => selector === '[data-window]' ? frame : null,
+  };
+  const reports = [];
+  try {
+    listen_window(root, (...args) => reports.push(args));
+    state.rootListeners.pointerdown({
+      button: 0,
+      clientX: 100,
+      clientY: 100,
+      target: {
+        closest: selector => selector === '[data-window-handle]' ? handle : null,
+      },
+      preventDefault: () => {},
+    });
+    globals.find('pointermove').handler({
+      clientX: 150,
+      clientY: 140,
+      preventDefault: () => {},
+    });
+    expect(reports).toEqual([[1050, 840]]);
+  } finally {
+    globals.restore();
+  }
+});
+
+test('ctrl + wheel zooms the canvas and a plain wheel does not', () => {
+  const { root, state } = fakeRoot();
+  const canvas = { getBoundingClientRect: () => ({ left: 10, top: 20 }) };
+  const target = { closest: selector => selector === '.design-canvas' ? canvas : null };
+  const reports = [];
+  try {
+    listen_zoom(root, (...args) => reports.push(args));
+    let stopped = false;
+    state.rootListeners.wheel({
+      ctrlKey: true,
+      metaKey: false,
+      deltaY: -1,
+      clientX: 40,
+      clientY: 60,
+      target,
+      preventDefault: () => {},
+      stopPropagation: () => { stopped = true; },
+    });
+    expect(stopped).toBe(true);
+    expect(reports).toEqual([[1.1, 30, 40]]);
+
+    state.rootListeners.wheel({
+      ctrlKey: false,
+      metaKey: false,
+      deltaY: -1,
+      clientX: 40,
+      clientY: 60,
+      target,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+    expect(reports.length).toBe(1);
+  } finally {
+    reports.length = 0;
+  }
+});
+
+test('zooming keeps the point under the pointer and reset returns to the top', () => {
+  const { root } = fakeRoot();
+  const canvas = { scrollLeft: 100, scrollTop: 50, clientWidth: 400, clientHeight: 200 };
+  root.querySelector = selector => selector === '.design-canvas' ? canvas : null;
+
+  anchor_zoom(root, 30, 20, 1, 2);
+  expect(canvas.scrollLeft).toBe(230);
+  expect(canvas.scrollTop).toBe(120);
+
+  canvas.scrollLeft = 100;
+  canvas.scrollTop = 50;
+  center_zoom(root, 1, 2);
+  expect(canvas.scrollLeft).toBe(400);
+  expect(canvas.scrollTop).toBe(200);
+
+  reset_zoom(root);
+  expect(canvas.scrollLeft).toBe(0);
+  expect(canvas.scrollTop).toBe(0);
 });

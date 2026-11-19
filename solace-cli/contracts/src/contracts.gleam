@@ -17,6 +17,7 @@ import lustre/element.{type Element}
 import lustre/element/html as h
 import lustre/element/svg as s
 import lustre/event as e
+import zoom_bar
 
 /// Registers the element on its own, for `index.html`.
 pub fn main() {
@@ -2089,12 +2090,17 @@ fn drawing_sheet(model: Model) -> Element(Msg) {
         ),
       ]),
       h.div([a.class("view-tools")], [
-        h.button([e.on_click(Zoom(1.2)), a.aria_label("Zoom in")], [
-          h.text("+"),
-        ]),
-        h.button([e.on_click(Zoom(0.833333)), a.aria_label("Zoom out")], [
-          h.text("−"),
-        ]),
+        zoom_bar.bar(
+          model.zoom,
+          Zoom(1.2),
+          Zoom(0.833333),
+          Reset,
+          zoom_bar.Tips(
+            "Zoom in (scroll up)",
+            "Zoom out (scroll down)",
+            "Back to the default view. Pan by dragging",
+          ),
+        ),
         icon_button(
           ExpandAll,
           "Expand all (Shift+Space)",
@@ -2104,11 +2110,6 @@ fn drawing_sheet(model: Model) -> Element(Msg) {
           CollapseAll,
           "Collapse all (Shift+C)",
           "M7 4l5 5 5-5M7 20l5-5 5 5",
-        ),
-        icon_button(
-          Reset,
-          "Back to the default view",
-          "M3 11.5 12 4l9 7.5M5.5 9.5V20h5v-6h3v6h5V9.5",
         ),
       ]),
     ]),
@@ -2438,6 +2439,7 @@ pub fn view(model: Model) -> Element(Msg) {
     list.append(
       [
         h.style([], view_styles),
+        h.style([], zoom_bar.styles),
         h.header([a.class("view-top")], [
           h.div([], [
             h.a([ax("href", "/"), a.class("view-back")], [h.text("← Board")]),

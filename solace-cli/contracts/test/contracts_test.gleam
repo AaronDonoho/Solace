@@ -1,12 +1,15 @@
 import contracts
+import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None}
 import gleam/result
+import gleam/string
 import gleeunit
 import gleeunit/should
+import lustre/element
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -179,4 +182,51 @@ pub fn flow_positions_place_connected_nodes_test() {
     )
   let assert Ok(points) = json.parse(placed, decode.list(decode.dynamic))
   assert list.length(points) == 2
+}
+
+/// The drawing uses the bar shared with the Design page.
+pub fn the_drawing_uses_the_shared_zoom_bar_test() {
+  let text =
+    "{\"nodes\":[{\"id\":\"fn:app.main\",\"kind\":\"entry\",\"name\":\"main\"}],\"edges\":[]}"
+  let graph =
+    json.parse(text, contracts.graph_decoder())
+    |> result.unwrap(contracts.Graph([], [], None, "", "", []))
+  let model =
+    contracts.Model(
+      graph,
+      [],
+      [],
+      [],
+      "",
+      None,
+      "",
+      [],
+      "",
+      "",
+      1.0,
+      0.0,
+      0.0,
+      False,
+      0.0,
+      0.0,
+      0.0,
+      "",
+      "",
+      "",
+      False,
+      False,
+      None,
+      False,
+      "",
+      None,
+      "",
+      dynamic.nil(),
+      False,
+    )
+  let html = element.to_string(contracts.view(model))
+  assert string.contains(html, "class=\"zoom-bar\"")
+  assert string.contains(
+    html,
+    "data-tip=\"Back to the default view. Pan by dragging\"",
+  )
 }

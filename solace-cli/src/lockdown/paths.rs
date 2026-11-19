@@ -216,7 +216,10 @@ pub(crate) fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     // A path out of the project, or into a project nested in it, is another project's.
     if internal(root, name) || name.split('/').any(|c| c == "..") {
         // A strategy run changes nothing and has no task to ask about (D-93).
-        let ask = if strategy_context().is_some() || crate::board::runs::design_context().is_some() {
+        let ask = if strategy_context().is_some()
+            || crate::board::runs::design_context().is_some()
+            || crate::board::runs::notes_context().is_some()
+        {
             String::new()
         } else {
             format!(". {}", crate::scope::ASK_FOR_PROJECT)

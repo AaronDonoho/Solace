@@ -134,6 +134,7 @@ lists them):
   write [path]                  one replacement, or no path: a patch of many edits
   move <from> <to>              move a file
   design list | show <id>       the workspace's designs, and one whole
+  design schema                 the whole design format, with an example of each element type
   work add | list | done        work records, kept across sessions
 Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's
 src/ and tests/ *.rs, are symbol-held source (`submit`, never `write`);

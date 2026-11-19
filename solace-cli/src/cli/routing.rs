@@ -409,6 +409,9 @@ enum SettingsWrite {
 }
 
 fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Result<Option<Out>, Failure> {
+    if let Some(rid) = crate::board::runs::notes_context() {
+        return Ok(Some(notes_run(&rid, args, input, budget)));
+    }
     if let Some(rid) = crate::board::runs::design_context() {
         return Ok(Some(design_run(&rid, args, input, budget)));
     }
@@ -671,7 +674,8 @@ pub(crate) fn inspect_options<'a>(args: &[&'a str]) -> Result<(Vec<&'a str>, Opt
 
 /// A command in design run `rid` (D-240): plain reads of any project under the
 /// root, taking no project lock. Every other command is refused (`E7010`);
-/// the run's own commands are `design note`, `design wait` and `design propose`.
+/// the run's own commands are `design note`, `design wait`, `design propose`
+/// and `design check`.
 fn design_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
     let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
     design_run_at(&top, rid, args, input, budget)
@@ -687,8 +691,9 @@ fn design_run_at(top: &Path, rid: &str, args: &[String], input: &mut dyn FnMut()
             "strategy" => "a design run reads the plan with `strategy list` and `strategy show`; other strategy commands are refused",
             c if HOST.contains(&c) => "host command is unavailable in a run",
             _ => {
-                "a design run reads code, designs and the plan; reply with `design note` or propose \
-                 with `design propose <id>` (add `--project <folder>` for another project)"
+                "a design run reads code, designs and the plan; reply with `design note`, check \
+                 with `design check <id>`, or propose with `design propose <id>` \
+                 (add `--project <folder>` for another project)"
             }
         };
         return crate::lockdown::error("E7010", command, why);
@@ -712,8 +717,38 @@ fn design_run_at(top: &Path, rid: &str, args: &[String], input: &mut dyn FnMut()
     if command == "strategy" {
         return crate::board::strategy_command(top, rid, &a, input, budget);
     }
-    if command == "design" && matches!(a.get(1).copied(), Some("note" | "wait" | "propose")) {
+    if command == "design" && matches!(a.get(1).copied(), Some("note" | "wait" | "propose" | "check")) {
         return crate::board::design_command(top, rid, &a, input);
     }
     read_project(dir, &read_args, budget)
+}
+
+/// A command in notes run `rid`: plain reads, and `notes draft` to save the
+/// draft. Every other command is refused (`E7010`).
+fn notes_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    if command != "notes" && !READS.contains(&command) {
+        let why = match command {
+            "task" => "a notes run drafts release notes; task commands are refused",
+            c if HOST.contains(&c) => "host command is unavailable in a run",
+            _ => {
+                "a notes run reads code and saves its draft: notes draft, and view, inspect, refs, find, grep, \
+                 files and read (with --project <folder> for another project)"
+            }
+        };
+        return crate::lockdown::error("E7010", command, why);
+    }
+    let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
+    crate::board::runs::notes_guard(&top, rid, &a)?;
+    if command == "notes" {
+        return crate::board::runs::notes_command(&top, rid, &a, input);
+    }
+    match a.iter().position(|x| *x == "--project") {
+        Some(i) => {
+            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
+            read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
+        }
+        None => read_project(".", args, budget),
+    }
 }

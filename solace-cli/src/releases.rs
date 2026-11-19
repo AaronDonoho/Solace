@@ -6,6 +6,9 @@ use crate::lockdown;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Component, Path};
+#[cfg(test)]
+#[path = "releases_tests.rs"]
+mod tests;
 
 pub const DEFAULT_OUTPUT: &str = "build-output";
 
@@ -238,6 +241,10 @@ pub fn listed(top: &Path) -> Result<Value, Failure> {
         }
     }
     records.sort_by(|a, b| b["time"].as_u64().cmp(&a["time"].as_u64()).then_with(|| b["version"].as_str().cmp(&a["version"].as_str())));
+    for record in &mut records {
+        let version = record["version"].as_str().unwrap_or("");
+        record["notes"] = saved(top, version).unwrap_or(Value::Null);
+    }
     Ok(json!({"releases": records}))
 }
 
@@ -245,8 +252,10 @@ pub fn get(top: &Path, version: &str) -> Result<Value, Failure> {
     if version.is_empty() || version.contains('/') || version.contains("..") {
         return Err(Failure(format!("E7023 unknown release {version}"), 1));
     }
-    crate::jsonx::read_opt(&top.join(folder(top)).join(version).join("release.json"))
-        .ok_or_else(|| Failure(format!("E7023 unknown release {version}"), 1))
+    let mut record = crate::jsonx::read_opt(&top.join(folder(top)).join(version).join("release.json"))
+        .ok_or_else(|| Failure(format!("E7023 unknown release {version}"), 1))?;
+    record["notes"] = saved(top, version).unwrap_or(Value::Null);
+    Ok(record)
 }
 
 fn succeeded(text: &str) -> bool {
@@ -261,4 +270,225 @@ pub(crate) fn artifact(top: &Path, version: &str, path: &str) -> Result<std::pat
         return Err(Failure(format!("E7023 unknown release artifact {path}"), 1));
     }
     Ok(file)
+}
+
+/// Starts release `version`'s notes run, with a draft built from the work
+/// completed since the release before it.
+pub(crate) fn ask(top: &Path, version: &str) -> Result<Value, Failure> {
+    get(top, version)?;
+    if saved(top, version).is_some_and(|notes| notes["state"] == "approved") {
+        return Err(Failure(format!("E7003 release {version}'s notes were already approved"), 1));
+    }
+    if let Some(open) = crate::tasks::strategy::notes_runs(top)
+        .into_iter()
+        .find(|r| r["state"] != "ended" && r["context"]["kind"] == "release" && r["context"]["id"] == version)
+    {
+        let rid = open["id"].as_str().unwrap_or("");
+        return Err(Failure(format!("E7003 notes run {rid} for release {version} is open"), 1));
+    }
+    let mut notes = draft(top, version)?;
+    let text = notes["text"].as_str().unwrap_or("").to_string();
+    let message = format!(
+        "Draft the release notes for release {version}. The draft below is already saved on the Build tab; \
+         review it and save your version with `notes draft`, its Markdown in `text`. Keep one entry per task, \
+         written `[title](task:<id>)`, under its feature's title; add no work that is not listed.\n\n{text}"
+    );
+    let run = crate::tasks::strategy::start_notes_run(top, version, &message)?;
+    let rid = run["id"].as_str().unwrap_or("").to_string();
+    notes["run"] = json!(rid);
+    notes["state"] = json!("draft");
+    notes["time"] = json!(crate::now());
+    save(top, version, &notes)?;
+    crate::board::runs::start_notes(top.to_path_buf(), rid);
+    Ok(notes)
+}
+
+/// Saves the draft an agent wrote for release `version`.
+pub(crate) fn save_draft(top: &Path, version: &str, text: &str) -> Result<Value, Failure> {
+    let _lock = crate::board::task_model::lock(top)?;
+    let mut notes = saved(top, version).ok_or_else(|| Failure(format!("E7023 release {version} has no notes draft"), 1))?;
+    if notes["state"] != "draft" {
+        return Err(Failure(format!("E7023 release {version}'s notes were already settled"), 1));
+    }
+    notes["state"] = json!("draft");
+    notes["text"] = json!(text.trim_end());
+    notes["time"] = json!(crate::now());
+    save(top, version, &notes)?;
+    Ok(notes)
+}
+
+/// The draft saved beside release `version`, if there is one.
+pub(crate) fn saved(top: &Path, version: &str) -> Option<Value> {
+    crate::jsonx::read_opt(&file(top, version))
+}
+
+/// The draft release `version` starts from: the work completed after the
+/// release before it, up to and including it.
+pub(crate) fn draft(top: &Path, version: &str) -> Result<Value, Failure> {
+    let releases = listed(top)?["releases"].as_array().cloned().unwrap_or_default();
+    let at = releases.iter().position(|r| r["version"] == version).ok_or_else(|| Failure(format!("E7023 unknown release {version}"), 1))?;
+    let upper = releases[at]["time"].as_u64().unwrap_or(0);
+    let lower = releases.get(at + 1).and_then(|r| r["time"].as_u64());
+    let tasks = window_tasks(top, lower, upper)?;
+    let features = crate::tasks::records(top, "features");
+    let groups = groups(&tasks, &features);
+    let decisions = decisions(top, &tasks, lower, upper);
+    let text = markdown(version, &groups, &decisions);
+    Ok(json!({"version": version, "groups": groups, "decisions": decisions, "text": text}))
+}
+
+fn file(top: &Path, version: &str) -> std::path::PathBuf {
+    top.join(folder(top)).join(version).join("notes.json")
+}
+
+fn save(top: &Path, version: &str, notes: &Value) -> Result<(), Failure> {
+    let dir = file(top, version).parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    crate::jsonx::replace_pretty(&dir, "notes.json", notes)?;
+    crate::tasks::store::log(top, "", &json!({"releaseNotes": {"version": version}}));
+    Ok(())
+}
+
+fn window_tasks(top: &Path, lower: Option<u64>, upper: u64) -> Result<Vec<Value>, Failure> {
+    let mut flows: std::collections::HashMap<std::path::PathBuf, Option<Value>> = std::collections::HashMap::new();
+    let mut out = vec![];
+    for t in crate::board::task_model::all_tasks(top)? {
+        let Some(closed) = t["closedTime"].as_u64() else { continue };
+        if closed > upper || lower.is_some_and(|low| closed <= low) {
+            continue;
+        }
+        let root = crate::scope::path(top, t["home"].as_str().unwrap_or("."));
+        let w = flows.entry(root.clone()).or_insert_with(|| crate::board::task_model::flow(&root).ok());
+        let Some(w) = w else { continue };
+        if crate::board::task_model::column(w, &t)["final"] != true {
+            continue;
+        }
+        out.push(t);
+    }
+    Ok(out)
+}
+
+fn groups(tasks: &[Value], features: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    for t in tasks {
+        let id = t["id"].as_str().unwrap_or("");
+        let title = t["title"].as_str().unwrap_or(id);
+        let feature = t["feature"].as_str().and_then(|fid| features.iter().find(|f| f["id"] == fid));
+        let (key, label, complete) = match feature {
+            Some(f) => {
+                (f["id"].as_str().unwrap_or("").to_string(), f["title"].as_str().unwrap_or("").to_string(), f["state"] == "complete")
+            }
+            None => (String::new(), "Other work".to_string(), false),
+        };
+        let entry = json!({"task": id, "title": title});
+        match out.iter().position(|g| g["key"] == key) {
+            Some(i) => out[i]["tasks"].as_array_mut().unwrap().push(entry),
+            None => out.push(json!({"key": key, "title": label, "complete": complete, "tasks": [entry]})),
+        }
+    }
+    out
+}
+
+fn decisions(top: &Path, tasks: &[Value], lower: Option<u64>, upper: u64) -> Vec<Value> {
+    let text = fs::read_to_string(crate::decisions::file(top)).unwrap_or_default();
+    let titles: Vec<String> = tasks.iter().filter_map(|t| t["title"].as_str().map(unquote)).collect();
+    let lower_date = lower.map(crate::decisions::date_of);
+    let upper_date = crate::decisions::date_of(upper);
+    crate::decisions::records(&text)
+        .into_iter()
+        .filter(|r| match origin(&r.text) {
+            Some((origin, date)) => match origin.strip_prefix("board task ") {
+                Some(title) => titles.iter().any(|t| *t == unquote(title)),
+                None => {
+                    origin.starts_with("strategy run")
+                        && lower_date.as_deref().is_none_or(|low| date.as_str() >= low)
+                        && date.as_str() <= upper_date.as_str()
+                }
+            },
+            None => false,
+        })
+        .map(|r| json!({"id": r.id, "title": r.title}))
+        .collect()
+}
+
+fn origin(record: &str) -> Option<(String, String)> {
+    let line = record
+        .lines()
+        .find(|l| l.starts_with('(') && l.ends_with(')') && (l.contains(", board task ") || l.contains(", strategy run ")))?;
+    let parts: Vec<&str> = line[1..line.len() - 1].split(", ").collect();
+    let date = parts.last()?.to_string();
+    let origin = parts.get(1..parts.len() - 1)?.join(", ");
+    Some((origin, date))
+}
+
+fn unquote(text: &str) -> String {
+    text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text).to_string()
+}
+
+fn markdown(version: &str, groups: &[Value], decisions: &[Value]) -> String {
+    let mut out = format!("# Release {version}\n");
+    for group in groups {
+        out += &format!("\n## {}\n", clean(group["title"].as_str().unwrap_or("")));
+        for entry in group["tasks"].as_array().into_iter().flatten() {
+            let title = clean(entry["title"].as_str().unwrap_or(""));
+            out += &format!("- [{}](task:{})\n", title, entry["task"].as_str().unwrap_or(""));
+        }
+    }
+    if !decisions.is_empty() {
+        out += "\n## Decisions\n";
+        for d in decisions {
+            out += &format!("- {}: {}\n", d["id"].as_str().unwrap_or(""), clean(d["title"].as_str().unwrap_or("")));
+        }
+    }
+    out
+}
+
+fn clean(text: &str) -> String {
+    text.replace(['\n', '\r'], " ").replace(['[', ']'], "")
+}
+
+/// Saves the human's edited draft as release `version`'s notes.
+pub(crate) fn approve(top: &Path, version: &str, text: &str) -> Result<Value, Failure> {
+    let _lock = crate::board::task_model::lock(top)?;
+    get(top, version)?;
+    let mut notes = saved(top, version)
+        .filter(|n| n["state"] == "draft")
+        .ok_or_else(|| Failure(format!("E7023 release {version} has no notes draft"), 1))?;
+    end_open_notes_run(top, version, "finished")?;
+    notes["state"] = json!("approved");
+    notes["text"] = json!(text.trim_end());
+    notes["time"] = json!(crate::now());
+    save(top, version, &notes)?;
+    get(top, version)
+}
+
+/// Drops release `version`'s notes and any draft run still writing them.
+pub(crate) fn reject(top: &Path, version: &str) -> Result<Value, Failure> {
+    let _lock = crate::board::task_model::lock(top)?;
+    get(top, version)?;
+    if saved(top, version).filter(|notes| notes["state"] == "draft").is_none() {
+        return Err(Failure(format!("E7023 release {version} has no notes draft"), 1));
+    }
+    end_open_notes_run(top, version, "stopped")?;
+    let path = file(top, version);
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    crate::tasks::store::log(top, "", &json!({"releaseNotes": {"version": version}}));
+    get(top, version)
+}
+
+/// Ends the notes run still writing `version`'s draft, if there is one.
+fn end_open_notes_run(top: &Path, version: &str, outcome: &str) -> Result<(), Failure> {
+    for run in crate::tasks::strategy::notes_runs(top) {
+        if run["state"] == "ended" || run["context"]["kind"] != "release" || run["context"]["id"] != version {
+            continue;
+        }
+        let rid = run["id"].as_str().unwrap_or("").to_string();
+        let outcome = outcome.to_string();
+        crate::tasks::strategy::update_run(top, &rid, move |run| {
+            crate::tasks::strategy::end_strategy(run, &outcome);
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
