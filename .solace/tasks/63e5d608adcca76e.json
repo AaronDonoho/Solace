@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056547,
+  "body": "`solace --version` prints which build is installed and exits 0.\n\nThe package version is always `0.1.0`, so it alone can't tell builds apart. The output also names the git commit the binary was built from, and says when it was built with uncommitted changes. A build outside a git checkout prints the version alone.\n\nIt is listed in `solace help`.\n\nOut of scope: the Settings page's About tab, and choosing release version numbers (task:311f185a4d180f07).\n\n**Tests:** `--version` prints the version and exits 0.",
+  "closedTime": 1794979487,
+  "column": "cancelled",
+  "createdTime": 1794787900,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "63e5d608adcca76e",
+  "links": [],
+  "milestone": null,
+  "rank": 304.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "cli: solace --version"
+}

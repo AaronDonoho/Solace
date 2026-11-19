@@ -445,6 +445,14 @@ fn migration_view(model: Model) -> Element(Msg) {
           message -> h.p([a.role("alert")], [h.text(message)])
         },
         case m.state {
+          "none" ->
+            h.div([], [
+              h.p([], [h.text("Nothing to migrate here.")]),
+              case m.reason {
+                "" -> h.text("")
+                reason -> h.p([], [h.text(reason)])
+              },
+            ])
           "available" ->
             h.div([], [
               button("Migrate this project", ToggleMigration),

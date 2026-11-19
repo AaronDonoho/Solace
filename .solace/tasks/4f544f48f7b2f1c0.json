@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792464633,
+  "body": "`submit <module>` works for Rust as it does for Gleam: it replaces a whole module, and the text must keep every symbol (`reference.txt`). Without it, Rust and Gleam would differ in which commands they have. Lifts the \"submit its items one by one\" refusal from task:ba1542d1a967b9b7.\n\n- **Split** the submitted text with `language::rust::split`. Its refusals reply \"Not saved\", and the draft is kept.\n- **Match** each item to its stored symbol by name within its parent (`impl`, `trait`, inline `mod`, `extern`), so ids stay permanent. A stored symbol missing from the text is refused with Gleam's message for a dropped symbol. New items are added as with `--new`.\n- **Format** only the items whose text differs from the stored text, with `cargo::format_item` (with the parent's opening when nested). Unchanged items keep their bytes, so the rest of the file isn't reformatted (D-158 point 5).\n- **Order and spacing** follow the submitted text: `ord`, `sep` and each container's `tail`.\n- **Header** is checked as for `submit --imports` (task:ba1542d1a967b9b7). Changing its `mod x;` list is refused; add a module with `submit --new` (task:5ce78f3fa5e3d808).\n- **A module that doesn't exist** is created, as in Gleam, through task:5ce78f3fa5e3d808's new-module path.\n- **Check:** `check_all` as for every submit. Errors reply \"Not saved\" and the draft is kept.\n- **Docs:** `reference.txt` drops any Rust exception for `submit <module>`; add the change to D-168.\n\n### Done when\nIn a scratch Rust store, submitting `view`'s text of a module back unchanged changes no byte and no id. Submitting it with one method edited and one item added changes only those. Dropping an item is refused. A type error keeps the draft. Gleam suites unchanged.",
+  "closedTime": 1792384226,
+  "column": "complete",
+  "createdTime": 1792355911,
+  "dependsOn": [
+    "ba1542d1a967b9b7",
+    "5ce78f3fa5e3d808"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "4f544f48f7b2f1c0",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 229.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: whole-module submit"
+}

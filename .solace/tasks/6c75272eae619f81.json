@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876819,
+  "body": "`POST /tasks` with a `milestone` returns the task with `milestone: null`; a `PATCH` afterwards sets it. Creating a task keeps the `milestone` it was given.\n\n`board::task_model.created` reads only `title`, `body`, `links` and `scope` from the request, so `feature` and `dependsOn` are likely dropped the same way: keep those too, checked as a `PATCH` checks them (an unknown record is refused, not saved).\n\n**Tests:** a task created with a milestone, a feature and a dependency returns and stores all three; an unknown one is refused.",
+  "closedTime": 1794789087,
+  "column": "complete",
+  "createdTime": 1794787890,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6c75272eae619f81",
+  "links": [],
+  "milestone": null,
+  "rank": 303.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tasks: keep milestone on create"
+}

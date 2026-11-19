@@ -1,0 +1,10 @@
+{
+  "body": "Agents work through Solace's commands, not a shell. For Gleam, the symbol tools halve tokens against plain file tooling (bench runs 16 and 21: 727k against 1.81M; run 21 medians 178k-273k against 616k-625k). For non-Gleam languages — Rust in `solace-cli`, Python in `bench` — Solace gives a weakened file tier: `grep` capped at 6 lines per file and 40 files with no context, `read` with size limits and line ranges, no orientation bundle. The ranking for a non-store language is **symbol tools > CLI tools > Solace's file tier**, so Rust agents pay the turn cost of locating code with a crippled grep and get nothing in return.\n\nEvidence: task:96249ceddc889684's work run `accc8a2600ab52b6` — 54 steps, ~20 turns, about half spent on grep→read pairs (`grep fn settle` → `read lockdown.rs 575..595`, `grep struct Sym` → `read main.rs 835..860`, and four more).\n\nThis feature closes the gap **without a shell**: the lockdown stays (journal, scope locks, recorded changes, protected-file approvals), the file tier becomes a full file tool, and non-Gleam code gets orientation. The gain is measured on real work runs — turn counts and tokens on a Rust task, against task:96249ceddc889684's work run as the baseline.",
+  "colorSlot": 2,
+  "id": "3e8b5fe47bba41c4",
+  "milestone": null,
+  "rank": 4.0,
+  "startTime": 1791843598,
+  "state": "complete",
+  "title": "Agent Tooling Efficiency"
+}

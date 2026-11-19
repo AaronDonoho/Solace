@@ -168,7 +168,7 @@ fn read_task_with(
     flows: &mut HashMap<PathBuf, Value>,
     features: &mut HashMap<String, Option<Value>>,
 ) -> Result<Value, Failure> {
-    let mut t: Value = jsonx::read(path)?;
+    let mut t = with_local_defaults(read_parts(path)?);
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
     let mut workflow = |home: &PathBuf| -> Result<Value, Failure> {
@@ -289,14 +289,21 @@ pub(crate) fn adopt_tasks(top: &Path, root: &Path) -> Result<(), Failure> {
             }
         }
         t["home"] = json!(home);
-        jsonx::write_pretty(&to, &t)?;
+        let (shared, local) = split(&t);
+        // The local part goes first, so a page that reads between the two writes
+        // still finds the conversation.
+        let local_to = local_path(&to);
+        fs::create_dir_all(local_to.parent().unwrap_or(&to))?;
+        jsonx::write_pretty(&local_to, &local)?;
+        jsonx::write_pretty(&to, &shared)?;
         fs::remove_file(&p)?;
     }
     Ok(())
 }
 
 pub(crate) fn event(s: &Store, v: Value) -> Result<(), Failure> {
-    s.db.execute("INSERT INTO board_events(data) VALUES (?)", [v.to_string()])?;
+    let top = scope::top(&s.root);
+    crate::tasks::store::log(&top, &scope::dir(&top, &s.root), &v);
     Ok(())
 }
 
@@ -1632,4 +1639,93 @@ fn answer_reply(t: &Value, run: &Value) -> Value {
 
 fn answered(t: &Value) -> usize {
     t["questions"].as_array().map_or(0, |qs| qs.iter().filter(|q| !q["answer"].is_null()).count())
+}
+
+/// The task fields the root commits. Every other field is local to this
+/// computer: a field added later stays local until someone shares it.
+pub(crate) const SHARED_FIELDS: [&str; 15] = [
+    "id",
+    "title",
+    "body",
+    "column",
+    "rank",
+    "links",
+    "scope",
+    "home",
+    "feature",
+    "milestone",
+    "dependsOn",
+    "createdTime",
+    "closedTime",
+    "archivedTime",
+    "techDebt",
+];
+
+/// The task's local part, beside its shared file in a folder the root ignores.
+pub(crate) fn local_path(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(Path::new(".")).join("local").join(path.file_name().unwrap_or_default())
+}
+
+/// Whether `t` holds anything the shared file must not commit.
+pub(crate) fn has_local_fields(t: &Value) -> bool {
+    t.as_object().is_some_and(|o| o.keys().any(|k| !SHARED_FIELDS.contains(&k.as_str())))
+}
+
+/// Splits `t` into the part committed and the part kept on this computer.
+pub(crate) fn split(t: &Value) -> (Value, Value) {
+    let mut shared = serde_json::Map::new();
+    let mut local = serde_json::Map::new();
+    for (key, value) in t.as_object().into_iter().flatten() {
+        if SHARED_FIELDS.contains(&key.as_str()) {
+            shared.insert(key.clone(), value.clone());
+        } else {
+            local.insert(key.clone(), value.clone());
+        }
+    }
+    (Value::Object(shared), Value::Object(local))
+}
+
+/// The shared file with its local part's fields on top, before load-time
+/// checks and defaults: what a split writes back.
+pub(crate) fn read_parts(path: &Path) -> Result<Value, Failure> {
+    let mut t: Value = jsonx::read(path)?;
+    let local_path = local_path(path);
+    if let Some(local) = jsonx::read_opt(&local_path)
+        && (!has_local_fields(&t) || !older(&local_path, path))
+        && let (Some(t), Some(local)) = (t.as_object_mut(), local.as_object())
+    {
+        for (key, value) in local {
+            t.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(t)
+}
+
+/// What a task with no local part reads as: empty conversations and no run state.
+fn with_local_defaults(mut t: Value) -> Value {
+    if !t.is_object() {
+        return t;
+    }
+    for key in ["notes", "questions", "runs"] {
+        if !t[key].is_array() {
+            t[key] = json!([]);
+        }
+    }
+    if !t["stamps"].is_object() {
+        t["stamps"] = json!({});
+    }
+    for key in ["model", "effort", "paused_from", "attention", "finished", "settleFailed"] {
+        if t.get(key).is_none() {
+            t[key] = Value::Null;
+        }
+    }
+    t
+}
+
+/// Whether `a` is older than `b`; without both times, the local part wins.
+fn older(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a).and_then(|m| m.modified()), fs::metadata(b).and_then(|m| m.modified())) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => false,
+    }
 }

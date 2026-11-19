@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977620,
+  "body": "Starting feature:1bf75f597496363d moved its three tasks (task:3517183e01f63016, task:96e452af906351e1, task:0a7b15f56ea4febc) from Backlog to Planning, but none of them shows on the board, even in the `solace-cli` lane and after a page reload. task:0a7b15f56ea4febc even has an investigate run going.\n\n## What is known\n- All three are in Planning, not archived, scoped to `solace-cli`, and their feature is `active`. Each has the note \"Moved to Planning: its feature … is active\".\n- By the server's rule (`tasks.shows_on_board`, D-196) that gives `onBoard: true`, *as long as* `tasks.has_project` finds the task's home. The board then shows a task when `onBoard` is true and its scope covers the lane (`solace_board.cards`).\n- Since a reload doesn't help, the live update when a feature starts (`tasks.put_record`) is probably not the cause. The task list (`board.listed`) or the card filter is.\n- The existing test `a_feature_visibility_change_announces_its_tasks` covers only a task that was already in Planning, not one moved out of Backlog when its feature starts. Nothing covers tasks created or changed by a Strategy proposal and then planned this way.\n\n## Fix\nFind why these tasks aren't shown, then fix the cause. First check what `GET` of the board's task list returns for them (`onBoard`, `home`, `column`). Leads, not conclusions: the task's `home` not naming a project, so `has_project` is false; the task being listed under a lane whose `scope_of` misses `solace-cli`; or the decoded task losing `onBoard`.\n\n## Done when\n- The three tasks above show in the `solace-cli` lane.\n- A test pins the cause, for a task created in Backlog with a feature, moved to Planning when the feature starts, and then listed: its `onBoard` is true and the board shows its card.\n- The summary names the cause in one line.",
+  "closedTime": 1792977460,
+  "column": "complete",
+  "createdTime": 1792976351,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "59e61a38727a62c4",
+  "links": [],
+  "milestone": null,
+  "rank": 83.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "title": "Fix: started feature's tasks not on board"
+}

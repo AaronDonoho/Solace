@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793916048,
+  "body": "`board.task_command` replies `Recorded.` as soon as `tasks::send` returns, while the task server may not have applied the note. If the agent exits first, `board.supervise` sees no feedback and fails the review; if the server later sets the note aside, the `Recorded` guard blocks the final-message fallback. A batched `task note` has the same timing.\n\nFor a review's `task note`, send the note, then wait with `tasks::applied` until the server has applied it. Return `Recorded.` only then. If the server set the message aside, return an error naming the set-aside and its failed inbox path so the agent can resend; the failed tool entry must not look like `Recorded.`. If no server is running, return `tasks::QUEUED` as today. Do not change work, investigate or discussion notes.\n\nDecision first: amend Spec 15 §6 (and D-183 point 2 if it needs it) to say a review's note is recorded only once the server applies it; a set-aside is a refusal to resend.\n\nTests: unit tests for applied, set-aside, queued/no server, and a batched call; an acceptance case with a fake review agent that sends `task note` inside a batch and exits, asserting `reviewed` and one note. Run `rust-board-tests`, `rust-acceptance`, `test --all`, and `check --warnings`.\n\nLeft out: no retry of the message and no change to how other task commands report queued.",
+  "closedTime": 1793485323,
+  "column": "complete",
+  "createdTime": 1792598442,
+  "dependsOn": [],
+  "feature": "081a981351f3e658",
+  "home": ".",
+  "id": "23c0a086bc394189",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 247.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "review: note waits for the server"
+}

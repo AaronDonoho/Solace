@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056540,
+  "body": "From the Build tab, the human can ask for notes on a release. An agent then drafts them. Notes are never drafted on their own.\n\n- The draft covers the tasks, features and decisions completed since the previous release (for the first release, everything completed before it).\n- It groups changes by feature and links each entry to its task.\n- The human sees the draft on the Build tab with that release.\n\nNot in this task: editing, approving and storing the notes (the next task).\n\nDone when: asking for notes on a release produces a draft grouped by feature, each entry linking its task, covering only the work completed since the previous release.",
+  "closedTime": 1795045988,
+  "column": "complete",
+  "createdTime": 1794979617,
+  "dependsOn": [],
+  "feature": "3637869b15413bc5",
+  "home": "solace-cli",
+  "id": "b0f3849ee3123643",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 401.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "notes: draft release notes on request"
+}

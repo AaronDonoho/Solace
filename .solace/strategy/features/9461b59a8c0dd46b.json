@@ -1,0 +1,10 @@
+{
+  "body": "Backlog becomes a status that means *not active*, and Planning becomes the board's first column. This lets a task with no feature go active without one.\n\nOrder:\n1. **Strategy: Plan and Back to backlog** (5441d4a953670951) lets the Strategy page plan a task and put a task with no feature back in Backlog.\n2. **Board: Backlog off, back to planning** (35564bb525e93b96) hides Backlog from the board and adds `to_planning` from Assigned, Needs review and Canceled. It depends on task 1.\n3. **Active feature plans its tasks** (3528b8bc59f7bb2b) moves an active feature's Backlog tasks to Planning and files Tech Debt in Planning. It can run at any time.\n\nThe tasks share one new decision record, amending D-108, D-112 and D-128. The first task to land writes it, and the others extend it.\n\nThe feature is `active` so its tasks show on the board (D-128.4).",
+  "colorSlot": 5,
+  "id": "9461b59a8c0dd46b",
+  "milestone": null,
+  "rank": 11.5,
+  "startTime": 1791987994,
+  "state": "complete",
+  "title": "Workflow: Backlog off the board"
+}

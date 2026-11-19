@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690241,
+  "body": "A Feature consists of many Tasks.\nA Milestone consists of many Features.\nIs this a good definition? What are the exceptions?\nShould they be a part of the Task Store, or have their own store?\n\n-----------\n\nThings to consider:\n\nA Strategy page will eventually exist. It will be used to define features, tasks, and milestones. It is loosely defined as such:\n\n\n**As a solace user,\nI want a Strategy page that enables defining of features, breaking out tasks per feature, and roadmapping,\nso that I don't have to work from a document.**\nBasic Requirement Overview\n\nCreate a new page called Strategy\nThe Strategy page is intended to be built & reachable as any other solace page is.\nThe Strategy page should allow the user to work with an agent to create a vision, understand the current product (if it exists), define features, break features down into tasks (units of work), and a roadmap with milestones.\nEach are saved to the solace root project.\nThe vision drives the overall design direction and features of the product.\nThe features are attributes and/or capabilities of the product.\nThe roadmap displays the milestones and intended sequencing of the features / tasks.\nAll are allowed to change.\nThe Strategy process leans heavily into getting a working product first, and then iterating.\nIt supports the principles of being agile by being open to change.\nSolace reminds Agents to utilize the vision when defining features, tasks, or investigating a task.\nHow it is helpful\n\nThe Strategy page makes the following easy:\nHuman and Agent collaboration in the broadest scope of the product to ideate and make long-term plans\nDefining features and tasks (each task can be associated with a feature)\nDefining task dependencies\nSequencing the tasks\nEstablishing milestones / scope of releases\nEditing the feature/task storage layer (to be created prior to starting work on this page)\n\n------\n\nAn Archive page will eventually exist. It is loosely defined as such:\nAs a solace board user,\nI want an archive to show all the tasks,\nso that I can remove them from the board yet still have the tasks.\nThis archive depends on having a milestone/feature/task store in place first.\nThe archive should be a separate page.\nThe archive can display all tasks.\nSelecting a task displays it in the same fashion as displayed by the board, and allows editing. So we will want a shared component between the board and the archive for that.\nThe following are capabilities of the archive but require support by the Task Store to accomplish efficiently:\nIt is text-searchable by title, changes, or string matching within details or notes.\nIt shows tasks ordered by completion date (most recent at top). Can be filtered by status (a.k.a. column), project, milestone, feature (new fields on task).\nThe archive allows deleting tasks after a confirmation dialog.\nThe archive will support mass edits of tasks' project, milestone, or feature.\n\n\n",
+  "closedTime": 1791552174,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "ab21ee540db622e1",
+  "links": [],
+  "milestone": null,
+  "rank": 48,
+  "scope": [
+    "."
+  ],
+  "title": "Define Tasks for Milestones and Features"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794183789,
+  "body": "see task:8135c7b95b8a86b3\n#### Tech debt\n\n- `specs/15-board-api.md`: its `GET /events` entries still need the `roleModels` event, in both the live stream and the root snapshot, and any `roles` field removed from the workflow entry. The spec is the API's record, and the worker couldn't reach it. This needs the repository root in the task's scope.\n\n  Check: `grep roleModels` finds it in Spec 15, and the workflow entry names no `roles`.\n\n- `solace_task.choose_role_model` and `strategy.choose_plan_model`: the same effort rule (find the agent, then `kept_effort`, else `\"\"`) is written out in both. Extract one public helper in `solace_task`, taking the models, the id and the effort, because the two pickers must stay in step.\n\n  Check: both functions call the helper, and `an_effort_survives_a_role_models_refresh_test` and `the_plan_keeps_only_an_effort_the_model_still_offers_test` pass.\n\n- `board::server.Events::strategy_state`: `a_bad_role_model_config_leaves_open_pickers_alone` covers only the failed read, and no test asserts that a readable config puts `roleModels` in the snapshot. Add that test, because the format string was rewritten and a slip there would silently drop the event.\n\n  Check: a test with a valid `config.toml` asserts `strategy_state()` contains `roleModels`.",
+  "closedTime": 1793995557,
+  "column": "complete",
+  "createdTime": 1793981003,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli",
+  "id": "cb3071c0dc042a32",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 284.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Agent Roles: Tech Debt"
+}

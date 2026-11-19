@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231417,
+  "body": "Don't take the following at face-value. Check it, and recommend how solace should be amended to address these shortcomings.\n\n`submit --imports` is documented as replacing a module's imports and module comment, but it also requires the header to keep the module's `mod x;` list. In run 86faf39d0c8095d6 on task:9c5dd4d28f6b4ef3, the worker sent only `use` lines; the `fsx` header's `mod tests;` was missing. `submit_imports_rust` compared the `mod` lists, found them different, and refused with \"`--imports` can't add or remove a module\". The worker tried with and without the module comment, then replaced the whole `fsx` module to add `std::thread` and `std::time::{Duration, Instant}`. The `read` refusal also sent it to `view fsx --bodies` (85 KB) instead of `view fsx --header`, which shows exactly the header `--imports` needs.\n\nDone when:\n- `submit --imports <module>` accepts a header with the module comment, imports and the same `mod` list; a test covers adding `use std::time::{Duration, Instant};` to `fsx`.\n- When the `mod` list differs or is missing, the error says the header must keep it and names `view <module> --header`; a test covers the message.\n- The `read` refusal for a symbol-held source names `view <module> --header` for the header, not just `--bodies`; a test covers it.\n- `submit` still auto-adds a standard-library import when there is exactly one match, and the multi-match refusal lists the choices.",
+  "closedTime": 1793220373,
+  "column": "complete",
+  "createdTime": 1793216659,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "894bad3b5ad0487b",
+  "links": [],
+  "milestone": null,
+  "rank": 165,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: add imports without replacing a module"
+}

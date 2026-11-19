@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793231415,
+  "body": "When a Rust `extract` or `move` targets a nested module (e.g. `store::paths`) and a module on that path is private to callers that need the moved item, Solace raises that module's visibility instead of refusing the move.\n\n**Rule**\n- It's the same rule items already follow (`visibility::promote_access`, `make_visible`), applied to each module on the target path.\n- A module is raised only if some caller can't otherwise reach the moved item, and only as far as that caller needs: `pub(super)` or `pub(crate)`, never `pub`.\n- A module that's already visible enough stays as it is.\n- Raising is automatic, like item visibility. It doesn't need approval.\n\n**Reply and undo**\n- The reply names each module it raised and the visibility it now has.\n- The change is part of the task's recorded changes, so it shows in the diff and is undone with the rest.\n\n**Where it is today**\n`extract::rust.rewrite_move` and `rewrite_mentions` check each mention with `visibility::visible_from` and promote items, but they never change the visibility of the `mod` declarations on the path.\n\n**Done when**\n- Tests cover: moving into `a::inner` with a private `inner` used from outside `a` succeeds and raises `inner` to `pub(crate)`; a caller inside `a` gets `pub(super)`; an already-visible module is left alone; undoing the change restores the old visibility.\n- A decision records the rule.",
+  "closedTime": 1793209687,
+  "column": "complete",
+  "createdTime": 1793197013,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "65beae1b0290ae2d",
+  "links": [],
+  "milestone": null,
+  "rank": 155.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: raise nested module visibility"
+}

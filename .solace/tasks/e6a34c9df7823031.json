@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464633,
+  "body": "`submit --new board::agents::cache` creates a Rust module, as in Gleam, so agents can add modules once task:7db8dd126a22c863 locks `.rs` files. Builds on the nested insert from task:5ce78f3fa5e3d808.\n\n### Plan (from the earlier investigation)\n\n**Create** (`rust_submit.rs`): `rust_new_target` and the plain-block path (`rust_target`, used by patch `*** Add: <module>`) get a \"create\" outcome, like Gleam's `create` closure in `submit_symbols_blocks`. It applies when the name is unknown, every segment is an identifier, and the parent exists:\n- `cache` → parent `crate`\n- `board::agents::cache` → parent `board::agents`\n- `integration::x` → a new test root\n- Otherwise: E1003 unknown module.\n\n**Its file** (`language/rust.rs`): take the base-directory rule out of `rust::walk` into a `pub fn child_file(parent_file, owns_dir, name)`. A crate root, `tests/x.rs`, `mod.rs` and `#[path]` files place children beside them; other files place them in a folder named after the file. So `src/board/agents.rs` gives `src/board/agents/cache.rs`, and `integration::x` gives `tests/x.rs`. If that file already exists outside the store, the submit is refused, as Gleam's is.\n\n**Stored:**\n- Format the whole text with `format_item(None)` and split it. Split refusals, and `mod x;` lines in the new module, are refused.\n- The header (doc and `use` lines) goes into the module row, with `dir` `src`/`tests` and `file` set, inserted the way `store_rust_file` does. Items are inserted nested.\n- The parent's header gets `mod cache;` after its last header `mod` line, or at the end of the header when it has none. A test root gets no line.\n- All of this happens inside `transaction(&[new file], …)`, then `check_all`.\n- **Reply:** `created module board::agents::cache (src/board/agents/cache.rs; added mod cache; to board::agents)`.\n- `submit_imports_rust`: the `mods` guard stays; its message now says a new module comes from `submit --new <module>`, and removing one comes from deleting its items.\n\n**Undo:** the module row, the parent's header and the symbols are recorded by the existing snapshot/`touch`, so cancel removes the file (via `materialize`'s prune) and the `mod` line. One fix in `board.rs::touch`: the folder record for an added module (D-136) uses `outside::file_of(dir, path)`, Gleam's layout. It should use the row's `file` (`after[key][3]`) when it has one.\n\n**Docs:** `reference.txt` \"Rust projects\": `submit --new a::b::c` creates `src/a/b/c.rs` and its `mod c;`; `integration::x` creates `tests/x.rs`. Add the point to D-168.\n\n**Tests** (gated on `cargo::installed()`): in `store_submit_tests.rs`, a new module (file plus `mod` line, `check` clean), a new `integration::x`, and a module whose file already exists is refused. In `board_tests.rs`, cancelling a task that created a Rust module removes `src/x.rs` and `mod x;` (beside `reverting_checks_a_rust_projects_restored_code`). Grep `later task` and `5ce78f3fa5e3d808` under `solace-cli/tests` for old refusal texts.\n\n### Done when\nIn a scratch Rust store, a new module and a new `integration::x` each submit, check and project to files cargo builds. An existing file is refused. Cancelling the task removes the new file and its `mod` line.",
+  "closedTime": 1792380270,
+  "column": "complete",
+  "createdTime": 1792368698,
+  "dependsOn": [
+    "5ce78f3fa5e3d808"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "e6a34c9df7823031",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 231.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: new modules via submit --new"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794183768,
+  "body": "Designs get a default theme of named tokens, so a design says \"primary\" rather than a raw color, and a design's look stays consistent.\n\n### Do\n\n- Define one default theme of tokens, such as colors, spacing and text sizes. The token list is agreed with the human before building it.\n- The renderer draws the default components from these tokens.\n- The validator knows which token names exist, and refuses an unknown one.\n- A token's values aren't stored in each design, so a design refers to tokens by name.\n\n### Acceptance\n\n- Tests: components draw from token values, changing a token's value changes what is drawn, and an unknown token is refused, naming the element.\n\n### Left out\n\nAn editable theme, \"promote to token\", and a project's own theme. How a project's own look is represented stays open in feature:7c9cdfad16609a44.",
+  "closedTime": 1794101933,
+  "column": "complete",
+  "createdTime": 1793914435,
+  "dependsOn": [
+    "a3611a3835587484"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "4f894eee05d2e46d",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 343.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "ui: default theme of tokens"
+}

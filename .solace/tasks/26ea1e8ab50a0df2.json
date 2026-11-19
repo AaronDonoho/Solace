@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159127,
+  "body": "Found in task:2414798176c466e4, run af333848436847ab, step 92 (`extract crate.take crate.run_options … crate.BUDGET --to cli`). The move failed type-checking because Solace rewrote some paths wrongly and missed others. Related to task:c6a21e1622c6b25a, which covers a missed bare call and missing trait imports.\n\n1. **A path nested inside another isn't rewritten.** `crate::outside::absorb(&store, outside::Mode::Notice)` had its outer path fixed but kept the inner `outside::Mode`. At the crate root, `outside`, `drafts` and `board` are in scope as child modules; inside `cli` they need `crate::` in front. Other examples: `drafts::view(...)` in `cli.run_inner`, and `board::strategy_guard` in `cli.strategy_run`.\n2. **A name used inside a format string isn't rewritten.** Uses like `format!(\"…{PROBE}…\")` of the moved `PROBE` constant were left without an import or a path. This happened in `rust_probe.prepare`, `rust_probe.probe_code` and `crate.Store::probe`, and with `HELD` in the crate tests.\n3. **An item moved in the same call is referred to by its old path.** `cli.run_options` called `crate::Within::enter`, although `Within` moved to `cli` in the same call.\n\nThe `str: Sized` errors at `cli.run_options` lines 177–179 are probably a knock-on effect of point 1 (the unresolved `drafts::view`). This isn't confirmed.\n\n### Done when\n\n- Each of points 1–3 has a unit test where the move type-checks.\n- `check --warnings`, `rust-unit` and the extract acceptance suite pass.",
+  "closedTime": 1793127135,
+  "column": "complete",
+  "createdTime": 1793119355,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "26ea1e8ab50a0df2",
+  "links": [],
+  "milestone": null,
+  "rank": 298.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: paths in and to moved Rust code"
+}

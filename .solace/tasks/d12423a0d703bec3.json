@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231414,
+  "body": "Extracting the `Store` write methods to `store_write` in task:21241abf8e6ac8a7 never type-checks, so nothing moves. Two import gaps cause it:\n\n- A test file created for a child module starts with `use testing::*;`, which only works at the crate root. Inside a child it needs `use crate::testing::*;`.\n- A newly created target module misses imports its moved helpers use (`Ref`, `ImportMatch`) until the module is pre-created with `use super::*`.\n\nMake a same-project Rust extract into a new module self-contained: qualify moved test imports that name crate-root modules, and give the new module the parent imports its moved code needs, or otherwise carry them. Do not widen visibility or move unrelated code, and keep the current behavior for an existing target module.\n\nTests:\n- extracting a write helper that uses a crate-root import into a new module succeeds without pre-creating the module;\n- a crate-root test module whose header is `use testing::*;` moves into a child and type-checks;\n- an existing target module still receives methods and tests as it does now.",
+  "closedTime": 1793196296,
+  "column": "complete",
+  "createdTime": 1793164055,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d12423a0d703bec3",
+  "links": [],
+  "milestone": null,
+  "rank": 150.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: carry imports into new modules"
+}

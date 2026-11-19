@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056531,
+  "body": "Let a design run check a set of element operations without asking the human. Solace applies them to a copy and checks the result exactly as `design propose` does (D-241 point 3), saves nothing, and asks no question. It replies either with the first refusal, naming the element, or with a short outline of what was added, removed, moved and changed. Today a mistake only shows up as a refused proposal, and the agent has to propose again and wait.\n\n## Done when\n\n- A valid check saves nothing and leaves the run with no new question.\n- An invalid check returns the same refusal `design propose` would give (`E7033` / `E7001`, naming the element).\n- The run's commands, help and Spec 15's design run paragraph cover it.\n\n## Suggested (cursory, not prescriptive)\n\n- Share one apply-and-validate path with `design propose`, so the two can't disagree.",
+  "closedTime": 1795036786,
+  "column": "complete",
+  "createdTime": 1794865751,
+  "dependsOn": [],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "08eb320c615ec583",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 315.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: check a proposal first"
+}

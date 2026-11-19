@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);
 -- rejected submissions, kept to retry (D-46)
 CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args TEXT NOT NULL, text TEXT NOT NULL, base TEXT NOT NULL);
 -- the task board
-CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
 CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
 CREATE TABLE IF NOT EXISTS board_ends(task TEXT, module TEXT NOT NULL, parent TEXT NOT NULL, last TEXT NOT NULL, sep TEXT NOT NULL, PRIMARY KEY(task,module,parent));
@@ -74,6 +73,7 @@ impl Store {
         db.busy_timeout(Duration::from_secs(10))?;
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(LATER_TABLES)?;
+        remove_board_events(&db)?;
         crate::Store::add_columns(&db)?;
         Ok(crate::Store::new(Rc::new(db), root, true, true))
     }
@@ -686,5 +686,21 @@ fn checkpointed(busy: i64) -> Result<(), Failure> {
 pub(crate) fn checkpoint_pending(s: &Store) -> Result<bool, Failure> {
     let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(busy != 0)
+}
+
+/// Removes a store's old board event table once, overwriting its rows and
+/// compacting the file so no conversation stays in the committed bytes.
+fn remove_board_events(db: &Connection) -> Result<(), Failure> {
+    let exists: bool =
+        db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='board_events')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(());
+    }
+    db.execute_batch("PRAGMA secure_delete=ON; DELETE FROM board_events; VACUUM;")?;
+    let (busy, _, _): (i64, i64, i64) = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    checkpointed(busy)?;
+    db.execute_batch("DROP TABLE board_events; PRAGMA secure_delete=OFF;")?;
+    let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    Ok(())
 }
 

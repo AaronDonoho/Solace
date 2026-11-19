@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792009416,
+  "body": "Part of the Backlog-off-the-board change (see **Workflow: Backlog off the board**, 35564bb525e93b96). Once Backlog is hidden from the board, an active feature's tasks have to be in Planning to show up there.\n\n- When a feature becomes `active` (by a human edit or an approved proposal), its tasks in `backlog` move to `planning`. Each move adds a solace note naming the feature.\n- A feature's Tech Debt task (D-112) is filed in `planning`, not `backlog`. This amends D-112.\n- A task created or linked to a feature that is already `active` goes in `planning` too.\n- Rust in `tasks.rs`/`board.rs`. Update Spec 15 and the tests in `board_tests.rs` and `board_acceptance.py` that expect Tech Debt in `backlog`.",
+  "closedTime": 1791990545,
+  "column": "complete",
+  "createdTime": 1791987643,
+  "dependsOn": [],
+  "feature": "9461b59a8c0dd46b",
+  "home": ".",
+  "id": "3528b8bc59f7bb2b",
+  "links": [],
+  "milestone": null,
+  "rank": 136.0,
+  "scope": [
+    "."
+  ],
+  "title": "Active feature plans its tasks"
+}

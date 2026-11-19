@@ -1,0 +1,10 @@
+{
+  "body": "Rust code is held in the store as symbols with permanent IDs, as Gleam is: agents read and change Rust by symbol through Solace, every change is type-checked, code with errors is not saved, and Solace writes ordinary `.rs` files for `cargo`.\n\nToday Rust files are **watched** plain files: `view` reads them by item (D-121) and `write` changes them, with no type check on save.\n\n**One API:** Rust and Gleam have the same commands, forms and replies. Where Rust can't support a Gleam command yet, that is a gap to close, not a separate Rust API.\n\n### Scope\n\n- An assessment first: which Rust the store can hold and check, what must be refused, and whether a subset trips agents up.\n- Rust items in the graph tier of lockdown (Spec 14), changed only by `submit` and `delete`.\n- Type checking each change with an existing checker (`cargo check`), errors reported per symbol as for Gleam.\n- Writing source files from the store so `cargo build` and `cargo test` run unchanged.\n- Reading by name (`view`, `inspect`, `find`, session), `submit` in all its forms, `delete`, and `refs`, `impact`, `inspect --context` and test reach, built from names.\n\n### Not in scope\n\n- JavaScript (stays with task:55522c8306320f9d).\n- Type-accurate refs (rust-analyzer / SCIP).\n- Moving Solace's own crate into the store: feature:42af7119fb6915f9.",
+  "colorSlot": 8,
+  "id": "ee70ab461cef2b9c",
+  "milestone": "8f4cf01d7d220348",
+  "rank": 1.0,
+  "startTime": 1792251310,
+  "state": "complete",
+  "title": "Rust symbol store and lockdown"
+}

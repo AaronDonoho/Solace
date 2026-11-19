@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792945505,
+  "body": "`solace_task.editor` keeps its text in `localStorage` as it is typed and restores it when the editor is shown again, including after a reload or leaving the page. The key names the editor and the record or context it belongs to, so two tasks, a new and an edited feature, or two plan contexts don't share a draft; the note/answer editor is keyed by its task. The draft is removed when the editor's action succeeds, a send clears the text, or a form is canceled; a blank editor removes it. Blocked or full storage is ignored, as `load` and `store` already are, and the editor works without it. Text set by the model (a live update or a send's clear) wins over a stored draft.\n\nCover every editor: the task's note/answer box and description edit, the planning panel, and the feature, milestone and new-task forms.\n\n**Tests:** unit tests for the key, load, save, clear and blocked storage; Gleam tests that each context passes its key and clears it on success and cancel; a browser flow that leaves and returns to restore the text, and sends or saves to clear it. The real editor's reload restore is checked by hand, as the CodeMirror box is.\n\n**Left out:** no drafts for title, rank, target date, selects or other plain inputs; no server-side or cross-device drafts; no draft history.",
+  "closedTime": 1792888395,
+  "column": "complete",
+  "createdTime": 1792816342,
+  "dependsOn": [
+    "f4bce6d356acdd64"
+  ],
+  "feature": "a7563a250614b0b9",
+  "home": "solace-cli/components",
+  "id": "750656709c6dda32",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 109.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "text editor: drafts in the browser"
+}

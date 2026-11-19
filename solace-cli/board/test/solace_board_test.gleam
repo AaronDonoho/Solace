@@ -2345,3 +2345,68 @@ pub fn columns_hold_their_cards_in_view_test() {
   |> string.contains(".lane .stack")
   |> should.be_false
 }
+
+/// A listed project whose store is missing still gets a lane that says so.
+pub fn store_missing_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"app\",\"name\":\"app\",\"base\":\"\"},{\"dir\":\"lib\",\"label\":\"lib\",\"name\":\"lib\",\"base\":\"\",\"needs\":\"Store missing\"}],\"found\":[]}",
+      ),
+    )
+  let assert [_, lib] = model.lanes
+  lib.needs |> should.equal("Store missing")
+  let rendered = board.view(model) |> element.to_string
+  rendered
+  |> string.contains(
+    "<small class=\"lane-needs attention\"> Store missing</small>",
+  )
+  |> should.be_true
+  // A root that isn't a project has no `.` lane: the missing project must not
+  // take the root's workflow or its live messages, and the project with a
+  // store keeps the one shared header.
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"\",\"needs\":\"Store missing\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.WorkflowLoaded(
+        "a",
+        "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}",
+      ),
+    )
+  board.shared_columns(model.lanes) |> should.be_true
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"task\":{\"id\":\"1\",\"title\":\"Root task\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}}",
+      ),
+    )
+  let assert [a, b] = model.lanes
+  a.tasks |> should.equal([])
+  b.tasks |> should.equal([])
+  model.error |> should.equal("")
+  let rendered =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
+  rendered |> string.split("lane-head") |> list.length |> should.equal(2)
+  rendered |> string.contains("<h2>Planning</h2>") |> should.be_true
+  rendered
+  |> string.contains(
+    "<small class=\"lane-needs attention\"> Store missing</small>",
+  )
+  |> should.be_true
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791778991,
+  "body": "Right now a cancelled task can't come back. Final columns have no actions (`board.rs` refuses a workflow that gives them any), and other edits there are refused with `E7004`. Add a way for the human to return a **cancelled** task to the backlog.\n\n- The board's task details get a **Back to backlog** action, available only in `cancelled`. Decide whether this is a workflow action on the cancelled column (D-51 forbids actions in final columns, so that would need a decision), or a dedicated request like `POST /tasks/{id}/restore`. Record the choice in DECISIONS.md.\n- The task keeps its title, body, notes, runs, links and `dependsOn`. If it was archived, it is unarchived (`archivedTime` cleared, D-95). `closedTime` stays, as D-87 says.\n- Cancelling has already settled the task's changes, so there's nothing to undo. The next run starts fresh.\n- Leaving the final column makes any task that depends on this one unfinished again, so those cards dim again (feature 29f4838ffb0cb0d0).\n- Add a note to the task recording that the human brought it back.\n- `complete` tasks stay as they are; this only applies to `cancelled`.\n- Update Spec 15 and the board README, and add tests (Rust and `board_acceptance.py`): restore from cancelled, refuse from any other column, and unarchive.",
+  "closedTime": 1791763701,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "35a78b9b764f41bb",
+  "links": [],
+  "milestone": null,
+  "rank": 84.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Move a cancelled task back to the backlog"
+}

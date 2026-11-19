@@ -1,0 +1,1396 @@
+{
+  "elements": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "delivery-menu-workspace",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Workspace",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-strategy",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Strategy",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-delivery",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Delivery",
+                "variant": "body",
+                "width": "hug"
+              },
+              "style": {
+                "fill": "text",
+                "padding": "sm",
+                "text_color": "on_primary"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-design",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Design",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-board",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Board",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-contracts",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Contracts",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-knowledgebase",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Knowledgebase",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "delivery-menu-settings",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Settings",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "delivery-menu",
+          "properties": {
+            "align": "center",
+            "gap": "sm",
+            "height": "hug",
+            "justify": "start",
+            "padding": "md",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "style": {
+            "fill": "surface"
+          },
+          "type": "row"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "id": "setup-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 2,
+                    "text": "Build setup",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                }
+              ],
+              "id": "setup-intro",
+              "properties": {
+                "align": "start",
+                "gap": "xs",
+                "height": "hug",
+                "justify": "start",
+                "padding": "none",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "id": "scope-label",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Projects",
+                        "variant": "small",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "scope-value",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "All 3 projects",
+                        "variant": "body",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "scope-names",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "app · web · tools",
+                        "variant": "muted",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "scope-field",
+                  "properties": {
+                    "align": "start",
+                    "gap": "xs",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "scope-change",
+                      "properties": {
+                        "height": "hug",
+                        "label": "Choose projects",
+                        "variant": "ghost",
+                        "width": "hug"
+                      },
+                      "type": "button"
+                    },
+                    {
+                      "id": "build-button",
+                      "properties": {
+                        "height": "hug",
+                        "label": "Build",
+                        "variant": "primary",
+                        "width": "hug"
+                      },
+                      "type": "button"
+                    },
+                    {
+                      "id": "cancel-button",
+                      "properties": {
+                        "height": "hug",
+                        "label": "Cancel build",
+                        "variant": "ghost",
+                        "width": "hug"
+                      },
+                      "type": "button"
+                    }
+                  ],
+                  "id": "scope-actions",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "hug"
+                  },
+                  "type": "row"
+                }
+              ],
+              "id": "setup-scope",
+              "properties": {
+                "align": "center",
+                "gap": "md",
+                "height": "hug",
+                "justify": "between",
+                "padding": "none",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "id": "version-label",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Version",
+                        "variant": "small",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "version-input",
+                      "properties": {
+                        "height": "hug",
+                        "placeholder": "0.2.1",
+                        "width": "fill"
+                      },
+                      "type": "text_input"
+                    }
+                  ],
+                  "id": "version-field",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "xs",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "folder-label",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Release folder",
+                        "variant": "small",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "folder-input",
+                      "properties": {
+                        "height": "hug",
+                        "placeholder": "build-output",
+                        "width": "fill"
+                      },
+                      "type": "text_input"
+                    }
+                  ],
+                  "id": "folder-field",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "xs",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "access-label",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Agent access to release files",
+                        "variant": "small",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "access-read-only",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Read-only",
+                            "variant": "secondary",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        },
+                        {
+                          "id": "access-editable",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Editable",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "access-choice",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "access-field",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "xs",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "setup-details",
+              "properties": {
+                "align": "start",
+                "gap": "lg",
+                "height": "hug",
+                "justify": "start",
+                "padding": "none",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            }
+          ],
+          "id": "build-setup",
+          "properties": {
+            "align": "stretch",
+            "gap": "md",
+            "height": "hug",
+            "justify": "start",
+            "padding": "lg",
+            "variant": "card",
+            "width": "fill"
+          },
+          "type": "column"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "id": "steps-title",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "level": 2,
+                            "text": "Build steps",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        }
+                      ],
+                      "id": "steps-heading",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "id": "steps-count",
+                      "properties": {
+                        "align": "right",
+                        "height": "hug",
+                        "text": "2 of 7 passed · running",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "steps-head",
+                  "properties": {
+                    "align": "center",
+                    "gap": "md",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "app-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "app",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "app-count",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "2 of 3 passed",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "app-head",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "app-compile-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "PASSED",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "app-compile-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "compile",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "app-compile-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "app-compile-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "12.4 s",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "app-compile",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "app-check-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "PASSED",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "app-check-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "check",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "app-check-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "app-check-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "4.8 s",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "app-check",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "app-bundle-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "RUNNING",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "primary"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "app-bundle-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "bundle",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "app-bundle-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "app-bundle-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "8.1 s",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "app-bundle",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "style": {
+                            "fill": "#e8eef7"
+                          },
+                          "type": "row"
+                        }
+                      ],
+                      "id": "app-group",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "web-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "web",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "web-count",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "0 of 2 passed",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "web-head",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "web-build-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "WAITING",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "web-build-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "build",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "web-build-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "web-build-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "—",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "web-build",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "web-test-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "WAITING",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "web-test-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "test",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "web-test-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "web-test-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "—",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "web-test",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        }
+                      ],
+                      "id": "web-group",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "tools-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "tools",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "tools-count",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "0 of 2 passed",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "tools-head",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "tools-build-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "WAITING",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "tools-build-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "build",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "tools-build-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "tools-build-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "—",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "tools-build",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "tools-test-state",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "WAITING",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "tools-test-name",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "test",
+                                    "variant": "body",
+                                    "width": "hug"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "tools-test-label",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "start",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "id": "tools-test-time",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "—",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "tools-test",
+                          "properties": {
+                            "align": "center",
+                            "gap": "md",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "sm",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        }
+                      ],
+                      "id": "tools-group",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "step-groups",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "md",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "steps-panel",
+              "properties": {
+                "align": "stretch",
+                "gap": "md",
+                "height": "fill",
+                "justify": "start",
+                "padding": "lg",
+                "variant": "card",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "output-title",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "level": 3,
+                                "text": "Live output",
+                                "width": "fill"
+                              },
+                              "type": "heading"
+                            },
+                            {
+                              "id": "output-step",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "app · bundle · running",
+                                "variant": "muted",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "output-heading",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "output-collapse",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Collapse",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "output-head",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "id": "output-log",
+                      "properties": {
+                        "height": {
+                          "fixed": 160
+                        },
+                        "label": "bundle output; follows the newest lines",
+                        "width": "fill"
+                      },
+                      "type": "image_placeholder"
+                    }
+                  ],
+                  "id": "output-block",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "release-title",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Latest release 0.2.0",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "release-appimage-name",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "text": "Solace_0.2.0_amd64.AppImage",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "release-appimage-size",
+                          "properties": {
+                            "align": "right",
+                            "height": "hug",
+                            "text": "68.2 MB",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "release-appimage-get",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Download",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "release-appimage",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "release-deb-name",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "text": "solace_0.2.0_amd64.deb",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "release-deb-size",
+                          "properties": {
+                            "align": "right",
+                            "height": "hug",
+                            "text": "12.4 MB",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "release-deb-get",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Download",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "release-deb",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "release-open",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Open folder",
+                            "variant": "secondary",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "release-actions",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "release-block",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "side-panel",
+              "properties": {
+                "align": "stretch",
+                "gap": "lg",
+                "height": "fill",
+                "justify": "start",
+                "padding": "lg",
+                "variant": "card",
+                "width": {
+                  "fixed": 420
+                }
+              },
+              "type": "column"
+            }
+          ],
+          "id": "delivery-body",
+          "properties": {
+            "align": "stretch",
+            "gap": "lg",
+            "height": "fill",
+            "justify": "start",
+            "padding": "none",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "type": "row"
+        }
+      ],
+      "id": "delivery-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "lg",
+        "height": "fill",
+        "justify": "start",
+        "padding": "xl",
+        "width": "fill"
+      },
+      "type": "screen"
+    }
+  ],
+  "id": "42f52e04f54c90e5",
+  "schemaVersion": 1,
+  "tab": "ui",
+  "title": "Delivery page layout"
+}

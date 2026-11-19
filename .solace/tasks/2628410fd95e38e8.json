@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312244,
+  "body": "Do not assume the following is the right approach. Consider it, and recommend correct behavior based on making the extract tool's behavior more robust. If you find other gaps, list them, even if they belong in other tasks.\n\nMoving a symbol into a target module that already imports it from the source rewrites that import into an import of the target itself. The result is a duplicate name, so `extract` refuses with E0255 and nothing moves.\n\nThis happened in task:7e3ce29f6be82b87 while moving `extract::rust.add_import_line` and `extract::rust.module_imports` into `extract::rust::imports`. The target header held `use super::{add_import_line, module_imports};`. After planning the move, it held `use crate::extract::rust::imports::{add_import_line, module_imports};` while also defining both functions.\n\nFix: when the target module is the moved symbol's new module, an import of that symbol must be removed rather than rooted to the target's own path. This is separate from the carried-import clash fixed in task:c970ab48b3b62497: there a carried import clashed with a name arriving from another module; here the target already imports the symbol it is about to define.\n\nTest: a crate where `a` defines `f`, and `b` has `use crate::a::f;` plus a staying function that calls `f`. Run `extract a.f --to b`. Assert that the extract succeeds, `b`'s header has no import of `f` from `b` itself, and the project type-checks. Cover the `use super::f;` form too if it takes a different branch.",
+  "closedTime": 1793233755,
+  "column": "complete",
+  "createdTime": 1793229843,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "2628410fd95e38e8",
+  "links": [],
+  "milestone": null,
+  "rank": 177,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: drop self-imports on move"
+}

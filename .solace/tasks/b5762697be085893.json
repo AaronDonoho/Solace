@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792009423,
+  "body": "Part of General UI Polish (feature item 1). Buttons and column names show literal action names today: an action button falls back to the action name when the workflow's `labels` dict (D-108) has no entry, and column names come from `Column.label`.\n\n- `default-board.toml` (root project): give every column a human `label` and add `labels` entries for every action.\n- `solace_task.action_label` keeps its fallback, but no shipped workflow relies on it.\n- Collect the board's, task detail's, Strategy's and Settings' button texts into one label map (in `solace_task`, shared by the pages) so buttons read defined labels, not inline strings: New task, Create task, Archive, Show task, Close All, Dismiss, Save, Edit, Add note, Delete, Copy ID, Answer, Watch, Start, Send, End, Stop, New run.\n- The board's column bar (`head_view`) and the Strategy Tasks tab's Column filter use the same labels.\n\n**Tests:** board and strategy view tests that action buttons and column headers show labels for the default workflow; update tests that assert the old literal names.",
+  "closedTime": 1791918094,
+  "column": "complete",
+  "createdTime": 1791909743,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "b5762697be085893",
+  "links": [],
+  "milestone": null,
+  "rank": 1,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Labels for buttons and columns"
+}

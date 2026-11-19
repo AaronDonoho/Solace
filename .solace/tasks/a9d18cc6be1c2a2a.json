@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791951660,
+  "body": "Solace can already move files (D-84) but not symbols. The symbol graph that powers impact and the \"Reaches N uses\" notes already knows the dependency closure, callers and tests. So a symbol-level move is mostly bookkeeping:\n\nmove <symbols…> --to <module> [--to-project <folder>]\n1. Pull in the private helpers. Private helpers that only the moved symbols use come along, and anything still used from outside becomes pub.\n2. Rewrite every remaining reference. Uses become solace_task.x, and the import is added. That alone would have prevented the failed board submit.\n3. Add the path dependency to the target project's gleam.toml.\n4. Move the tests. Tests that only reach moved symbols move with them. Tests that also reach code that stays get their references rewritten in place.\n5. Refuse a cycle and name it. If moved code still calls something staying behind, the move stops and lists those symbols, so the agent can move them too or pass them in.\n6. Handle JS FFI files. Whole files already move. When @external paths change, the move rewrites them.\n\nThe agent is then left with the part that needed judgment: the component boundary.",
+  "closedTime": 1791949877,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "a9d18cc6be1c2a2a",
+  "links": [],
+  "milestone": null,
+  "rank": 62.0,
+  "scope": [
+    "."
+  ],
+  "title": "Solace Command: move <symbol>"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793665574,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793665503,
+  "column": "complete",
+  "createdTime": 1793658530,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b8ba559f459ba296",
+  "links": [],
+  "milestone": null,
+  "rank": 255.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "mcp: repair or name wrong-type arguments"
+}

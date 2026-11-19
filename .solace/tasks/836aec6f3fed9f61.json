@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312248,
+  "body": "A new Tech Debt task is titled `<feature or task title>: Tech Debt` (`board.new_debt`). The board already shows a Tech Debt label on these tasks, so the suffix just repeats it.\n\n**Needed**\n- A new Tech Debt task is titled with just the feature's title, or the completed task's title when it has no feature, with nothing added.\n- Update the tests that expect the suffix (`board::tests.completing_a_task_files_its_reviews_tech_debt`, `board::tests.a_task_with_no_feature_files_its_own_tech_debt`).\n- Record the change as a decision amending D-112 point 3 and D-199 point 2, which set the `: Tech Debt` title.\n\n**Not included:** renaming Tech Debt tasks that already exist.",
+  "closedTime": 1793298551,
+  "column": "complete",
+  "createdTime": 1793296461,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "836aec6f3fed9f61",
+  "links": [],
+  "milestone": null,
+  "rank": 198.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "tech debt: drop \": Tech Debt\" title suffix"
+}

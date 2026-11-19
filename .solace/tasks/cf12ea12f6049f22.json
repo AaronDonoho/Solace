@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791778988,
+  "body": "Currently, when an agent has replied on the board, a toast appears. This is helpful to the human.\nHowever, if on the board, and an agent replies to something in the Strategy page, nothing appears. So I propose adding a flashing highlight to the menu bar on tabs that require attention. the highlight disappears when the tab is focused, and it never appears in the first place if the tab was already in focus.",
+  "closedTime": 1791762142,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "cf12ea12f6049f22",
+  "links": [],
+  "milestone": null,
+  "rank": 69.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Highlight tabs that need attention"
+}

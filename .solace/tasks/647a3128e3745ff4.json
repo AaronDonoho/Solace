@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056535,
+  "body": "When viewing a task, an action's button is hidden while a run of that kind is underway on the task:\n\n- **Investigate** (Planning) is hidden while an investigation is underway.\n- **Assign** is hidden while a work run is underway.\n- **Review** (Assigned and Review) is hidden while a review is underway.\n\nThe button shows again once that run ends.\n\n---\nFor the agent: the list of actions comes from `solace_task.actions` (solace-cli/components); a run is underway while its `state` isn't `ended`. Action → run kind is in the workflow's `actions` map (`investigate` → `investigate`, `assign` → `work`, `review` → `review`). Reassign, New agent and Start over are not part of this task.",
+  "closedTime": 1794789571,
+  "column": "complete",
+  "createdTime": 1794789233,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "647a3128e3745ff4",
+  "links": [],
+  "milestone": null,
+  "rank": 124.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "task view: hide buttons for a run underway"
+}

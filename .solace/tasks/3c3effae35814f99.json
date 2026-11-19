@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056534,
+  "body": "Give the Design page's canvas a zoom level and controls for panning, so the human can look at a screen bigger than the space it's drawn in, or smaller than it. The Design page has neither today. A screen drawn at a size the human picks needs both (task:1cf044ccf5423404).\n\n## Done when\n\n- The human can set the canvas's zoom level and pan around it.\n- Selecting, region selection and notes still pick the right elements at any zoom level and pan position.\n- The design README describes it.\n\n## Open (for the human)\n\n- What the zoom and pan controls look like, and where they go.",
+  "closedTime": 1795045656,
+  "column": "complete",
+  "createdTime": 1794865958,
+  "dependsOn": [],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli/design",
+  "id": "3c3effae35814f99",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 28.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/contracts",
+    "solace-cli/design"
+  ],
+  "title": "design page: zoom and pan the canvas"
+}

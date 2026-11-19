@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792284195,
+  "body": "Reviewers spend their first calls on things the brief already holds or should hold. Seen in task:a0064b47e0aa822b: review run `dc7878abbe1cbdb4` ran `session start --task` and then `task diff --since-review`, though the brief already held both the task and that delta; review run `950a3acc30f7b70c` began with `task diff`.\n\n### Change (`board.rs`)\n\n- **The diff is always in the brief.** `review_context` already appends `task diff --since-review` when a checkpoint exists. When none exists (a first review, or no usable baseline), append the whole-task `task diff` instead, with the same 8000 cap. If the diff is too long and gets cut, the reply's own *Left out* line names what to ask for.\n- **The wording matches.** In the review role in `brief` and in `review_context`, replace \"Start with `task diff` / `task diff --since-review`\" with \"The task's changes are below (the delta since the last review, or the whole task)\". Keep the advice to run `task diff` only when the human asks for a fresh full review, or for parts the brief left out.\n- **No session start.** The review role says the task, its notes and its changes are all in the brief, so it doesn't send `session start --task`.\n\n### Done when\n\n- `board_tests.rs`: a first review's brief contains the whole-task diff, a follow-up's contains the delta, and neither tells the agent to start with `task diff` or `session start`.\n- `board_acceptance.py`: update the assertion that checks for `Start with \\`task diff --since-review\\``.",
+  "closedTime": 1792215995,
+  "column": "complete",
+  "createdTime": 1792215634,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "979c4f6e780aea71",
+  "links": [],
+  "milestone": null,
+  "rank": 195.0,
+  "scope": [
+    "."
+  ],
+  "title": "briefs: review diff in the brief"
+}

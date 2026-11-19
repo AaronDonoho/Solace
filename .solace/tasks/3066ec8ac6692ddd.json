@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765932,
+  "body": "Give the Strategy page's record state labels one shared, accessible color mapping:\n\n- proposed: purple\n- upcoming: blue\n- active: green\n- complete: black\n- canceled: gray\n\nUse the page's existing color tokens (or add named state tokens beside them) rather than one-off colors in each view. A filled label with readable text is fine; keep the uppercase wording and neutral styling for an unknown state. Apply the mapping wherever a feature or milestone state appears: Features cards, Roadmap feature rows and Roadmap milestone headings. Both light and dark themes must keep the label legible.\n\nTask rows show workflow columns (Backlog, Planning, Assigned, Review, Complete, Canceled), not the five record states named in the request; leave those labels and the live `<solace-task>` status badge unchanged. The plan note flags this narrower reading for the human.\n\n**Tests:** each of the five states gets its own class and exact text on a feature and a milestone; an unknown state stays neutral; the style contains no inline color; existing state text and save tests stay green. **Docs:** describe the mapping in the Strategy README.",
+  "closedTime": 1792733307,
+  "column": "complete",
+  "createdTime": 1792709921,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "3066ec8ac6692ddd",
+  "links": [],
+  "milestone": null,
+  "rank": 109.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "ui: color state labels"
+}

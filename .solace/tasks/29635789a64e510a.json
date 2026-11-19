@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690223,
+  "body": "Support text Selection in the run's metadata, so i can copy the log location for example.",
+  "closedTime": 1791222403,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "29635789a64e510a",
+  "links": [],
+  "milestone": null,
+  "rank": 7.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Text Selection: run metadata"
+}

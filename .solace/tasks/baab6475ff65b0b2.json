@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056530,
+  "body": "Define how a project declares its build, so the Build tab can run any project. First task of feature:ac9e8bd025316ef2.\n\n1. **Decision first.** Add a decision to `DECISIONS.md` for the recipe format. Suggested shape, in a project's `solace.toml`:\n   ```toml\n   [build]\n   after = [\"solace-cli/board\"]          # projects built first\n   outputs = [\"priv/app.js\"]             # artifact paths, from the project\n   steps = [\n     { name = \"install\", run = [\"bun\", \"install\"] },\n     { name = \"bundle\",  run = [\"bun\", \"build\", \"src/main.mjs\", \"--outfile\", \"priv/app.js\"] },\n   ]\n   ```\n   A step may instead name an existing command (`command = \"build-release\"`), so today's `[commands] build-release` entries are reused, not duplicated.\n2. **Validation.** `lockdown::parse_settings` checks `[build]` (`E6020` with the field at fault): steps need a name and `run` or `command`; a named command must exist; `after` names projects (`workspace::members`).\n3. **Defaults.** A project with no `[build]` gets one from what it has: `gleam.toml` → `gleam build` (its target from `gleam.toml`); `Cargo.toml` → `cargo build --release --locked`; `package.json` → install, then its `build` script. A project with none of these has no recipe and is skipped.\n4. **Order.** A function returns every project's recipe in build order from `after`; a cycle is refused and named.\n5. **Reading it.** A read-only `build plan` answer (CLI and a `GET` route for the page) lists each project's recipe in order, marked declared or default.\n6. **Specs and reference.** Spec 15 (the route) and `reference.txt`.\n7. **Tests.** Unit tests for validation errors, each default, order, a cycle, and `command =` reuse. Run `rust-unit` and `rust-board-tests`.\n\nThe frontend projects' `build-release` entries and `solace-cli/build.rs` stay as they are; the self-build feature moves them over later.",
+  "closedTime": 1794843941,
+  "column": "complete",
+  "createdTime": 1791953331,
+  "dependsOn": [],
+  "feature": "ac9e8bd025316ef2",
+  "home": ".",
+  "id": "baab6475ff65b0b2",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 120,
+  "scope": [
+    "."
+  ],
+  "title": "recipes: build section in solace.toml"
+}

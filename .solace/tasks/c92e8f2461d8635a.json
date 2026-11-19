@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792292714,
+  "body": "Humans should set up a model, including its API key, from the Settings page, without opening a command line.\n\n## Problem\nToday a model's endpoint key comes only from an environment variable named by `key_env` in `~/.config/solace/config.toml`. The Solace server starts from the desktop app, so it never sees variables set in a shell. The model is then silently missing from the model list, and the only fix is editing system environment files.\n\n## Wanted\n- On the Settings page, a human can add or edit a model (label, agent, model id, endpoint base URL) and paste its API key.\n- Solace keeps the key itself: the OS keychain where available, else a file under `~/.config/solace/` readable only by the user. Never in `config.toml`, never shown again after saving.\n- When Solace launches the agent (Codex: `endpoint_args` in `src/board.rs` already passes `env_key`), it sets that variable on the agent's process from the stored key.\n- `local()` in `src/board/agents.rs` treats a stored key as available. `key_env` keeps working for people who prefer environment variables.\n- A model that can't start stays in the model list with its reason, such as \"No key yet; add one in Settings\", instead of disappearing.\n\n## Notes\n- Real case that prompted this: Command Code (`https://api.commandcode.ai/provider/v1`, model `deepseek/deepseek-v4.1-flash`, OpenAI Responses API).\n- Optional nice touch: a \"Test connection\" button that calls the endpoint's `/models` and reports whether the model id exists and supports `/responses`.\n",
+  "closedTime": 1792289510,
+  "column": "complete",
+  "createdTime": 1792288070,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "c92e8f2461d8635a",
+  "links": [],
+  "milestone": null,
+  "rank": 215.0,
+  "scope": [
+    ".",
+    "solace-cli/settings"
+  ],
+  "title": "Set up models and their keys from Settings"
+}

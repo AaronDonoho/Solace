@@ -1,0 +1,10 @@
+{
+  "body": "Rust is already held and read as symbols: `session`, `view`, `inspect`, `find`, `submit`, `delete`, `check`, `test`, `refs` and `impact` work by name, and `read_project` now admits a Rust store. The remaining gap is at the edges: a task that starts in a plain project never sees its Rust project's symbols, plain-project refusals and some command text still speak only of Gleam, and `grep` does not point at `find`.\n\n### Scope\n\n- `session start --task` builds its brief from every project in the task's scope; a plain starting project no longer short-circuits to `plain_session`.\n- Plain-project refusals are language-neutral, name the task's projects and `--project <folder>`, and say \"Gleam only\" where D-158 defers a command.\n- `grep` after a miss in a project with symbol-held source names `find`; `submit`'s import refusal names the block and the missing import.\n- Tests cover a root + `solace-cli` task, a plain-project refusal, and every changed message.\n\n### Not in scope\n\n- Rust `extract`, `merge` and `probe` (D-158 point 6); `format` (Rust items are formatted on submit).\n- Symbol-text search in `grep`; that is `find`'s job.\n- Workspaces, proc-macro crates and type-accurate refs; docs beyond `src/reference.txt`.\n\nEvidence: task:0bec6ebe6c74974f run `e1440ef957659c73`; most turns went to refusals and routing, not code.",
+  "colorSlot": 10,
+  "id": "83d06e9ff942c067",
+  "milestone": "8f4cf01d7d220348",
+  "rank": 3.0,
+  "startTime": 1792466667,
+  "state": "complete",
+  "title": "Rust: equal treatment"
+}

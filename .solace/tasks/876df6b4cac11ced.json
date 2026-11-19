@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312248,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793299283,
+  "column": "complete",
+  "createdTime": 1793297771,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "876df6b4cac11ced",
+  "links": [],
+  "milestone": null,
+  "rank": 199.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: moving out of the crate root type-checks: Tech Debt: Tech Debt: Tech Debt"
+}

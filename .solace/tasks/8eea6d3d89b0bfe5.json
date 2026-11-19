@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778990,
+  "body": "Think up a way to support writing multiple at once so agents don't have to make multiple tool calls.\nCan they write a new type of draft and submit it?\nwhatever approach, the main issue seems to be delimiting between the writes.",
+  "closedTime": 1791753323,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "8eea6d3d89b0bfe5",
+  "links": [],
+  "milestone": null,
+  "rank": 79.0,
+  "scope": [
+    "."
+  ],
+  "title": "Support multi-write commands"
+}

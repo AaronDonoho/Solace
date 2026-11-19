@@ -1,0 +1,1880 @@
+{
+  "elements": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "b-menu-workspace",
+              "properties": {
+                "height": "hug",
+                "text": "Workspace",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-strategy",
+              "properties": {
+                "height": "hug",
+                "text": "Strategy",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-design",
+              "properties": {
+                "height": "hug",
+                "text": "Design",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-board",
+              "properties": {
+                "height": "hug",
+                "text": "Board",
+                "variant": "body",
+                "width": "hug"
+              },
+              "style": {
+                "fill": "text",
+                "padding": "sm",
+                "text_color": "on_primary"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-contracts",
+              "properties": {
+                "height": "hug",
+                "text": "Contracts",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-knowledgebase",
+              "properties": {
+                "height": "hug",
+                "text": "Knowledgebase",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "b-menu-settings",
+              "properties": {
+                "height": "hug",
+                "text": "Settings",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "b-menu",
+          "properties": {
+            "align": "center",
+            "gap": "sm",
+            "height": "hug",
+            "justify": "start",
+            "padding": "md",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "style": {
+            "fill": "surface",
+            "padding": "md"
+          },
+          "type": "row"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "id": "b-lane-toggle",
+                  "properties": {
+                    "height": "hug",
+                    "text": "▾",
+                    "variant": "body",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "b-lane-name",
+                  "properties": {
+                    "height": "hug",
+                    "level": 3,
+                    "text": "app",
+                    "width": "hug"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "id": "b-lane-count",
+                  "properties": {
+                    "height": "hug",
+                    "text": "7 tasks",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "b-lane-contracts",
+                  "properties": {
+                    "height": "hug",
+                    "text": "Contract view",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "style": {
+                    "text_color": "primary"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "b-lane-title",
+              "properties": {
+                "align": "center",
+                "gap": "sm",
+                "height": "hug",
+                "justify": "start",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "id": "b-head-planning",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Planning",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-plan-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Add coupon preview",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-plan-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Checkout",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-plan-1-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "PLANNING",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "b-card-plan-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-plan-2-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Tax rounding",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-plan-2-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "PLANNING",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "b-card-plan-2",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "b-col-planning",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "b-head-assigned",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Assigned",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-assigned-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Partial return shipping",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-assigned-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Shipping",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-assigned-1-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "ASSIGNED",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "b-card-assigned-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "b-col-assigned",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "b-head-review",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Review",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-review-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Refund by month",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-review-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Reporting",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-review-1-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "NEEDS ATTENTION",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "style": {
+                            "text_color": "#a32628"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "b-card-review-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "b-col-review",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "b-head-complete",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Complete",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-complete-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Resume split shipments",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-complete-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Shipping",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-complete-1-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "COMPLETE",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-complete-1-archive",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Archive",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "b-card-complete-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "b-col-complete",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "b-head-canceled",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Canceled",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "b-card-canceled-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Export warehouses",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-canceled-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Reporting",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "b-card-canceled-1-status",
+                          "properties": {
+                            "height": "hug",
+                            "text": "CANCELED",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "b-card-canceled-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "b-col-canceled",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "b-columns",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "fill",
+                "justify": "start",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            }
+          ],
+          "id": "b-body",
+          "properties": {
+            "align": "stretch",
+            "gap": "sm",
+            "height": "fill",
+            "justify": "start",
+            "padding": "lg",
+            "width": "fill"
+          },
+          "type": "column"
+        },
+        {
+          "children": [
+            {
+              "id": "b-empty-hint",
+              "properties": {
+                "height": "hug",
+                "text": "Select a task to see its details.",
+                "variant": "muted",
+                "width": "fill"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "b-empty-band",
+          "properties": {
+            "align": "stretch",
+            "gap": "xs",
+            "height": "hug",
+            "justify": "start",
+            "padding": "sm",
+            "variant": "card",
+            "width": "fill"
+          },
+          "type": "column"
+        }
+      ],
+      "id": "board-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "none",
+        "height": "fill",
+        "justify": "start",
+        "padding": "none",
+        "width": "fill"
+      },
+      "type": "screen"
+    },
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "d-menu-workspace",
+              "properties": {
+                "height": "hug",
+                "text": "Workspace",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-strategy",
+              "properties": {
+                "height": "hug",
+                "text": "Strategy",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-design",
+              "properties": {
+                "height": "hug",
+                "text": "Design",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-board",
+              "properties": {
+                "height": "hug",
+                "text": "Board",
+                "variant": "body",
+                "width": "hug"
+              },
+              "style": {
+                "fill": "text",
+                "padding": "sm",
+                "text_color": "on_primary"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-contracts",
+              "properties": {
+                "height": "hug",
+                "text": "Contracts",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-knowledgebase",
+              "properties": {
+                "height": "hug",
+                "text": "Knowledgebase",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "d-menu-settings",
+              "properties": {
+                "height": "hug",
+                "text": "Settings",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "d-menu",
+          "properties": {
+            "align": "center",
+            "gap": "sm",
+            "height": "hug",
+            "justify": "start",
+            "padding": "md",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "style": {
+            "fill": "surface",
+            "padding": "md"
+          },
+          "type": "row"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "id": "d-lane-toggle",
+                  "properties": {
+                    "height": "hug",
+                    "text": "▾",
+                    "variant": "body",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "d-lane-name",
+                  "properties": {
+                    "height": "hug",
+                    "level": 3,
+                    "text": "app",
+                    "width": "hug"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "id": "d-lane-count",
+                  "properties": {
+                    "height": "hug",
+                    "text": "7 tasks",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "d-lane-contracts",
+                  "properties": {
+                    "height": "hug",
+                    "text": "Contract view",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "style": {
+                    "text_color": "primary"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "d-lane-title",
+              "properties": {
+                "align": "center",
+                "gap": "sm",
+                "height": "hug",
+                "justify": "start",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "id": "d-head-planning",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Planning",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "d-card-plan-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Add coupon preview",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "d-card-plan-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Checkout",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "d-card-plan-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "d-col-planning",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "d-head-assigned",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Assigned",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "d-card-assigned-1-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Partial return shipping",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "d-card-assigned-1-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Shipping",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "d-card-assigned-1",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "d-col-assigned",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "d-head-review",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Review",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "d-col-review-card-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Refund by month",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "d-col-review-card-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Reporting",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "d-col-review-card",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "d-col-review",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "d-head-complete",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Complete",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "d-col-complete-card-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Resume split shipments",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "d-col-complete-card-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Shipping",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "d-col-complete-card",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "d-col-complete",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "d-head-canceled",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Canceled",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "d-col-canceled-card-title",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Export warehouses",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "d-col-canceled-card-feature",
+                          "properties": {
+                            "height": "hug",
+                            "text": "Feature: Reporting",
+                            "variant": "small",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "d-col-canceled-card",
+                      "properties": {
+                        "align": "start",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "d-col-canceled",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "padding": "sm",
+                    "variant": "card",
+                    "width": "fill"
+                  },
+                  "style": {
+                    "fill": "#eceee6"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "d-columns",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "fill",
+                "justify": "start",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            }
+          ],
+          "id": "d-body",
+          "properties": {
+            "align": "stretch",
+            "gap": "sm",
+            "height": "fill",
+            "justify": "start",
+            "padding": "lg",
+            "width": "fill"
+          },
+          "type": "column"
+        },
+        {
+          "children": [
+            {
+              "id": "d-band-handle",
+              "properties": {
+                "align": "center",
+                "height": "hug",
+                "text": "⸺",
+                "variant": "muted",
+                "width": "fill"
+              },
+              "type": "text"
+            },
+            {
+              "children": [
+                {
+                  "id": "d-band-toggle",
+                  "properties": {
+                    "height": "hug",
+                    "text": "▾",
+                    "variant": "body",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "d-band-title",
+                  "properties": {
+                    "height": "hug",
+                    "level": 3,
+                    "text": "Tax rounding",
+                    "width": "hug"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "id": "d-band-copy",
+                  "properties": {
+                    "height": "hug",
+                    "text": "Copy ID",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "style": {
+                    "text_color": "primary"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "d-band-column",
+                  "properties": {
+                    "height": "hug",
+                    "text": "Assigned",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "d-band-status",
+                  "properties": {
+                    "height": "hug",
+                    "text": "Working",
+                    "variant": "small",
+                    "width": "hug"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "d-band-bar",
+              "properties": {
+                "align": "center",
+                "gap": "md",
+                "height": "hug",
+                "justify": "start",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            },
+            {
+              "id": "d-band-details",
+              "properties": {
+                "height": "fill",
+                "label": "Task details: description, notes, runs, changes and scope",
+                "width": "fill"
+              },
+              "type": "image_placeholder"
+            }
+          ],
+          "id": "d-band",
+          "properties": {
+            "align": "stretch",
+            "gap": "sm",
+            "height": {
+              "fixed": 360
+            },
+            "justify": "start",
+            "padding": "md",
+            "variant": "card",
+            "width": "fill"
+          },
+          "type": "column"
+        }
+      ],
+      "id": "detail-bottom-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "none",
+        "height": "fill",
+        "justify": "start",
+        "padding": "none",
+        "width": "fill"
+      },
+      "type": "screen"
+    },
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "s-menu-workspace",
+              "properties": {
+                "height": "hug",
+                "text": "Workspace",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-strategy",
+              "properties": {
+                "height": "hug",
+                "text": "Strategy",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-design",
+              "properties": {
+                "height": "hug",
+                "text": "Design",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-board",
+              "properties": {
+                "height": "hug",
+                "text": "Board",
+                "variant": "body",
+                "width": "hug"
+              },
+              "style": {
+                "fill": "text",
+                "padding": "sm",
+                "text_color": "on_primary"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-contracts",
+              "properties": {
+                "height": "hug",
+                "text": "Contracts",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-knowledgebase",
+              "properties": {
+                "height": "hug",
+                "text": "Knowledgebase",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "s-menu-settings",
+              "properties": {
+                "height": "hug",
+                "text": "Settings",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "s-menu",
+          "properties": {
+            "align": "center",
+            "gap": "sm",
+            "height": "hug",
+            "justify": "start",
+            "padding": "md",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "style": {
+            "fill": "surface",
+            "padding": "md"
+          },
+          "type": "row"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "id": "s-lane-toggle",
+                      "properties": {
+                        "height": "hug",
+                        "text": "▾",
+                        "variant": "body",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "s-lane-name",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "app",
+                        "width": "hug"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "id": "s-lane-count",
+                      "properties": {
+                        "height": "hug",
+                        "text": "7 tasks",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "s-lane-contracts",
+                      "properties": {
+                        "height": "hug",
+                        "text": "Contract view",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "primary"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "s-lane-title",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "id": "s-head-planning",
+                          "properties": {
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Planning",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "s-card-plan-1-title",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Add coupon preview",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "s-card-plan-1-feature",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Feature: Checkout",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "s-card-plan-1",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "sm",
+                            "variant": "card",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "s-col-planning",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "fill",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#eceee6"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "s-head-assigned",
+                          "properties": {
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Assigned",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "s-card-assigned-1-title",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Partial return shipping",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "s-card-assigned-1-feature",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Feature: Shipping",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "s-card-assigned-1",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "sm",
+                            "variant": "card",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "s-col-assigned",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "fill",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#eceee6"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "s-head-review",
+                          "properties": {
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Review",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "s-card-review-1-title",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Refund by month",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "s-card-review-1-feature",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Feature: Reporting",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "s-card-review-1",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "sm",
+                            "variant": "card",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "s-col-review",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "fill",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#eceee6"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "s-head-complete",
+                          "properties": {
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Complete",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "s-card-complete-1-title",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Resume split shipments",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "s-card-complete-1-feature",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Feature: Shipping",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "s-card-complete-1",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "sm",
+                            "variant": "card",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "s-col-complete",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "fill",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#eceee6"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "s-head-canceled",
+                          "properties": {
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Canceled",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "s-card-canceled-1-title",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Export warehouses",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "s-card-canceled-1-feature",
+                              "properties": {
+                                "height": "hug",
+                                "text": "Feature: Reporting",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "s-card-canceled-1",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "sm",
+                            "variant": "card",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "s-col-canceled",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "fill",
+                        "justify": "start",
+                        "padding": "sm",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#eceee6"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "s-columns",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "fill",
+                    "justify": "start",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                }
+              ],
+              "id": "s-body",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "fill",
+                "justify": "start",
+                "padding": "lg",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "id": "s-band-handle",
+                  "properties": {
+                    "align": "center",
+                    "height": "hug",
+                    "text": "⸺",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "s-band-toggle",
+                      "properties": {
+                        "height": "hug",
+                        "text": "▸",
+                        "variant": "body",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "s-band-title",
+                      "properties": {
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Tax rounding",
+                        "width": "hug"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "id": "s-band-copy",
+                      "properties": {
+                        "height": "hug",
+                        "text": "Copy ID",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "primary"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "s-band-column",
+                      "properties": {
+                        "height": "hug",
+                        "text": "Assigned",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "s-band-status",
+                      "properties": {
+                        "height": "hug",
+                        "text": "Working",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "s-band-bar",
+                  "properties": {
+                    "align": "center",
+                    "gap": "md",
+                    "height": "hug",
+                    "justify": "start",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "s-band-details",
+                  "properties": {
+                    "height": "fill",
+                    "label": "Task details: description, notes, runs, changes and scope",
+                    "width": "fill"
+                  },
+                  "type": "image_placeholder"
+                }
+              ],
+              "id": "s-band",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "fill",
+                "justify": "start",
+                "padding": "md",
+                "variant": "card",
+                "width": {
+                  "fixed": 512
+                }
+              },
+              "style": {
+                "border": "border"
+              },
+              "type": "column"
+            }
+          ],
+          "id": "s-work",
+          "properties": {
+            "align": "stretch",
+            "gap": "none",
+            "height": "fill",
+            "justify": "start",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "type": "row"
+        }
+      ],
+      "id": "detail-side-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "none",
+        "height": "fill",
+        "justify": "start",
+        "padding": "none",
+        "width": "fill"
+      },
+      "type": "screen"
+    }
+  ],
+  "id": "c8aff994aef54bef",
+  "schemaVersion": 1,
+  "tab": "ui",
+  "title": "Board page layout"
+}

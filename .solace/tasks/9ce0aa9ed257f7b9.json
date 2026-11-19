@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056547,
+  "body": "New and migrated projects get a starter `AGENTS.md` next to the starter `solace.toml` (`main.rs::import`). It is never written over an existing file.\n\n### Contents\n\nThe project-level rules the investigation (task `1f282969708a99a0`) places in a starter `AGENTS.md`, for the project's language (Gleam, Rust or JavaScript). Each section is short and opens with a plain-words comment saying the human owns the file and can change it. Rules every project needs belong in the briefs, not here: this file holds the defaults a human may want to change.\n\n### Checks\n\nImport and migrate tests: the file is created once, is protected, and is shown at `session start` (D-45).",
+  "closedTime": 1794975928,
+  "column": "cancelled",
+  "createdTime": 1792092166,
+  "dependsOn": [
+    "1f282969708a99a0"
+  ],
+  "feature": "09e09be4b9fddd05",
+  "home": ".",
+  "id": "9ce0aa9ed257f7b9",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 162.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "projects: starter AGENTS.md"
+}

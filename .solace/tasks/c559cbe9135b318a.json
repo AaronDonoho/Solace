@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792284194,
+  "body": "Saves several turns on runs that compact (run 11 made four separate re-reads after compaction).\n\nNothing in `solace-cli` reads Claude Code's compaction event, and the server doesn't need to. If the agent re-reads a symbol it already got in this run, and the symbol hasn't changed since, the context was almost certainly lost. That reply then adds:\n- the current views of the other symbols the run has been working on, within the reply budget (D-14), and\n- a short outline of the run so far.\n\n**Check first:** the server needs each run's read history, with the version of each symbol it served. The run log records steps (D-99). Check whether it records versions too. If it doesn't, record them in the task store, keyed by run.\n\n**Limits:**\n- **One turn late.** The first call after compaction is planned from the summary alone. This saves the re-reads after the first, not the first itself.\n- **Small windows.** Adding everything at once right after compaction brings the next compaction closer. Add only the symbols changed or read since the run's last `submit`, not everything the run has read.\n\n**Done when:** in a task run, re-reading an unchanged symbol returns the extra views and the outline once; a re-read of a symbol that changed since it was served does not. Runs outside a task, and strategy runs, are unaffected. Tests cover both cases. Record it as a decision and update spec 3.",
+  "closedTime": 1792251211,
+  "column": "complete",
+  "createdTime": 1792202477,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "c559cbe9135b318a",
+  "links": [],
+  "milestone": null,
+  "rank": 184.0,
+  "scope": [
+    "."
+  ],
+  "title": "replies: catch re-reads after compaction"
+}

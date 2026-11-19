@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876829,
+  "body": "The Design page's Preview button and its Show/Hide changes button don't look like the buttons on the rest of the app.\n\n- **Preview / Exit preview:** today a dark filled button. It takes the app's ordinary button look (the shared control styles the task detail and Settings use).\n- **Show/Hide changes:** today a 🔍 icon whose words are only a tooltip. Leave the icon as is.\n\nOut of scope: the other Design page buttons (Restore, Proposed / Current).\n\n**Tests:** both buttons use the shared button look",
+  "closedTime": 1794788605,
+  "column": "complete",
+  "createdTime": 1794787918,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "bed891c77822251d",
+  "links": [],
+  "milestone": null,
+  "rank": 21,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "design: buttons match the app"
+}

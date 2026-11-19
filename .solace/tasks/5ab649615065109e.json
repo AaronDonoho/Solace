@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794876826,
+  "body": "Selection and notes work on the Architecture tab as they do on UI/UX: a human can point at a flow diagram's nodes and its edges.\n\n### Do\n\n- Clicking a node or an edge selects it by its ID, and a dragged region selects the nodes and edges inside it, with the same rules as the UI/UX tab.\n- A note on the Architecture tab sends through the same path as on UI/UX.\n\nThis assumes edges can be pointed at as well as nodes, since both are elements (feature:afd9fe8bae36c59c). If the human says otherwise, select nodes only.\n\n### Acceptance\n\n- Tests: a node and an edge each select by ID, and a region selects the expected nodes and edges.\n- Update the README.\n\n### Left out\n\nSequence diagrams and other diagram types.",
+  "closedTime": 1794857987,
+  "column": "complete",
+  "createdTime": 1794273247,
+  "dependsOn": [
+    "638c6f11b9163467",
+    "5f5eebf4cda2b32e"
+  ],
+  "feature": "afd9fe8bae36c59c",
+  "home": "solace-cli/design",
+  "id": "5ab649615065109e",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 15.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "notes: point at diagram nodes and edges"
+}

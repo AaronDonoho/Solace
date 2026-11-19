@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793231418,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793231386,
+  "column": "complete",
+  "createdTime": 1793224221,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f6f2e28a5938c145",
+  "links": [],
+  "milestone": null,
+  "rank": 175.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: carried import vs moved name clash: Tech Debt"
+}

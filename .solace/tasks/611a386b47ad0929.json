@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690239,
+  "body": "I read through the D-77 task store: tasks.rs, the task paths in board.rs (adopt_tasks, needs_lock, guard, change, message, task_command, supervise, finish, Events), lockdown::recover, outside::absorb and the board client (api.mjs, solace_board.live / start). The design holds up overall: one writer thread, and project locks are always taken in the same order. But I found ways to lose edits, apply stale edits, leave the board out of step with the store, and stall it. They are listed by severity. Nothing was changed, and no tests were run (this run is read-only and run is refused).\n\nMedium: ordering and races\nA task done sent just before the agent exits can lose to supervise. task done uses send and doesn't wait. The server drains only between jobs, and a job that arrives during the 50 ms recv_timeout runs first. If the agent exits within that window, finish(... \"agent exited without finishing\") runs first, the run is marked failed, and then the stale done is applied (item 2). This is unlikely with real CLIs but likely with fast fake agents, so tests could be flaky. Fix: call drain right before each job in the server loop, and/or have done wait with applied() like note/ask do.\nA crash during migration blocks serve. adopt_tasks writes the store copy and then deletes the old one. A crash in between leaves both, and the next serve refuses to start (\"remove one copy\"). Fix: if the store copy's home is this project, delete the old file and continue. Two projects copied from one folder with the same ids also stop serve; that case needs a clearer message.\nDurability: write_atomic doesn't fsync the file or the directory, even though inbox messages are fsynced. After a power loss a task file can be empty. all_tasks then fails on that one file, so the whole board's task listing fails. Fix: fsync in the task store's write, and have all_tasks skip and report an unreadable file instead of failing.",
+  "closedTime": 1791426659,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "611a386b47ad0929",
+  "links": [],
+  "milestone": null,
+  "rank": 38.0,
+  "scope": [
+    "."
+  ],
+  "title": "Task Store debt: ordering and races"
+}

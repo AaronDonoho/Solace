@@ -42,5 +42,18 @@ node_modules/
 **/.solace/*
 !**/.solace/store.db
 !**/.solace/approved
+!/.solace/strategy/
+/.solace/strategy/*
+!/.solace/strategy/vision.md
+!/.solace/strategy/personas.json
+!/.solace/strategy/milestones/
+/.solace/strategy/milestones/*
+!/.solace/strategy/milestones/*.json
+!/.solace/strategy/features/
+/.solace/strategy/features/*
+!/.solace/strategy/features/*.json
+!/.solace/tasks/
+/.solace/tasks/*
+!/.solace/tasks/*.json
 # Solace: shared store files end.
 build-output/

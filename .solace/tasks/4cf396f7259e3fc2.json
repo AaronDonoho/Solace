@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972378,
+  "body": "**Question:** is it worth replacing file-time staleness with a content fingerprint, and declaring the bundle's inputs once?\n\n**Proposed design (from task:4ea2064f16119df8):**\n- The frontend's `[build]` declares the bundle's inputs (source folders, `gleam.toml`, `manifest.toml`, `bun.lock`) and output (`priv/app.js`). `build`, `build plan`, `task done` and `build.rs` all read that one list.\n- The bundle step writes a hash of those inputs next to `app.js`; both are committed. Mismatch = stale, regardless of timestamps (fresh clone, branch switch).\n- Tool versions (bun, gleam) are left out of the hash, so another PC doesn't see every bundle as stale.\n- One source for the step itself, ending the three copies.\n\n**Answer in a note:** how often file times give wrong answers today, the size of the change, what it unblocks, and a recommendation: do it, do part, or drop. If yes, propose the work task. No code changes.",
+  "closedTime": 1794324339,
+  "column": "complete",
+  "createdTime": 1792291876,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "4cf396f7259e3fc2",
+  "links": [],
+  "milestone": null,
+  "rank": 218.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate bundle fingerprint and declared inputs"
+}

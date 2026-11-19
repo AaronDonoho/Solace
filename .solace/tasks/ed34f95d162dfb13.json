@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "The Build tab milestone needs proof that a supported imported project builds to a deployable that runs. It may already work; this checks it.\n\n- Import a small Gleam project and a small one-crate Rust package into Solace, each on its own, outside Solace's own workspace.\n- Build each from the Build tab, using its default recipe or a declared one.\n- Copy each deployable out and run it on Linux, with only the runtime it needs (e.g. Erlang for Gleam).\n\nReport what worked and what didn't. For each failure, propose a task to fix it. Change no code here.\n\nDone when: both projects have been tried, and the report says for each whether it built, whether its deployable ran, and which fix tasks were proposed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1794976807,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "ed34f95d162dfb13",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 400.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Investigate imported projects build and run"
+}

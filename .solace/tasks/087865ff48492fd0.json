@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794359900,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794341759,
+  "column": "complete",
+  "createdTime": 1794338826,
+  "dependsOn": [],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "087865ff48492fd0",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 374.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "design: design agent: Tech Debt"
+}

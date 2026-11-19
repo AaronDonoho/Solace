@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791690216,
+  "body": "The Contract View should be its own page, Gleam compiled to javascript, just as the Migration page has its own page. Document the steps to achieve this.",
+  "closedTime": 1791511876,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "8bfe320f609bfe5f",
+  "links": [],
+  "milestone": null,
+  "rank": 17,
+  "scope": [
+    ".",
+    "solace-cli/archive",
+    "solace-cli/board",
+    "solace-cli/contracts",
+    "solace-cli/frontend"
+  ],
+  "title": "Contracts app planning"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056550,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\n- `PATCH` on several tasks at once (feature, milestone, and project if that is allowed).\n- `DELETE /tasks/{id}` with a confirmation.\n- Archiving: set `archivedTime`, and decide whether the board hides archived tasks. D-87 point 3 left this open. (See also **Remove completed tasks from board**, 399a97660fe6863a.)\n- Server-side search over notes and changes.\n\nAll Rust plus the Tasks tab.\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1793665556,
+  "column": "cancelled",
+  "createdTime": 1791594852,
+  "dependsOn": [
+    "abd509d40836ae73"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "f7918afa21803f2a",
+  "links": [],
+  "milestone": null,
+  "rank": 61.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: mass edits and archiving"
+}

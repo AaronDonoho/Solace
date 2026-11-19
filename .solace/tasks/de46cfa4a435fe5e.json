@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792977620,
+  "body": "Do what decision D-202 in `DECISIONS.md` says: a planning run is never started on a task, and runs already saved on a task are listed with the page's runs.\n\n### Why\nA run started while a task was open on the Strategy page's Tasks tab was filed under that task. The planning panel lists only the runs for the current selection, so the run vanished from the list and the human thought it was lost (run `335eb6144270745b`, filed under task `3d734b5a9310c362`).\n\n### What to change\n- `strategy.plan_context` (solace-cli/strategy) gives the page for every tab. Opening a task no longer changes which run the panel shows, or the context of the next run.\n- `plan.past` and `plan.open_on` treat a run whose stored context is a task as a page run, so every run on a task appears under \"Earlier runs\".\n- `tasks.start_run` (solace-cli) refuses a `task` context (`E7001`) and says the run starts on the page.\n- Update Spec 15 (`context` row, `POST /strategy/runs`, the strategy run paragraph in §6) to match D-202.\n\n### Keep\n- The stored run format: existing runs keep `context: {kind: \"task\", id}`, their ids, notes and timestamps. Don't rewrite run files.\n- Feature and milestone contexts are out of scope; leave them as they are.\n- No new list or panel of all runs (the human declined one).\n\n### Tests\n- Opening a task on the Tasks tab leaves the plan context on the page.\n- A stored run on a task is listed among the page's earlier runs, and the open-run check covers it.\n- Starting a run with a task context is refused with a message naming the page.",
+  "closedTime": 1792964874,
+  "column": "complete",
+  "createdTime": 1792959594,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "de46cfa4a435fe5e",
+  "links": [],
+  "milestone": null,
+  "rank": 76.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: planning runs not tied to tasks"
+}

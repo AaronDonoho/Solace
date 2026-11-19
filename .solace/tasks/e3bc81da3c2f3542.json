@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977619,
+  "body": "When a task reaches a final column, Solace settles it: it clears the task's undo records. For every task whose home is a project other than the root, settling fails with `E7001 unknown task`. Since Oct 23 the server has logged this for 39 completed tasks (for example `6ab9e60845ad86d4`, `a74a64c7c8469ce4`, all in `solace-cli` or `solace-cli/components`). It retries all of them on every start, and their undo records stay behind. The tasks themselves are intact.\n\n### Cause\n- `board.settle_final` (solace-cli/src/board.rs) first reads the task with `board.task(top, tid)`, where `top` is the root. `board.task` refuses a task whose `home` isn't the folder it is given, so any project's task is \"unknown\".\n- `tasks.flag_settle_failed` reads the task the same way, so recording the failure also fails. The human is never told; only the server output says so (`recording the settling failure of task …`).\n\n### What to change\n- Read the task at its own home in both places, for example by reading it from the root's task store to find `home`, then `board.task(&scope::path(top, home), tid)`. Keep the no-project case (`noProject`), which has nothing to settle.\n\n### Tests\n- A completed task whose home is a member project (not the root) settles: no undo records remain and nothing is logged.\n- When settling it fails, the failure is flagged on the task (its note and attention flag), not lost.\n- A no-project task still settles as a no-op.",
+  "closedTime": 1792962253,
+  "column": "complete",
+  "createdTime": 1792959594,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e3bc81da3c2f3542",
+  "links": [],
+  "milestone": null,
+  "rank": 77.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Settle: completed tasks in a project never settle"
+}

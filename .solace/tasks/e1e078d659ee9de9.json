@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125213,
+  "body": "In task:e86828d20aaab5a2, one leading space in the `write` paragraph of `solace-cli/src/reference.txt` used up six runs, three work and three review. Nothing measured the layout. The reviewers judged columns by eye from `read` output. The work runs couldn't see leading space at all: `read` adds a `NNN: ` prefix, `grep` collapses spaces, and `write`'s `old` matches a substring. This task makes a slip like that impossible to save.\n\n## Change\n- **Script** `solace-cli/tests/reference_layout.py <file>`: checks the \"Commands in full\" section of the reference. Exit 0 when the layout is clean. Otherwise, exit 1 with one line per fault: `line N: starts at column C; the descriptions start at column D` (or the width fault).\n  - **Description column:** read it from the file (the column where descriptions start after the `  <syntax>` lines), not a hard-coded number.\n  - A **command line** starts with two spaces. If its description is on the same line, it starts at the description column.\n  - A **continuation line** (all spaces up to its text) starts exactly at the description column. The exception is an **indented example block**, like the `*** Begin Patch` example under `write`: lines deeper than the description column are allowed if the whole run of them shares one column.\n  - **Group headings** (`Reading`, `Project: …`) and blank lines are left alone. So is the part before \"Commands in full\".\n  - **Width:** no line is longer than the widest line the section has now. Measure that when writing the script and put the number in the script with a comment.\n- **Validator:** the human adds `\"solace-cli/src/reference.txt\" = [\"python3\", \"solace-cli/tests/reference_layout.py\", \"{file}\"]` under `[validators]` in the root `solace.toml`. Agents can't edit that file, so ask with `task ask` and give the exact line. After that, a `write` that misaligns the reference is refused at once and names the line and column.\n- **Run it now** against the current file. Fix whatever it finds, so the file starts clean.\n- **Records:** a decision in `DECISIONS.md`, and one line in `solace-cli/README.md` next to the `src/reference.txt` entry.\n\n## Tests\nA unit test in `main.rs` runs the script on `REFERENCE` as embedded and expects exit 0, so `rust-unit` also catches a reference that was changed some other way. Script cases, on small sample texts: a continuation line one column too far right fails and names its line; one column too far left fails; a consistent indented example block passes; an example block with mixed columns fails; a line over the width fails.",
+  "closedTime": 1792118475,
+  "column": "complete",
+  "createdTime": 1792076793,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "e1e078d659ee9de9",
+  "links": [],
+  "milestone": null,
+  "rank": 150.0,
+  "scope": [
+    "."
+  ],
+  "title": "reference: layout validator"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792705659,
+  "body": "Lets the human add `solace-cli/` from the Workspace page, which task:ae814f5f5d70db58 depends on. Today there is no way to do it:\n\n- `workspace::found` lists only folders with a `gleam.toml`.\n- `workspace::add` takes only a folder that already has a store, and sends existing code to migration (D-59).\n- `workspace::setup` refuses a folder without `gleam.toml`.\n- Migration (`migrate::candidates`) offers nothing inside a root that is already managed.\n\n**First:** add a decision to `DECISIONS.md` (amends D-57 point 3 and D-59): a one-crate Cargo package below a managed root is added in place. The import changes none of its files (only `.solace/` and a new `solace.toml`), and `language::rust::package` refuses the whole package, naming each line outside the subset, before anything is written. So the copy-and-swap is not needed for it.\n\n- `found` also lists one-crate Cargo packages (`Cargo.toml` with `[package]`), skipping `target/`, with `language: \"rust\"`.\n- On the Workspace page, a listed package without a store offers **Add**, which runs `setup`. `setup` accepts a folder with `Cargo.toml` as well as `gleam.toml`.\n- A refusal (subset lines, several crates, a workspace, a proc-macro crate, a failed fetch) is shown on the page as the import words it. The project list and the folder are left unchanged.\n- Without `cargo`, the add goes ahead and says the dependencies weren't fetched (`main.rs::import_with`).\n- Gleam is unchanged: an existing Gleam project still comes in by migration.\n\n### Tests\n- `found` lists a one-crate package, and doesn't list `target/` or a package that already has a store.\n- Adding a package in place imports it, lists it in `projects`, and leaves every file outside `.solace/` and `solace.toml` byte for byte unchanged.\n- A package with a refused line isn't listed and gets no store, and the reply names the line.\n\nLeft out: Rust migration (copy, check, swap), and multi-crate workspaces (D-158 point 6).",
+  "closedTime": 1792440408,
+  "column": "complete",
+  "createdTime": 1792428024,
+  "dependsOn": [],
+  "feature": "42af7119fb6915f9",
+  "home": ".",
+  "id": "ba3b986a554dd17f",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 236.0,
+  "scope": [
+    ".",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "Workspace: add a Rust package in place"
+}

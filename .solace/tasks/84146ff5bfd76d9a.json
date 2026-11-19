@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1793651946,
+  "body": "Add a **Personas** tab between Vision and Features (`?tab=personas`).\n\n- Lists personas; add, edit and delete one. A form has Name, Objectives, Tools, Concerns and Other, with these placeholders:\n  - Name\n  - Objectives: What does this persona want to accomplish?\n  - Tools: What capabilities, resources, or means can the persona use to pursue their objectives?\n  - Concerns: What risks, constraints, trade-offs, or undesirable outcomes matter to this persona?\n  - Other: Additional context that helps explain this persona's perspective, reasoning, or behavior.\n- Uses the shared Markdown editor like the Vision tab; a draft begun from an older revision says so and offers to reload.\n- Updates live from the `{personas}` event.\n\nLeft out: reordering and search.",
+  "closedTime": 1793492770,
+  "column": "complete",
+  "createdTime": 1792601893,
+  "dependsOn": [
+    "cf2a0c42be1e6541"
+  ],
+  "feature": "310e17a1d12ca5da",
+  "home": "solace-cli/frontend",
+  "id": "84146ff5bfd76d9a",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 15.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "personas: Strategy page tab"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792731882,
+  "body": "Same-project Rust `extract <symbols…> --to <module>` (D-185), built on the scoped resolver from task:10e5b94213c1e788. Today Rust `extract` is refused (\"Gleam only\", D-158 point 6).\n\n**Do.**\n- Route Rust `extract` to a new `extract::rust` instead of refusing it. `--to-project` stays refused for Rust.\n- Move the named items and the private helpers only they use into the target module, creating it if new. Keep stored identity.\n- Rewrite references with the resolver's `rewrite_sites` and `use_sites` only; no second resolver, no last-name fallback. Keep bare names where an import binds them.\n- Promote moved items to `pub(crate)` where code left behind still uses them.\n- One transaction: if cargo check fails, roll everything back and show its errors.\n- Errors: E5002 (a test would be split from what it tests), E1004 (name already in target), E6013 (kind that cannot move yet, e.g. impls, nested test modules: name it and the follow-up).\n- Record D-185; update `reference.txt`, the specs and help text; drop \"Rust extract is deferred\" and the \"Not available for Rust\" entry for `extract`.\n\n**Tests.** A fn with a private helper moves and callers compile; a new target module is created; a name clash gives E1004; a cargo failure rolls back; `vendor::make` and a local `let make` are untouched; `check --warnings` stays clean.\n\n**Out of scope.** Impls and nested test modules (task:cecf5788c7f06aa3); import carrying and namespaces (task:f9b3a60e7dd8547f); `--to-project` and `merge` for Rust.",
+  "closedTime": 1792682840,
+  "column": "complete",
+  "createdTime": 1792617728,
+  "dependsOn": [
+    "10e5b94213c1e788"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "4375a3b1075dced2",
+  "links": [],
+  "milestone": null,
+  "rank": 253.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust command, same project"
+}

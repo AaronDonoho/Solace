@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792208843,
+  "body": "Builds the skills half of D-27 (PROPOSAL §5.5), which was never built. Agent runs don't load the agent program's own skills or plugins (`--setting-sources \"\"`, `--disable-slash-commands`, `enabledPlugins: {}`), so a human's skills, such as impeccable for design direction, never reach Solace's agents. Customers will need this to give agents a consistent look and feel for their apps, and other house rules.\n\n- **Where:** a `skills` key in the project's `solace.toml` names the folder, defaulting to `skills/` when the key is missing. Humans own the folder: agents can read it but not change it, the same protection as `AGENTS.md`.\n- **Shape:** each skill is a subfolder with a `SKILL.md`, the common format, with `name` and `description` in its front matter. A skill may have more files beside it (references, examples). A single `<name>.md` file is accepted as well. A skill with no description is listed with its first line.\n- **Brief:** every run's brief, for work, investigate, discuss, review and strategy runs, has a short **Skills** section with one line per skill: its name, its description, and the path to `read`. It also says to read a skill when the task matches its description. The brief never includes skill contents. With no skills, the section is left out.\n- **Scripts:** a skill's scripts are not run by Solace. A skill that needs a tool names a `[commands]` entry that the human adds to `solace.toml`, the same pattern as `layout_audit`. Say this in the reference text under skills.\n- **Docs:** add skills to `reference.txt` and the Guide. Note in `DECISIONS.md` that D-27's skills are now built, with the folder key and default.\n\n**Tests:**\n- A project with two skills (one folder with `SKILL.md`, one single file) lists both in the brief, with name, description and path.\n- A skill without front matter is listed by its first line.\n- No skills folder means no Skills section.\n- An agent write into the skills folder is refused like other protected files.\n- The `skills` key in `solace.toml` overrides the default folder.",
+  "closedTime": 1792084776,
+  "column": "complete",
+  "createdTime": 1792007416,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "dbb9a1d662ccfe10",
+  "links": [],
+  "milestone": null,
+  "rank": 140.0,
+  "scope": [
+    ".",
+    "solace-cli/frontend"
+  ],
+  "title": "skills: folder listed in the brief"
+}

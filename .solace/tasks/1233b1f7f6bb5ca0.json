@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159124,
+  "body": "Rust keeps modules and functions in separate namespaces, so `mod merge;` next to `fn merge` is valid Rust. But `language::rust.Cx::duplicates` treats them as one name and refuses the file (`merge is defined twice in extract::rust`).\n\n`submit` saved this pair anyway in run 1eb9fa406ebb94eb of task:ea673350c54b241e. After that, writing the crate back from the store failed, and two tests broke: `every_file_of_this_crate_joins_back_exactly` and `a_copy_of_this_crate_is_imported_and_written_back_exactly`. So `submit` and the importer disagree about the same code.\n\n### Change\n- `duplicates` counts a `mod` as a clash only with another type-namespace item (struct, enum, union, trait, type, mod), not with a fn, const or static.\n\n### Done when\n- A test shows that `fn f` and `mod f` in one module import and write back exactly.\n- The existing `the_same_name_twice_is_refused` cases still pass.\n- `test --all --project solace-cli` passes.",
+  "closedTime": 1793055281,
+  "column": "complete",
+  "createdTime": 1793052897,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "1233b1f7f6bb5ca0",
+  "links": [],
+  "milestone": null,
+  "rank": 110.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "rust: a module may share a function's name"
+}

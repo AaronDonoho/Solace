@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791778987,
+  "body": "Should be able to link to a task by ID; tasks can be linked to in text. Clicking the link focuses the task in the Board (if present) or otherwise in the Strategy page, or else displays message \"Task does not exist\" in a temporary toast.",
+  "closedTime": 1791737472,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "7fe40a99e12c7e0c",
+  "links": [],
+  "milestone": null,
+  "rank": 68.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "reference a task with link"
+}

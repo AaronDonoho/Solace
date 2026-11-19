@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690214,
+  "body": "The solace-cli is taking a long time to build, install.\nIt appears to be due to the number of packages that must be installed, but some take longer than others.\nTests also take a long time. We want to keep our tests but shorten the duration of them if possible.",
+  "closedTime": 1791234798,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "e401773101a3fdd7",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "Reduce build/install/test time"
+}

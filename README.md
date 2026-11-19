@@ -36,13 +36,12 @@ Start from a machine with nothing but a terminal. Linux and macOS are supported 
 
 ### 1. What Solace uses
 
-The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam and Erlang, Gleam projects can't build or run; without Rust and Cargo, Rust projects can't; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`.
+The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam and Erlang, Gleam projects can't build or run; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`. Rust projects also need Rust and Cargo; step 3 lists them.
 
 | Tool | What it's for | Version |
 | --- | --- | --- |
 | Gleam | formats, checks, tests and builds your projects | 1.18.1 or newer |
 | Erlang/OTP | runs Gleam projects | 29 or newer |
-| Rust and Cargo | checks, tests and builds Rust projects | current |
 | An agent | Codex CLI or Claude Code; does the work you assign | current |
 | bubblewrap | makes a migration's original folder read-only to Solace's commands, and runs Rust commands without network access, writing only `target/` and `Cargo.lock` (Linux) | current |
 | Git | keeps your project's history and lets you switch branches | current |
@@ -321,7 +320,7 @@ Solace puts every file in the project into one category, named for what Solace d
 
 File writes enforce `watch_limit`, stale-write checks and any matching validators. `gleam.toml` must still parse after a write and can't be removed. Watched and unwatched file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
-Agents get no shell and no file tools, only the Solace MCP tool and web access. Code is meant to change through tasks, but Solace never writes over a source file it didn't write last. An edit made outside Solace (by hand, by another tool, by `git pull` or a branch switch) is read into the store. If an agent is working, the edit joins its task. Otherwise it waits on an **Unexpected Changes** task, marked with a hazard sign, until you complete it (keep the changes) or cancel it (restore Solace's code); no agent starts work meanwhile. Code that was approved in Solace, such as a teammate's pulled work, is read in quietly through `.solace/approved`, which you commit; Solace keeps one marked block in the root `.gitignore` that commits every project's `store.db` and `approved` and ignores the rest of each `.solace/`. Migration reports source differences before you adopt the copy.
+Agents get no shell and no file tools, only the Solace MCP tool and web access. Code is meant to change through tasks, but Solace never writes over a source file it didn't write last. An edit made outside Solace (by hand, by another tool, by `git pull` or a branch switch) is read into the store. If an agent is working, the edit joins its task. Otherwise it waits on an **Unexpected Changes** task, marked with a hazard sign, until you complete it (keep the changes) or cancel it (restore Solace's code); no agent starts work meanwhile. Code that was approved in Solace, such as a teammate's pulled work, is read in quietly through `.solace/approved`, which you commit; Solace keeps one marked block in the root `.gitignore` that commits every project's `store.db` and `approved`, plus the root's strategy vision, personas, milestones and features and its tasks (without their notes, questions or run details), and ignores the rest of each `.solace/` (including strategy runs and task conversations). Migration reports source differences before you adopt the copy.
 
 ### Running an agent yourself
 

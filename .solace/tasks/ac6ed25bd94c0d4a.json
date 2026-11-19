@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183766,
+  "body": "The server can list a workspace's designs and return one, so the page and agents have one way to read them. Nothing writes a design yet.\n\n### Do\n\n- Decide where the current designs live in the repo and record it in the format decision. They belong to the workspace, not to a project. They can't sit in `.solace/`, because git ignores it apart from `store.db` and `approved`. A cursory suggestion: `designs/<id>.json` at the root.\n- Give a design an ID the way tasks get theirs.\n- Add root routes in the board server: `GET /designs` returns each design's ID, title and tab; `GET /designs/{id}` returns one design whole.\n- A file that fails validation is reported rather than breaking the list. A missing design returns the usual not-found error (`E7023`).\n- Add the routes to Spec 15.\n\n### Acceptance\n\n- Tests: an empty workspace lists nothing, two designs on different tabs both list, one design reads back whole, a missing ID gives `E7023`, and an invalid file doesn't hide the valid ones.\n- Works when the workspace root isn't itself a project (see `board::server.root_route`).\n\n### Left out\n\nSaving, versions, and any page.",
+  "closedTime": 1793977507,
+  "column": "complete",
+  "createdTime": 1793913860,
+  "dependsOn": [
+    "c7b617fbc8184707"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "ac6ed25bd94c0d4a",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 335.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: list and read designs"
+}

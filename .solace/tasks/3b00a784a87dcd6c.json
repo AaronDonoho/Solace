@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231416,
+  "body": "The worker brief's `submit` example (`src/reference/workflow.txt`, step 2) is loose enough that run 5ee6456fc6ffd442 on task:541f1aa3d40fadf0 copied it literally, and most of its failed calls came from that.\n\n## What went wrong, and its cause in the example\n- **`text:` written inside `command`**: steps 18, 29, 31 and 44 were refused as \"not shell\" or \"not a command\". The example shows the call as `command: …` / `text: …` labels in one indented block, and the worker typed it that way.\n- **A `text` that starts with the literal `text:`**: steps 36 and 54. This comes from the same layout.\n- **`--replace` with `old:` and `text:` in `command`**: step 44. The brief never shows a `--replace` call.\n- **A bare `@@` left before the next `*** Update:`**: step 54, E0108 \"a hunk that only adds lines\". The example has one hunk per header, so it never shows how hunks end.\n- **`*** Add: language::rust_refs::ImportSite::named`** for a method on a type that already exists: step 36, E1003. The example is Gleam only (`pilot/checkout.pay`), so it never shows the Rust forms.\n- **`read` on a symbol-held `.rs` file**: step 12, E6001.\n\n## Change\n1. Replace the `command:` / `text:` block with a form that can't be mistaken for text to type. For example, two separately labelled arguments, with one sentence saying the labels are not part of either value and that `text` starts at `*** Begin Patch`.\n2. Show a patch with two `*** Update:` headers, each with its own `@@` hunk. Say that an `@@` is always followed by its lines.\n3. Show one `submit --draft <id> --replace` call: `old` and `text` are separate arguments, never lines in `command`.\n4. Show the Rust Add forms next to the Gleam ones: a new function `*** Add: m.f`, and a method on an existing type `*** Add: m.Type::f` or a new `impl`, whichever `submit` actually accepts. Check this against `submit` before writing it.\n5. Add one line: `read` doesn't open symbol-held source; use `view` or `inspect`.\n\n## Done when\n- The examples in `workflow.txt` and `changing.txt` match what `submit` accepts.\n- The reference's own validation passes.\n- A test passes that runs each example's patch through `submit` on a small Rust fixture, if the reference tests can do that cheaply.",
+  "closedTime": 1793212037,
+  "column": "complete",
+  "createdTime": 1793211012,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "3b00a784a87dcd6c",
+  "links": [],
+  "milestone": null,
+  "rank": 161.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: exact submit call example"
+}

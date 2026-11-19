@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778989,
+  "body": "1) where possible, Allow commands to apply to an arbitrary list of arguments, so agents don't have to do things like:\n\n> solace strategy show task <taskid> strategy show task <taskid> strategy show task <taskid> strategy show task <taskid> \n\n2) separate lines in the documentation for commands that have clearly different purposes. for example, agents often confuse when to use `find` and `grep` because they share a line.\n\n3) the delineation between the different tiers of files should be made clear to the agent so that it doesn't stumble; often times agents think they absolutely can't do something when they actually can, and vice versa.\n\n4) look for opportunities to reduce the number of commands which are nearly semantically equivalent even though the implementation is different.\n\nthe character length of the solace info may be extended if required to add clarity.",
+  "closedTime": 1791750358,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "9fe17e0c48c96daf",
+  "links": [],
+  "milestone": null,
+  "rank": 72.0,
+  "scope": [
+    "."
+  ],
+  "title": "Improve solace commands"
+}

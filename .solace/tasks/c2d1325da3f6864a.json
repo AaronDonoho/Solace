@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977672,
+  "body": "Planner runs sometimes treat a reported problem as a request to design a process, and they can present a concrete solution as though it were prescribed. The current role asks for the smallest plan and what was left out, but not for a conversational, grounded reading of the request.\n\nChange `board::strategy.STRATEGY_ROLE`, used by `strategy_brief` for every strategy run, to add short guidance:\n\n- Read the human's message literally: the problem or need is the request; don't invent a process around it. Ground the plan in the records and code you actually read, and say what is uncertain rather than filling it in.\n- When something is missing, make the smallest grounded assumption, name it in one line, and ask only when the choice changes what will be built or risks real loss.\n- Separate what the human asked for from what you recommend. If you propose a specific solution, say plainly that it is merely a cursory suggestion, not a prescription; the human decides.\n- Don't turn measurement, investigation, benchmarking or another step into a precondition unless the human asked for it or a decision or spec requires it. If one isn't feasible here, say so briefly and still propose the next useful action.\n- Keep notes conversational: lead with the answer, use plain language, and explain any term a non-specialist may not know.\n\nKeep the existing read-only, proposal and left-out rules unchanged.\n\n**Test:** extend the `board_tests.rs` strategy brief test to assert the new guidance reaches every run's prompt. Run `rust-board-tests`; run `rust-acceptance` if a prompt assertion changes acceptance output.\n\n**Leaves out:** changing work, review, investigate or discussion briefs; reworking proposal fields; adding a settings toggle; and a new spec or decision. D-156 point 2 already asks a strategy run for the smallest version, so this clarifies stance and wording, not the API.",
+  "closedTime": 1792854858,
+  "column": "complete",
+  "createdTime": 1792811332,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "c2d1325da3f6864a",
+  "links": [],
+  "milestone": null,
+  "rank": 55.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "planner: grounded, conversational brief"
+}

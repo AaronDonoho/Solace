@@ -1,0 +1,10 @@
+{
+  "body": "Follow-up to feature:5561308bebd3bc9d. These reported issues remain after General UI Polish: the Tasks tab pages at 25 rather than 10; the selected task scrolls below the table instead of sitting in a collapsible bottom band; the feature editor opens inline instead of in a bottom band; the Project, Feature and Milestone filters are still selects; record state labels use one neutral style; milestone headings show a raw feature total rather than completion; and complete or canceled features remain mixed among open groups on Features. Several Strategy elements are misaligned, including the missing gap before a milestone's feature count, and browser Back skips tab changes and record-link activations.\n\nTen small tasks cover this feature. The milestone gap is folded into the alignment pass because it is the same cosmetic defect, and the Back task notes that it changes D-90 point 3's `replaceState` choice. The feature-editor band follows the Tasks tab's selected-task band rather than introducing a second pattern. No milestone: this is follow-up polish, not a dated delivery.",
+  "colorSlot": 16,
+  "id": "c84dfec066f79321",
+  "milestone": null,
+  "rank": 16.0,
+  "startTime": 1792722542,
+  "state": "complete",
+  "title": "Strategy page: remaining fixes"
+}

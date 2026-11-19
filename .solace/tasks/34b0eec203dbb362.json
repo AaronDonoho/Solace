@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791951681,
+  "body": "The menu bar at the top should be sticky; always visible when scrolling down.",
+  "closedTime": 1791864570,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "34b0eec203dbb362",
+  "links": [],
+  "milestone": null,
+  "rank": 12.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Menu bar: Sticky"
+}

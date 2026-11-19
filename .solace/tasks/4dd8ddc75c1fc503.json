@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792598368,
+  "body": "Improve the direction agents get so their work stays maintainable, in the work and review briefs (`board.rs::brief`) and `reference.txt`.\n\n### Work runs\n\n- Reuse existing code before adding new code. Extract common patterns\n- Prefer small, stateless, self-documenting functions\n- Keep modules and functions small and focused; separate concerns by domain and component\n- Use clear names for new symbols\n- Never allow thoughts/decisions/directives into code comments or UI\n- Never allow details/decisions of implementation/development into the UI\n- Follow the module boundaries the refactor (task:2414798176c466e4) creates: new code goes in the module that owns its concern\n\n### Review runs\n\n- Flag duplication and large modules; minor ones file as tech debt\n- Never allow thoughts/decisions/directives into code comments or UI\n- Never allow details/decisions of implementation/development into the UI\n- Do not allow cross-domain concerns into the same module\n- Flag excessively long functions and dead code as tech debt\n\n### Notes\n\nOverlaps with task:65a103e60528001a (briefs: built-in engineering practices) under feature:09e09be4b9fddd05 — the human may want to merge the two wordings into one task.",
+  "closedTime": 1792556989,
+  "column": "complete",
+  "createdTime": 1792211537,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "4dd8ddc75c1fc503",
+  "links": [],
+  "milestone": null,
+  "rank": 190,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: direction for maintainable code"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793231414,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793223115,
+  "column": "complete",
+  "createdTime": 1793196296,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "541f1aa3d40fadf0",
+  "links": [],
+  "milestone": null,
+  "rank": 153.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: carry imports into new modules: Tech Debt"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056555,
+  "body": "On the Board, within a project's lane, a column's cards stay in view while the human scrolls down that lane, instead of scrolling off the top with the rest of the lane.\n\n**Example:** a lane has many cards in Complete and one in In Progress. Scrolled halfway down Complete, the In Progress card is still visible, held just below the column header bar.\n\n- The cards stay held until the bottom of their lane scrolls past, then leave with the lane, so they never cover the next lane.\n- A column whose cards are taller than the visible area scrolls as it does today, so none of its cards are cut off.\n- Nothing else about the board changes.",
+  "closedTime": 1794959364,
+  "column": "complete",
+  "createdTime": 1794958410,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "ef5de8c272a2e7f4",
+  "links": [],
+  "milestone": null,
+  "rank": 179.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "board: short columns stay in view while scrolling"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423233,
+  "body": "Found in work run 81e9243b4ac911b0 on task:da49ea4b9938994d. Both cases are a child module named like a function in its parent (`lockdown::settings` / `lockdown.settings`, `lockdown::paths` / `lockdown.paths`), the trap task:1433afceee3ca3e7 also hit.\n\n1. **A local binding shadows a rewritten call (step 43).** In `workspace.tests::the_root_can_be_a_project_itself`, a call through the module path became a bare `settings(&root)`, but the test has `let settings = fs::read_to_string(…)` above it, so it no longer compiles (E0618).\n2. **A module-qualified path in moved code breaks (step 97).** `lockdown.patterns` calls `paths::matches(…)`. After the move into `lockdown::paths`, `paths` resolves to the function `lockdown.paths`, not the module it meant (E0433).\n\n**Wanted:** when a rewrite would bind to a different name than before (a local, or another item with the same name), `extract` keeps a qualified path (`super::`, `crate::…`) or picks a fresh import name instead of producing code that doesn't compile.\n\n**Done when:** a test reproduces each case on a small fixture, and both moves type-check with no edits.",
+  "closedTime": 1793373256,
+  "column": "complete",
+  "createdTime": 1793340940,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "3639289439599162",
+  "links": [],
+  "milestone": null,
+  "rank": 209.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: name clashes in moved code"
+}

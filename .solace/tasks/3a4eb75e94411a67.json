@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792812805,
+  "body": "Follow-up to task:7d4f91ad548749c8. A proposal card still shows `feature:<id>` (or the bare id) in its `feature` field instead of the feature's title. Find the break in the end-to-end title resolution and fix it at that point; do not add another fallback that leaves the id on screen.\n\n**Required behavior**\n\n- When a proposal creates or changes a task and names a loaded feature, the `feature` value is a link to `/feature/<id>` whose text is the feature's title.\n- When the feature is not loaded at first render, the fallback `feature:<id>` changes to its title once the record is found, without losing the href.\n- The proposal heading and Approve/Reject behavior stay as they are.\n\n**Tests**\n\n- A Strategy integration test: load a feature, render a run with a task proposal that names it, and assert the title in the feature field.\n- Coverage for an unloaded feature that gains its title, in the layer where that replacement happens; a browser helper test only if the frontend watcher is at fault.\n- Keep the existing proposal link tests green.\n\n**Scope:** start with the actual Strategy panel and model. Use components or frontend only if the break is in the shared proposal renderer or title watcher.\n\n**Leaves out:** proposal layout changes and other fields, unless milestone or dependsOn fail through the exact same shared path.",
+  "closedTime": 1792767859,
+  "column": "cancelled",
+  "createdTime": 1792731651,
+  "dependsOn": [],
+  "feature": "b74a151f65c05ebc",
+  "home": "solace-cli/components",
+  "id": "3a4eb75e94411a67",
+  "links": [],
+  "milestone": null,
+  "rank": 105.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "plan: proposal feature titles"
+}

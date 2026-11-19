@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056531,
+  "body": "The server takes a human's direct change to a design and saves it, so the page can edit a design without the design agent (feature:c3bed08cc1bbbbb8).\n\n### Do\n\n- Add a route that takes the same element operations the design agent proposes (add, remove, move, change a property; task:f1bd9eba08b243e9), applies them to the current design, validates the result with the design rules, and saves it through the design save path with the human as its source.\n- An invalid result is refused with the element named, and nothing is saved.\n- An operation on an element that no longer exists is refused.\n- A human's save makes any open proposal on that design stale, so accepting it is refused as task:610eda5bb11671e0 already says.\n- Record the route in a decision.\n\n### Acceptance\n\n- Tests: each operation saves the expected design and a version marked as the human's, an invalid change is refused and saves nothing, and an open proposal can't be accepted after a human's save.\n\n### Left out\n\nThe page's editing controls, and undo beyond restoring a version.",
+  "closedTime": 1794972912,
+  "column": "complete",
+  "createdTime": 1794273274,
+  "dependsOn": [
+    "f1bd9eba08b243e9"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": ".",
+  "id": "f90a4ae01bdae411",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 369.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "edit: save a human's change"
+}

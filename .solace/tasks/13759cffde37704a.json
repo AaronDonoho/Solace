@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792009415,
+  "body": "A strategy run proposed two tasks with `scope: [\"solace-cli\"]`. `solace-cli` is not a project (the projects are `.` and folders such as `solace-cli/board`), so under D-94 point 2 the tasks were created with that folder as their home. They were in no lane: the board and Strategy pages didn't show them, and links to them gave `E7001 unknown task`. The human approved them without seeing anything wrong, and the tasks were lost in practice. (The tasks were 59d0b7ae77d161d9 and c358499741989777.)\n\n1. **Decision first.** Add a decision that amends D-94:\n   - Every folder in a proposed task's `scope` must be a project (`workspace::members`). To plan for a project that doesn't exist yet, leave `scope` out, or use `.`, and name the future project in the body.\n   - The Strategy page lists every task in the root's store, whatever its home. A task whose home isn't a project (left over from D-94, or after its project was removed) still appears in the Tasks tab and its search, and opens from a link, marked as having no project.\n2. **Refuse when the proposal is sent, not when it's applied.** In the `strategy task` proposal path (`tasks.rs::proposed_task` and the check that runs before the human is asked), refuse a `scope` folder that isn't a project. The agent can then correct it without the human seeing a bad proposal. Name the folder and list the projects, for example: `E7001 solace-cli is not a project; scope takes project folders: ., solace-cli/board, solace-cli/strategy, …`. Remove the `projects.is_empty()` home fallback and update the doc comment.\n3. **Strategy shows homeless tasks.** The Strategy Tasks tab, its search, and task, feature and milestone links (`/tasks/find/{id}` and the task detail) read from the whole root store, not only from tasks whose home is a project. Opening such a task shows its detail with a \"no project\" marker instead of `E7001`. From there the human can cancel or archive it, or change its scope once task:18b387c328d39cdb lands. The board's lanes stay as they are: a lane shows its project's tasks. The existing orphans 59d0b7ae77d161d9 and c358499741989777 are the check that this works.\n4. **Tell the planner.** The strategy run brief or `help strategy` lists the project folders next to the `scope` field, so the agent doesn't have to guess.\n5. **Specs and reference.** Update Spec 15 where it describes proposal `scope` and the task listing, and `reference.txt` if it mentions `scope`.\n6. **Tests.**\n   - A unit test: a proposal with a non-project folder is refused with the list, and nothing is written. A mixed scope (one project, one non-project) is refused too.\n   - A test that a task stored with a non-project home is listed by the Strategy API and opens by id, and that it can be cancelled.\n   - A Strategy `api.test.mjs` case: the Tasks tab and search show such a task with its marker.\n   - Update or remove the existing test of the D-94 \"no lane\" behaviour.\n   - Run `rust-board-tests`, `rust-acceptance` and the strategy tests.",
+  "closedTime": 1791955658,
+  "column": "complete",
+  "createdTime": 1791927244,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "13759cffde37704a",
+  "links": [],
+  "milestone": null,
+  "rank": 115.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "strategy: scope guard, list homeless tasks"
+}

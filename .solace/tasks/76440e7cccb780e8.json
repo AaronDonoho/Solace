@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794972383,
+  "body": "Worker runs on the codex harness (seen with the deepseek model on task:76554b1e77976ad7) open with three entries shown as errors:\n\n1. Two copies of \"`[features].multi_agent` is deprecated…\". Solace's own codex settings file switches that feature off, and the installed codex now warns about it.\n2. \"Model metadata for `deepseek/deepseek-v4.1-flash` not found. Defaulting to fallback metadata.\" Solace already ignores this warning when it decides why a run failed, but the run still lists it as an error.\n\nDone when a new codex run no longer opens with these errors. Real errors must still show.\n\nOpen point: the full text of the first warning is cut off in the run log, so read it from the run's steps to see which setting codex wants instead.",
+  "closedTime": 1794970710,
+  "column": "complete",
+  "createdTime": 1794961844,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "76440e7cccb780e8",
+  "links": [],
+  "milestone": null,
+  "rank": 394.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "codex: no startup errors in runs"
+}

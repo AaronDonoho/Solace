@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183758,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794014294,
+  "column": "complete",
+  "createdTime": 1793976950,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6ba101d221efbc7e",
+  "links": [],
+  "milestone": null,
+  "rank": 283.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "outside: align tests and module ownership"
+}

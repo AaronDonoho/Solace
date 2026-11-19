@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056534,
+  "body": "Make Strategy's planning panel usable from another page, so the Design page reuses it rather than copying it. Nothing changes on Strategy.\n\n### Do\n\n- Move `plan` from `solace-cli/strategy` into `solace-cli/components`, or split out the part another page needs, whichever is smaller.\n- Remove what ties it to Strategy: the record context, the words naming planning, the draft key, and the `/strategy/runs` address. Each page passes its own.\n- Keep `plan_test`-style tests with the code they test. Update the README of both projects, and D-93 point 7 if it names where the panel lives.\n\n### Acceptance\n\n- Strategy's panel behaves as before, and its existing tests pass unchanged apart from import paths.\n- A test uses the panel with a different context, draft key and address.\n\n### Left out\n\nPutting the panel on the Design page, which is the next task.",
+  "closedTime": 1794323281,
+  "column": "complete",
+  "createdTime": 1793914494,
+  "dependsOn": [
+    "73718ff8c5f77922"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": "solace-cli/strategy",
+  "id": "ffbb783dd0d6fcea",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 119.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agent: share the planning panel"
+}

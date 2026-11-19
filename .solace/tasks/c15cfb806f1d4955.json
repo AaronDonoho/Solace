@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792541816,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792541813,
+  "column": "complete",
+  "createdTime": 1792528163,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "c15cfb806f1d4955",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 24.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Rust: equal treatment: Tech Debt"
+}

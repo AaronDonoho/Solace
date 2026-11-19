@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794979406,
+  "body": "A human resizes an element on a UI/UX design by dragging its border, as asked in feature:c3bed08cc1bbbbb8.\n\n### Do\n\n- Dragging a selected element's border sets its width or height to a fixed size, saved the same way as task:cc33d4301e06e612.\n- A size the rules refuse is not saved, and the element goes back to its saved size.\n\nAsk the human how a border is grabbed, and whether a drag can return a size to fill or hug.\n\n### Acceptance\n\n- Tests for the size a drag produces, and that a refusal restores the element.\n- A browser check of a drag; say in the task note if it has to be manual.\n- Update the README.\n\n### Left out\n\nMoving elements, and the Architecture tab.",
+  "closedTime": 1794979178,
+  "column": "complete",
+  "createdTime": 1794273287,
+  "dependsOn": [
+    "cc33d4301e06e612"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "bb1f36a33c070c79",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 17.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "edit: resize by dragging a border"
+}

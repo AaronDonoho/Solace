@@ -174,6 +174,13 @@ class Migrate(unittest.TestCase):
         self.assertTrue((empty/'web/.solace/store.db').exists())
         self.assertIn('already exists', self.cli('create', 'web', cwd=empty, input='y\n', ok=False))
 
+    def test_a_set_up_root_has_nothing_to_migrate(self):
+        (self.repo/'solace.toml').write_text('projects = []\n')
+        self.serve(self.repo)
+        v = self.get()
+        self.assertEqual(v['state'], 'none')
+        self.assertEqual(v['reason'], 'This folder already uses Solace.')
+
     def test_board_migrates_and_restarts_where_the_project_is(self):
         self.serve(self.repo)
         v = self.get()

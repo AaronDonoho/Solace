@@ -1,0 +1,10 @@
+{
+  "body": "The engineering habits that keep code good ship inside Solace, so every project gets them even when the human doesn't know to ask. Today most of them live in this repo's own `AGENTS.md`, `CLAUDE.md`, `DECISIONS.md` and skills. A new project gets only a starter `solace.toml` (`main.rs::import`), and the built-in briefs (`board.rs::brief`) cover note format but not code quality.\n\n### Goals\n\n- **Maintainable as it grows:** reuse before adding, small focused functions, no copied code, clear names and descriptions.\n- **No regressions:** tests come with every behaviour change; a bug fix carries a test that fails on the old code; reviews flag weakened or removed tests.\n- **Push back:** a task that contradicts a decision, the vision or another task gets a question before any work.\n- **A decision log in every project:** humans decide what goes in it, and agents read it.\n- **Notes written for the reader:** the outcome first, worded for the human's involvement level (see **Agent behaviour settings**).",
+  "colorSlot": 23,
+  "id": "09e09be4b9fddd05",
+  "milestone": "63a4809d1d3362ba",
+  "rank": 4.0,
+  "startTime": 1793666444,
+  "state": "complete",
+  "title": "Built-in quality practices"
+}

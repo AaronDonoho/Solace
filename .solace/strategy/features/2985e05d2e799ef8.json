@@ -1,0 +1,10 @@
+{
+  "body": "A work run on task:10e5b94213c1e788 hit the long-thread warning, then re-viewed most of what it had already read. Give a resumed or compacted run a short summary built by Solace instead: symbols saved this task, drafts pending, command forms that worked and failed, and the open review findings. Needs a design first: what the summary holds, its size cap, and where it shows in the run. No tasks yet.",
+  "colorSlot": 12,
+  "id": "2985e05d2e799ef8",
+  "milestone": null,
+  "rank": 12.5,
+  "startTime": 1792608270,
+  "state": "complete",
+  "title": "Agent working summary on resume"
+}

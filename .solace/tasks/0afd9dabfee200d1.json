@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539264,
+  "body": "Solace's own crate isn't rustfmt-clean (about 295 hunks across 21 files with its `rustfmt.toml`, D-158 point 5). That is why `submit` formats only changed items and `format` with no module is refused (D-180 point 2). As a result, every first edit of an old item also reformats it, which adds noise to that task's review.\n\n### Change\n\n- Run `format <module>` on each module of `solace-cli` that rustfmt would change, one module per call so each change is checked and recorded on its own. Make no other edits.\n- Where a module gets long-line notes, split the literal or fix the indentation that rustfmt left alone.\n- Done when the `cargo-fmt-check` recipe passes.\n\n### Out of scope\n\n- Changing `submit`, the no-module refusal, or the gates. Once the crate is clean, per-item formatting on `submit` keeps it clean.\n\n### Tests\n\n- `cargo-fmt-check` passes.\n- `test` passes, with the same results as before.",
+  "closedTime": 1792532969,
+  "column": "complete",
+  "createdTime": 1792522116,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "0afd9dabfee200d1",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 20.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "format: make Solace's crate rustfmt-clean"
+}

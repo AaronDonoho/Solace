@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009424,
+  "body": "Part of General UI Polish (feature item 12). Task creation lives on the board (the New task button, the editor section, and the create messages) and on the Strategy page; the feature asks for it only on Strategy.\n\n- Remove from `solace_board`: the `creating`, `draft_title`, `draft_body`, `draft_scope`, `submitting` model fields, the `NewTask`, `Create`, `DraftTitle`, `DraftBody`, `DraftScope` messages, the editor section in `view`, and the projects picker it uses.\n- The board's header loses the \"New task\" button; the board keeps notices, lanes, and task detail.\n- Strategy's new-task form (`features.TaskForm`, `features.form`) stays the only creation path; the board's draft storage keys are dropped.\n- Board tests that create a task through the board are removed; `board_acceptance.py` steps that used the board form move to the Strategy page.\n\n**Tests:** board view tests assert no editor section; the acceptance flow creates a task on Strategy and sees it on the board.",
+  "closedTime": 1791927266,
+  "column": "complete",
+  "createdTime": 1791909803,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "f236ac8333726412",
+  "links": [],
+  "milestone": null,
+  "rank": 8,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Remove task creation from board"
+}

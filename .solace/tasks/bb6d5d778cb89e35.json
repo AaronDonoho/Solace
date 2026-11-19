@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159109,
+  "body": "Seen in run 0442c97d6b8bf128 on task:be36c1d67353660d (steps 100–124). To find out why an import wasn't carried, the worker made about 11 submit-and-test rounds, putting `panic!(\"{names:?} …\")` diagnostics into a saved test and then taking them out again, just to print what private functions such as `super_glob_names` and `module_imports` returned for the test's fixture.\n\n`probe --from <fn>` already does this for Gleam: it starts from a test's imports and body, and `text` adds statements that can use the test's variables. In Rust, `probe` runs statements in a test in a scratch copy of the crate, and `--in <module>` reaches private items, but there is no `--from`.\n\n- `probe --from <test>` works in a Rust project: the probe runs the test's body (in its own module, so its imports and private items are in scope), then the statements in `text`, which can use the test's local variables. `println!` / `dbg!` output is shown, and nothing is saved.\n- `help probe` drops \"Gleam only\" from `--from` and keeps it for `--trace`.\n\nCheck: a test in a Rust fixture crate, `probe --from <module>::tests.<test>` with `dbg!(<a local of that test>)` prints its value, and the store is unchanged afterwards.\n\nLeft out: `--trace` for Rust.",
+  "closedTime": 1793143622,
+  "column": "complete",
+  "createdTime": 1793137473,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "bb6d5d778cb89e35",
+  "links": [],
+  "milestone": null,
+  "rank": 132.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: --from a Rust test"
+}

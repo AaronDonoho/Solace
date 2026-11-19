@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793459114,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793458560,
+  "column": "complete",
+  "createdTime": 1793423609,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f4455b82f5b4af04",
+  "links": [],
+  "milestone": null,
+  "rank": 222.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Fix: extract crash breaks later commands"
+}

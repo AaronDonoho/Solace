@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792541815,
+  "body": "`store.RUST_BRIEF` tells an agent Rust's coding rules but not how to name or find code, so the first dozen calls of a Rust run go to guessing names. Add a few lines to the Rust brief in `Store::session` and `Store::task_session`, filled from the project's own store so the examples are real:\n\n1. One method as `<module>.<Type>::<fn>` (a real one from the store), with \"the module is the one holding the `impl`\".\n2. One test in an inline `mod tests`, as `<module>::tests.<name>`, and the `*** Add:` header that adds a test beside it.\n3. \"`find <text>` searches Rust source; `grep` searches other files only.\"\n4. When the project has no method or no inline test module, leave that line out rather than inventing one.\n5. Keep it to these lines; the full list is in the reference (task:5bc1e9311b667f05).\n6. Tests: a Rust project's session shows a real method name and test name from its store; a project with no inline tests omits that line; a Gleam project's session is unchanged.\n\nChecks: `rust-unit`, `rust-acceptance`.\n\nLeft out: examples chosen per task (e.g. from the task's named symbols).",
+  "closedTime": 1792539695,
+  "column": "complete",
+  "createdTime": 1792468937,
+  "dependsOn": [
+    "5bc1e9311b667f05"
+  ],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "7c6675332c60d13b",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 10.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "session: Rust name examples from the project"
+}

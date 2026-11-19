@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793128210,
+  "body": "The reference's workflow tells agents that every edit goes in one patch: \"All the edits, in one file or several, go in one patch, one header per symbol, module or file (`*** Update: <module.name>`, `*** Add: <name>`, `*** Update File: <path>`)\". But `submit` refuses a `*** Update File:` header (E0108: a file other than code changes with `write`). So an agent that follows the reference gets refused.\n\nThis happened in run 9eba28482d963263 of task:557b230ec2e4db52. The worker put its `src/reference.txt` hunks into the same `submit` patch as its code, was refused, then had to drop the draft and send two patches.\n\n**Do**\n- Reword that workflow step so it says: code changes (symbols and modules) go in one `submit` patch, then `test`; other files go in one `write` patch (no path), then `run <name>`; a change to both is two calls.\n- Check the rest of the reference for wording that says the same mixed-patch thing, and fix it there too.\n\n**Done when**\n- The reference no longer suggests that one patch can hold both code and file headers.\n- A test pins the new wording, like the other reference tests do.\n\n**Not in this task**\n- Making `submit` accept file hunks.\n- Splitting `reference.txt` into files (task:45a377d8ed65be38).",
+  "closedTime": 1793111270,
+  "column": "complete",
+  "createdTime": 1793077264,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "ae37bf0cabe3aac6",
+  "links": [],
+  "milestone": null,
+  "rank": 125.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "reference: code and file edits in separate patches"
+}

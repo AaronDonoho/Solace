@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792812805,
+  "body": "The Tasks tab's Feature and Milestone columns currently hold `link_select` controls, so the table can change both links. Make the table read-only: show each loaded record's title as plain text, fall back to its id when not loaded, and show `—` when there is none. Keep the columns and their sorting; editing links stays in the task detail.\n\n**Tests:** rows with a feature, milestone, both and neither render text and no select; the fallback id and empty state; sorting by Feature and Milestone is unchanged; opening and paging rows still work.",
+  "closedTime": 1792724913,
+  "column": "cancelled",
+  "createdTime": 1792708192,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "97659639c8ac4bbf",
+  "links": [],
+  "milestone": null,
+  "rank": 107.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: table links read-only"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794183765,
+  "body": "Please assess whether there is genuine need for this, and how valuable it is. Consider its size and difficulty. \n\nTech debt from the work on task:b3464bbfdd4cbc60 (work run 15fa95a53e42167e):\n\n`submit` draft fixing: a rejection that names a symbol outside the retained draft cannot be fixed with `--replace`, so the whole patch had to be resent. Let a draft accept a new change to another symbol.",
+  "closedTime": 1794183740,
+  "column": "complete",
+  "createdTime": 1794178119,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "739a9de2fd8eb565",
+  "links": [],
+  "milestone": null,
+  "rank": 295.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Submit draft: accept new change to another symbol"
+}

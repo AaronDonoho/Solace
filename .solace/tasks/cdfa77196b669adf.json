@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795105046,
+  "body": "Split from task:040fefdf07a5aeab.\n\nOpening a Solace workspace that sits inside another one (for example, the Solace repo cloned under an existing workspace folder) is refused, as intended by D-57. The refusal should also tell the person what to do: open the inner folder on its own, or move it out of the outer workspace.\n\nOut of scope: allowing one workspace inside another, which would change D-57.\n\n### For the worker\n\n- The refusals are in `workspace.enclosing` (\"the Solace root … is inside the root …\" and \"lists projects inside the Solace project\") and `workspace.setup` (\"lists projects of its own\").\n- `workspace_acceptance.py` already covers the nested-root refusal; extend its expected text.\n\n**Tests:** each refusal names the folder to open on its own.",
+  "closedTime": 1795064339,
+  "column": "complete",
+  "createdTime": 1795055277,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": "solace-cli",
+  "id": "cdfa77196b669adf",
+  "links": [],
+  "milestone": null,
+  "rank": 421.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "workspace: clearer refusal for a workspace inside another"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791690203,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nDecision: the vision is one internal Markdown document. No store.\n\n- **Server (Rust, `tasks.rs`).**\n  - Store `<root>/.solace/strategy/vision.md`. It is internal, so agents can't touch it (Spec 14 §1 rule 3), and the task server is its only writer.\n  - `GET /vision` returns `{text, revision}`.\n  - `PUT /vision` takes `{text, base}`. A `base` that doesn't match the current revision is refused (E7xxx), so two editors don't overwrite each other.\n  - Send a root `{vision}` event, also in the replay. Route it beside `milestones|features` in `board.rs` ~3407, at the root only.\n- **Briefs.** Investigate, work and discuss briefs say there is a vision and include it (or its first part), in `continuation_brief` (`board.rs` ~2235). This covers \"Solace reminds agents to use the vision\".\n- **Page.** A Markdown view and editor. Reuse `editor`/`md` from `components`.\n- **Spec and decision.** Spec 15 §1 says the vision belongs to the Strategy work, so a decision adds the section.\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1791651070,
+  "column": "complete",
+  "dependsOn": [
+    "54bca89035fdb606"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "4e94f3278c3ee7c1",
+  "links": [],
+  "milestone": null,
+  "rank": 57.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: Vision"
+}

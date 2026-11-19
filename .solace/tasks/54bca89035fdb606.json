@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791690202,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nDecisions: the Strategy page has tabs, one component per tab: **Vision**, **Features**, **Roadmap**, **Tasks**.\n\n- **Project.** A new Gleam JavaScript project, `solace-cli/strategy` (dependencies `lustre`, `gleam_json`), with a component `<solace-strategy>` modelled on `contracts`: `register()`, `api.mjs`, `index.html`. It draws a tablist with four placeholder panels. The tab shown is kept in the URL (`/strategy?tab=tasks`) so a reload returns to it.\n- **Shell (`solace-cli/frontend`).**\n  - Add a `Strategy` variant to `Route`.\n  - `route` maps `[\"strategy\"]` to it, `page_of` returns `\"solace-strategy\"`, and `view` adds a **Strategy** link to the menu.\n  - Register the component in `main` and add a path dependency in `gleam.toml`.\n  - Test `route` and `page_of`, as the existing ones are tested.\n- **Server (`board.rs` ~3445).** Add `\"/strategy\"` to the GET paths that serve `frontend/index.html`. Add an acceptance check that `GET /strategy` serves the shell.\n- **The empty `solace-cli/archive` project.** \"Archive\" is now the Tasks tab, so this project is either renamed to `solace-cli/strategy` or removed. Changing the `projects` list in the root `solace.toml` is for a human to do.\n- **New decision record.** A D-85-style record for \"Strategy is its own app at `/strategy`, with tabs\".",
+  "closedTime": 1791595614,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "54bca89035fdb606",
+  "links": [],
+  "milestone": null,
+  "rank": 54.0,
+  "scope": [
+    ".",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy page: basic layout with tabs"
+}

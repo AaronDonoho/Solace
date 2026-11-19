@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183789,
+  "body": "Fixes two role-model bugs the human met after Agent Roles (2026-11-05). A role's model is only the starting value of the model picker; it does not decide which model an action runs.\n\n### What changes\n- A role's model fills the model picker when a task opens or its column changes. A model picked by hand stays until the task changes or that model can no longer start.\n- Changing a role's model in Settings reaches open pickers immediately, without a page reload or reopening the task.\n- Investigate, Assign, Review and the other task actions send the model currently shown in the picker, with its effort. They no longer substitute the action's own role default.\n- A picker with no role default keeps its existing \"Select a model\" behavior.\n\n### Acceptance criteria\n- With a role set to model B, an open task whose picker follows that role starts on B; clicking Assign sends the model now selected in the picker, not the action's role default.\n- After a role's model changes in Settings, an open task picker and an open Strategy plan picker show the new default without a reload, unless someone picked a model by hand.\n- Actions use the selected model and effort.\n- Focused tests cover: the default filling the picker, a live default change reaching both pages, a hand pick staying, and actions sending the selected model.\n- Existing tests that assert an action uses its own role's default are updated to the new behavior.\n\n### For the agent\n`solace_task.action_choice` is where an action swaps in its own role's default; `solace_task.refresh` already re-fetches role models. `strategy.choose_plan_model` does the same for the plan. A change made in Settings must reach both elements while they stay mounted and hidden.\n\n### Out of scope\nChanging role definitions, skills, Autorun, and the model list itself.",
+  "closedTime": 1793931540,
+  "column": "complete",
+  "createdTime": 1793929054,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli",
+  "id": "8135c7b95b8a86b3",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 274.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Agent roles: default fills picker only"
+}

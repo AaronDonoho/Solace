@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "Package inspection and its risk report cover every target's package in a release, not only one.\n\nDone when: a release with more than one target has an inspection and a risk report for each target's package.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979670,
+  "dependsOn": [
+    "194dcc378e61ec67",
+    "f8a8fa654669415a",
+    "9d6e56b13978a6a1"
+  ],
+  "feature": "e40726481f932b3d",
+  "home": "solace-cli",
+  "id": "07ddc6593c245b4c",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 409.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "targets: inspect every target's package"
+}

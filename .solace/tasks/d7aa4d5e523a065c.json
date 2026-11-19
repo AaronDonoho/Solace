@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464632,
+  "body": "Give Rust projects `refs`, `impact`, `inspect --context` and test reach through the language seam, with the same command forms and replies as Gleam, using a reference graph built from names. Moved into feature:ee70ab461cef2b9c so that Rust and Gleam don't differ in which commands they have.\n\n- While splitting, record the paths and identifiers each item's body mentions (`syn` visitor), resolved against the module's `use` lines and the crate's item names. This fills `Index::build`'s `used_by` for Rust stores.\n- When a name could mean more than one item (methods with the same name on different types, trait methods), link to all of them. This overestimates on purpose, so test reach never misses a test.\n- `refs`, `impact` and `inspect --context` (callers and tests) answer Rust names in Gleam's reply format. Remove their Rust refusal in `main.rs::run_inner`.\n- Test reach selects `#[test]` functions by libtest name, wherever Gleam's test reach is used.\n\n### Done when\nIn `solace-cli/`, changing a function selects every test that a full `cargo test` shows depends on it (checked on a sample). `refs` lists its callers, and `impact` and `inspect --context` answer as they do for a Gleam name.",
+  "closedTime": 1792377002,
+  "column": "complete",
+  "createdTime": 1792252910,
+  "dependsOn": [
+    "ac5ae78fb2e94ab2"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "d7aa4d5e523a065c",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 205.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: refs, impact and test reach"
+}

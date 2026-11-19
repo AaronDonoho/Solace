@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312246,
+  "body": "On task:32303cd61a19be26 the worker used `extract` correctly, but the review (note 6) still found leftovers that a second work run had to clean up (note 9). Four of them come from `extract` itself, so every Rust split will hit them again. Fix them in the tool, so that a correct `extract` leaves code a reviewer has nothing to tidy.\n\n### What it left behind\n\n1. **Full paths in moved bodies.** Bodies and signatures came out with `crate::failure::Failure`, `crate::failure::Out`, `crate::cli::projects::hinted` and `crate::cli::PROJECT_ONLY`, not the short names plus a `use` line. `extract::rust.resolve_moved_mentions` writes the full path when it thinks the short name is *taken* in that module (`target_names_after_move`, a prelude name, or `glob_binds`). The `cli` case looks like a false positive, or else the carried imports (`extract::rust::imports.carry_imports`) didn't bring the source's own `use` lines. I haven't confirmed which; the worker should reproduce it first.\n2. **`#[allow(unused_imports)]` added to re-exports** (`extract::rust.allow_import_keys`). This hides dead re-exports from the lint. If a re-export is only needed by tests, it should be `#[cfg(test)]`. If nothing needs it, it should go. The `allow` should only be used when neither of those is true, if that ever happens.\n3. **`#[cfg(test)] use …` inside a module that is already test-only** (the `test_only` branch of `resolve_moved_mentions`). The attribute does nothing there. Write a plain `use` when the module itself is `#[cfg(test)]`.\n4. **A stray blank line** added to the crate root's header before `mod reference;`.\n\n### Done when\n\n- Each item has a test in `extract::rust::tests` built from the task's real case. The test fails before the fix and passes after it.\n- Existing extract tests still pass. Where one of them asserts the old output, change it only if the new output is the correct one, and say so in the result.\n- `check --warnings` shows 0 warnings, and `rust-unit` and `rust-acceptance` pass.\n- `changing.txt`/`rust.txt` are updated if they describe the old behavior (see task:e1f8144821128de1).",
+  "closedTime": 1793293180,
+  "column": "complete",
+  "createdTime": 1793255223,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8c55feb7a6a2b158",
+  "links": [],
+  "milestone": null,
+  "rank": 191.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: leave no Rust cleanup behind"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231419,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793160906,
+  "column": "complete",
+  "createdTime": 1793160574,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "3ad69960dcae9974",
+  "links": [],
+  "milestone": null,
+  "rank": 312.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Root project refactor and cleanup: Tech Debt"
+}

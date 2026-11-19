@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792009424,
+  "body": "Part of General UI Polish (feature item 10). The Features tab prints a \"Features\" heading directly under the tab bar; the same pattern appears on the other tabs and pages, where the tab name already says what the panel is.\n\n- Remove headings that repeat the tab name in `strategy` (`tasks_view`, `features_view`, `roadmap_view`, `vision_view` and their heading elements), in `settings`, and on the board where a heading repeats a section name.\n- Keep headings that name content the tab does not (e.g. \"Run\" inside a task detail, \"Proposal\" in the plan panel).\n- Where a heading carried layout (spacing, a rule), keep the spacing with the tab bar's own margins so removing it does not shift the page.\n\n**Tests:** strategy, board and settings view tests that assert the heading text are updated to the tab-only layout.",
+  "closedTime": 1791941818,
+  "column": "complete",
+  "createdTime": 1791909779,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "6e2c02ff4ce96e26",
+  "links": [],
+  "milestone": null,
+  "rank": 5,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Remove redundant headings"
+}

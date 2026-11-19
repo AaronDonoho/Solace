@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056555,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794790809,
+  "column": "complete",
+  "createdTime": 1794789795,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "c5bfcf0f2c079c73",
+  "links": [],
+  "milestone": null,
+  "rank": 178.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "notifications: sounds and settings tab"
+}

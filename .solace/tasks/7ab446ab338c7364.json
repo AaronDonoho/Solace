@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690223,
+  "body": "Add new capabilities to solace:\n**Discuss**\nDiscuss could be an option between Runs. Discuss would establish a note-based discussion with an agent who uses only high-level context (to keep things efficient) so that the human can ask questions and create ideas efficiently. The discussion stays in a single run, with all discussion notes compacted into a single note (with author attribute to who said what) at the end of the discussion.\n**Stop**\nThis interrupts a working agent. It ends the agent's session.",
+  "closedTime": 1791246834,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "7ab446ab338c7364",
+  "links": [],
+  "milestone": null,
+  "rank": 5,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Additional capabilities: Discuss and Stop"
+}

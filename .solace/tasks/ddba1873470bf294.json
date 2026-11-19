@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690215,
+  "body": "I want copying selected text from the pages to include the markdown.",
+  "closedTime": 1791553264,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "ddba1873470bf294",
+  "links": [],
+  "milestone": null,
+  "rank": 5.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Copy markdown"
+}

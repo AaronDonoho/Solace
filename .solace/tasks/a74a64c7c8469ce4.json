@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977623,
+  "body": "A submit lists only the warnings on the symbols it saved (`own` in `rust_submit.Store::submit_symbols_rust`, `Store::submit_module_rust`, `Store::submit_imports_rust`, and Gleam's `Store::submit` / `Store::submit_symbols_blocks`). A warning that lands on a symbol the agent didn't touch never shows up. Example: removing the last non-test use of `board::prerequisites.TOOLS` makes `TOOLS` dead code, but the warning is filed under `TOOLS`, so the agent who caused it never saw it. `check` without `--warnings` only gives a count.\n\n## Change\n- After a submit's check, also list the warnings outside the saved symbols that weren't there before the submit, under their own heading (for example `New warnings elsewhere:`), one line each, the same way `warning_summary` does now.\n- \"Before\" means the warnings from the last check. This could work like the `broken` table does for errors (cursory suggestion; the agent picks the mechanism).\n- Warnings that were already there before the submit stay as quiet as they are now.\n\n## Done when\n- A test: a submit that leaves another symbol unused (only its tests use it) names that symbol's dead-code warning in the submit reply.\n- A test: a warning that was already there before the submit isn't listed again.\n- Works for Rust and Gleam stores.",
+  "closedTime": 1792957392,
+  "column": "complete",
+  "createdTime": 1792951658,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a74a64c7c8469ce4",
+  "links": [],
+  "milestone": null,
+  "rank": 73.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: report warnings a change causes elsewhere"
+}

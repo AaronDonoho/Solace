@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464630,
+  "body": "Add the decision proposed in task:d41626ab51473623 (note 3, \"Proposed decision\") to DECISIONS.md, adjusted by the measured times from task:4f32c653e33b9caf.\n\n- Rust projects held by symbol: one-crate Cargo packages, item naming (`board::agents::cached`, `Type::name`, `<Type as Trait>::f`).\n- The subset and its refusals (note 3, section 2), and the brief lines for Rust projects.\n- `cargo check --all-targets --message-format=json` per change; errors located by span.\n- `build.rs`, `.cargo/config.toml`, `rust-toolchain.toml` and Cargo.toml's dependency and build keys are human-approved settings; bubblewrap without network on Linux.\n- `syn` parsing, exact write-back, rustfmt on submit.\n- Deferred: workspaces, proc-macro crates, type-accurate refs, extract/merge, probe.\n\nAmend Specs 1, 2 and 14 to match. Documents only; no code.",
+  "closedTime": 1792255910,
+  "column": "complete",
+  "createdTime": 1792252704,
+  "dependsOn": [
+    "4f32c653e33b9caf"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "19798e790ee4ae99",
+  "links": [],
+  "milestone": null,
+  "rank": 198.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: record the store decision"
+}

@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1792464631,
+  "body": "Guard the Rust files that run code at check time (D-158 points 2 and 4; Spec 14 already amended).\n\n- Lockdown tiers (Spec 14): `.rs` files in `src/` and `tests/` are symbols, changed only by `submit`.\n- Settings the human approves (`write` with `reason`): `build.rs`, `.cargo/config.toml` (its `rustc-wrapper` and `linker` run programs), `rust-toolchain.toml`, and Cargo.toml's dependency and build keys: the dependency tables, `[target.*]` dependencies, `[patch]`, `[replace]`, `package.build`, `package.links`, `lib.proc-macro`. Other Cargo.toml edits stay ordinary.\n- On Linux, `cargo check`, and Solace's `test` and `build` (they run `build.rs` too), run under bubblewrap with no network (`--offline`) and only `target/` writable; Cargo's registry and git caches and the toolchain are mounted read-only. Elsewhere, approval is the guardrail. Today bubblewrap is only used in migrations (`migrate::sandboxed`).\n- New `unsafe` in a change needs a `// SAFETY:` comment, and the review lists it (a review rule, not a refusal).\n- Update `lockdown.rs`'s tier text (\"src/ and test/ *.gleam are symbols\") and `reference.txt` examples for Rust.",
+  "closedTime": 1792418614,
+  "column": "complete",
+  "createdTime": 1792252811,
+  "dependsOn": [
+    "ba1542d1a967b9b7",
+    "ac5ae78fb2e94ab2",
+    "5ce78f3fa5e3d808",
+    "e6a34c9df7823031",
+    "87caaab35442ab65"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "7db8dd126a22c863",
+  "links": [],
+  "milestone": null,
+  "rank": 203.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: lockdown tiers and sandbox"
+}

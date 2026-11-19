@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792976239,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792965535,
+  "column": "complete",
+  "createdTime": 1792964874,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "77223229e39a3d17",
+  "links": [],
+  "milestone": null,
+  "rank": 79.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Strategy: planning runs not tied to tasks: Tech Debt"
+}

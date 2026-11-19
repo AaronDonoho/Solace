@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056539,
+  "body": "List every rule or habit that keeps work good in this repo but that a user's project wouldn't get from the shipped binary.\n\n### Where to look\n\nThis repo's `AGENTS.md`, `CLAUDE.md`, `DECISIONS.md`, `WORK.md` protocol and skills. Compare them with what ships: `board.rs::brief`, `strategy.rs`, `reference.txt`, and `main.rs::import` (`STARTER_SETTINGS`). Also check what PROPOSAL.md §8.8 promises for tests (protected expected values, regression tests that must fail on the old code, flagged weakened checks), and how much of that is enforced today.\n\n### Deliverable\n\nA note with a table: rule, where it lives now, and where it belongs (built-in brief, `reference.txt`, starter `AGENTS.md`, enforced by a check, or Solace-only and not for users). Cover all three languages (Gleam, Rust, JavaScript). Then the wording to propose for the work and review briefs, and for a starter `AGENTS.md`.",
+  "closedTime": 1794975011,
+  "column": "complete",
+  "createdTime": 1792092132,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "1f282969708a99a0",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 158.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Investigate quality rules not built into Solace"
+}

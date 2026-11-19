@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159126,
+  "body": "Recommended for the shared-primitives step: fold duplicate helpers such as `crate.write_atomic` into the synchronized writer, `crate.lock_file` into `board.lock`, and `crate.project_dir` into `lockdown.same_project`, keeping one identity and redirecting every use. Without it, that step needs `submit` plus `delete` per caller.\n\n**Do.**\n- Add same-project Rust `merge <survivor> <retired>` for top-level functions and other non-type items.\n- Keep the survivor's identity and revision unless its text changes.\n- Redirect every resolved reference and import from the retired symbol to the survivor; drop imports only the retired symbol used.\n- Move tests that reach only the retired symbol; refuse a test that also reaches code that stays (`E5002`).\n- Refuse when the symbols cannot be folded without changing behavior, with a clear error naming the difference.\n- One transaction gated on cargo: restore every row, file and history entry on failure.\n- `--to-project` stays refused for Rust (`E6013`).\n\n**Tests.** Fold duplicated functions; redirect callers and imports; keep the survivor's identity; move tests; refuse a test that also reaches staying code; refuse incompatible signatures or behavior; cargo failure rollback; no new warnings.\n\n**Out of scope.** Cross-project Rust `merge`; merging types, impl methods or modules (method moves are task:09f49e1fccb91e93); changing Gleam `merge`.",
+  "closedTime": 1793051850,
+  "column": "complete",
+  "createdTime": 1792721008,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "b5c87c892b7d275c",
+  "links": [],
+  "milestone": null,
+  "rank": 263.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "merge: Rust duplicate functions"
+}

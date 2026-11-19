@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792976242,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792971910,
+  "column": "complete",
+  "createdTime": 1792971474,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "dcc6c201885e691d",
+  "links": [],
+  "milestone": null,
+  "rank": 80.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Settle: completed tasks in a project never settle: Tech Debt: Tech Debt"
+}

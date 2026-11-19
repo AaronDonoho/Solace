@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312250,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793306812,
+  "column": "complete",
+  "createdTime": 1793300992,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a7af2f75e80f0f7c",
+  "links": [],
+  "milestone": null,
+  "rank": 202.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: shorter reply on staying tests"
+}

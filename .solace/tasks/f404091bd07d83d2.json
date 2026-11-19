@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423232,
+  "body": "Two `extract` failures seen in work run 83ca52aa9bd789c9 on task:648553bf42a26e94 (steps 100 and 169).\n\n1. **A moved method's imports aren't carried into an existing `impl`.** `extract store_core.Store::at … store_core.Store::forget_warnings --to store_scratch` was refused because `store_scratch.Store::index` uses `Kind::parse`, and `use crate::language::Kind;` from `store_core` wasn't added to `store_scratch`. The target already had `use crate::Store;` and an `impl Store` (short form, written by hand). Nothing changed, but the worker had to paste in a whole import list by hand before the move worked.\n   - This is case 1 of task:b3411fd1753bb394. There it **didn't reproduce**, so nothing was fixed, and its test `a_moved_root_fn_carries_the_names_the_root_saw` passed both before and after. Step 169 gives the failing shape that task was missing: the source is an ordinary module (not the crate root), and many methods join an existing short-form `impl Store` in a target that imports only `Store`. Start from the step's exact output.\n2. **Solace can't read an `impl` that `extract` just moved.** `extract store_read.Store::find --to store_scratch` created the module and type-checked. Then `extract store_scratch.Store::find --to store_read` failed with `E6013 store_scratch.Store has no type in this crate its self type names: Store`. So Solace couldn't work out which type the `impl` it had just written belongs to (`language::rust_refs.impl_owner_in`). No earlier task covers this.\n\nDone when:\n- Moving methods into a module that already has the type's `impl` carries every import their bodies use, including names the source module imports from elsewhere in the crate (like `Kind`).\n- A method moved to a new module with `extract` can be moved straight back with `extract` (a round trip).\n- Each case has a test in `extract::rust_tests` that fails before the fix.",
+  "closedTime": 1793313257,
+  "column": "complete",
+  "createdTime": 1793309522,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "f404091bd07d83d2",
+  "links": [],
+  "milestone": null,
+  "rank": 204.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: carry method imports, read moved impls"
+}

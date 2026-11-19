@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231417,
+  "body": "`language::rust_refs.ImportSite` holds no attributes (its fields are `local`, `path`, `range`, `alias`, `outside`, `glob`). So when extract carries a gated import such as `#[cfg(feature = \"x\")]`, `#[cfg(test)]`, `#[cfg(unix)]` or `#[allow(...)] use ...;`, the new module gets it as an unconditional import. In a normal build that import can name a module that does not exist, and the build breaks.\n\nFix: keep the import's outer attributes when it is carried. Either store the attribute text on the site when it is collected, or recover it from the originating header or `use` symbol; the agent picks whichever fits the code.\n\nTest: a feature- or test-gated module with a matching gated import, and a moved item under the same gate. After extract, the carried import in the target still has its attribute, and the normal (ungated) build compiles.\n\nTouches the same function as task:c970ab48b3b62497 (`extract::rust.carry_imports`), so it runs after it.",
+  "closedTime": 1793228321,
+  "column": "complete",
+  "createdTime": 1793221145,
+  "dependsOn": [
+    "c970ab48b3b62497"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "eda9d8fcdf47837f",
+  "links": [],
+  "milestone": null,
+  "rank": 170.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: carried imports keep their attributes"
+}

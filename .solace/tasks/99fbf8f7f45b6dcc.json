@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792009423,
+  "body": "Part of General UI Polish (feature item 2). The base styles cap text areas: `textarea{width:min(95%,700px)}` and `input{width:min(80%,600px)}` in `solace_task` (shared base CSS) and in `solace_board` styles, so editors do not fill their panels.\n\n- Change the defaults so a text area fills its container: `width:100%` with `box-sizing:border-box`, no percentage cap; inputs the same.\n- Keep the composer in `solace_task.editor_styles` (already `width:100%`) consistent with the new default, and drop per-page overrides that fight it (`solace_board`, `strategy`, `settings` styles).\n- The plan panel composer, the board editor, the Strategy new-task form, and the task-detail composer all end up flush with their panels.\n\n**Tests:** view tests that assert the width caps are updated; the build stays green.",
+  "closedTime": 1791928618,
+  "column": "complete",
+  "createdTime": 1791909771,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "99fbf8f7f45b6dcc",
+  "links": [],
+  "milestone": null,
+  "rank": 4,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Textareas fill container width"
+}

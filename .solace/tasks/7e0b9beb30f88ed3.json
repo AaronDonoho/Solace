@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464630,
+  "body": "Let the store hold one split Rust file's pieces, nested, and write them back exactly (D-158 points 1 and 5). Part 1 of 2: the Rust import of a whole package is a separate task that depends on this one. The plan in note 4 is the detailed design; this task takes its steps 1 and 4 and the storing half of step 3.\n\nThe `syn` splitter (`language/rust.rs`, from task:cab38c205dcdd8e2) already cuts a file into pieces that join back exactly. What's missing is a store that holds them and a projection that writes them back.\n\n- **Schema** (`main.rs`: `SCHEMA`, `Store::add_columns`): `symbols` gets `parent` (the enclosing `impl`, `trait`, `extern` or inline `mod`; NULL at top level; `ord` counts within the parent), `sep` (whitespace after the item; NULL means Gleam's blank line) and `tail` (a container's text after its last child). `modules` gets `file` (path from the project root; NULL for Gleam). `add_columns` adds them to older stores, as for `board_touches`.\n- **Inserts that name their columns**: the ones that list columns by position break once a column is added: `main.rs::import`, the new-module insert in `main.rs`, the module insert in `extract.rs`, `migrate.rs`'s test helper and the `INSERT … SELECT` in `board_tests.rs`.\n- **Storing a split file**: one function that takes a module path, its file and a split `File`, writes the module row with `file` set and inserts the pieces recursively: kind as Rust's own word, trailing whitespace moved to `sep`, a container's tail to `tail`, children with `parent` and their own `ord`. Ids by a new `rust::id_kind` (struct, enum, union, type, trait → `ty:`; const, static → `cn:`; else `fn:`). The import task calls this function.\n- **Projection** (`main.rs::projection`, `Sym`, `ModuleRow`, `Store::index`, `materialize_to`): `Sym` gains `parent`, `sep`, `tail`; `ModuleRow` gains `file` and `rel()` (the stored file, else `outside::file_of`). Update the other places that build these structs (in `main.rs`, `view.rs`, `extract.rs`). A module with `file` set is written exactly: header, then each symbol's text, its children by `ord`, its `tail` and `sep`; no trimming, no added blank lines. A module without `file` keeps today's Gleam path byte for byte. `materialize_to` and `outside::absorb` use `rel()`.\n\nKept out: `Cargo.toml` reading, `mod` resolution, `tests/*.rs`, the D-158 refusals and the Rust branch of `import`, all in the import task. Rust stays undetected by `language::detect`, as in note 4.\n\n### Done when\n\nA test splits `src/board.rs` (and a one-line `impl A { fn f() {} }`, and a file with no trailing newline), stores the pieces in a scratch store, projects them, and gets the same bytes; `Store<T>::open`'s parent is its `impl`, and a run of consts has `sep = \"\\n\"`. The Gleam suites pass unchanged: `rust-unit` (`--bins`), `rust-acceptance`, `rust-board-tests`, `rust-lockdown-tests`.",
+  "closedTime": 1792284675,
+  "column": "complete",
+  "createdTime": 1792252725,
+  "dependsOn": [
+    "cab38c205dcdd8e2"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "7e0b9beb30f88ed3",
+  "links": [],
+  "milestone": null,
+  "rank": 201.0,
+  "scope": [
+    "."
+  ],
+  "title": "Store: nested items and exact projection"
+}

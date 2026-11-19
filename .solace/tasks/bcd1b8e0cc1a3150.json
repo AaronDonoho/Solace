@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056531,
+  "body": "Let one `add` operation in a design proposal carry an element with its children nested inside it. Any element sent without an id gets a new one from Solace that the design doesn't already use. The design agent's report said hand-writing a large flat list of adds, each with a unique id it made up, was slow and easy to get wrong.\n\n## Done when\n\n- A nested add is stored the same way the separate adds would be (D-230 point 1 child order is kept).\n- Elements without ids get unique ones. An id that is supplied and already taken is still refused, naming it.\n- The agent can find out which ids were given, so later operations can refer to those elements.\n- D-241 point 2 is amended in `DECISIONS.md`, and Spec 15 is updated to match.\n\n## Suggested (cursory, not prescriptive)\n\n- Give out the ids when the proposal is made, so the proposal the human approves is the same one that gets saved. The check from task:08eb320c615ec583 can show them.",
+  "closedTime": 1795044088,
+  "column": "complete",
+  "createdTime": 1794865772,
+  "dependsOn": [],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "bcd1b8e0cc1a3150",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 316.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: add nested elements, ids given"
+}

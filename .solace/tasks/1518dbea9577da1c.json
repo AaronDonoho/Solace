@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793665588,
+  "body": "the notifications that appear at the bottom-right part of the screen should have a border to indicate when there is a question. The borders' color should be the same as it used to indicate attention in other parts of the app, per theme.",
+  "closedTime": 1793567903,
+  "column": "complete",
+  "createdTime": 1793552054,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "1518dbea9577da1c",
+  "links": [],
+  "milestone": null,
+  "rank": 176.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Board: notifications' color indicates question"
+}

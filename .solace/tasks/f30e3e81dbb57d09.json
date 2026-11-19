@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792009423,
+  "body": "Part of General UI Polish (feature item 6). Select boxes and other inputs render a drab yellowish-brown in dark mode, which does not fit the indigo theme in `index.html` (`html[data-theme=dark]` sets `--sheet`, `--paper`, `--ink`, `--soft`, `--line`, `--edge`, `--hover`, `--focus`).\n\n- Set `color-scheme` per theme in `index.html` so native dropdowns, date pickers and scrollbars render dark in dark mode.\n- Give `select`, `input`, `textarea` and `button` the theme tokens in the base styles of `solace_task`, `solace_board`, `strategy` and `settings`: `--paper` background, `--ink` text, `--line` border, `--hover` on hover, `--focus` on focus; no page hard-codes a color.\n- Options lists inside native selects follow the scheme, so the yellowish panel is gone.\n\n**Tests:** the theme switch test in `settings` stays green; page tests assert no literal color values in the input styles.",
+  "closedTime": 1791941212,
+  "column": "complete",
+  "createdTime": 1791909762,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/frontend",
+  "id": "f30e3e81dbb57d09",
+  "links": [],
+  "milestone": null,
+  "rank": 3,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Dark-mode input colors"
+}

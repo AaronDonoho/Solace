@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464630,
+  "body": "A Rust implementation of the language seam's split, using `syn` 2 (`full`, `proc-macro2` `span-locations`). `syn` is already in `Cargo.lock` through `serde_derive`. The rules are D-158 points 1, 2 and 5.\n\n- Cut each item's text from the source by span, so comments and formatting are kept exactly; leading comments and attributes go with their item, as `gleam::is_leading` does.\n- `syn` is also the syntax check, the job `gleam format --stdin` does for Gleam.\n- Names: module path items (`board::agents::cached`), `Type::name` methods, trait impls in Rust's own syntax (`<Failure as From<std::io::Error>>::from`), generics kept in the name; `impl`, `trait`, top-level `extern` blocks and inline `mod` as containers.\n- Refusals: the subset in D-158 point 2, with its exact refusal texts (same name twice in a module, item-making macros at module level except `thread_local!`, `include!`, `#[path]` outside the parent's folder). Each refusal quotes the line and gives the rewrite.\n- Replaces the D-121 line scanner for `view` of `.rs` files, so there is one parser.\n\nNot yet checked: whether `syn` parses all of the crate's edition-2024 syntax (`unsafe extern`, `use<>`). This task's test answers it; if it doesn't, stop and ask.\n\n### Done when\n\nA test splits every file in `solace-cli/src` and joins it back byte-identical, with no refusals.",
+  "closedTime": 1792274116,
+  "column": "complete",
+  "createdTime": 1792252719,
+  "dependsOn": [
+    "1e2951750664a164"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "cab38c205dcdd8e2",
+  "links": [],
+  "milestone": null,
+  "rank": 200.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: syn-based splitter"
+}

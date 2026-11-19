@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690236,
+  "body": "Allow a session to be inherited when model or effort changes. ",
+  "closedTime": 1791347937,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "1259d32d18a897cc",
+  "links": [],
+  "milestone": null,
+  "rank": 16.0,
+  "scope": [
+    "."
+  ],
+  "title": "Effort changes keep session"
+}

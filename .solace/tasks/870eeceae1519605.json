@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690224,
+  "body": "Scope should appear as a tab on a task, to the right of the Changes tab.\nThe scope checkboxes should be toggle switches.\nThey should run vertically, rather than the current horizontal layout.",
+  "closedTime": 1791392777,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "870eeceae1519605",
+  "links": [],
+  "milestone": null,
+  "rank": 14.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Improve Scope UI"
+}

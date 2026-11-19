@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035350,
+  "body": "A refused submit leaves a draft that holds the work until it is retried. In a work run on another project, a draft held the new `core.respond`, `core.loop` and `core.main`. The agent saved only the imports, then ran `task done` and summarised the unsaved code as done. Only the review noticed, because of 5 \"unused import\" warnings. As far as I can see, `task done` doesn't look at drafts today; they appear only in a resumed run's brief.\n\n## Change\n1. `task done` is refused while the task owns a draft in any project in its scope. The refusal lists each draft and names `view --draft <id>`, the retry (`submit --draft <id>` or `write --draft <id>`), and the command that drops it.\n2. **A way to drop a draft.** None exists today: `drafts::discard` is only used inside a retried file patch. Add the smallest one: a single command that drops one draft the task owns, documented in `src/reference.txt`. Without it, a stale draft would block `task done` for good.\n3. The usage error for `submit --draft <id> --imports <module>` says to run the two as separate calls: `submit --imports <module>` first, then `submit --draft <id>`.\n\n## Cautions\n- Drafts are kept in each project's own store. Check every project in the task's scope, not just the one the call names.\n- Drop only drafts the task owns, never another task's or `cli`'s.\n\n## Done when\n- Each point is pinned by a test, including a draft in a second scoped project blocking `task done`, and that dropping it lets `task done` through.\n- `src/reference.txt` mentions the `task done` rule and the drop command.\n\nOut of scope: allowing `--draft` and `--imports` in one call; flagging unused-import warnings after an import-only submit.",
+  "closedTime": 1792989096,
+  "column": "complete",
+  "createdTime": 1792975700,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "96e452af906351e1",
+  "links": [],
+  "milestone": null,
+  "rank": 81.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "task done: refuse while a draft is open"
+}

@@ -1,0 +1,10 @@
+{
+  "body": "The Build page starts a build from the recipes and shows its progress, without a command line.\n\n- Start and cancel a build; one at a time per Solace root.\n- Each step shows its status (waiting, running, passed, failed) and a live log.\n- A failed step gets a short summary: the step, the command, the first errors.\n- **File a task from this failure**: creates a task with the failure summary and log attached, scoped to the failing project, so an agent can fix it.\n\nDepends on: build: recipes in solace.toml.\n\nDone when: the human can build every project from the page and turn a failure into a task in one action.",
+  "colorSlot": 30,
+  "id": "7adcac261eef1bfa",
+  "milestone": "e84433b01fd0791f",
+  "rank": 2.0,
+  "startTime": 1794866359,
+  "state": "complete",
+  "title": "build: run from the Build page"
+}

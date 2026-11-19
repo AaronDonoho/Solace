@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793483696,
+  "body": "## The bug\n\nFind (Ctrl/Cmd+F) throws `watchHost is not defined` in the built `app.js`, so the find bar does not work. The reported browser stack points into the compiled frontend.\n\n## Cause\n\n`collect` in `solace-cli/frontend/src/shell.mjs` walks the page and every open shadow root. When it reaches an element with a `shadowRoot`, it calls `watchHost(child)`. No such function exists. The watcher is created by `watch_shadow_hosts`, which returns `watch` and `unwatch`, and the same scope already uses `watch` when a node is added to the page.\n\nI did not reproduce the error in the app or run the frontend tests. This comes from the reported stack and the source.\n\n## Work\n\n- Register the shadow host through the existing `watch` function so its root is observed and its text can be found.\n- Add a `solace-cli/frontend/test/shell.test.mjs` case where Find reaches a shadow host during collection that the document observer has not watched yet. Searching inside that root must not throw and must find the text. The test should fail on the current source.\n- Rebuild the frontend bundle so the packaged app uses the fixed source.\n\n## Left out\n\nNo redesign of Find, and no change to match limits or the way matches are marked.\n\n## Uncertain\n\nThe error and the source call line up, but the app was not run in this planning session; the new regression test should confirm the path.",
+  "closedTime": 1792886402,
+  "column": "complete",
+  "createdTime": 1792873868,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "f8d1c36c99bd18e0",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 18.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Fix: Find nested shadow roots"
+}

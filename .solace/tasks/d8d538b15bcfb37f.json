@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793983854,
+  "body": "Align the `outside` and `outside_share` modules and their tests with the crate's flat test-file convention, without changing runtime behavior.\n\n- Move `src/outside/outside_tests.rs` to `src/outside_tests.rs`, declared with a `#[path]` as `outside::tests` the way `outside_share` does. Remove its `#![cfg(test)]`, its inner `mod tests`, and the repeated `#[cfg(test)]` attributes on its tests and on `root_with_two_projects`.\n- Move the ignore tests that cover `outside_share` into `outside_share::tests`: `the_store_is_committed_with_the_project`, `only_the_store_block_is_changed`, `generated_store_ignores_are_removed_and_an_edited_one_stays`, `a_folder_without_a_store_gets_no_ignore_file`, `the_generated_store_ignore_is_pinned`, `another_projects_store_directory_is_not_this_projects_warning`, `a_bare_store_directory_ignore_still_warns_for_a_nested_project`, `an_ignore_file_that_still_hides_the_store_is_flagged`, and `a_root_ignore_that_still_hides_the_store_is_flagged`. Move `root_with_two_projects` with them.\n- Leave `outside_share` owning store sharing and ignore handling only. Move WAL checkpointing (`checkpoint`, `checkpoint_pending`, `checkpointed`) to the store's core database module, and kept-copy handling (`keep`, `remove_old_copies`, `OLD_COPIES_REMOVED`) to a module that owns `.solace/outside` copies. Move each concern's tests with its code. Add a module comment to `outside_share`.\n- Make `hidden_note` return its result instead of mutating `Written`; `outside` applies the result. Then make `Written.hidden` and `Written.dirty` private and remove the `outside` ↔ `outside_share` import cycle created by that sharing.\n\nAcceptance:\n- `files src` lists `src/outside_tests.rs`, and `find \"#[cfg(test)]\"` has no hits inside that module's tests.\n- `refs outside_share.STORE_IGNORE` has no `outside_tests` users.\n- `view outside_share` lists only store sharing and ignore handling.\n- `Written.hidden` and `Written.dirty` are private.\n- `test --all` passes.\n\nLeft out: changing outside-change behavior, moving unrelated tests, and any user-interface work. The exact names of the destination modules are left to the implementer; the requirement is that `outside_share` no longer owns these separate concerns.",
+  "closedTime": 1793976950,
+  "column": "complete",
+  "createdTime": 1793941750,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d8d538b15bcfb37f",
+  "links": [],
+  "milestone": null,
+  "rank": 282.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "outside: align tests and module ownership"
+}

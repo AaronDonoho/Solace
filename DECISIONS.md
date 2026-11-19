@@ -316,11 +316,12 @@ Amends D-17 and D-61 point 4; builds on D-18 (Aaron, 2026-10-07).
 Why: every board write took the project lock, so a long agent command blocked task-only actions, and repeated clicks queued up and made duplicate tasks (four on 2026-10-06).
 
 ## D-78 A new board connection starts from a snapshot
-Amends Spec 15 `/events`; builds on D-77 (Aaron, 2026-10-07).
-1. A `/events` connection with no valid `Last-Event-ID` first reads the task log's position and each project's workflow-event position, then each project's workflow and tasks from the files, and sends `{workflow}` and `{tasks: [...]}` (the list `GET /tasks` returns) for each project, then `ready`. Reading the positions first means a change made in between arrives again as an event. A project added to the list later gets the same pair after `{projects}`. A reconnect with a valid id still gets only what it missed.
+Changed by (human, board task "share: keep board events out of the shared store", 2026-11-19)
+Amends Spec 15 `/events`; builds on D-77.
+1. A `/events` connection with no valid `Last-Event-ID` first reads the local task log's position, then each project's workflow and tasks from the files, and sends `{workflow}` and `{tasks: [...]}` (the list `GET /tasks` returns) for each project, then `ready`. Reading the position first means a change made in between arrives again as an event. A project added to the list later gets the same pair after `{projects}`. A reconnect with a valid id still gets only what it missed. Workflow changes share the task log, and each project keeps a workflow position in it so a replay sends workflows before tasks.
 2. The board takes its tasks from the stream, not from `GET /tasks`; it holds a message for a project the list has not named yet.
 3. The task server writes the file first. A failed log append after the rename is reported on stderr and doesn't fail the change, so a client doesn't retry it and repeat a note or action; the next connection shows the file.
-Why: the board showed the last logged copy of each task, so a file written without an event (a crash between rename and log, or `adopt_tasks`) was stale or missing, and every page load replayed the whole log. Compacting and pruning the log, and one SQLite connection per stream, are left for later.
+Why: the board showed the last logged copy of each task, so a file written without an event (a crash between rename and log, or `adopt_tasks`) was stale or missing, and every page load replayed the whole log. Compacting and pruning the log, and one SQLite connection per stream, are left for later. The old per-project workflow event table is removed from a shared store on its first open, and its rows are overwritten and compacted so notes from older builds do not stay in the committed file.
 
 ## D-79 Task messages go in `text`, never in `command`
 Amends Spec 15 §6 (Aaron, 2026-10-07).
@@ -1677,4 +1678,16 @@ Amends D-228 point 1 and D-151 point 1.
 2. The run's start project follows the same text, as D-228 point 2 chose for findings.
 
 Why: Investigations, answers and reviews in the notes name the code a run needs. A title can name something else entirely: a Tech Debt task without a feature is titled after the task that filed it. The cost is small, since session start already reads the whole codebase.
+
+## D-261 Strategy records are committed, but their runs are not
+(human, board task "share: commit Strategy records", 2026-11-18)
+Changed by (human, board task "share: final check before teammates clone", 2026-11-18)
+Amends D-179 point 1 and D-191, deliberately changing the block D-191 pins.
+
+1. The root's marked `.gitignore` block shares the root's `.solace/strategy/vision.md`, `personas.json`, `milestones/` and `features/`, as well as every project's `.solace/store.db` and `.solace/approved`. Strategy `runs/` and every other file in `.solace/strategy/`, including temporary files, stay ignored.
+2. Setup keeps the block's markers, so running it again replaces an old block with the current one and changes nothing else.
+3. A strategy record changed outside Solace, such as by `git pull`, reaches open Strategy pages without a restart.
+4. Tasks are shared without their notes, questions and runs. Current designs live at `<workspace root>/designs/` (D-230 point 6); design runs and other local state under `.solace/` stay local. Personas stay in one file, so concurrent persona edits on two computers can conflict.
+
+Why: the vision, personas, milestones and features are the team's direction and belong in the project, while strategy runs are conversations that can hold private data. Tasks and current designs are shared for the same reason: a clone needs them, while their conversations and local run state stay private. Committing the records avoids an import/export step that would drift.
 

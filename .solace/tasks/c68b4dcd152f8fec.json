@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793656131,
+  "body": "A worker and a reviewer both passed task:6165fb16c328435a, yet saving role models never worked when the root is a project (fixed in task:6ebbce7fa97d8a67). The worker's test skipped the server's routing, and the reviewer re-ran that same test and passed it.\n\n### Scope\nAdd one short sentence to each brief, about as long as the wording below. Don't add more than that.\n- **Work brief** (`board::briefs.work_role`): \"Prove each acceptance criterion through the entry point - for example: a request through the server's routing, not the function behind it; a save confirmed by a fresh read\"\n- **Review brief** (`board::briefs.review_role`): \"Red-team the changes: assume they don't work until you prove they fully meet the need and break nothing they reach\"\n- Update `board::briefs::tests` so both sentences are pinned.\n\n### Acceptance criteria\n- Each brief carries its sentence and grows by no more than that.\n\n### Out of scope\nNew test suites (route tests for every page request, browser tests), and changing how the server registers routes.",
+  "closedTime": 1793638684,
+  "column": "complete",
+  "createdTime": 1793637935,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c68b4dcd152f8fec",
+  "links": [],
+  "milestone": null,
+  "rank": 246,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: prove acceptance criteria"
+}

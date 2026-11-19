@@ -1,0 +1,14 @@
+{
+  "archivedTime": 1791690222,
+  "body": "Compilation target should be displayed after the project name.",
+  "closedTime": 1791148747,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "bc537152147a7535",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "title": "Swimlane displays compilation target"
+}

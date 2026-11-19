@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793665578,
+  "body": "From the harness discussion on task:30881953fb66677f (note 8). When the MCP `solace` tool gets an argument of the wrong type, it quietly treats it as missing. The agent then gets nothing, or an error that misleads it.\n\n### Known cases\n- `options` sent as a JSON string (`\"[\\\"A\\\",\\\"B\\\"]\"`) is read as an empty list. The `task ask` reaches the human **with no options**, and nobody is told.\n- `text` sent as an object (strategy runs do this) is read as missing, and the error talks about \"new code\".\n- An `old` or `reason` that isn't a string is read as missing.\n- `command` sent as a list of lines is read as empty, and the reply is \"No command given\" plus the **whole reference** (thousands of tokens).\n\n### Change\n- **Repair** only when there's just one possible meaning: parse an array that came as a JSON string, serialize an object sent where JSON text is expected, unwrap a one-item list sent where a string is expected, join a `command` list into lines. Each repair adds a line to the reply, e.g. `repaired: options was a JSON string; send an array`.\n- **Refuse** any other wrong type, naming the argument and the type expected, and run nothing (the same way E7015/E7017 refuse).\n- A truly empty `command` gets a one-line usage and a pointer to `help`, not the whole reference.\n- Record each repair and refusal as a step in the run log, with a stable code, so counts per model can be read later.\n- Keep the tool schema as simple as it is now (no `anyOf`).\n- Record the rule as a decision: repair syntax, never guess intent, always say what was repaired.\n\n### Tests\nOne for each case above, plus: a correct call is unchanged, and a repaired call shows its `repaired:` line.\n\n### Limit\nClaude Code checks arguments against the schema before they reach Solace, so most of these fixes help Codex and other agent programs.",
+  "closedTime": 1793658530,
+  "column": "complete",
+  "createdTime": 1793459827,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b51b9e64b6eaed14",
+  "links": [],
+  "milestone": null,
+  "rank": 224.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "mcp: repair or name wrong-type arguments"
+}

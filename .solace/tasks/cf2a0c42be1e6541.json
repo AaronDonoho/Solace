@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793507413,
+  "body": "Keep personas in the root, as the vision is kept (D-91): internal, not reachable by agents, no store.\n\n- A persona is `{id, name, objectives, tools, concerns, other}`; the id is assigned by the server and never reused. All text fields are plain strings and may be empty except `name`, which must be non-empty.\n- Routes: list, create, replace (by id, with a `base` revision like `PUT /vision`, so a stale edit is refused), delete.\n- The root `/events` sends `{personas: [...]}` after every write and in a new connection's replay, as it does for `{vision}`.\n- Document the routes and events in specs/15-board-api.md and record the decision in DECISIONS.md.\n\nLeft out: ordering by drag, archiving, per-project personas.",
+  "closedTime": 1793483496,
+  "column": "complete",
+  "createdTime": 1792601874,
+  "dependsOn": [],
+  "feature": "310e17a1d12ca5da",
+  "home": "solace-cli",
+  "id": "cf2a0c42be1e6541",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 29.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "title": "personas: stored and served by the board"
+}

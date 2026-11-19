@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183765,
+  "body": "Define what a design holds and what makes one valid, so every later Design task builds on one definition. This task saves nothing and adds no page.\n\n### Do\n\n- Record the format in a new decision. A cursory suggestion, not a prescription: JSON, holding a schema version, an ID, a title, the tab it belongs to (`architecture` or `ui`), and a tree of elements.\n- An element has a permanent ID, a type and properties, and may have children. A child's position lives on its parent.\n- Add a validator on the server. It refuses an unknown schema version or tab, a repeated element ID, an unknown element type, an unknown property, a value outside a property's closed list, and children under a type that can't hold them. A refusal names the element and what is wrong.\n- Keep element types and their properties in one table that later tasks extend. Start with only what the tests need; the UI/UX and Architecture tasks add the real ones.\n- Solace will support many diagram types (flow, sequence and others), so a new one must not need a format change.\n\n### Constraints\n\nA design is data, not code: no Gleam, Lustre or CSS in the format, and it stays out of the symbol store and type checks.\n\n### Acceptance\n\n- Unit tests: a valid design passes, and each refusal above is refused with the element named.\n\n### Left out\n\nSaving, versions, the page, and the real element types.",
+  "closedTime": 1793936101,
+  "column": "complete",
+  "createdTime": 1793913852,
+  "dependsOn": [],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "c7b617fbc8184707",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 334.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: format and validity rules"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778992,
+  "body": "the latest run on task:aeabf950d1fad737 claims it destroyed a file. please confirm the file looks okay.",
+  "closedTime": 1791776763,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "7e2d141c11cb4225",
+  "links": [],
+  "milestone": null,
+  "rank": 85.0,
+  "scope": [
+    "."
+  ],
+  "title": "Confirm restoration of file"
+}

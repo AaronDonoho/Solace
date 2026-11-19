@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977611,
+  "body": "When a strategy run proposes a change, the plan panel's heading reads `Change task <em>title</em>` as plain text (`solace_task.proposal_view`). Every other record reference on the page is a link that shows the record's title. The heading should link the same way.\n\n1. **Link the record.** For an edit, `proposal_view` puts `record_link(kind, id, name)` in the heading after `Change <kind>`, the way it already does in its \"Approving also sets…\" lines, in place of the plain title. The link shows the record's current title. When the proposal renames it, the `title` field below already shows `old → new`. This is the same code for tasks, features and milestones, so all three get the link.\n2. **Unchanged:** `Create <kind> <em>title</em>` (a new record has no id yet to link to) and `Replace the vision`.\n3. **Tests** in `solace_task_test.gleam`: update `proposal_edit_and_vision_test` so an edit's heading contains the record's link with its loaded title, and a create's heading keeps the plain title. Run the components project's tests and any Strategy page test that checks the heading text.",
+  "closedTime": 1792947221,
+  "column": "complete",
+  "createdTime": 1792901316,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "bb787607fbef25fe",
+  "links": [],
+  "milestone": null,
+  "rank": 114.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "proposals: heading links the record"
+}

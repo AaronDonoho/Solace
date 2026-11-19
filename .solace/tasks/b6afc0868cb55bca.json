@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312250,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793302863,
+  "column": "complete",
+  "createdTime": 1793301970,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b6afc0868cb55bca",
+  "links": [],
+  "milestone": null,
+  "rank": 203.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "board: Codex worker sometimes lacks Solace tool"
+}

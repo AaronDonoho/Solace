@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464630,
+  "body": "Put the Gleam-specific code behind one language interface, with Gleam as its only implementation. **No behavior change**: all tests stay green. Background: D-158 (Rust projects held by symbol) and Specs 1, 2 and 14; this task adds no Rust yet.\n\nWhat moves behind it (from the Rust investigation, copied here because a work run can't read other tasks' notes):\n\n- `gleam.rs` as a whole: split, `Kind {Fn, Type, Const}`, imports, references, record fields, field reads, constructors.\n- Reading a project: `import` and `source_files` (only `*.gleam` in `src/` and `test/`), `valid_module_path`, `Index::build`.\n- Formatting and checking: `format_gleam` (also the syntax check), `Store::gleam`, `check_all`, `diagnostics`, `relocate`, which read Gleam's text output.\n- Test output: `failures`, `quiet`, which read `gleam test` and build output.\n- The `gleam::` call sites, about 87: main 30, extract 22, reach 12, view 9, merge 5, migrate 4, drafts 3, outside 2.\n\nGleam-only helpers (auto-imports `missing_imports`, `unimported_name`, `add_import`, `merge_import`; `weak_asserts`; `probe` and `trace_wrap`; `dependency`; `STDLIB`; the `GLEAM` command list) may stay Gleam-only, called through the interface where a language can say it has none.\n\nAlready language-neutral, so leave alone: the schema (kind is text), ids, history, drafts, board touches, undo, `FileMap`/`locate`, the patch format.\n\nThe project's language is chosen once, from its files (`gleam.toml` today).",
+  "closedTime": 1792272765,
+  "column": "complete",
+  "createdTime": 1792252711,
+  "dependsOn": [
+    "19798e790ee4ae99"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "1e2951750664a164",
+  "links": [],
+  "milestone": null,
+  "rank": 199.0,
+  "scope": [
+    "."
+  ],
+  "title": "Store: language seam"
+}

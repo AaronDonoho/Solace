@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009428,
+  "body": "Part of General UI Polish (feature item 8). The Tasks tab renders every task in one table under the filters, so a large plan scrolls for pages.\n\n- Add paging to `tasks_view` in `strategy`: a page size (fixed, e.g. 25), Prev/Next controls with a page indicator, and the page number in the model as a message.\n- Filters (Column, Project, Feature, Milestone, Closed) apply before paging, and changing a filter resets to the first page.\n- The selected task's detail stays below the table as today; paging does not move it.\n- Count line names the total and the page, e.g. `page 2 of 4, 96 tasks`.\n\n**Tests:** strategy view tests for paging math (page window, last page, filter reset) and for the detail staying under the table.",
+  "closedTime": 1791986581,
+  "column": "complete",
+  "createdTime": 1791909795,
+  "dependsOn": [
+    "6e2c02ff4ce96e26"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "fa381a3d2079fb08",
+  "links": [],
+  "milestone": null,
+  "rank": 7,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Paginate Strategy Tasks tab"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159110,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793140860,
+  "column": "complete",
+  "createdTime": 1793139670,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "014116954af3e6cf",
+  "links": [],
+  "milestone": null,
+  "rank": 136.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "submit: refuse Add that wraps an item in its own module: Tech Debt"
+}

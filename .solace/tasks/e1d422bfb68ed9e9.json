@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778990,
+  "body": "Why: strategy agents write task titles that read like summaries of the body. Examples: \"Review follow-ups go to the feature's Tech Debt task, and workers are told about it\", and \"Atomic cross-project extract: a crash finishes or rolls back, never half-applies\". A title should capture the essence of the work, what it's for, so it reads well on a board card and in `strategy list`. The specifics belong in the body.\n\nAdd guidance to the strategy run's role (`board.rs` `STRATEGY_ROLE`, Spec 15 §6 brief) for proposing tasks, features and milestones:\n- A title names what's to be done, in a few words (roughly 3–7). Use the feature's short name as a prefix when that helps (`extract: JS FFI files`).\n- No mechanism, conditions, error codes or lists in the title. Those go in the body.\n- Keep it short: the brief has a size budget, so one or two sentences.\n\nAlso check the agent reference and `help` (`strategy task …`) and mirror the guidance there in one line, if it fits.\n\n**Tests:** the existing strategy brief test (or a new one) asserts that the guidance is present.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791755670,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "e1d422bfb68ed9e9",
+  "links": [],
+  "milestone": null,
+  "rank": 82.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy runs: guidance on task titles"
+}

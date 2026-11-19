@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794972380,
+  "body": "Three changes to agent briefs, so tech debt is filed or fixed instead of lost, and investigations hand over checkable work.\n\n### 1. Review: non-blocking items go to Tech debt\n\nA review puts every non-blocking item in its `### Tech debt` section, never under Findings, so completing the task files it on a Tech Debt task.\n\nExample: the review of task:3d346fcd77e0cede wrote a `### Findings (non-blocking)` section. Items there are not filed when the task completes.\n\n- In the review brief (`board::briefs.review_role`, `TECH_DEBT_ASK`, `review_context`), say plainly that Findings hold only what explains the assessment or blocks this task, and that any item to fix later goes in `### Tech debt`, nowhere else.\n- Remove the wording that lets a non-blocking item go \"in the findings or tech debt\" (`review_context`).\n\n### 2. Worker sent back after a review fixes its tech debt\n\nWhen a task goes back to a worker after a review, the worker fixes the review's findings and its `### Tech debt` items that fall within the task's scope, even when the review said Looks good, without the human having to ask in a note. It names in its summary any item it left, and why.\n\n- Change the work brief (`board::briefs.work_role`) to say so.\n\n### 3. Investigation: checkable criteria, risks settled\n\n- The report gives clear acceptance criteria: each one a check a worker or reviewer can confirm.\n- The investigator settles any risk it can resolve itself (by reading, checking or making the call) instead of leaving it open. It lists a risk only when it can't settle it, and says why.\n- Change the investigation brief (`board::briefs.investigation_role`) to say so.\n\n### Acceptance\n\n- Brief tests check that each of the three briefs carries its new rule, and that the review brief no longer offers Findings as a place for non-blocking items.\n\n### Left out\n\nRejecting or rewriting notes that break these rules; filed Tech Debt tasks from other tasks.",
+  "closedTime": 1794935380,
+  "column": "complete",
+  "createdTime": 1794931375,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "f17f6e0a822e4941",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 387.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: tech debt and investigation reports"
+}

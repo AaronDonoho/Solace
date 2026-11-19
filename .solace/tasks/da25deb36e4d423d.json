@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231413,
+  "body": "Split out of task:fd4acc7182802a8f (its tech-debt note 2; the investigation's recommendation is in its note 5).\n\n### Problem\n\nWhen a Rust `extract` moves tests into `<module>_tests.rs`, `extract::rust.ancestor_glob_needed` decides per **name**, not per **glob**. If an ancestor module has several globs and any needed name might come from one of them, every glob in that ancestor is carried. The unused ones show up as unused-import warnings in the new test file.\n\nThe store alone can't tell which external glob supplies a name (for example `std::fmt::*` vs `std::collections::*` for `BTreeSet`), so only the compiler can decide.\n\n### Required\n\n- Keep `ancestor_glob_needed`'s current per-name check as the first filter.\n- After the move, drop any glob that the extract itself carried into `<module>_tests.rs` and that cargo reports as an unused import. Never touch imports the user wrote.\n- Reuse the diagnostics the move already gets: `rust_check.post_move_check` calls `check_all`, which returns warnings as well as errors (`Diag.error` is false for a warning). Avoid a second cargo run if that's workable.\n- The cleanup write goes through the same rollback as the move: if it fails, nothing changes.\n\n### Acceptance\n\n- New test: root has `use std::fmt::*;` and `use std::collections::*;`; the moved test uses only `BTreeSet`. `helpers_tests.rs` has `std::collections::*` but no `std::fmt::*`, and `check_all` returns no messages.\n- `a_used_ancestor_glob_moves_with_tests` and `an_unused_ancestor_glob_stays_out_of_moved_tests` still pass.\n- `check --warnings` is clean.\n\n### Risks\n\n- A glob unused under one `cfg` but used under another.\n- A test-only glob cargo sees only when building tests: make sure the diagnostics used cover the test target.",
+  "closedTime": 1793159432,
+  "column": "complete",
+  "createdTime": 1793147033,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "da25deb36e4d423d",
+  "links": [],
+  "milestone": null,
+  "rank": 145.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: drop unused carried ancestor globs"
+}

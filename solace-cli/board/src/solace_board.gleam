@@ -292,7 +292,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             ),
             effect.batch(
               list.flat_map(lanes, fn(l) {
-                [get(model, l.base <> "/workflow", WorkflowLoaded(l.dir, _))]
+                // A lane with no store has no workflow to load, and its empty
+                // base would ask the root's.
+                case no_store(l) {
+                  True -> []
+                  False -> [
+                    get(model, l.base <> "/workflow", WorkflowLoaded(l.dir, _)),
+                  ]
+                }
               }),
             ),
           )
@@ -726,9 +733,10 @@ pub fn view(model: Model) -> Element(Msg) {
   ])
 }
 
-/// Whether every lane has the same columns, so one header row serves all.
+/// Whether every lane with a store has the same columns, so one header row
+/// serves all; a lane with no store has none to compare.
 pub fn shared_columns(lanes: List(Lane)) -> Bool {
-  case lanes {
+  case list.filter(lanes, fn(l) { !no_store(l) }) {
     [first, ..rest] -> list.all(rest, fn(l) { l.workflow == first.workflow })
     [] -> True
   }
@@ -747,9 +755,7 @@ fn lanes_view(model: Model) -> Element(Msg) {
         h.header([a.class("lane-title")], [
           h.span([], lane_name(lane)),
           task_count(cards(model, lane)),
-          h.a([a.href(lane.base <> "/contracts")], [
-            h.text(solace_task.ui_label("contract_view")),
-          ]),
+          contracts_link(lane),
         ]),
         columns_view(model, lane, True),
       ])
@@ -759,9 +765,10 @@ fn lanes_view(model: Model) -> Element(Msg) {
         h.a([a.href("/workspace")], [h.text("Workspace page")]),
         h.text("."),
       ])
-    _, lanes ->
+    _, lanes -> {
+      let stored = list.filter(lanes, fn(l) { !no_store(l) })
       h.div([a.class("lanes")], [
-        case shared, lanes {
+        case shared, stored {
           True, [first, ..] -> head_view(board_columns(first.workflow))
           _, _ -> h.text("")
         },
@@ -784,21 +791,24 @@ fn lanes_view(model: Model) -> Element(Msg) {
                 ],
               ),
               task_count(cards(model, lane)),
-              h.a([a.href(lane.base <> "/contracts")], [
-                h.text(solace_task.ui_label("contract_view")),
-              ]),
+              contracts_link(lane),
             ]),
-            ..case open, shared {
-              True, True -> [columns_view(model, lane, False)]
-              True, False -> [
-                head_view(board_columns(lane.workflow)),
-                columns_view(model, lane, False),
-              ]
+            ..case open, no_store(lane) {
               False, _ -> []
+              True, True -> []
+              True, False ->
+                case shared {
+                  True -> [columns_view(model, lane, False)]
+                  False -> [
+                    head_view(board_columns(lane.workflow)),
+                    columns_view(model, lane, False),
+                  ]
+                }
             }
           ])
         })
       ])
+    }
   }
 }
 
@@ -1022,13 +1032,17 @@ fn scope_of(home: String, t: solace_task.Task) -> List(String) {
 /// The tasks a lane shows, each with the project it is stored in: every task
 /// the server marks `onBoard` whose projects include this lane's (D-61, D-196).
 fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
-  list.flat_map(model.lanes, fn(l) {
-    l.tasks
-    |> list.filter(fn(t) {
-      t.on_board && list.contains(scope_of(l.dir, t), lane.dir)
-    })
-    |> list.map(fn(t) { #(l.dir, t) })
-  })
+  case no_store(lane) {
+    True -> []
+    False ->
+      list.flat_map(model.lanes, fn(l) {
+        l.tasks
+        |> list.filter(fn(t) {
+          t.on_board && list.contains(scope_of(l.dir, t), lane.dir)
+        })
+        |> list.map(fn(t) { #(l.dir, t) })
+      })
+  }
 }
 
 @external(javascript, "./api.mjs", "prevent_drag")
@@ -1172,7 +1186,7 @@ fn event_dir(model: Model, text: String) -> String {
   case json.parse(text, decode.at(["project"], decode.string)) {
     Ok(dir) -> dir
     Error(_) ->
-      list.find(model.lanes, fn(l) { l.base == "" })
+      list.find(model.lanes, fn(l) { l.dir == "." || l.dir == "" })
       |> result.map(fn(l) { l.dir })
       |> result.unwrap("")
   }
@@ -2196,3 +2210,21 @@ fn watch_stacks(root: dynamic.Dynamic) -> Nil
 /// scrolls with its lane.
 const stack_styles =
   ".lane .stack{position:sticky;top:var(--lane-bar,38px);z-index:4}.lane .stack.tall{position:static}"
+
+/// A project the server lists without a base, because its store is missing:
+/// it shows no tasks and no links. The root and the single-project
+/// placeholder have no base either.
+fn no_store(lane: Lane) -> Bool {
+  lane.dir != "" && lane.dir != "." && lane.base == ""
+}
+
+/// The link to a project's Contract view; a project with no store has none.
+fn contracts_link(lane: Lane) -> Element(Msg) {
+  case no_store(lane) {
+    True -> h.text("")
+    False ->
+      h.a([a.href(lane.base <> "/contracts")], [
+        h.text(solace_task.ui_label("contract_view")),
+      ])
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977614,
+  "body": "Planning runs have disappeared from the Strategy page. Find where they went, restore them without changing their ids or notes, and stop the loss.\n\n### What the code shows\n\n- Strategy runs are root records in `<root>/.solace/strategy/runs/*.json`; `tasks.strategy_runs` reads only that folder.\n- The planner lists only runs whose `context` equals the selected record, or the page. A run on another task, feature or milestone is hidden until that record is selected, and there is no all-runs list. A run on an archived or removed record may have no selection that shows it.\n- When a project that was its own Solace root joins a workspace, `board.claim` adopts only the older `.solace/board` tasks. It does not move the project's `.solace/tasks` or `.solace/strategy/runs` into the new root, so those records stay on disk but the new root never lists them. The same cause could explain a task that vanished.\n- `tasks.stored_records` silently skips a run file it cannot read.\n\n### Work\n\n1. Find the missing runs on disk: the current root's `.solace/strategy/runs` and each project's `.solace/strategy/runs` (including `solace-cli`). Do not delete or rewrite anything until the files are backed up.\n2. Say which cause fits: an old root, a context that is no longer selectable, or an unreadable file. Check whether a missing task is also under a project's `.solace/tasks`.\n3. Restore what was found: adopt runs and tasks from a former root into the current root, keeping ids, notes, logs, timestamps and links. If an id is already used, report the collision instead of overwriting.\n4. Stop the silent loss: report an unreadable run file instead of omitting it, and either find a run from a former root or refuse the join until it is moved. If runs are meant to stay per-context, make the history discoverable rather than hidden.\n5. Add tests: a run and task in a project that becomes a workspace member are still listed after the join; an unreadable run file is named; context filtering still works.\n\n### Left out\n\n- Guessing at lost run contents or recreating them.\n- A general redesign of the planning panel.\n- Changing the stored run format.",
+  "closedTime": 1792959735,
+  "column": "cancelled",
+  "createdTime": 1792957558,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "5f8a73a74b90bb52",
+  "links": [],
+  "milestone": null,
+  "rank": 75.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "Find and restore planning runs"
+}

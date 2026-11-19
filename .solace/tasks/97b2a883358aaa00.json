@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035351,
+  "body": "When `--replace` can't find `old`, say why. When it did apply but the retry failed, say the draft now holds the change.\n\n## Why\nIn run 00acbe40d2cf4d4d on task:3517183e01f63016, steps 38–92 are mostly `E0105 \\`old\\` does not occur; read the current text and copy it exactly`. That message gives no clue. At least one miss happened because an earlier `--replace` had already changed the draft (step 39): the replacement applied, the retry failed, and the reply said only \"Nothing was saved. Draft … retained.\" So the worker's idea of the draft's text was wrong from then on.\n\n## What changes\n1. **E0105 names the nearest line.** When `old` doesn't occur, `drafts.replace` names the line of the text closest to `old`'s first non-blank line, with its line number. If they differ only in leading space, it also gives each one's leading spaces, as E0108 does (D-142). If, in a patch draft, `old` matches once the `-`, `+` or ` ` prefixes are left off, the refusal says to include the prefixes. This covers `submit --draft … --replace`, `write --draft … --replace` and `submit <name> --replace`, since they share `drafts.replace`.\n2. **A replacement kept in a failed retry is named.** When `--replace` applied but the retry was refused, the footer (`drafts.retry_advice`) says the draft now has the replacement, and that the next `old` must match the draft as it is now (`view --draft <id>`).\n\n## Cautions\n- **Wording only.** What `--replace` accepts doesn't change. A loose match is named, never applied.\n- \"Nearest\" is the agent's choice of a simple measure (for example, the same line with spaces trimmed first, then the longest shared start). Keep it cheap and deterministic, and say in your summary which measure you used.\n- Update `drafts.tests::replace_all_and_occurrence_lines` only where its expected message changes, and say so.\n\n## Done when\n- An `old` that differs only in leading space, or only in missing patch prefixes, gets a refusal that names the line and the fix. A plain miss names the nearest line. All are pinned by tests in `drafts::`.\n- A failed retry after an applied `--replace` says the draft holds it, pinned by a test.\n- `src/reference.txt`'s draft paragraph mentions that a failed retry keeps the replacement, keeping the D-143 layout.",
+  "closedTime": 1792984117,
+  "column": "complete",
+  "createdTime": 1792982889,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "97b2a883358aaa00",
+  "links": [],
+  "milestone": null,
+  "rank": 88.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "drafts: --replace misses name the nearest line"
+}

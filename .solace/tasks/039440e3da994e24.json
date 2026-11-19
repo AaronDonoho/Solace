@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1793924912,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793922639,
+  "column": "complete",
+  "createdTime": 1793922345,
+  "dependsOn": [],
+  "feature": "9d778f6e03dea799",
+  "home": "solace-cli/design",
+  "id": "039440e3da994e24",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 9.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "design: page and records"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793916050,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793856729,
+  "column": "complete",
+  "createdTime": 1793854528,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c4c2f8efea3e749e",
+  "links": [],
+  "milestone": null,
+  "rank": 264.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Fix: agents skip messages sent mid-work"
+}

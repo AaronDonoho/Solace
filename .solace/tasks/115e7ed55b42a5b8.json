@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159110,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793146028,
+  "column": "complete",
+  "createdTime": 1793139946,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "115e7ed55b42a5b8",
+  "links": [],
+  "milestone": null,
+  "rank": 137.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "submit: point Update of a new name to Add: Tech Debt"
+}

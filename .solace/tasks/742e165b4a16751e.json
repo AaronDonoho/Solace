@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792269313,
+  "body": "A task whose stored `home` is no project of the workspace (D-129) is marked `noProject`: it is in no board lane, and its scope can't be changed. task:59d0b7ae77d161d9 shows this way, even though its scope (`.`, `solace-cli/components`) names only projects and `.` is a member.\n\n1. **Find the cause first.** Read task:59d0b7ae77d161d9's stored `home` and work out how it got a home that isn't a project, even though `tasks::proposed_task` creates it with `home` = `.`. Possible causes: the scope edit, `move_task`, the feature start (`board::plan_for_feature`), or `workspace::members` leaving out `.`. Fix that path, and add a test that reproduces it.\n2. **Decision.** Amend D-129 point 2: when a task's home is no project, it is re-homed. Its home becomes the first project in its scope. If none of its scope folders is a project, its home becomes the root (when the root is a project), and its scope becomes `.`. A task stays without a project only when the root itself isn't a project.\n3. **Re-home on load.** `board::all_tasks` and `board::task` apply point 2 and write the change. Each such task gets a `solace` note naming its old and new home. Its folder moves the way `move_task` moves it.\n4. **Scope edits.** With point 3 in place, the Scope tab works on such a task like on any other. Check that changing the scope of a task that was without a project now saves.\n5. **Tests.** Add `board_tests.rs` unit tests: a homeless task with a project in its scope is re-homed there; one with no project in its scope goes to the root; with no root project it stays marked `noProject`. Update the D-129 acceptance cases in `board_acceptance.py`, and run `rust-board-tests` and `rust-acceptance`.",
+  "closedTime": 1792266346,
+  "column": "complete",
+  "createdTime": 1792258625,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "742e165b4a16751e",
+  "links": [],
+  "milestone": null,
+  "rank": 211.0,
+  "scope": [
+    "."
+  ],
+  "title": "Homeless tasks fall back to the root"
+}

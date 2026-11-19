@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972379,
+  "body": "**Question:** when a build or test takes in files another active task has changed and not finished, should the reply and run log say so?\n\nRuns in different projects share one copy of the files, so a failing (or passing) result can depend on another task's half-done work, and nobody knows why.\n\n**Proposed design (from task:4ea2064f16119df8):**\n- Report on pass **and** fail, e.g. *\"included unfinished changes from task \"Board drag fix\" in solace-cli/board\"*.\n- Only for files the build or test actually took in: the bundle's declared inputs; for Rust tests, conservatively the crate's sources plus what `build.rs` reads. An unrelated active task gives no warning.\n- Says \"included\", never \"caused\": evidence, not blame.\n- Shown in the task's run log on the board, not just the agent's reply.\n- Tested with recorded task changes, not two live runs (D-83).\n\nThis is diagnosis, not isolation; see task for separate copies.\n\n**Answer in a note:** whether Solace can reliably tell which task owns each changed file, how noisy the Rust-test case would be, and a recommendation. No code changes.",
+  "closedTime": 1794325567,
+  "column": "complete",
+  "createdTime": 1792291927,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "cb8fe9a6519e90d3",
+  "links": [],
+  "milestone": null,
+  "rank": 221.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate reporting other tasks' unfinished changes"
+}

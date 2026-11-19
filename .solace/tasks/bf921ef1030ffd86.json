@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159128,
+  "body": "Part of splitting task:3254586664024306. From its notes 13–17; the original notes stay on the parent record. These concern how `extract::rust` chooses import spelling and how it sees globs.\n\n- **Unreachable test-import removal (note 13).** `extract::rust.remove_test_import` looks unreachable. If a module's header already has `#[cfg(test)] use <path>;` and a non-test mention needs the item, `header_binds` returns false. `target_names_after_move` then counts that import's local name, because `import_sites_in` parses attributed `use` items too. So the group counts as taken and gets the full path, and the code that should swap in a plain import never runs. Fix: in `rewrite_mentions`, before the clash check, treat a test-gated import of the same `path` as not taken (for example, leave it out of the names set); otherwise delete `remove_test_import`. Check: add a test where a staying module's header has `#[cfg(test)] use crate::Failure;` and a non-test fn mentions `crate::Failure`, then extract `crate.Failure --to failure`. Expect exactly one plain `use crate::failure::Failure;`, no `#[cfg(test)]` copy, a short `Failure` in the fn, and no warnings from `check_all`.\n- **Duplicate name sets (note 14).** `extract::rust.target_names_after_move` now copies almost all of `extract::rust.target_names` (header imports, `header_mod_names`, imports in `use` symbols); only the item filter differs. Make `target_names` take a predicate for which symbols belong to the module (or the list of symbol indices), and have both callers use it, so the two name sets cannot drift apart. Check: `check --warnings` is clean, and the `extract::rust::tests` format-capture and carry-import tests pass.\n- **Long function (note 15).** `extract::rust.rewrite_mentions` is about 135 lines and does three jobs: classifying each site, choosing the spelling per group, and splicing the edits. Move the group-resolution loop (the code after the site loop) into its own function, such as `resolve_moved_mentions(cx, groups, newheaders, edits)`. While there, import `BTreeMap` rather than writing `std::collections::BTreeMap` inline; `BTreeSet` is already imported. Check: `test` and `check --warnings` pass with no behavior change.\n- **Untested branches (note 16).** `extract::rust::tests` does not cover the other new branches. A mention made only by test code should get `#[cfg(test)] use …;`. A glob that supplies the same name to other code (`glob_binds`) and a prelude-named moved item should keep the full path. A mention inside an inline `mod tests { … }` should keep the full path (`in_moved_inline_module`). Add one test per case, each asserting the spelling and that `check_all` reports no warnings. Check: the new tests pass in `test`.\n- **Glob only in header (note 17).** `extract::rust.glob_binds` reads globs from the module header only. A glob in a top-level `use` symbol of that module (such as `pub use x::*;`) is missed, so an explicit import could shadow it without anyone noticing. Also scan the module's `use` symbols, the way `target_names_after_move` does. Check: add a test with `pub use other::*;` as a `use` symbol that supplies `Failure` to other code, and expect the full path to be kept.",
+  "closedTime": 1793138239,
+  "column": "complete",
+  "createdTime": 1793135892,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "bf921ef1030ffd86",
+  "links": [],
+  "milestone": null,
+  "rank": 305.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: import spelling and globs"
+}

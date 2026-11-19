@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125213,
+  "body": "A run hit this: `grep` cuts long lines to ~200 characters around the match (`lockdown.rs::around`), marking the cut with a leading `…`. An agent copied the visible tail of a 2,140-character fixture line into a patch hunk; the hunk couldn't match (a patch line is a whole line, D-142), the patch was refused (E0108), and the agent recovered with one `write --replace` call. The bare `…` was easy to miss.\n\nThe E0108 refusal already names the fix; the gap is at read time, before the patch is written.\n\nFix: when a grep reply shows any line whose start was cut (the `…` prefix from `around`), add one footer line, in the style of the existing \"N more files match\" footers:\n\n`Lines starting with … are cut from longer lines; read the whole line with read <path> --lines <n>..<n>, and to change part of one use write <path> --replace with old/text.`\n\n- One footer per reply, not per line; only when at least one shown line was cut at the start.\n- Context lines (`12-`) cut the same way count.\n- `read` needs no change: it shows whole lines within its budget.\n\nChecks: unit tests in `lockdown.rs` — a reply with a cut match line gets the footer; a reply with only whole lines doesn't; the footer appears once per reply.",
+  "closedTime": 1792085344,
+  "column": "complete",
+  "createdTime": 1792079862,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "c5dbccc54291cc68",
+  "links": [],
+  "milestone": null,
+  "rank": 152.0,
+  "scope": [
+    "."
+  ],
+  "title": "grep: cut lines say so and name the fix"
+}

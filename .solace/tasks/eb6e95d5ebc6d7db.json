@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972380,
+  "body": "When a design agent proposes a change, nothing is visible until the human presses Accept, so the human has nothing to judge it by. The human asked to drop the Accept/Reject step: the agent's change is saved straight away as a new version that the human can look at. If they don't want it, they go back to an earlier version.\n\n## Asked for\n\n- Every design agent change becomes a new version of the design as soon as it's made, with no Accept or Reject step.\n- The page can show what changed compared with the version before it (see the follow-on task for the controls).\n\n## Done when\n\n- A design run's change is checked and saved as a new version with the run as its source, and no question is put to the human. A new design gets its first version the same way.\n- An invalid change is refused as it is today, and nothing is saved.\n- The design page shows the new version without a reload.\n- D-243 is amended (it currently requires Accept). Spec 15 and the design agent's brief and help say changes are saved as versions.\n\n## Calls made\n\n- A change to a design that got a newer version after the agent read it is still refused, and the agent reads the design again. This keeps D-243 point 2's rule that a later change is never lost.\n\n## Not in this task\n\n- task:08eb320c615ec583 (check before proposing) stays as it is. It still saves the agent from making versions that get refused.",
+  "closedTime": 1794953328,
+  "column": "complete",
+  "createdTime": 1794935440,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli",
+  "id": "eb6e95d5ebc6d7db",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 388.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "design agent: changes saved as versions"
+}

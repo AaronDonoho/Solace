@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1793159125,
+  "body": "Steps 3–4 of the refactor plan (task:fc9bf315f4eddc7a, note 6 for the boundaries, note 12 for the updates). This is part 1 of 4 of the module splits. Waits on task:32ad4bda2e68c02d.\n\n- **CLI facade:** move argument parsing, project scoping, batching, probe helpers and command routing into `cli`. Command names and option validation stay unchanged, and the crate-root `main` stays a one-line entry that hands off to `cli`.\n- **Model and diagnostics:** move `Failure`, `Out`, `Sym`, `ModuleRow`, `Index`, `Target`, `FileMap` and `Diag`, plus span, warning and broken-report formatting, into their owning modules.\n\n### Rules for every split task\n\n- Move methods with `extract Type::method --to <module>`, and raise visibility only to `pub(crate)`.\n- Tests move with their code into `<module>_tests.rs` files. A module that still has an inline `mod tests` can't take moved code (`E1004`), so move code *out* of it first.\n- Keep each public symbol reachable by its current name. Remove a wrapper only after `refs` shows nothing calls it.\n- After each move, run `check --warnings`, `rust-unit` and the affected acceptance suite. At the end of the task, also run `rust-acceptance` and `spacing_parity`.",
+  "closedTime": 1793074730,
+  "column": "complete",
+  "createdTime": 1792211527,
+  "dependsOn": [
+    "fc9bf315f4eddc7a",
+    "32ad4bda2e68c02d",
+    "9c12aa66b1c5c9b1",
+    "545854e525a9f088",
+    "9762fb9af04c8c77"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "2414798176c466e4",
+  "links": [],
+  "milestone": null,
+  "rank": 188.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Refactor: CLI facade and model split"
+}

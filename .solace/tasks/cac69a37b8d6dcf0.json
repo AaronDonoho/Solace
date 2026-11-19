@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791755318,
+  "body": "",
+  "closedTime": 1791737468,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "cac69a37b8d6dcf0",
+  "links": [],
+  "milestone": null,
+  "rank": 8.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "Move the Dark mode toggle to the Settings page"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792192489,
+  "body": "The first piece of the Knowledgebase, done before the rest of milestone:208dbeb9095a5a4b. A **Knowledgebase** menu tab at `/knowledgebase` shows the guide inside the app, with the menu bar, and the board loses its **Guide** link.\n\n## Now\nThe guide is a separate static page: `board/guide.html`, served at `/guide` by `board.rs` (the page match) and linked from the board header (`solace_board.view`). It has no menu, its own styles, and no dark mode.\n\n## Change\n- **Shell** (`solace-cli/frontend`): add a Knowledgebase tab to the menu, after Strategy and before Settings, at `/knowledgebase`. The page shows the guide's content with the shell's fonts and theme, light and dark. The guide's own `<title>`, page chrome and its line \"This guide is a separate page\" go. Its section headings become a short table of contents at the top, linking to each section.\n- **Where the content lives:** the page is the start of the Knowledgebase, so make it the shell's own page for now, holding the guide's HTML. A later Knowledgebase task can turn it into its own app. Moving the content out of `board/guide.html` is fine.\n- **Server:** serve the shell at `/knowledgebase`. `/guide` sends the browser on to `/knowledgebase` (or serves the shell, which replaces it in the history), so old links still work.\n- **Board:** remove the Guide link from the header.\n- **Docs:** the root README (\"The board's **Guide** link (`/guide`)…\"), the frontend README's page table and menu line, and Spec 15's `/guide` line name the Knowledgebase page. Record the move as a decision in `DECISIONS.md`.\n\n**Tests:** frontend tests: the menu has Knowledgebase, `/knowledgebase` shows the guide's sections, and `/guide` lands there. In `board_acceptance.py`, `/guide` still answers and `/knowledgebase` answers with the shell. Board view tests check that there's no Guide link.",
+  "closedTime": 1792073336,
+  "column": "complete",
+  "createdTime": 1791957132,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "8468541fcf2abdfc",
+  "links": [],
+  "milestone": "208dbeb9095a5a4b",
+  "rank": 133.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "knowledgebase: page with the Guide"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778986,
+  "body": "A strategy run's agent is read-only (D-93), but parts of what it is told come from task runs. They point it to commands it can't use, and it wastes calls on them.\n\n- **Tool description.** `solace mcp` (`solace-cli/src/main.rs:663`) gives every run the same description and `command`/`text` hints: \"Start with `session start --task`… put `test` on the line after a `submit`\", plus `work add`/`task note|done|ask`. A strategy run gets its own description and hints instead, covering reading (`view`, `inspect`, `refs`, `find`, `grep`, `files`, `read`), `strategy list|show`, the proposals and `strategy note`. The run already launches with `[STRATEGY, rid]` (`board.rs:3134`), so the MCP server can tell which kind of run it is serving.\n- **Errors.** In a strategy run, refusals give no task-run advice. For example, E6006 (`lockdown.rs:592`) says \"ask the human with `task ask`\". In a strategy run it should only say that other projects are reached with `--project <folder>`. Check the other refusals for the same problem.\n- **Brief.** Remove \"Other commands, `task` commands among them, are refused\" from `STRATEGY_ROLE` (`board.rs:3142`), since the list of allowed commands is already complete.\n- **Decisions list.** `strategy_brief` puts every `## D-` title from DECISIONS.md in the prompt (14 now). The list grows with every decision and is mostly irrelevant to a given run. Bound it, for example to the most recent ~10 titles, followed by a line saying that `grep D-` finds the rest, so the brief stays short as the project ages.\n- **`grep` syntax.** `grep` (`lockdown.rs:977`) treats everything after the command as one literal, case-insensitive string, so `grep -i \"plan\"`, `grep \"a\\|b\"` and `grep \"x\" some/file.rs` silently search for the wrong text. Make `grep` refuse a query starting with `-` (or a trailing path) with a message explaining its syntax: \"literal text, already case-insensitive; one term per command; `--project` to pick the project\". Say the same in the `help grep`/reference line and in the brief's read line. This applies to task runs too.\n- **Tests.** A strategy run's brief, its tool description and a refusal it gets don't mention `task ask`, `submit`, `test` or `session start`. The decision list is bounded. `grep` refuses an option-like query with the syntax hint. `board_acceptance.py:144` already checks a related prompt, so extend it or follow its lead.",
+  "closedTime": 1791730917,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "f4e8430b06ebe86d",
+  "links": [],
+  "milestone": null,
+  "rank": 66.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy runs: tell the agent only what it can do"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793459125,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793248506,
+  "column": "cancelled",
+  "createdTime": 1793248486,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "16f43030171f602c",
+  "links": [],
+  "milestone": null,
+  "rank": 188.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "work: report wasteful steps as tech debt: Tech Debt: Tech Debt"
+}

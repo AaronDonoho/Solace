@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793483690,
+  "body": "Use the **detail** and **asking** settings in every run's brief, next to the involvement section.\n\n### Detail\n\n- **concise:** notes and summaries in a few lines, with the outcome first.\n- **standard:** as today.\n- **thorough:** also covers the alternatives considered and how the result was checked.\n\n### Asking\n\nThe brief tells the agent when to ask instead of deciding:\n\n- **often:** ask whenever the task allows more than one reasonable reading.\n- **balanced:** ask when a wrong guess would mean redoing work or would change what the human sees.\n- **rarely:** decide whatever can be undone and record it as a call made. Ask only about things that can't be undone or that contradict the task.\n\nThe setting never stops an agent from asking about a conflict with a decision or the vision (see the push-back task in **Built-in quality practices**). The proposed Autorun feature's Agent-Managed mode should use *rarely*, not add a setting of its own.\n\n### Checks\n\nBrief tests for each value.",
+  "closedTime": 1793466304,
+  "column": "complete",
+  "createdTime": 1792092108,
+  "dependsOn": [
+    "6a6a1895b45ee268"
+  ],
+  "feature": "d597d4887f6e54eb",
+  "home": ".",
+  "id": "8d0fd049769c8049",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 156,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: detail and when to ask"
+}

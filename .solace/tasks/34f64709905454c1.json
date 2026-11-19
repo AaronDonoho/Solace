@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231415,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793210548,
+  "column": "complete",
+  "createdTime": 1793209687,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "34f64709905454c1",
+  "links": [],
+  "milestone": null,
+  "rank": 158.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: raise nested module visibility: Tech Debt"
+}

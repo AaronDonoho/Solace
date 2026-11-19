@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "**Question:** should each task work in its own copy of the project, so no task sees another's unfinished work (the option D-18 left open)?\n\nThis is the full fix for cross-task interference that task:cb8fe9a6519e90d3 only reports. It's a large architectural change, likely a feature of its own.\n\n**Answer in a note:** the options (e.g. git worktrees, copy-on-write folders), cost in disk and build time per task, how merging back and conflicts would work with the symbol store and undo records, effect on \"frictionless on other PCs\", and a recommendation: worth it now, later, or not at all. If worth it, propose a feature. No code changes.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1792291935,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "f54a8d4394a0cc36",
+  "links": [],
+  "milestone": null,
+  "rank": 222.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate a separate copy per task"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794876829,
+  "body": "When Solace launches, the Design tab in the menu sometimes flags as needing attention even though nothing has happened on the Design page.\n\nThe Design tab should flag only when something new happens on a design run after launch (an agent replies or asks a new question), as it does today while Solace is open. Runs that were already waiting before launch must not flag it.\n\n### For the agent\nLikely cause, not confirmed: `panel.needs_attention` treats a run missing from the old list as new, so on the first load (old list empty) any run already in `waiting`, or with an unanswered question, returns True, and `design.settle` emits `attention`. Check how the Strategy page avoids flagging on its first load and match it. Keep `panel_test.attention_when_a_run_replies_or_proposes_test` passing and add a case for the first load.",
+  "closedTime": 1794801282,
+  "column": "complete",
+  "createdTime": 1794800678,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "c3a232bb800e65f9",
+  "links": [],
+  "milestone": null,
+  "rank": 22.0,
+  "scope": [
+    "solace-cli/design",
+    "solace-cli/frontend"
+  ],
+  "title": "design: no tab flag on launch"
+}

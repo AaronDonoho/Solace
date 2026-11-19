@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977616,
+  "body": "Review briefs ask for findings and tech debt that a weaker, literal worker can act on without searching again, and say exactly how to write the Tech debt section so Solace picks it up.\n\n## Why\nReviewers usually run a stronger model than the worker. Vague findings get followed literally and often add tech debt, and later runs search the same code again. A Tech debt section in the wrong shape is silently dropped: `board.tech_debt_items` only reads top-level bullets (`-`, `*`, `+`, `1.`) under a heading whose text is `Tech debt`, and stops at the next heading.\n\n## Today\n- `board.TECH_DEBT_ASK` is the only instruction, and only tasks with a feature get it (`board.brief`).\n- The review role's wording for ordinary findings is in `board.brief` and the review prompt it builds.\n\n## The investigator decides\nThe new wording, for both:\n1. **Findings and tech debt**: each one names the symbol or file, what's wrong, what to change it to and why, and how to check it's done. It's enough that the worker needs no more investigation.\n2. **Tech debt format**: the exact heading (`### Tech debt`), one top-level bullet per item, details as indented lines under their bullet, no other heading inside the section, and nothing after it that isn't a new heading. A short example in the brief may help.\n\n## Done when\n- Review briefs carry the new wording; `board::tests` pin it.\n- Spec 15 §6 (review run) and D-112 point 1 describe it, or a new decision does.\n\nOut of scope: changing how the section is parsed.",
+  "closedTime": 1792947841,
+  "column": "complete",
+  "createdTime": 1792944872,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "702e874a1cc7a625",
+  "links": [],
+  "milestone": null,
+  "rank": 64.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "reviews: detailed findings, strict Tech debt format"
+}

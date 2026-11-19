@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792554932,
+  "body": "Make changed long-form proposal values readable in the Strategy planner without a strikethrough line diff.\n\n- For a changed task body or vision text, show labeled `Old:` and `New:` sections containing the full current and proposed values in their original order.\n- Remove the line diff's `del` strikethrough and `+` markers for these values. Keep the existing rendered Markdown preview for the proposed value and the existing `old → new` form for short fields.\n- Preserve the current filtering rules: unchanged fields stay hidden, whitespace-only changes still count as unchanged, and a proposal with no effective change still says `No change`.\n- Cover changed task bodies, changed vision text, unchanged fields, whitespace-only changes, and the retained short-field and Markdown-preview behavior.\n\nLeft out: word-level highlighting, side-by-side columns, syntax-aware diffs, and changing proposal approval or answer controls. The smallest version presents the two complete values directly.",
+  "closedTime": 1792545137,
+  "column": "complete",
+  "createdTime": 1792541897,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "68fd1c6f1c59581e",
+  "links": [],
+  "milestone": null,
+  "rank": 99.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "planner: show old and new"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795105044,
+  "body": "Split from task:040fefdf07a5aeab. Follows task:611bae9849f67e12, which shared strategy records the same way.\n\nTasks are kept only on the machine that made them. Commit them to git so a clone or teammate gets the same tasks.\n\n**Shared:** each task's title, description, column and order, links, scope, feature, milestone, dependencies, and created, closed and archived times. Past tasks are shared too, archived ones included.\n\n**Kept local, never committed:**\n- notes, and questions with their answers (conversations can hold private details, and this repo is public);\n- runs and run state: which agent ran and its effort, where its log is, whether it's waiting, paused or finished;\n- approval stamps.\n\nAnother computer's board shows no run status for a task.\n\nA task changed by `git pull` shows without restarting Solace, the same as strategy records do (D-261 point 3).\n\n**Out of scope:** blocking a task from being started on two computers; a setting to share notes and questions; merging two people's edits to one task.\n\n### For the worker\n\n- Today one file per task, `<root>/.solace/tasks/<id>.json`, holds both the shared and the local fields (Spec 15 §1). The local fields need to live apart from the committed file, so that committing it publishes nothing local. Keep the task server the only writer (D-77). A task that has no local part yet (for example, freshly cloned) reads as having no notes, questions or runs.\n- Extend `outside_share.STORE_IGNORE` the way D-261 did for strategy records. Keep `inbox/`, the task event log and every project's `.solace/board/` ignored, and add the old block to `OLD_STORE_IGNORES` so setup replaces it.\n- To get pulled changes onto open pages, reuse `tasks::store.announce` / `announce_records`.\n- Update README line 323 (what the root `.gitignore` block commits) and Spec 15's storage paragraph.\n- D-261 point 4 (\"Tasks and design records stay local\") will be out of date. The human said no decision is needed for this task.\n\n**Tests:** the block's text is pinned; a task's shared file is not ignored, and its local part, the inbox and run data are; an old block is replaced; a committed task file holds none of the local fields; a task with no local part loads with empty notes, questions and runs; a changed task file reaches an open board without a restart.",
+  "closedTime": 1795060581,
+  "column": "complete",
+  "createdTime": 1795056043,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": ".",
+  "id": "146032c74c41f96b",
+  "links": [],
+  "milestone": null,
+  "rank": 392.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "share: commit tasks, keep conversations local"
+}

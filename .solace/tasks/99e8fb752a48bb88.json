@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794864193,
+  "body": "Solace runs the project's build tools for the user, so build output piles up quietly:\n\n- **Rust:** `check`, `test` and `probe` grow `target/`. A probe also keeps a second full build folder at `target/solace-probe/` (see `rust_probe.run` and `rust_probe.probe_argv`). In Solace's own checkout that adds up to about 15 GB.\n- **Gleam (BEAM):** `check`, `test` and `probe` build into `build/`. A Gleam probe runs in place, as a temporary `test/solace_probe.gleam` that is then removed, so it makes no second build folder.\n\nSomeone who isn't a developer won't know the clean commands, and has no way to see where the space went.\n\n### Change\n- For each project, the Workspace page shows how much disk its build output uses: `target/` for Rust, `build/` for Gleam.\n- A **Clear build files** action removes it: `cargo clean` for Rust. For Gleam it removes `build/dev` and `build/prod` but keeps `build/packages`, the downloaded dependencies, which `inspect` and `find` read and which would otherwise need a network connection to fetch again.\n- The action is refused while a task run or probe is using the project.\n- The page says, in plain words, that the next check or test will be slower while the files rebuild.\n\n### Not in this task\n- Run logs under `.solace/`, which are task history shown in the app.\n- Automatic pruning.\n\n### Done when\n- For a Rust project and a Gleam project, a test shows that the reported size matches what is on disk.\n- A test shows that clearing removes the build output (keeping Gleam's `build/packages`) and that a following `check` still passes in each project.\n- Clearing is refused during a run.",
+  "closedTime": 1794790183,
+  "column": "cancelled",
+  "createdTime": 1793053539,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "99e8fb752a48bb88",
+  "links": [],
+  "milestone": null,
+  "rank": 111.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "workspace: show and clear build files"
+}

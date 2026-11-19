@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312246,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793251276,
+  "column": "complete",
+  "createdTime": 1793233755,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a69b477727f2c38a",
+  "links": [],
+  "milestone": null,
+  "rank": 185.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: drop self-imports on move: Tech Debt"
+}

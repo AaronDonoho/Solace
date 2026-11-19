@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056539,
+  "body": "A design the design agent creates appears in the left-hand list on its tab as soon as it is created, without the human reloading the page.\n\nReported on the UI/UX tab with design:2eeb706be208462a: the design was saved, but the list stayed stale while the page was open.",
+  "closedTime": 1795012587,
+  "column": "complete",
+  "createdTime": 1794981161,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "14e2494e807a083e",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 39.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "design: new design appears without reload"
+}

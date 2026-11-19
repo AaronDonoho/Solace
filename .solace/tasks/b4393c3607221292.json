@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791925643,
+  "body": "Part of feature:3e8b5fe47bba41c4. Give Rust and other non-store languages an orientation bundle comparable to `inspect --context`, so locating code takes one call, not grep→read pairs.\n\n**Preliminary approaches (the implementer's call):**\n\n1. **Tree-sitter side index.** Parse `solace-cli/src/*.rs` with tree-sitter-rust into a read-only index. Rust stays watched files; `write` patches stay the way to change them. The index rebuilds when a watched file changes — `outside.rs` already watches them and runs at the start of every command.\n2. **Commands:**\n   - `view <file>::<fn>` — the function's source;\n   - `view <file>` — an outline: every fn signature with its line range, so `read --lines` targets precisely;\n   - `refs <file>::<fn>` — call sites, in file order;\n   - `inspect <file>::<fn> --context` — signature, callers, the unit tests in the same file, and the acceptance tests that exercise it.\n3. **Command→test mapping.** Acceptance tests are Python keyed by the command they drive. Declare the mapping in `solace.toml` (e.g. `rust-acceptance` sections per command name, or a header comment in each acceptance file naming the commands it covers) so `inspect --context` can name the tests that reach a Rust function.\n4. **Generalize.** One index interface with a tree-sitter grammar per language (Rust first, Python for the bench suites later); languages without a grammar keep `grep`/`read`.\n\nRelated: task:361a2379c755fb59 is the first build (`view`/`refs` read-only). This task plans the bundle, the mapping, and the reply size limits (the 8k reply cap applies; outlines must fit).\n\n**Checks:** `rust-unit`, `rust-acceptance`; turn and token counts on a Rust work run, against task:96249ceddc889684's work run `accc8a2600ab52b6` as the baseline.",
+  "closedTime": 1791856216,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "b4393c3607221292",
+  "links": [],
+  "milestone": null,
+  "rank": 99.0,
+  "scope": [
+    "."
+  ],
+  "title": "Orientation for non-Gleam files"
+}

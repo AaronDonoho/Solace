@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794876824,
+  "body": "Opening an Architecture design draws its flow diagram on the Architecture tab, with a proposal's changes highlighted the same way as on the UI/UX tab.\n\n### Do\n\n- Draw nodes and edges with Lustre, with `data-design-id` on each, so an agent can tell exactly what is meant later.\n- Reuse the Contracts page's graph layout rather than adding a second one. It is in `solace-cli/contracts/src/layout.mjs`, as FFI to that app (D-85), so share it without changing how the Contracts page draws.\n- Show a proposal's added, removed, changed and moved nodes and edges through the same comparison as task:149943de0d4deccf.\n- Dispatch on diagram type, so a later type adds its own drawing.\n\n### Acceptance\n\n- Tests: nodes and edges draw from a design, each carries its ID, and each change kind is marked.\n- The Contracts page's tests still pass unchanged.\n- One end-to-end check: a human asks the design agent for a flow diagram, it is drawn, accepted and shown in the list.\n\n### Left out\n\nSequence diagrams and other types, drag and drop, and notes.",
+  "closedTime": 1794360807,
+  "column": "complete",
+  "createdTime": 1793914538,
+  "dependsOn": [
+    "be0eb694f480ac1c"
+  ],
+  "feature": "b993a7a21b436618",
+  "home": "solace-cli/design",
+  "id": "5f5eebf4cda2b32e",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 7.0,
+  "scope": [
+    "solace-cli/contracts",
+    "solace-cli/design"
+  ],
+  "title": "arch: draw a flow diagram"
+}

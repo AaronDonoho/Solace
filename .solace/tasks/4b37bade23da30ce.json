@@ -1,0 +1,14 @@
+{
+  "archivedTime": 1791690219,
+  "body": "Currently the migration process is displayed on the Board.\nMigration should be its own page.\nDetermine the steps required to make this happen, in order.",
+  "closedTime": 1791147842,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/migration",
+  "id": "4b37bade23da30ce",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "title": "Migration App Planning"
+}

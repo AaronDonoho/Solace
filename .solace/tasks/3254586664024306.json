@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231421,
+  "body": "Split into four smaller tasks by concern: task:be36c1d67353660d (test moves carry imports), task:bf921ef1030ffd86 (import spelling and globs), task:58fd35e216e17548 (short names and module docs) and task:32303cd61a19be26 (split CLI and test main).\n\nThe 17 notes below remain the source details. This parent is kept for history; archive it once the split tasks are accepted.",
+  "closedTime": 1793135980,
+  "column": "cancelled",
+  "createdTime": 1793129104,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "3254586664024306",
+  "links": [],
+  "milestone": null,
+  "rank": 301.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Root project refactor and cleanup: Tech Debt"
+}

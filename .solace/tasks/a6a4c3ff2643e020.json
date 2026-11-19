@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690235,
+  "body": "Is \"new_agent\" workflow needed, as opposed to re-using the reassign semantics?",
+  "closedTime": 1791229390,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "a6a4c3ff2643e020",
+  "links": [],
+  "milestone": null,
+  "rank": 6.0,
+  "scope": [
+    "."
+  ],
+  "title": "Re-assess \"new_agent\""
+}

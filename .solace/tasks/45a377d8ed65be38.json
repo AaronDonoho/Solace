@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793128210,
+  "body": "`src/reference.txt` is 663 lines in one file, which trips up agents editing it (hunks miss, the wrong place matches, a whole-file read is huge). Split it into one small file per section and build the reference from them in code.\n\n**Do**\n- Move each section of `reference.txt` into its own file under `src/reference/` (e.g. the opening workflow, each group of \"Commands in full\" such as Reading and Changing, Task runs, Strategy runs, Host commands), split at the existing headings. Text stays word-for-word the same.\n- `reference.REFERENCE` is built from those files in order at compile time (e.g. `concat!` of `include_str!`s), so it is still one `&'static str` and `agent_reference`, `agent_help_for`, `options_of` and the tests that read `REFERENCE` work unchanged.\n- Delete `src/reference.txt`.\n- Keep the layout check (D-143, D-144): `solace.toml`'s validator entry covers the new files, and the check works on a section file on its own (it currently requires a \"Commands in full\" line). The `main.rs` test that runs it on the embedded reference stays.\n- Update `solace-cli/README.md`'s description of where the reference lives.\n\n**Done when**\n- The assembled `REFERENCE` is byte-for-byte equal to today's `reference.txt` (a test pins this once, then it can go, or compare against a recorded hash).\n- A `write` to one section file that misaligns a line is still refused by the layout check.\n- All existing reference tests pass.\n\n**Not in this task**\n- Generating help text from each command's own code (doc next to its handler).\n- Rewording or shortening the reference.",
+  "closedTime": 1793113410,
+  "column": "complete",
+  "createdTime": 1793077178,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "45a377d8ed65be38",
+  "links": [],
+  "milestone": null,
+  "rank": 124.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "reference: assemble from section files"
+}

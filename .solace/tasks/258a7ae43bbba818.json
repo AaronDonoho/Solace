@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972377,
+  "body": "From a failed build step, one action creates a task for an agent to fix it.\n\n- A **File a task** button on the failure summary in the Build tab. It opens a prefilled new-task form the human can edit before creating: the title `build: <project> <step> fails`, the body with the failure summary, the command and a link to the build, and the scope set to the failing project.\n- The step's log is attached in full to the task as a note, so the agent reads it without the page.\n- The build shows a link to the task, and the task links back to the build.\n- A second press on the same failure opens the existing task instead of creating another.\n\nOnce the Delivery project exists, widen the scope to include it (D-127).\n\n**Tests:** the API creates the task with the right scope, note and links. A second request returns the existing task. A view test covers the button and the link.",
+  "closedTime": 1794885161,
+  "column": "complete",
+  "createdTime": 1791953359,
+  "dependsOn": [
+    "a1368aa20450d228"
+  ],
+  "feature": "7adcac261eef1bfa",
+  "home": ".",
+  "id": "258a7ae43bbba818",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 123,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "build: file a task from a failure"
+}

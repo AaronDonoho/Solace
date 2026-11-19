@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793459658,
+  "body": "Decide whether two or more agents should work together on one task, communicating as they go, and what Solace must provide for that to be safe, observable and worthwhile.\n\n### Forms to compare\n- **Pair:** two agents, one driving and one navigating or reviewing, with fixed or rotating roles.\n- **Mob:** three or more agents, one driver and the rest contributing, with a way to reach a decision.\n- **Role pairing:** agents with different roles, such as investigator and worker, rather than two workers with the same role.\n\nFor each, say what the agents need from each other and from Solace, and which form gives the most gain for the least machinery. Treat these definitions as defaults; say if another meaning of pairing or mobbing changes the conclusion.\n\n### Questions\n- **Communication:** how do agents exchange messages? Is it a shared conversation, direct messages, task notes, or the board? What must the human see, and what may stay between agents?\n- **One writer:** one work run per project is the current lock (D-18, E7005), and code goes straight into the project. How can agents share work without conflicting edits: one writer at a time, read-only partners, or separate drafts? Every change must still be type-checked, recorded and undone as one task's work.\n- **Roles and turns:** who decides the next step, how roles rotate, how a turn ends, and what stops a pair or mob that stalls or loops.\n- **Questions and disagreement:** when does an agent ask another agent, and when the human? What happens when agents disagree, or when one is wrong?\n- **Human's place:** the human sets direction, follows work, answers questions and approves results, without reading code or using a terminal. What does the human need to see to follow and intervene?\n- **Cost and value:** what quality or throughput gain is plausible, and against what cost in tokens, latency, duplicated context and human attention? Say which task kinds would benefit and which would not.\n\n### Constraints already known\n- The board already orchestrates separate investigate, work and review runs, fresh reviewers, and dependencies (D-110). task:30881953fb66677f area F found that multi-agent orchestration belongs to the board, not to a Solace-owned agent loop.\n- A run resumes the author's conversation when compatible, otherwise it gets a fresh handoff (D-33). Mid-run notes to a running agent are out of scope in Spec 15 §7.\n- Agents reach the project only through Solace under the lockdown. An investigation reports requirements, not edits (D-186), and bench runs need Aaron's go-ahead.\n\n### Deliverable\nA note that states:\n- required behavior, acceptance criteria and risks for pair and mob programming, and which form, if any, is worth pursuing first\n- the smallest experiment that would test it, what that experiment would measure, and what it would leave out\n- the main risks, and anything the investigation did not check\n- a recommendation with an effort estimate, plus any decision the human must make\n- how this relates to feature:760cc1718abae3b4, feature:9a9d3f7bd153e158 and task:30881953fb66677f, without designing those features\n\n### Out of scope\nNo implementation, protocol design, Autorun or Agent Roles changes, or bench runs.",
+  "closedTime": 1792728793,
+  "column": "complete",
+  "createdTime": 1792725855,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "0c7fce0d045c7f76",
+  "links": [],
+  "milestone": null,
+  "rank": 264.0,
+  "scope": [
+    "."
+  ],
+  "title": "Investigate pair and mob programming"
+}

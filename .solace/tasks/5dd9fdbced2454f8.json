@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792539260,
+  "body": "Audit every agent-facing string in `solace-cli/src` that names Gleam or `gleam.toml` and decide whether it applies to Rust. The observed run was told \"this project has no Gleam code\" and \"no Gleam code of its own\", and `GLEAM`/`reference.txt` still read as if Gleam is the only store.\n\n1. Where both languages share a command or tier, say \"Gleam or Rust\" or \"symbol-held source\"; where only Gleam applies, say \"Gleam only\" and name the deferred Rust command (D-158 point 6).\n2. Cover at least: `GLEAM`'s doc and gate, `lockdown::plain`, `plain_session`, `grep`/`read`/`view` hints, `agent_reference`, `reference.txt`'s Files by tier and Rust projects sections, and `submit`/`delete`/`check`/`test` refusals.\n3. Do not change behavior; this is wording only. Keep `gleam.toml` where the file is genuinely Gleam's; use `Cargo.toml` where Rust's.\n4. Tests: assert a Rust project's refusal does not say \"no Gleam code\"; assert an unsupported Rust command says \"Gleam only\" rather than \"no Gleam code\"; assert the reference names both languages. Run `rust-unit` and `rust-acceptance`.\n\nLeft out: adding Rust `extract`, `merge`, `probe` or `format`; a language-neutral spelling for `gleam.toml` (it is a Gleam file).",
+  "closedTime": 1792471700,
+  "column": "complete",
+  "createdTime": 1792466699,
+  "dependsOn": [
+    "96f6879447e80a66"
+  ],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "5dd9fdbced2454f8",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 6.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "commands: say Rust where they say Gleam"
+}

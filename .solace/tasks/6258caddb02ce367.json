@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792009415,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1791956695,
+  "column": "complete",
+  "createdTime": 1791942404,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "6258caddb02ce367",
+  "links": [],
+  "milestone": null,
+  "rank": 116.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Agent Tooling Efficiency: Tech Debt"
+}

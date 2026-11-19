@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792215002,
+  "body": "The Strategy page's task search should bring back a task whose id matches either <taskid> or task:<taskid>",
+  "closedTime": 1792200889,
+  "column": "complete",
+  "createdTime": 1792180727,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/frontend",
+  "id": "73b99f818b11b63b",
+  "links": [],
+  "milestone": null,
+  "rank": 14,
+  "scope": [
+    ".",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "find bar: go to a task by id"
+}

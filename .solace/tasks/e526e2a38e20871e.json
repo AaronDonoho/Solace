@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793983850,
+  "body": "Add an **About** tab to the Settings page, after Languages. It shows:\n\n- **Software version:** the version of the Solace program that is running.\n- **License:** an expandable header naming the license (Sustainable Use License 1.0). It starts closed, and expanding it shows the full license text.\n\nThe version and license text must be correct on any computer, including an installed copy with no source tree, so both are built into the program rather than read from the project's files at run time. The license text comes from `LICENSE.md`, the one source (D-225); don't keep a second copy to maintain.\n\nThe page gets them from the server, in the same way as its other sections (see `Board::projects_api` and `board::server.root_route`). The version comes from the `solace-cli` package.\n\nUpdate the settings README to match.\n\n**Tests:** the server's reply carries the program's version and the license text; the tab shows the version; the license starts closed and expands to the full text.",
+  "closedTime": 1793941360,
+  "column": "complete",
+  "createdTime": 1793834912,
+  "dependsOn": [
+    "4ecf4f5061289cbf"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e526e2a38e20871e",
+  "links": [],
+  "milestone": null,
+  "rank": 256.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "settings: About tab"
+}

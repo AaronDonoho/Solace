@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791951663,
+  "body": "Allow adjusting task scope while an agent is waiting on a human (for example, during a question or discussion).\nAllow increasing task scope at any time.\nStill should not allow reducing task scope during a run.",
+  "closedTime": 1791940041,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "18b387c328d39cdb",
+  "links": [],
+  "milestone": null,
+  "rank": 26.0,
+  "scope": [
+    ".",
+    "solace-cli/components"
+  ],
+  "title": "Allow adjusting task scope"
+}

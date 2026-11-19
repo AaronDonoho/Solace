@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792215005,
+  "body": "Feature displayed on a task's card should be evident without prefixing it with \"Feature\" - instead, put the feature name on a new line.",
+  "closedTime": 1792214079,
+  "column": "complete",
+  "createdTime": 1792212584,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "2bf872d3c5444674",
+  "links": [],
+  "milestone": null,
+  "rank": 192.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Feature on task card"
+}

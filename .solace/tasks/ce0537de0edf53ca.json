@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792036279,
+  "body": "Tooling for the visual alignment pass (task:3fb4a6b4e4a05bbe). Agents can't see pages, so this gives them measured numbers they can compare, plus screenshots for the human. Shape agreed in that task's notes 4 and 5.\n\n- **Script:** `solace-cli/tests/layout_audit.py`, using Playwright's Python API with headless Chromium. It starts a fixture Solace instance the way `board_acceptance.py` and `workspace_acceptance.py` do, with the D-71 isolation (no `SOLACE_*` context from the invoking agent). It seeds a few tasks, features and a milestone so the pages have content.\n- **Pages:** `/`, `/strategy` (each tab), `/settings`, and a task detail, each in the light and dark theme.\n- **Prints, per page and theme:**\n  - every button's, input's and select's rendered height, grouped by height, with the selector that produced each group\n  - the baseline offset between each label and its control\n  - padding of cards and sections\n  - the vertical position of the tab bar\n  - the x offset and width of each sticky `.lane-head` column against its lane column\n- **Screenshots:** saves PNGs to a folder it names in its output, so a run can attach them to its notes (D-37).\n- **Command:** `layout_audit = { run = [\"env\", \"-u\", \"SOLACE_TASK\", …, \"python3\", \"solace-cli/tests/layout_audit.py\"], args = true, allowed_in_reviews = true }` in the root `solace.toml`. That file is protected, so the agent proposes the line and the human approves it (D-38). An argument limits the audit to one page.\n- **Setup:** `pip install playwright` and `playwright install chromium` are done by the human. When Playwright or the browser is missing, the script exits with one line saying which, and how to install it.\n\n**Tests:** a run of `layout_audit` on the current pages prints the measurements for all four pages in both themes and saves the PNGs. The output becomes the baseline the alignment pass compares against, recorded in this task's notes.",
+  "closedTime": 1792032335,
+  "column": "complete",
+  "createdTime": 1791942585,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "ce0537de0edf53ca",
+  "links": [],
+  "milestone": null,
+  "rank": 117.0,
+  "scope": [
+    "."
+  ],
+  "title": "ui: Layout audit command"
+}

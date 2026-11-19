@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690215,
+  "body": "Support blockquotes and proper rendering of ordered lists (so a list with repeated \"1.\" or out-of-order numbers gets rendered with incrementing numbers).\n\nThe text input field component should include buttons reflecting the full markdown capabilities (notably headings are not a button yet)\n",
+  "closedTime": 1791555487,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "92c0e0d45e0c29db",
+  "links": [],
+  "milestone": null,
+  "rank": 6.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "Enhanced markdown support"
+}

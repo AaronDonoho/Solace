@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794183754,
+  "body": "Each tab shows its designs in a flat list on the left side of the screen, and picking one opens it. Designs can't be drawn yet, so opening one shows its title for now.\n\n### Do\n\n- Load designs from `GET /designs` and show the current tab's designs, each by title, in a flat list on the left.\n- Picking a design opens it in the rest of the page, showing its title for now. Later tasks draw it there.\n- The design that is open is in the address with the tab, so a reload or Back returns to it.\n- The list updates when a design is added or changed, the same way other pages follow live changes.\n\n### Acceptance\n\n- Tests: each tab lists only its own designs, picking one opens it, and the address round-trips the open design.\n- A design from the other tab, or one that no longer exists, in the address opens nothing and doesn't break the page.\n\n### Left out\n\nGrouping or arranging designs, search, and creating a design here: designs come from the design agent. Ask the human what the list shows when a tab has no designs.",
+  "closedTime": 1793982136,
+  "column": "complete",
+  "createdTime": 1793914359,
+  "dependsOn": [
+    "c1c58d064ee1fa9f",
+    "ac6ed25bd94c0d4a"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": "solace-cli/design",
+  "id": "20edf290e52a37fc",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 2.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design",
+    "solace-cli/frontend"
+  ],
+  "title": "design: list designs on the left"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "From the Build tab, the human picks two releases and sees the tasks and features that went in between them. \"Went in\" means completed after the older release and by the newer one, the same rule release notes use.\n\nDone when: comparing two releases lists exactly the tasks and features completed between them, each linked to its record.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979631,
+  "dependsOn": [
+    "484b88ac1eed5264"
+  ],
+  "feature": "a7f49e5036236ae5",
+  "home": "solace-cli",
+  "id": "a523d078edc5b37d",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 404.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "history: compare two releases"
+}

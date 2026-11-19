@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792554931,
+  "body": "A review started from task:e91e424ed5780d37 with `commandcode-deepseek-v4.1-flash` showed `TypeError: Load Failed` at the top of the task detail. The review did start (run 2d04e50a81dc2a2d), so the report was wrong. The message stayed in the desktop window after switching tasks; a browser window on the same server did not keep it.\n\nThe likely path: `task_api.request` turns a rejected `fetch` into `{\"message\": String(error)}`; `solace_task.update`'s `Changed` arm can't parse it as a task, so it sets `model.error`. Later successful transcript, review and model replies don't clear `model.error`, and `open` keeps the old error while a new task is staging. The desktop app's WebKit says `TypeError: Load Failed`; a Chromium browser says `Failed to fetch`. A lost action reply does not mean the action failed.\n\n### Goal\n\n- Never show a raw browser exception in the task detail.\n- After an action's reply is lost, refetch the task and its runs and say what is known: the connection was lost and the task is being checked. Show the run if it is there.\n- Clear the task's error on a successful task, transcript, review or model load, and as soon as another task is chosen.\n- Keep a server error (a JSON `message`) visible as it is today.\n- Do not retry the action automatically: it may already have started a run.\n\n### Tests\n\n- A rejected action fetch leaves no raw exception, refetches the task, and clears the message when the refetch shows the run.\n- Choosing another task clears the old error at once; a later successful transcript or review load clears it too.\n- A server error still shows its message.\n\n### Left out\n\n- A general offline mode, an action retry button, and changes to the review runner. If the desktop webview itself is wedged rather than the UI holding a stale error, stop and ask to add the desktop app's folder.",
+  "closedTime": 1792543591,
+  "column": "complete",
+  "createdTime": 1792519251,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "30a241733cf0eca4",
+  "links": [],
+  "milestone": null,
+  "rank": 97.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "Fix: stale error after review start"
+}

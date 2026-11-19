@@ -1,0 +1,11 @@
+{
+  "body": "In Settings, allow the user to assign a default model and skills to each agent role (Strategist, Investigator, Worker, Reviewer, Coordinator).",
+  "colorSlot": 22,
+  "id": "9a9d3f7bd153e158",
+  "milestone": "63a4809d1d3362ba",
+  "rank": 2.0,
+  "request": "a15a091a-7a09-4d36-8cbe-6ccc32025615",
+  "startTime": 1793485368,
+  "state": "complete",
+  "title": "Agent Roles"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792679748,
+  "body": "Cuts the extra `probe`/`check` calls seen after a passing test in runs 8 and 12.\n\nA passing `test` reply ends with:\n\n`Next: if this was the last change, finish with task done.`\n\nWhen the reply lists a changed symbol that no test reaches, the line asks for a test of that symbol first, matching the rule in task:cd11def06b15aa97.\n\n**Fix the reference too.** The reference's \"Once `test` passes, the code is done\" (`solace-cli/src/reference.txt`) is wrong for tasks with several parts. Reword it to say the same as the new line: once `test` passes after the last change, the code is done.\n\n**Done when:** a passing reply ends with the line; a failing reply doesn't; the reference is reworded and passes the layout check (D-143). Tests cover both replies. Update spec 3.",
+  "closedTime": 1792600124,
+  "column": "complete",
+  "createdTime": 1792202486,
+  "dependsOn": [
+    "cd11def06b15aa97"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "505d0a797b0ccb92",
+  "links": [],
+  "milestone": null,
+  "rank": 185.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "test: a Next line on a pass"
+}

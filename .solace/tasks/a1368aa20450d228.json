@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794972377,
+  "body": "The Build tab of a new **Delivery** page at `/delivery`, built the same way as Strategy and Settings. Deploy and Test become further tabs of this page in their milestones.\n\n1. **New project.** A Lustre project `solace-cli/delivery`, element `<solace-delivery>`, with tabs as Strategy has them (`/delivery` opens the Build tab; only Build exists for now). It doesn't exist yet, so this task's scope can't name it. The agent creates it, and adding it to the root `solace.toml` `projects` list goes to the human as a settings proposal (D-38). Once that is approved, widen this task's scope to include it (D-127).\n2. **Wiring.** The frontend shell registers `<solace-delivery>` and adds **Delivery** to the menu, after Strategy. `board.rs` serves `index.html` at `/delivery`. `solace-cli/build.rs` watches the new project, and the frontend README's page table and server section list it.\n3. **Build tab.**\n   - A **Build** button, with a choice of all projects or chosen ones, and **Cancel** while a build runs.\n   - The recipe order as a list of steps grouped by project, each with its status and duration, updated live from the event stream.\n   - Clicking a step opens its log, which follows while the step runs.\n   - A failed step shows its failure summary at the top of the tab.\n   - The last build shows when the page opens. Earlier builds come with the release history feature.\n   - The `attention` event (D-107) flags the Delivery tab when a build ends while another page is shown.\n4. **Styles:** the app owns its styles, uses the shell's theme variables, and works in dark mode.\n5. **Tests:** Gleam view tests for each step state, the failure summary, and the cancel button showing only while running. A `api.test.mjs` with a fake server for start, cancel and live updates. Frontend routing tests for `/delivery`.",
+  "closedTime": 1794876124,
+  "column": "complete",
+  "createdTime": 1791953351,
+  "dependsOn": [
+    "a0e075890880e6a0"
+  ],
+  "feature": "7adcac261eef1bfa",
+  "home": ".",
+  "id": "a1368aa20450d228",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 122.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/delivery",
+    "solace-cli/frontend"
+  ],
+  "title": "build: Delivery page, Build tab"
+}

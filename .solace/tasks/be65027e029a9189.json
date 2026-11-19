@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795105049,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795102430,
+  "column": "cancelled",
+  "createdTime": 1795053968,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "be65027e029a9189",
+  "links": [],
+  "milestone": null,
+  "rank": 418.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "share: commit Strategy records"
+}

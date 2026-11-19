@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795105079,
+  "body": "In the menu bar at the top of every page, the **Delivery** button moves from its current place (after Strategy) to sit between **Contracts** and **Knowledgebase**. The other buttons keep their order.\n\n---\nFor the agent: reorder the `link` list in `frontend.view` (solace-cli/frontend). Update the page list in `knowledgebase.sections` that names the menu's pages in order, and any test that checks the menu order.",
+  "closedTime": 1794938187,
+  "column": "complete",
+  "createdTime": 1794934076,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "7e25d524afb3d783",
+  "links": [],
+  "milestone": null,
+  "rank": 20.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "menu: Delivery between Contracts and Knowledgebase"
+}

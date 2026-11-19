@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464633,
+  "body": "Agents read a Rust store by name, as with Gleam: `view`, `inspect`, `find` and `session`. Split from task:ba1542d1a967b9b7's investigation (its note 4, \"Reads\" and \"Session\"); the human's answer there: agents work with Rust as with Gleam.\n\n- **Routing (`main.rs::run_inner`):** in a Rust store allow `view`, `inspect` and `find` instead of the \"plain files\" reply.\n- **`view` by name:** `orientation.rs::view` treats any name with `::` as a file, so `view board::agents.Store::open` replies \"no watched file `board`\". Names the store resolves go to `Store::view`; file paths keep `orientation.rs`.\n- **Outline and `inspect`:** `Store::view`'s outline and `inspect` use the Rust signatures from `orientation.rs`, not `ix.lang.signature` (Gleam's). The kind label uses the stored kind text: `Kind::parse` turns `struct` into `fn`.\n- **`find`** works unchanged; check it on Rust names.\n- **`Index::build`** must not run Gleam's reference parser on Rust text. `inspect --context` callers and tests come with task:d7aa4d5e523a065c.\n- **Session:** `session` and `task_session` stop treating `lang == None` as plain files when the project is Rust. They list modules and names as for Gleam, then D-158 point 2's brief lines (\"Rust in Solace: …\", the text in `DECISIONS.md`; not in the code yet).\n- **Docs:** `reference.txt` and the READMEs: read and session text that says Gleam only.\n\n### Done when\nIn a scratch Rust store: `view board::agents.Store::open` shows the item; `view board::agents` outlines the module with Rust signatures and kinds; `inspect` and `find` answer Rust names; a Rust session lists Rust modules and names and carries the brief lines. Gleam suites unchanged.",
+  "closedTime": 1792368499,
+  "column": "complete",
+  "createdTime": 1792355386,
+  "dependsOn": [
+    "da797576d0cfaaac"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "ac5ae78fb2e94ab2",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 227.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: read and orient by name"
+}

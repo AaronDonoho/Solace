@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792512813,
+  "body": "`find pony --project solace-cli` finds 16 comments: 15 `// ponytail:` notes on known limits, and `// Ponytail's craft rules:` in `tests.agent_reference_leaves_out_host_and_task_commands`.\n\n- In every `// ponytail:` comment, drop the `ponytail:` prefix and leave the rest of the note unchanged. The comment still records the limit exactly as before.\n- Change `// Ponytail's craft rules:` to `// Craft rules:`.\n- Change no code, behavior or other comment text. Do not delete the notes.\n\nDone when `find pony --project solace-cli` returns no matches. Check `rust-unit`.",
+  "closedTime": 1792510439,
+  "column": "complete",
+  "createdTime": 1792506424,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "2e1aed1bf659c105",
+  "links": [],
+  "milestone": null,
+  "rank": 15.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "comments: remove skill name"
+}

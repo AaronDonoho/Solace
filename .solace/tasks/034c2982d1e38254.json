@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792978308,
+  "body": "Reported: the launcher lets you choose a project, but once one is selected, no other project can be opened properly.\n\n**Cause.** `open_project` starts or attaches to the chosen project's server, then `show` finds the existing `board` window and only shows and focuses it. It never navigates that window to the new address. The window keeps the old project, or a dead page once the old server stops; when the new server reuses the same port, focusing does not even reload the document.\n\n**Fix.** When a board window is already open, navigate or reload it to the chosen project's address before showing and focusing it. Opening in the browser still opens the browser, and the app window must not be left showing the old project. Switching A → B → A must work, and the tray's **Switch project** must still bring back the start screen.\n\n**Acceptance**\n- With one project open in an app window, choose another from the start screen: the board window shows the other project, not the old one and not a dead page.\n- Switch back to the first project the same way.\n- Browser mode still opens the chosen project in the browser.\n- Tests cover the navigation decision where the code allows it; anything that could not be checked in the running app is named in the run. \n\n**Scope note.** `solace-app` is not a project of the workspace, so this task is scoped to `.` and changes its watched files under `solace-app/`. The root has no declared command for building or testing the app, so the worker may not be able to compile it through Solace; make the code change and say plainly what was not verified.",
+  "closedTime": 1792976372,
+  "column": "complete",
+  "createdTime": 1792864739,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "034c2982d1e38254",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 272.0,
+  "scope": [
+    ".",
+    "solace-app"
+  ],
+  "title": "launcher: switch projects reliably"
+}

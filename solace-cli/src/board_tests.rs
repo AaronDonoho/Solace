@@ -3405,3 +3405,268 @@ fn strategy_briefs_check_for_a_clear_contradiction() {
         assert!(!brief.contains("task ask") && !brief.contains("task decision"), "{asking}: {brief}");
     }
 }
+
+/// A strategy record, vision or personas changed by git reaches an open
+/// root stream, so the Strategy page updates without a restart.
+#[test]
+fn a_strategy_change_reaches_the_root_stream() {
+    use std::io::BufRead as _;
+
+    let root = testing::Scratch::new();
+    let last = json!({"tasks": 0}).to_string();
+    let reader = Events::new(event_board(root.to_path_buf()), None, Some(&last));
+    let mut lines = std::io::BufReader::new(reader);
+    let mut next = |key: &str| -> Value {
+        loop {
+            let mut line = String::new();
+            let n = lines.read_line(&mut line).unwrap();
+            assert!(n > 0, "the stream ended");
+            if let Some(data) = line.strip_prefix("data: ") {
+                let v: Value = serde_json::from_str(data.trim()).unwrap();
+                if v.get(key).is_some() {
+                    return v;
+                }
+            }
+        }
+    };
+
+    let mut milestones = None;
+    crate::tasks::store::announce_records(&root, "milestones", &mut milestones);
+    assert_eq!(next("milestones"), json!({"milestones": []}));
+    let dir = crate::tasks::strategy::strategy_dir(&root, "milestones");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("m1.json"), r#"{"id":"m1","title":"M","rank":1}"#).unwrap();
+    crate::tasks::store::announce_records(&root, "milestones", &mut milestones);
+    assert_eq!(next("milestones"), json!({"milestones": [{"id":"m1","title":"M","rank":1}]}));
+
+    let mut features = None;
+    crate::tasks::store::announce_records(&root, "features", &mut features);
+    assert_eq!(next("features"), json!({"features": []}));
+    let dir = crate::tasks::strategy::strategy_dir(&root, "features");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("f1.json"), r#"{"id":"f1","title":"F","rank":1,"state":"upcoming","startTime":null,"colorSlot":null}"#)
+        .unwrap();
+    crate::tasks::store::announce_records(&root, "features", &mut features);
+    assert_eq!(
+        next("features")["features"],
+        json!([{"id":"f1","title":"F","rank":1,"state":"upcoming","startTime":null,"colorSlot":null}])
+    );
+
+    let mut vision = None;
+    crate::tasks::strategy::announce_vision(&root, &mut vision);
+    assert_eq!(next("vision")["vision"]["text"], "");
+    std::fs::write(root.join(".solace/strategy/vision.md"), "For teams").unwrap();
+    crate::tasks::strategy::announce_vision(&root, &mut vision);
+    assert_eq!(next("vision")["vision"]["text"], "For teams");
+
+    let mut personas = None;
+    crate::tasks::strategy::announce_personas(&root, &mut personas);
+    assert_eq!(next("personas"), json!({"personas": []}));
+    std::fs::write(root.join(".solace/strategy/personas.json"), r#"{"personas":[{"id":"p1","name":"Ada"}],"retired":[]}"#).unwrap();
+    crate::tasks::strategy::announce_personas(&root, &mut personas);
+    assert_eq!(next("personas"), json!({"personas": [{"id":"p1","name":"Ada"}]}));
+}
+
+/// A task file changed outside Solace, such as by `git pull`, reaches an open
+/// root stream without a restart.
+#[test]
+fn a_pulled_task_change_reaches_the_root_stream() {
+    use std::io::BufRead as _;
+
+    let root = testing::Scratch::new();
+    let last = json!({"tasks": 0}).to_string();
+    let reader = Events::new(event_board(root.to_path_buf()), None, Some(&last));
+    let mut lines = std::io::BufReader::new(reader);
+    let mut next = |key: &str| -> Value {
+        loop {
+            let mut line = String::new();
+            let n = lines.read_line(&mut line).unwrap();
+            assert!(n > 0, "the stream ended");
+            if let Some(data) = line.strip_prefix("data: ") {
+                let v: Value = serde_json::from_str(data.trim()).unwrap();
+                if v.get(key).is_some() {
+                    return v;
+                }
+            }
+        }
+    };
+
+    let mut tasks = None;
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+
+    let dir = crate::board::task_model::store_dir(&root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("t1.json"),
+        json!({"id":"t1","title":"Pulled","body":"","column":"backlog","rank":1.0,
+            "links":[],"scope":["."],"home":".","feature":null,"milestone":null,
+            "dependsOn":[],"createdTime":1,"closedTime":null,"archivedTime":null})
+        .to_string(),
+    )
+    .unwrap();
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+    assert_eq!(next("task")["task"]["title"], "Pulled");
+}
+
+#[test]
+fn the_servers_own_task_write_is_not_announced_twice() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let root = scope::top(&p.root);
+    let mut tasks = None;
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+    let t = crate::board::task_model::new_task("Own", "", &json!("backlog"), 1.);
+    crate::tasks::put(&p.store, &t).unwrap();
+    let count = |root: &std::path::Path| -> i64 {
+        crate::tasks::store::events(root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM events WHERE data LIKE '%\"task\"%'", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = count(&root);
+    assert_eq!(before, 1, "the write logged its task");
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+    assert_eq!(count(&root), before, "the server's own write was announced again");
+}
+
+/// A task file removed outside Solace, such as by `git pull`, leaves an open
+/// root stream without a restart.
+#[test]
+fn a_pulled_task_removal_reaches_the_root_stream() {
+    use std::io::BufRead as _;
+
+    let root = testing::Scratch::new();
+    let last = json!({"tasks": 0}).to_string();
+    let reader = Events::new(event_board(root.to_path_buf()), None, Some(&last));
+    let mut lines = std::io::BufReader::new(reader);
+    let mut next = |key: &str| -> Value {
+        loop {
+            let mut line = String::new();
+            let n = lines.read_line(&mut line).unwrap();
+            assert!(n > 0, "the stream ended");
+            if let Some(data) = line.strip_prefix("data: ") {
+                let v: Value = serde_json::from_str(data.trim()).unwrap();
+                if v.get(key).is_some() {
+                    return v;
+                }
+            }
+        }
+    };
+
+    let mut tasks = None;
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+
+    let dir = store_dir(&root);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t1.json");
+    std::fs::write(
+        &path,
+        json!({"id":"t1","title":"Pulled","body":"","column":"backlog","rank":1.0,
+            "links":[],"scope":["."],"home":".","feature":null,"milestone":null,
+            "dependsOn":[],"createdTime":1,"closedTime":null,"archivedTime":null})
+        .to_string(),
+    )
+    .unwrap();
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+    assert_eq!(next("task")["task"]["title"], "Pulled");
+
+    std::fs::remove_file(&path).unwrap();
+    crate::tasks::store::announce_tasks(&root, &mut tasks);
+    assert_eq!(next("removed")["removed"], "t1");
+}
+
+/// A workflow change reaches both streams under its project's folder, and a
+/// restart announces it again (D-78).
+#[test]
+fn a_workflow_change_reaches_the_merged_and_project_streams() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        ("sub/gleam.toml", "name = \"sub\"\nversion = \"1.0.0\"\n"),
+        ("sub/src/app.gleam", "pub fn main() { 1 }\n"),
+    ]);
+    let sub = root.join("sub");
+    crate::import(&sub).unwrap();
+    let board = event_board(root.to_path_buf());
+    let last = json!({"tasks": 0, "sub": 7}).to_string();
+    let mut merged = Events::new(board.clone(), None, Some(&last));
+    let mut one = Events::new(board, Some(sub.clone()), Some(&last));
+    let s = open(&sub).unwrap();
+    let w = flow(&sub).unwrap();
+    crate::board::task_model::event(&s, json!({"workflow": w})).unwrap();
+    let next_workflow = |reader: &mut Events| {
+        let mut buf = [0; 8192];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            assert!(n > 0);
+            let text = std::str::from_utf8(&buf[..n]).unwrap();
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let v: Value = serde_json::from_str(data).unwrap();
+                    if v.get("workflow").is_some() {
+                        return v;
+                    }
+                }
+            }
+        }
+    };
+    let event = next_workflow(&mut merged);
+    assert_eq!(event["project"], "sub");
+    assert_eq!(event["workflow"], w);
+    assert_eq!(next_workflow(&mut one)["workflow"], w);
+    crate::board::task_model::recover_project(&sub, true).unwrap();
+    assert_eq!(next_workflow(&mut merged)["project"], "sub");
+    assert_eq!(next_workflow(&mut one)["workflow"], w);
+}
+
+/// A fresh stream's snapshot keeps each project's workflow before its tasks.
+#[test]
+fn a_fresh_stream_snapshots_workflow_then_tasks_then_ready() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let mut reader = Events::new(event_board(scope::top(&p.root)), Some(p.root.clone()), None);
+    let mut text = String::new();
+    let mut buf = [0; 8192];
+    while !text.contains("event: ready") {
+        let n = reader.read(&mut buf).unwrap();
+        assert!(n > 0);
+        text.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+    }
+    let workflow = text.find("data: {\"workflow\"").expect("no workflow in the snapshot");
+    let tasks = text.find("data: {\"tasks\"").expect("no tasks in the snapshot");
+    assert!(workflow < tasks, "the tasks came before the workflow in {text}");
+}
+
+/// A project's own events being pruned does not rebuild another project
+/// whose stream position is still current (D-78).
+#[test]
+fn a_prune_for_one_project_does_not_snapshot_a_quiet_one() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"web\", \"components\"]\n"),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("components/gleam.toml", "name = \"components\"\nversion = \"1.0.0\"\n"),
+        ("components/src/lib.gleam", "pub fn z() -> Int {\n  0\n}\n"),
+    ]);
+    for d in ["web", "components"] {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let top = scope::top(&root.join("web"));
+    let mut logged = 0;
+    let mut rows: i64 = 0;
+    while logged < 2 || rows != 1 {
+        assert!(crate::tasks::store::log(&top, "web", &json!({"ignored": logged})));
+        logged += 1;
+        rows = tasks::events(&top).unwrap().query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert!(logged < 10_000, "the event log never pruned");
+    }
+    assert_eq!(rows, 1, "the event log was not pruned");
+    let newest: i64 = tasks::events(&top).unwrap().query_row("SELECT MAX(seq) FROM events", [], |r| r.get(0)).unwrap();
+    let last = json!({"tasks": newest, "web": newest, "components": 0}).to_string();
+    let mut reader = Events::new(event_board(top), None, Some(&last));
+    let mut text = String::new();
+    let mut buf = [0; 8192];
+    while !text.contains("event: ready") {
+        let n = reader.read(&mut buf).unwrap();
+        assert!(n > 0, "the stream ended");
+        text.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+    }
+    assert!(!text.contains("data: {\"tasks\""), "a quiet project was rebuilt from the files: {text}");
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793656129,
+  "body": "### Need\nTest reach (D-214) stops at the project edge, so a change to a shared project never runs the tests of projects that use it. See task:b0fadf061f7d551a, note 2.\n\n### Required behavior\n1. A test in a dependent project (one depending on the changed project by path, as in task:6c8565814de1fc7c) counts as changed when the reach hash of anything it can run in the shared project changed, the same rule D-214 applies inside one project.\n2. `test` without `--all` in a task runs those dependent tests too, and reports them under their project.\n3. Tests whose reach didn't change still don't run.\n\n### Acceptance\n- Changing a components symbol that a frontend test reaches runs that frontend test; changing one it doesn't reach doesn't.\n\n### Left out\n- Any change to which tests count as reaching processes, network or foreign code.\n- Amends D-214; record the amendment.",
+  "closedTime": 1793596615,
+  "column": "complete",
+  "createdTime": 1793583557,
+  "dependsOn": [
+    "6c8565814de1fc7c"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "9d98c2963cb11dc2",
+  "links": [],
+  "milestone": null,
+  "rank": 238.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "test: reach crosses into dependent projects"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792208844,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792202556,
+  "column": "complete",
+  "createdTime": 1792125344,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "3ea0cd5eea608cc8",
+  "links": [],
+  "milestone": null,
+  "rank": 171.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Improved Agent Integration: Tech Debt"
+}

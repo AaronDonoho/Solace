@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793560826,
+  "body": "From the harness investigation on task:30881953fb66677f (note 2). In bench run 21, Claude Code's `init.json` lists its built-in plugins `cc-plugin-agents-md` and `cc-plugin-plugin-authoring` as loaded. That happens even though Spec 14 §5 says no plugins and `lockdown::agent_config` writes `enabledPlugins: {}`. A plugin can add instructions or tools that Solace doesn't mediate.\n\n### Change\n- Confirm whether built-in plugins still load in a current Claude Code run (read the stream's `system/init` event).\n- If they do, find the setting or launch flag that turns them off, and apply it in `lockdown::agent_config` or in the launch command.\n- Add a check that fails, with a plain message, when a run's `system/init` lists any plugin.\n\n### Acceptance\n- A locked-down Claude Code run lists no plugins in its `system/init`.\n- The golden settings test covers the new setting, if one is needed.\n\nIf they no longer load, say so in the task and close it with the check added.",
+  "closedTime": 1793560824,
+  "column": "cancelled",
+  "createdTime": 1793459850,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e759e930a7c9980f",
+  "links": [],
+  "milestone": null,
+  "rank": 226.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "lockdown: Claude Code built-in plugins load"
+}

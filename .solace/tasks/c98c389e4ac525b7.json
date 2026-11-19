@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792036277,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792029014,
+  "column": "complete",
+  "createdTime": 1792007981,
+  "dependsOn": [],
+  "feature": "9461b59a8c0dd46b",
+  "home": ".",
+  "id": "c98c389e4ac525b7",
+  "links": [],
+  "milestone": null,
+  "rank": 141.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Workflow: Backlog off the board: Tech Debt"
+}

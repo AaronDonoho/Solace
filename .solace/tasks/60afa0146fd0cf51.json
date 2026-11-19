@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792719166,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792714095,
+  "column": "complete",
+  "createdTime": 1792711139,
+  "dependsOn": [],
+  "feature": "cb03260b259b3c5c",
+  "home": "solace-cli/strategy",
+  "id": "60afa0146fd0cf51",
+  "links": [],
+  "milestone": null,
+  "rank": 112.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Roadmap: milestone usability: Tech Debt"
+}

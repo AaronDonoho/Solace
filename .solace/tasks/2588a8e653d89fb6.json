@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009428,
+  "body": "Part of General UI Polish (feature item 7). The Features tab shows each feature's body and its full task list whether or not the feature is focused, which makes the tab long.\n\n- In `features.feature_view` (and `features.view`), show the body and the task list only when the feature is focused (`focus`); otherwise show title, state, milestone, and a task count in the form `1 / 7 final` (final count over total).\n- The count comes from the `Group` the board passes to the Features tab, so no new data is needed.\n- Focusing a feature (clicking its link) reveals the body and list as today.\n\n**Tests:** strategy view tests assert the compact card for an unfocused feature (count text present, body absent) and the full card for the focused one.",
+  "closedTime": 1791942165,
+  "column": "complete",
+  "createdTime": 1791909786,
+  "dependsOn": [
+    "6e2c02ff4ce96e26"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "2588a8e653d89fb6",
+  "links": [],
+  "milestone": null,
+  "rank": 6,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Feature cards show task count"
+}

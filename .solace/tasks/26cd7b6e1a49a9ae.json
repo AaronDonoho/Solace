@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794876816,
+  "body": "When viewing a task, these buttons are hidden while an agent is working, investigating or reviewing on it:\n\n- **Review**\n- **Back to planning**\n- **New agent**\n- **Reassign**\n\nThey show again once that agent's run ends.\n\n---\nFor the agent: the list of actions comes from `solace_task.actions` (solace-cli/components). A run is underway while its `state` isn't `ended`. The runs that count are kinds `work`, `investigate` and `review`. A `discuss` run doesn't count. Builds on task:647a3128e3745ff4, which hides Investigate, Assign and Review only for their own kind of run.",
+  "closedTime": 1794797338,
+  "column": "complete",
+  "createdTime": 1794789534,
+  "dependsOn": [
+    "647a3128e3745ff4"
+  ],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "26cd7b6e1a49a9ae",
+  "links": [],
+  "milestone": null,
+  "rank": 125.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "task view: hide more buttons while an agent runs"
+}

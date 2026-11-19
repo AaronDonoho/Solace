@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056532,
+  "body": "Raise the default time limit for each build step from 120 seconds to 2400 seconds (40 minutes).\n\nScope: the default only — a step that sets its own `timeout` in `solace.toml` keeps it (e.g. the self-build's `bundle` step stays at 600s).\n\nFor the agent: the default is `recipe.TIMEOUT`, and `board::builds.execute` falls back to 120 when a step has no timeout; change both, and update tests that assert 120 for build steps (e.g. `recipe::tests.each_project_kind_gets_its_default`, `recipe::tests.the_self_build_bundles_before_the_crate`) plus any docs describing the build default. Leave other 120s limits (probe, cargo fetch, tool commands, smoke checks) alone.",
+  "closedTime": 1795049933,
+  "column": "complete",
+  "createdTime": 1795049262,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a1f94566668c9820",
+  "links": [],
+  "milestone": null,
+  "rank": 416.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "build: default step timeout 2400s"
+}

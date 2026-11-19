@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690201,
+  "body": "Depends on \"Strategy Features tab: read-only list\".\n\n- Up and down buttons inside a group. Each PATCHes `rank` to the midpoint between the neighbours, or to the neighbour's rank ∓ 1 at either end. One PATCH per move.\n- Delete asks for confirmation inside the page: \"Delete *title*? Its N tasks lose their link to it; the tasks stay.\" Then it sends `DELETE /features/{id}`. The `{removedFeature}` and `{task}` events update the page.\n- Tests: the midpoint at the first, middle and last positions, the delete text naming the count, and a move-and-delete step in the JS flow. Update the README.\n\nPieces 2–4 of the Features tab all edit `features.gleam` and `update`, so run them one after another rather than in parallel.",
+  "closedTime": 1791652121,
+  "column": "complete",
+  "dependsOn": [
+    "64de3d5fa48b6b91",
+    "d8c18f595afa4a0e"
+  ],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "850c1af76064d8fc",
+  "links": [],
+  "milestone": null,
+  "rank": 3.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy Features tab: reorder and delete"
+}

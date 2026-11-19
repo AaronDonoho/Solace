@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793073114,
+  "body": "**Problem.** `format <module>` in a Rust store runs rustfmt on the whole module, then saves the result through `rust_submit.Store::submit_module_rust`. That function drops the formatted header's ending and puts the old header's ending back (`let end = &old[old.trim_end().len()..]`). So blank lines after a module header that rustfmt shrinks to one come back unchanged, and `format` reports nothing to fix. Example: `fsx`, `jsonx` and `project_paths` each have three blank lines after `mod tests;`.\n\n**Change.**\n- When the text comes from `format` (`formatted` is true), keep the formatted header's own ending instead of the old one. An ordinary whole-module `submit` keeps the old ending as it does now, so a module submitted unchanged still keeps every byte.\n- Undo the change task:ea95f37bd0284277 made to `rust_submit.Store::submit_imports_rust`: the line that caps the old ending at one blank line, and the doc comment sentence \"A run of blank lines after the header becomes one.\" Also undo the case it added to `store::submit_tests.imports_replace_the_header_only`. `--imports` is for imports; layout belongs to `format` (D-180). If that change has already been undone or isn't there, skip this step.\n- Add a test: a module with three blank lines after its header, run through `format`, comes out with one, and every item keeps its id.\n- Then run `format fsx`, `format jsonx` and `format project_paths`. This finishes note 1 of task:ea95f37bd0284277.\n\n**Check.** `view fsx jsonx project_paths --bodies --project solace-cli` shows one blank line before `#[cfg(test)]` and one after `mod tests;`. `check --warnings` is clean; `run rust-unit` and `run spacing_parity` pass.\n\n**Out of scope.** Finding out how the three blank lines got there (perhaps `submit --new`) is not part of this task.",
+  "closedTime": 1793062007,
+  "column": "complete",
+  "createdTime": 1793061653,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "1163f437baed9952",
+  "links": [],
+  "milestone": null,
+  "rank": 114.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "format: keep rustfmt's spacing after the header"
+}

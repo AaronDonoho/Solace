@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793483689,
+  "body": "Add three machine-wide settings to `~/.config/solace/config.toml` (or `$SOLACE_CONFIG`), next to `[[models]]` and `task_timeout`. Expose them through the board API and add controls for them on the Settings page.\n\n### Settings\n\n| Key | Values | Default |\n| --- | --- | --- |\n| involvement | `director`, `collaborator`, `engineer` | `collaborator` |\n| detail | `concise`, `standard`, `thorough` | `standard` |\n| asking | `often`, `balanced`, `rarely` | `balanced` |\n\n### Notes\n\n- The Settings page's other values are kept in the browser (`settings.gleam`, `store.mjs`). These three must be read from and written to the server, because the server builds briefs.\n- Each choice has a short popup explanation in plain words on the Settings page, hidden unless focus/hover of the element.\n- An unknown or missing value falls back to the default. It is never an error.",
+  "closedTime": 1793464237,
+  "column": "complete",
+  "createdTime": 1792092091,
+  "dependsOn": [],
+  "feature": "d597d4887f6e54eb",
+  "home": ".",
+  "id": "6a6a1895b45ee268",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 154,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "settings: agent behaviour in machine config"
+}

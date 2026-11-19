@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690243,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9).\n\nFiles: `tasks.rs`, `board.rs`, `main.rs`. Scope: `.`. Needs \"Strategy run store and API\" and \"Strategy: launching the agent and reading the graph\".\n\n- The `strategy` inbox message kind, the proposal questions and the Approve applier.\n- Reopening, the vision base check, and the notes on the run and the task.\n- The rest of A19, plus unit tests for the applier.",
+  "closedTime": 1791678412,
+  "column": "complete",
+  "dependsOn": [
+    "42994585a2a4b98e",
+    "4f0f816755b44428"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "b0f310d12726a880",
+  "links": [],
+  "milestone": null,
+  "rank": 65.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy: proposals and approval"
+}

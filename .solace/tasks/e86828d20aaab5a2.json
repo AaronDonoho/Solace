@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125212,
+  "body": "Run 8b3697864d7244e0 on task:8468541fcf2abdfc failed 10 of its first 27 calls trying to create one new module (`knowledgebase`). Rewording the brief would have prevented only the first failure. Most of the waste came from the error advice that followed.\n\n## What happened\n1. **Step 7:** a patch of `*** Add: knowledgebase.<name>` sections with the code written plainly, with no `+` on any line. E0108: \"every line starts with `+`\", plus the usual advice to fix the draft with `submit --draft <id> --replace`.\n2. **Steps 12–22:** following that advice, the agent tried to turn the ~140-line draft into blocks format one header at a time with `--replace`. That's 7 failed calls (E0101, E0105, then E0100 syntax errors, each pointing at the next `*** Add:` line), and finally lost imports.\n3. **Step 24:** `submit --imports knowledgebase` on a module that didn't exist yet gave E1003 \"unknown module\", with no pointer to `--new`.\n4. **Steps 26–27:** `submit --new knowledgebase` worked, but that made the draft stale (E0107), so its text had to be sent again.\n\nThe brief (`reference.txt`, steps 1–3) never says how to create a module. Its only `*** Add:` example adds a test to an existing module.\n\n## Change\n- **Brief** (`solace-cli/src/reference.txt`): one line under step 2. A new module is `*** Add: <module>` with its module comment, imports and symbols, every line `+`, or `submit --new <module>` with the plain file as `text`. Keep the brief's length about the same.\n- **Lenient `*** Add:`** (`drafts.rs::patch_blocks` / `sections`): an Add section where *no* line starts with `+` is read as plain code. That's unambiguous, because Add has no context or removed lines. A section that mixes `+` and bare lines is still refused with E0108, as the `bare` test expects.\n- **Advice for a wholly wrong patch:** when E0108's fault isn't one line, say so in the error: resend `text` (or use `submit --new <module>` for a new module) instead of `--replace` on the draft. Examples are an Add section with no `+` at all (if not made lenient) and a section header the parser can't read. Keep the `--replace` advice for single-line faults.\n- **E1003 on `--imports <module>` / `submit <module>`** for a module that doesn't exist: add \"create it with `submit --new <module>`\".\n- **Specs/docs:** Spec 03's patch paragraph and `help submit` mention the bare Add form. Record a decision in `DECISIONS.md`.\n\n## Tests\nIn `drafts.rs` tests: an Add section with no `+` lines submits the same blocks as the `+` form, for a new symbol and for a new module with imports. The mixed `bare` case still fails at line 5. The whole-patch E0108 advice doesn't mention `--replace`. `--imports` on an unknown module names `--new`.",
+  "closedTime": 1792076423,
+  "column": "complete",
+  "createdTime": 1792072927,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "e86828d20aaab5a2",
+  "links": [],
+  "milestone": null,
+  "rank": 148.0,
+  "scope": [
+    "."
+  ],
+  "title": "submit: new modules without a syntax spiral"
+}

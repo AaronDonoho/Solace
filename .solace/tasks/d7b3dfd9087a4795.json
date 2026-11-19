@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159108,
+  "body": "Seen in run 0442c97d6b8bf128 on task:be36c1d67353660d (step 58). The worker wrote `*** Update: extract::rust::tests.a_raw_string_naming_the_static_is_not_promoted` for a test that did not exist yet. `drafts.bad_target` refused with E0108, a list of similar names, and the hint \"a nested symbol is `<module>.<container>::<name>`\". That hint doesn't match how symbols in a `_tests.rs` file are shown (`extract::rust::tests.ready`), and the worker spent a long turn guessing at naming before it saw it needed `Add`.\n\n- When the part before the last `.` resolves to a module (or a container) but the full name doesn't, E0108 says the name is new and to create it with `*** Add: <target>`.\n- The similar-names hint stays for names whose module doesn't resolve either.\n\nCheck: a unit test where `*** Update: <existing module>.<new name>` is refused with a message containing `*** Add: <existing module>.<new name>`.",
+  "closedTime": 1793139946,
+  "column": "complete",
+  "createdTime": 1793137466,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d7b3dfd9087a4795",
+  "links": [],
+  "milestone": null,
+  "rank": 130.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: point Update of a new name to Add"
+}

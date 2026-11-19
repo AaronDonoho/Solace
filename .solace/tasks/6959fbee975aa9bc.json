@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183791,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794169201,
+  "column": "complete",
+  "createdTime": 1794098921,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/settings",
+  "id": "6959fbee975aa9bc",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 273.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "Agent Roles: Tech Debt"
+}

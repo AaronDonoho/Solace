@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1792812781,
+  "body": "Find and fix sustained memory growth in the running app.\n\n- Reproduce the growth with repeatable steps: leave the app open, move between pages, and exercise live task and Strategy updates; record any more specific trigger found.\n- Measure before and after to distinguish a real leak from a bounded cache, and name what retains the memory.\n- Fix the root cause and release or bound anything intentionally retained, such as listeners, subscriptions, event history or task updates.\n- Add a regression test for the identified path where practical; otherwise record the manual reproduction and before/after measurements.\n- Keep behavior and public routes unchanged. If profiling finds independent leaks, fix the measured one here and file follow-ups rather than widening this task.\n\nNo feature or milestone: this is cross-cutting maintenance. Left out: speculative allocation or render optimizations, and a claim to fix every independent leak in one pass.",
+  "closedTime": 1792780785,
+  "column": "complete",
+  "createdTime": 1792778466,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "88b61d902a98e554",
+  "links": [],
+  "milestone": null,
+  "rank": 52.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/contracts",
+    "solace-cli/frontend",
+    "solace-cli/migration",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "Fix app memory leaks"
+}

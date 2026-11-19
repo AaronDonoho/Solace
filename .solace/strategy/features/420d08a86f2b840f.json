@@ -1,0 +1,10 @@
+{
+  "body": "Each successful build produces a versioned release: its artifacts and a record of how they were made.\n\n- One version per build. Solace proposes the next version (patch, minor, major) and the human approves it; it is written to every manifest that holds a version (`Cargo.toml`, `gleam.toml`, `package.json`, `tauri.conf.json`), so they never disagree.\n- Each artifact is stored with its version, checksum, size, the source snapshot it was built from and the build's log.\n- Artifacts are stored in an output folder, `build-output` by default, set on the Build page (not under `.solace/`, which is off-limits). The folder is kept out of git and has a **read-only** option: when on, agents may read it but not write to it.\n- From the page: download an artifact, or open its folder in the desktop app.\n\nA release is what the Deploy Page rollout milestone later takes.\n\nDepends on: build: run from the Build page.",
+  "colorSlot": 31,
+  "id": "420d08a86f2b840f",
+  "milestone": "e84433b01fd0791f",
+  "rank": 3.0,
+  "startTime": 1794886346,
+  "state": "complete",
+  "title": "build: artifacts and versions"
+}

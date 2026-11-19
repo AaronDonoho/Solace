@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793916048,
+  "body": "After task:23c0a086bc394189, a review note can still be queued or arrive after the run ended. `board.recoverable_review` treats the queued reply (`Recorded; it reaches the board…`) as recorded, so it skips the final-message fallback; the review fails, and the note later lands on an ended run. When a batched reply is involved, the `Recorded` check reads only the start of the output.\n\nIn `board.recoverable_review`, find the `task note` result inside the tool output, including a batched reply, and treat only a plain `Recorded.` as recorded. A queued reply, a refusal, or a failed call is not recorded. In `board.message`, when an agent note arrives for a review run that has ended: if the run ended failed and has no feedback, record the note through the review path and end the run `reviewed`; if it already has feedback, drop the late note rather than adding a second agent note; leave a stopped or canceled run and a work or investigate run unchanged. Clear the failure attention only if it names the agent's unfinished exit; leave any other mark (D-183 point 3).\n\nDecision first: amend D-183 point 2 and Spec 15 §6 to say a queued note is not recorded, and the first feedback note wins for an ended review.\n\nTests: queued reply, late note on a failed review, late note on an already-reviewed review (no duplicate), late note on a stopped review, late note on a work run, and a batched queued reply. Acceptance with no server: queue a review note, exit, then start the server and assert one agent note and `reviewed`; and a fallback case where the queued note arrives after the final assessment (no second note). Run `rust-board-tests`, `rust-acceptance`, `test --all`, `check --warnings`.\n\nLeft out: merging two different late notes; no change to queued messages for other run kinds.",
+  "closedTime": 1793492827,
+  "column": "complete",
+  "createdTime": 1792598451,
+  "dependsOn": [
+    "23c0a086bc394189"
+  ],
+  "feature": "081a981351f3e658",
+  "home": ".",
+  "id": "6b15db4f59c8bdee",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 248.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "review: a queued note finishes"
+}

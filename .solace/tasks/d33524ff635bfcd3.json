@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690225,
+  "body": "The changes are not displaying correctly, sometimes not any at all. \n\nThe following are all notes from a previous task:\n\nChanges\nThe Changes tab now reads like a code outline instead of showing the server's order.\n\nChanges are grouped by module, with a heading per group and the symbols listed under it.\nSource modules come first and *_test modules last, so the behaviour change comes before its tests.\nSymbols are alphabetical inside each module.\nFor a task that covers several projects, the project is part of the heading (b · app) and projects are ordered first.\nAdded a Change(project, module, name) type. Task.changes is now a list of these, and task_decoder splits each name at the last .. It no longer builds the \"p: name\" string.\nAdded change_groups(changes, multi_project), a pure function that sorts and groups. detail renders its result. The tab title still shows the total count.\nVerification\nUpdated task_across_projects_test for the new Change type.\nAdded change_groups_test, which uses unordered input across source and test modules and checks the ordering and the cross-project heading.\nRan the affected tests: 18 passed, no failures. Seven other tests were skipped because the change doesn't reach them, and I didn't run test --all.\nI did not look at how the page renders the new h4 and section markup, so it may need CSS styling.\nNot done\nShowing whether a change was added, changed or removed would need the Rust server in solace-cli to send that, and it isn't in this task's scope.",
+  "closedTime": 1791508801,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "d33524ff635bfcd3",
+  "links": [],
+  "milestone": null,
+  "rank": 18,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Fix Changes Display"
+}

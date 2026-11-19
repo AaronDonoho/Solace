@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690201,
+  "body": "Depends on \"Strategy Features tab: read-only list\".\n\n- A small title form on each feature. It sends `POST {base}/tasks {title, body:\"\", request}`, then `PATCH {base}/tasks/{id} {feature}`, reusing `Link`/`Patched`.\n- In a workspace, there is a project `<select>` that defaults to the root's project. With a single project there is no picker.\n- Errors are reported per step. If the PATCH fails, say the task was created without the link.\n- Tests: the POST → PATCH sequence and the case where the PATCH fails, in the JS flow. Update the README.\n\nPieces 2–4 of the Features tab all edit `features.gleam` and `update`, so run them one after another rather than in parallel.",
+  "closedTime": 1791656326,
+  "column": "complete",
+  "dependsOn": [
+    "850c1af76064d8fc",
+    "d8c18f595afa4a0e"
+  ],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "52441bbdda556440",
+  "links": [],
+  "milestone": null,
+  "rank": 4.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy Features tab: new task for a feature"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690239,
+  "body": "Task Store implemented. Please Red Team the work.\nLook for possibilities that:\n\n- tasks may not be migrated to the Task Store correctly\n- task locks are held too long\n- task edits are out of order\n- task edits are incomplete\n- the UI is frozen\n- the UI is out of sync with the task store\n- any other issues",
+  "closedTime": 1791422816,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "804d0586043d0640",
+  "links": [],
+  "milestone": null,
+  "rank": 34.0,
+  "scope": [
+    "."
+  ],
+  "title": "Red team: Task Store"
+}

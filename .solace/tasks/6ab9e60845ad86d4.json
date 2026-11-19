@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792814722,
+  "body": "Moving a task to a final column takes about 2 seconds, and the action button waits for it. The wait is on the server's reply, not a UI delay.\n\n### Where the time goes\n\n- The move is a task-only write, but `board.action` calls `board.settle` before returning. `settle` walks every scope store, runs `outside::approve` (a full `board::snapshot` and rewrite of `.solace/approved`), drops the task's `board_before` rows and files, and runs `PRAGMA wal_checkpoint(FULL)`.\n- `board.needs_lock` treats the same move as a code change, so the request may also take every project's lock for work that happens after the move.\n- Agent `done` messages already move a task to a final column and settle it later, off the task server's thread (`tasks.settle_later` -> `board.settle_final`, D-77 point 5 Option B). The human action path doesn't.\n\n### Fix\n\n- Measure the action end to end and each step before changing it: `board.guard`, `board.action`, `tech_debt`, `settle`'s `approve`/`drop_before`/`checkpoint_pending`, the task write and the event log. Record the numbers in the task's notes.\n- Reply as soon as the task's file and event are written. Defer `settle` to the existing off-thread path (`settle_later` / `settle_final`), and leave conversation cleanup off the reply path as the agent path already does.\n- Once settle is deferred, a final move that keeps changes (Complete) no longer changes code, so it should not take the projects' locks. A cancel's `revert` stays synchronous under the locks (D-77 point 5).\n- If measurement shows tech-debt filing is also on the critical path, defer it too; keep its D-112 semantics and make it idempotent.\n- A deferred settle that fails must not be silent: note the failure on the task and flag it for attention; `resettle` retries it on the next serve. A retry changes nothing twice.\n- Do not add a fixed delay or an optimistic UI that hides a failed move. The task's final column and `closedTime` must be durable before the reply.\n\n### Tests\n\n- An action into a final column returns the moved task before its `board_before` rows are cleared; the deferred settle then clears them.\n- A settle failure after the reply puts a `solace` note on the task and flags attention; a retry (or `resettle`) clears it without a second approval.\n- Cancel still reverts before its reply and keeps the project locks.\n- A task with no changes and a task with changes both leave the board at once; existing final-column, archive and feature-follow tests still pass.\n\n### Target\n\nThe common Complete reply should not wait on settle: aim for a few hundred milliseconds in this workspace, measured before and after. If the measured cost is elsewhere, fix that instead and say so in the note.\n",
+  "closedTime": 1792811483,
+  "column": "complete",
+  "createdTime": 1792774877,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli",
+  "id": "6ab9e60845ad86d4",
+  "links": [],
+  "milestone": null,
+  "rank": 50.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tasks: fast move to final column"
+}

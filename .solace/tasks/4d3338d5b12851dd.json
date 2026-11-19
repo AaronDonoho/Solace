@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312247,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793293597,
+  "column": "complete",
+  "createdTime": 1793293180,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "4d3338d5b12851dd",
+  "links": [],
+  "milestone": null,
+  "rank": 194.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: leave no Rust cleanup behind: Tech Debt"
+}

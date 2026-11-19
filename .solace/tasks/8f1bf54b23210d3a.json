@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792705647,
+  "body": "Seen in the latest work run on task:10e5b94213c1e788. Four causes of wasted calls:\n\n1. **False E0108 rename.** A patch that `Update`s one symbol and adds a method or function after unchanged context (steps 25, 27, 31) is refused as a rename of the updated symbol. Treat a new symbol after unchanged context as an add. When a patch is still refused, name the hunk and say to put the new symbol under its own `*** Add:` header. Don't point at `submit <name>` for a multi-symbol patch.\n2. **Unknown header or target.** `*** Update: module:language::rust_refs` (step 73) answered only \"is no symbol\". For a `module:` prefix, a module name or a source path, answer with the form that works (`*** Update: <module>`, per `help submit`). A path `read` of a source file (D-181) should name the symbol-reading command.\n3. **Name syntax.** `view` of `extract.tests` versus `extract.tests::name`, and `.` versus `::`, failed 6 of 18 views in one call. When a name doesn't resolve, list the nearest stored names (same module, same leaf) in the error.\n4. **Cascading errors.** One missing `pub(crate)` produced 20+ errors in step 44. When several errors have one cause (a private item used from another module, a missing method on a type), print one line naming the item and the fix and list the sites below it.\n\n**Tests.** One unit test per cause: add-after-context applies; the `module:` header and unknown-name errors carry the hint; grouped privacy errors print one summary line.\n\n**Left out:** the stale module text (task:800c50ca75a02efb) and the resumed-run summary.",
+  "closedTime": 1792612999,
+  "column": "complete",
+  "createdTime": 1792608178,
+  "dependsOn": [],
+  "feature": "2985e05d2e799ef8",
+  "home": "solace-cli",
+  "id": "8f1bf54b23210d3a",
+  "links": [],
+  "milestone": null,
+  "rank": 32.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: fewer false refusals, clearer errors"
+}

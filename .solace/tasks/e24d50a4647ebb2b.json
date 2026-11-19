@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793916049,
+  "body": "A message the human sends while an agent is working must reach that agent. Today it can be lost: it stays on the page, but the agent never receives it.\n\n**Where it happens:**\n- `board::strategy.wait_strategy` and `board::runs.wait_discussion` only read human notes after the agent's last note, so a human note sent before the agent's next note is skipped for good.\n- `board::strategy.wait_answer` reads only the proposal's answer, so a note sent while a proposal waits is never handed over, and the agent's next note then skips it.\n- `tasks::strategy.change_run` accepts a human note in any open state.\n\n**Done when:** in a strategy run and in a task discussion, every human note reaches the agent exactly once, including one sent while the agent is working and one sent while a proposal waits. Several waiting notes arrive together, in order.\n\n**Tests:** each of those cases, for both kinds of run.",
+  "closedTime": 1793845683,
+  "column": "complete",
+  "createdTime": 1793836711,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e24d50a4647ebb2b",
+  "links": [],
+  "milestone": null,
+  "rank": 258.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Fix: agents skip messages sent mid-work"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792201206,
+  "body": "Part of feature:f414f1311c67fe80. The **Migration** menu tab and page become **Workspace**, at `/workspace`.\n\n- **Shell** (`solace-cli/frontend`): the menu reads Board, Workspace, Contracts, Strategy, Settings. `/workspace` shows `<solace-migration>`, and `/migrate` is replaced in the history by `/workspace`. Update the README's page table and menu line.\n- **Server** (`board.rs`, the page match beside `/migrate`): serve the shell at `/workspace` as well as `/migrate`. The JSON API stays at `/migration`; `/projects` stays the projects API and can't be a page address.\n- **Migration component** (`solace-cli/migration`): the page heading reads **Workspace**, and migration becomes a section of the page (heading such as \"Bring in an existing project\"). The package and the `solace-migration` tag keep their names.\n- **Wording:** the board's \"Migration page\" link in `solace_board.projects_view` points to `/workspace` and says \"Workspace page\". The guide (`board/guide.html`, \"open Migration in the menu bar\"), the root README, Spec 15 and Spec 17 name the Workspace page. Messages in `main.rs`/`workspace.rs` that say \"choose Migrate this project\" still match the button's label.\n- Record the rename and the `/workspace` address (why not `/projects`) as a decision in `DECISIONS.md`.\n\n**Tests:** frontend tests: the menu label, `/workspace` routing and the `/migrate` redirect. The migration component test (`test/component.html`) checks the new heading. `board_acceptance.py`'s page list includes `/workspace`.",
+  "closedTime": 1792180139,
+  "column": "complete",
+  "createdTime": 1791957109,
+  "dependsOn": [],
+  "feature": "f414f1311c67fe80",
+  "home": ".",
+  "id": "fe22a414170347a5",
+  "links": [],
+  "milestone": null,
+  "rank": 131.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "workspace: rename Migration page"
+}

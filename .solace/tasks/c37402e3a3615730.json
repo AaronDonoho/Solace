@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793916048,
+  "body": "`board.recoverable_review` takes only the last `message` entry, and `board.review_assessment` requires its first line to be exactly `**Assessment: Looks good**` or `**Assessment: Needs work**`. A preamble line, `**Assessment:** Looks good`, `## Assessment: …`, a trailing message such as `Done.`, or Claude splitting one reply into several text blocks loses a valid assessment.\n\nDecision first: amend D-183 to define the accepted shape. Join the trailing `message` entries after the last non-message entry in order, separated by a blank line, and find the first line that is a label after removing Markdown heading and emphasis markers around `Assessment:`: `Assessment: Looks good` or `Assessment: Needs work`, with no other text on the line. Record the whole joined reply as feedback. Reject a reply with no label; if two labels disagree, reject. Keep D-183's requirement that a final message is not a note in general.\n\nTests: assessment in the first of several text blocks with a trailing `Done.`; preamble line; `**Assessment:** Looks good`; `## Assessment: Needs work`; a trailing message after the label; no label; two conflicting labels; extra text on the label line. An acceptance case with a Claude-like log split into blocks, asserting `reviewed` and the full joined note. Run `rust-board-tests`, `rust-acceptance`, `test --all`, `check --warnings`.\n\nLeft out: no attempt to interpret a label outside the trailing message run, and no change to work or investigate runs.",
+  "closedTime": 1793649843,
+  "column": "complete",
+  "createdTime": 1792598460,
+  "dependsOn": [
+    "6b15db4f59c8bdee"
+  ],
+  "feature": "081a981351f3e658",
+  "home": ".",
+  "id": "c37402e3a3615730",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 249.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "review: read split final messages"
+}

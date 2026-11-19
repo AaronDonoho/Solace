@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056550,
+  "body": "In the following, let's focus on the potential bug that a task store is not shared amongst devs.\nwhen a dev cloned the repo and opened the solace app:\n\non the migration tab when I loaded up the solace app, I see nothing there:\n\nYes, this is a bug, and it hides a second, bigger one: on a fresh clone of this\n  repo, there's currently no way to migrate its Gleam projects at all. I haven't\n  changed any code for either.\n\n  \nThe screen draws nothing for the \"no migration\" state. The server answers\nnormally with state: \"none\". The Migration screen has views only for available,\nrunning, failed and copying. Anything else hits _ -> h.text(\"\") at\nsolace-cli/migration/src/migration.gleam:596, so you get a blank page with no\nexplanation.\n\n  \nThis repo's projects can't be migrated, from the board or the CLI.\nWhy \"none\": migrate::candidates (solace-cli/src/migrate.rs:954) offers nothing\nto migrate when the folder is already a Solace root. The committed\nsolace.toml lists projects, so ~/dev/solace always counts as one.\nProjects button: adding an existing project in place (workspace::add) is\nrefused on purpose (\"Existing code comes into Solace by migrating it\"),\nfollowing D-59.\nCLI: I tried solace migrate --yes --project solace-cli/board on the throwaway\nclone. It says \"Nothing to migrate here\", so the README's multi-project\nmigrate command fails for this repo.",
+  "closedTime": 1795056096,
+  "column": "cancelled",
+  "createdTime": 1791473444,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "040fefdf07a5aeab",
+  "links": [],
+  "milestone": null,
+  "rank": 41.0,
+  "scope": [
+    "."
+  ],
+  "title": "Fix: task store available to other devs "
+}

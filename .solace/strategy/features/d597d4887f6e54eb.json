@@ -1,0 +1,10 @@
+{
+  "body": "Settings, chosen per person, that control how agents talk to the human and what they ask. For now each is one machine-wide value in `~/.config/solace/config.toml`, which the Settings page writes through the board. Browser-only settings don't work here, because briefs are built on the server.\n\n### Settings\n\n- **Involvement level:** *Director* (the default: plain words, no code, product questions only), *Collaborator* (key trade-offs explained simply) or *Engineer* (full technical detail, as today).\n- **Detail:** how much agents write: concise, standard or thorough.\n- **When to ask:** how unsure an agent must be before it asks a question rather than decides: ask often, balanced, or ask rarely.\n\n### Decisions at the Guided level\n\nAgents word every decision so the human can make it at their level. When a choice really is too technical to put that way, the agent makes the call and records it on the task as a *call made*, with a plain reason. A call made is never written to the project's decision log: only a human decision becomes a logged decision.\n\n### Related\n\n*Ask rarely* overlaps with the proposed **Autorun** feature's Agent-Managed mode. Autorun should build on this setting, not add a second one.",
+  "colorSlot": 20,
+  "id": "d597d4887f6e54eb",
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 3,
+  "startTime": 1793422603,
+  "state": "complete",
+  "title": "Agent behaviour settings"
+}

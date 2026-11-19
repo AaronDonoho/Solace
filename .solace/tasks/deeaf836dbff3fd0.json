@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792036275,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792028686,
+  "column": "complete",
+  "createdTime": 1792027761,
+  "dependsOn": [],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "deeaf836dbff3fd0",
+  "links": [],
+  "milestone": null,
+  "rank": 144.0,
+  "scope": [
+    "."
+  ],
+  "techDebt": true,
+  "title": "`extract`: move symbols between modules and projects: Tech Debt"
+}

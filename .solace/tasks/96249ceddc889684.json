@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791924906,
+  "body": "Part of the `extract` feature. Plan source: task:a9d18cc6be1c2a2a note 17 (Task 3). Needs task:d6ac4f3600093a97. Code locations are by name; line numbers have moved since the plan.\n\nExtend `extract` with `--to-project <folder>`, allowed only for projects the task covers. Reuse the E6007 scope check from `move --to-project` (in `run`, main.rs).\n\n**1. Dependency direction.** The **source** gets `<dest_pkg> = { path = \"<path relative to the source>\" }` merged into its gleam.toml, and so does each dependent project that now uses the destination. The destination gets nothing (model: the board has `components = { path = \"../components\" }`; components has no board dependency). Merge the one line, never overwrite the file. Every changed gleam.toml goes in the file snapshot so revert and cancel undo it.\n\n**2. Package cycle refusal, E5002.** Refuse when the source needs the destination (staying code uses moved code) **and** either the destination needs the source (moved code uses staying code), or the destination already depends on the source, directly or transitively, through existing gleam.toml path dependencies. Same refusal form as task 1: every direct boundary use, plus the closure size.\n\n**3. Dependent projects.** For each project whose gleam.toml depends on the source:\n- covered by the task: rewrite its references with task 1's rewrite function and add the destination dependency;\n- not covered: refuse and name the uses, so the agent asks to add that project.\nThis replaces task 1's refusal for projects in scope.\n\n**4. Identity.** Insert the same symbol id in the destination store and delete it from the source. Refuse a module path that already exists in the destination, or in any package connected to source or destination (Gleam module names must be unique within a dependency graph).\n\n**5. Order.** Write the destination's files to disk first, then type-check the destination, the source and the dependents (Gleam resolves path dependencies from disk).\n\n**6. Recording.**\n- Each store records its undo rows **inside its own commit** (D-77 point 7, as `run` does today).\n- Snapshot the destination's **store** with `board::snapshot`, not only `files_under`; today `dest_before` is built only for `move` (from `lockdown::move_args`).\n- Mark every store involved (`lockdown::mark`), as D-84 does.\n- Take project locks in a fixed order, sorted by path.\n\n**7. Reply.** Add `Dependency added: solace_board, frontend -> components` and references rewritten per project.\n\n**Tests:**\n- Unit: the source gains the dependency; the destination doesn't.\n- Unit: extract into a project that already depends on the source, with staying uses → E5002 naming them.\n- Acceptance (`workspace_acceptance.py`, modelled on `test_a_move_between_the_projects_a_task_covers`), board→components-like fixture: references rewritten, test moves, dependency added, `check` passes; a dependent project in scope is rewritten, one outside scope refused naming its uses; cancel restores both stores, the source's gleam.toml and the dependent's gleam.toml.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791817798,
+  "column": "complete",
+  "dependsOn": [
+    "d6ac4f3600093a97"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "96249ceddc889684",
+  "links": [],
+  "milestone": null,
+  "rank": 75.0,
+  "scope": [
+    "."
+  ],
+  "title": "`extract --to-project`: move symbols into another project of the task"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793983856,
+  "body": "A new Tech Debt task for a task with a feature is titled `<feature title>: Tech Debt` again. A Tech Debt task for a task with no feature keeps today's title: just the completed task's title.\n\n### What changes\n- A new Tech Debt task in a feature gets the title `<feature title>: Tech Debt`.\n- Existing Tech Debt tasks keep their titles.\n\n### Acceptance criteria\n- Completing a task in feature F with tech debt, when no Tech Debt task can take the findings, creates a Tech Debt task titled `F: Tech Debt`.\n- Completing a task with no feature still creates a Tech Debt task titled with just that task's title.\n- Existing Tech Debt tasks are not renamed.\n- Focused tests cover both cases through the task action that completes a task.\n\n### For the agent\nThe title is chosen in `board::reviews.new_debt`. The doc comments on `new_debt` and `board::reviews.tech_debt` state the current rule, and `board::reviews::tests.completing_a_task_files_its_reviews_tech_debt` asserts it. This amends D-213 point 1 for tasks with a feature: record a decision saying so, and update Spec 15 §6 and A20, which D-213 names.\n\n### Out of scope\nThe board's \"Tech debt\" label, titles for tasks with no feature, which Tech Debt task receives findings (task:36e2575460f81dfd), and renaming existing tasks.",
+  "closedTime": 1793982121,
+  "column": "complete",
+  "createdTime": 1793980800,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "0e3c51e434e082c3",
+  "links": [],
+  "milestone": null,
+  "rank": 356.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "tech debt: restore feature title suffix"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056535,
+  "body": "In every text box with a send or save button, Ctrl+Enter (Cmd+Enter on a Mac) presses that button, as the Strategy and Design message box already does (`plan_panel.send_key`).\n\nThis includes answering a question, adding a note, and editing a task, a feature or a milestone. A disabled button means the keys do nothing. A box with no send or save button is unchanged.\n\n**Tests:** in each such box, Ctrl+Enter and Cmd+Enter send or save; Enter alone still adds a new line.",
+  "closedTime": 1794790377,
+  "column": "complete",
+  "createdTime": 1794788029,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "5d7e86330e121d9b",
+  "links": [],
+  "milestone": null,
+  "rank": 123.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "editors: Ctrl+Enter sends or saves"
+}

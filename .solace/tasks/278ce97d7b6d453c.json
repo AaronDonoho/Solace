@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977622,
+  "body": "If a batch runs the same command twice (for example `check` twice), `board.failed_section` always uses the first `==== solace <command> ====` section, even when the second one failed. So the failed-step line from `board.failed_step_line` can show the first run's output instead of the failure.\n\nThis is rare. Matching the section against the failed command's position in the batch would fix it.\n\n## Done when\n- When a batch repeats a command and a later copy fails, the failed-step line shows that copy's error.\n- A single command, or a batch with no repeats, behaves as today.\n- A test covers a batch that runs the same command twice where the second one fails.",
+  "closedTime": 1792957052,
+  "column": "complete",
+  "createdTime": 1792950624,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "278ce97d7b6d453c",
+  "links": [],
+  "milestone": null,
+  "rank": 70.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "runs: failed step finds the right section"
+}

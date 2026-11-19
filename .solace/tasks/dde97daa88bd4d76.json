@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972378,
+  "body": "Every project gets a decision log that Solace keeps. Only the human decides what goes in it. Today only this repo has one (`DECISIONS.md`), and the Strategy brief shows it only if the file exists (`strategy.rs`).\n\n### Behaviour\n\n- Solace creates the log for new and migrated projects. It is protected like `AGENTS.md`.\n- An agent proposes an entry: a title, what was decided and why, written at the human's involvement level. It becomes a decision only after the human approves it, like a settings proposal. An agent's *call made* (see **Agent behaviour settings**) is never added on its own.\n- Work, investigate, review and Strategy briefs list the recent decision titles and say how to read one, as the Strategy brief does today.\n- The human can read the log in the app, for example on the Knowledgebase page, without opening the file.\n\n### To decide in the investigation\n\nWhether this repo's `DECISIONS.md` becomes this format or stays as it is, and the file's name and location.",
+  "closedTime": 1794959305,
+  "column": "complete",
+  "createdTime": 1792092141,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": ".",
+  "id": "dde97daa88bd4d76",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 159.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "decisions: a decision log in every project"
+}

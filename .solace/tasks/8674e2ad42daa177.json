@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791842472,
+  "body": "Part of feature:3e8b5fe47bba41c4. Measure the claim that Solace's file tier loses to plain CLI tooling for non-Gleam work, and the gain from the orientation index. Needs task:b4393c3607221292 for arm C. Benchmark runs need Aaron's go-ahead.\n\n**Arms, same task, same model, 3 reps each:**\n\n- **A — Solace file tier as today:** `grep`, `read`, `write`, `run` only. The reference's rules apply.\n- **B — plain files + shell:** the agent gets file tools, `rg`, `cat`, `cargo test`, `git` — the usual CLI, no Solace commands. Guardrails off; this arm measures the ceiling.\n- **C — Solace + orientation index:** the file tier plus `view <file>::<fn>`, `refs`, `inspect --context` from task:b4393c3607221292.\n\n**Task fixture:** the shape of task:96249ceddc889684's work run — a multi-file `solace-cli` feature with unit and acceptance tests. Run on a scratch copy of `solace-cli` (a `solace import`-style fixture, not the real repo), with the task body as the prompt. Arm B's fixture is the same copy without Solace.\n\n**Metrics** (as `bench/analyze.py` reports): total tokens, uncached input, output, turns, tool calls, time, pass/fail; tokens before the first edit. Expectation to test: B beats A on locate turns; C beats B on orientation and test scoping.\n\n**Harness:** extend `bench/bench.py` arms to a Rust fixture; record in `bench/results/<n>/`.\n\n**Checks:** `bench.py validate`; results summarized in a task note for the human.",
+  "closedTime": 1791842465,
+  "column": "cancelled",
+  "dependsOn": [
+    "b4393c3607221292"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "8674e2ad42daa177",
+  "links": [],
+  "milestone": null,
+  "rank": 101.0,
+  "scope": [
+    "."
+  ],
+  "title": "Bench: Rust task, files vs file tier vs index"
+}

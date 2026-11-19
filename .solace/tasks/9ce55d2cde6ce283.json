@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793656128,
+  "body": "**Problem (from the human):** after the PC sleeps and wakes, Solace stops working properly. Every button that starts an agent fails with *\"Connection lost; the request may not have completed.\"* This happens on the board **and** on the Strategy page's planning. It may affect more pages than that.\n\n**What the code shows:** that message comes from `request` in `solace-cli/components/src/task_api.mjs`, the one request helper the pages share. It only shows when the browser's `fetch` to the local Solace server fails outright (no reply at all). Because several pages fail the same way, the likely common cause is the server for that workspace, not any one page. After waking, the server is either gone, hung, or no longer reachable on its port. The app (`open_project` in solace-app) starts the server once and never checks on it again, so the window keeps pointing at a dead server.\n\n**Cause is not known yet.** Reproduce it first (sleep, wake, press a start button on the board and on Strategy) and find out which of these happens: the server process exited, it is alive but not answering, or it answers but the pages are using a stale port.\n\n**Done when:**\n- After sleep and wake, starting an agent works without restarting Solace, from the board, from Strategy planning, and from any other page found to fail the same way.\n- If the server did stop, the app notices and brings it back (or the page says plainly what to do), instead of every button failing with \"Connection lost\".\n- A test covers the recovery path that is fixed.",
+  "closedTime": 1793655372,
+  "column": "complete",
+  "createdTime": 1793248407,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "9ce55d2cde6ce283",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 3.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "app: works again after PC sleep"
+}

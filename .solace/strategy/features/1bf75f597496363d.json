@@ -1,0 +1,10 @@
+{
+  "body": "Fixes for the failures seen in the work runs on a task in another project (4c636ac1a94fc001 there). There, agents spent many steps working around Solace, and one run lost work without anyone noticing.\n\n- **Imports:** dependency modules and aliases already used in the project aren't added automatically, and an import-only patch is refused.\n- **Open drafts:** `task done` goes through while a draft still holds unsaved work.\n- **Refusal messages:** wrong-project paths, `read` on Gleam source, `view` without `--project` and `inspect module:…` give messages that don't name the call that works.\n\nNot here: letting read-only runs use `run env`. That needs no code: mark it `allowed_in_reviews = true` in that project's `solace.toml`.",
+  "colorSlot": 18,
+  "id": "1bf75f597496363d",
+  "milestone": null,
+  "rank": 17.0,
+  "startTime": 1792976044,
+  "state": "complete",
+  "title": "Work run friction fixes"
+}

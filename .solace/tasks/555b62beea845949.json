@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792884692,
+  "body": "## The bug\n\nThe Command Code (CMD) DeepSeek model (`commandcode-deepseek-v4.1-flash` in recent runs) keeps disappearing from the available-model pick. It has run successfully every time. Pressing the ⟳ refresh button left of the pick brings it back, and it later falls off again. The task details and the Strategy planning panel both use the same model list.\n\n## What I found\n\n- Both pickers offer only entries where `/models` says `available: true` (`solace_task.agent_choice`, `plan.agent_choice`). An unavailable model is still in the reply, but it shows only in the collapsed unavailable line.\n- The ⟳ button calls `POST /models/try-again`, which drops the cached local check and clears holds. That explains why one press restores the model.\n- A model on its own endpoint with a stored key skips Codex's sign-in check in `board::agents.local`, so a sign-in check is less likely to be the cause.\n- The likely cause is a stale per-model hold from `board::agents.observe_refusal`. It marks an endpoint model when any error entry in its run transcript matches `board::agents.model_gone` or an agent signed-out message. A successful run clears that hold only when `board::agents.answered` is also true. If a successful CMD run has no message, thinking or tool entry of the kinds `answered` checks, the hold survives, and `/models` reports the model unavailable on the next refresh.\n- I could not inspect `agent-holds.json` or the run log from this planning run, so the exact reason is not confirmed.\n\n## Work\n\n- Capture the reason `/models` gives for the model and the matching hold, as part of the fix, so the change targets the real cause.\n- Make a successful endpoint-model run clear a refusal hold it could have left, even when the transcript has no `answered` entry. A failed or stopped run must still hold the model with the agent's reason.\n- If the error is a genuine Codex refusal, keep the reason and make the picker say it clearly; do not hide the model or refresh more often.\n- Add a Rust regression test with a successful fake endpoint run shaped like a CMD run, and assert the model stays available. Add a client test for each picker only if its behavior changes.\n- Confirm the selected model survives ordinary model refreshes after the fix.\n\n## Left out\n\nNo new provider, no faster catalog polling, no redesign of the picker, and no weakening of real usage-limit holds.\n\n## Uncertain\n\nThe cause is inferred from the source and the history of `task:eb61ac144a929e1c`; it is not confirmed on the machine that shows the bug. The run log should decide whether the bad hold is a refusal, a sign-in hold, or something else.",
+  "closedTime": 1792876044,
+  "column": "complete",
+  "createdTime": 1792873875,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "555b62beea845949",
+  "links": [],
+  "milestone": null,
+  "rank": 62.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Fix: CMD DeepSeek disappears"
+}

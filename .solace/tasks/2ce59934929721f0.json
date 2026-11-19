@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464636,
+  "body": "Implements D-158 point 4's fetch rule (Spec 14 §4): every Rust check runs `--offline`, so a cache that lacks a dependency leaves the agent no command that can fill it.\n\n- After an import, and after an approved change to Cargo.toml's dependency tables, run `cargo fetch` in the project root, outside the sandbox (task:7db8dd126a22c863) and without `--offline`, so later checks find everything.\n- A failed fetch is reported where it was asked for — the import, or the approved write — with cargo's message, and leaves the project as it was.\n- Without `cargo`, the same E6013 as `check` and `test`.\n\n### Tests (need `cargo`)\n- An import of a package whose dependency is absent from a scratch CARGO_HOME fetches it, and a following `check` passes with `--offline`.\n- An approved Cargo.toml change adding a dependency fetches it.\n- A fetch that fails is reported at the step that asked for it, and the store and files are unchanged.",
+  "closedTime": 1792420029,
+  "column": "complete",
+  "createdTime": 1792385568,
+  "dependsOn": [
+    "87caaab35442ab65"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "2ce59934929721f0",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 235.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: fetch dependencies outside the sandbox"
+}

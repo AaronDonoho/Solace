@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793423236,
+  "body": "Steps 5–7 of the refactor plan (task:fc9bf315f4eddc7a, notes 6 and 12). This is part 2 of 4 of the module splits, and the hardest one. It waits on task:2414798176c466e4 because the plan moves the types out first.\n\n- **`store_core`:** open, materialize, rewrite, transactions and schema setup.\n- **`store_read`:** session, view, inspect, refs, impact and find.\n- **`store_write`:** submit, delete, check, test, probe and work.\n\n`Store` has several inherent impls, so name each method (`extract Store::method --to <module>`), not `<Store>`. Keep the existing pattern of an `impl Store` in each module that owns a concern. Make fields `pub(crate)` only where a sibling module needs them, and don't widen the public API.\n\nThe rules for every split task are in task:2414798176c466e4.",
+  "closedTime": 1793164215,
+  "column": "complete",
+  "createdTime": 1793057969,
+  "dependsOn": [
+    "2414798176c466e4"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "21241abf8e6ac8a7",
+  "links": [],
+  "milestone": null,
+  "rank": 292.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Refactor: split Store"
+}

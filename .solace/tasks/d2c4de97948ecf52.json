@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792814721,
+  "body": "Replace the effort select with a slider in both places it appears: the task detail (`solace_task.agent_pick`) and the planning panel (`plan.agent_choice`). The model stays a select. The cancelled task:535777bcedf3e198 proposed segmented groups for both picks; this changes only effort, and keeps one shared control.\n\n### Control\n\n- A horizontal, discrete slider: a toggle-style track with a round thumb that snaps to one stop per choice.\n- Stops: **Default** first, then each effort the model lists, in the order the agent names them. Default's label names the model's default when it has one: \"Default (medium)\"; with none, \"Default\".\n- The track left of the thumb fills with `--focus`, the rest stays `--well`; the chosen label is bold. Labels sit under the stops, small enough for the narrowest panel; a label too long to fit keeps its full text in `title`.\n- It is a native `<input type=\"range\">` with `min=\"0\"`, `step=\"1\"`, `max` one less than the stop count, `aria-label` from `ui_labels` (\"Effort\"), and `aria-valuetext` with the chosen stop's label. Arrows, Home and End move it.\n- It shows exactly when the select did: whenever the model lists efforts. No efforts, no control. A model with one effort keeps two stops (Default and that effort).\n- Choosing a stop sends the same value as before: \"\" for Default, else the effort name.\n\n### Behavior\n\n- A model change resets effort as it does now (`AgentSelected`, `PlanModel`); `models_chosen` and `models_refreshed` still keep or narrow the pick.\n- Stored, sent and recorded values do not change (D-37, D-149); only the control's form does.\n- `solace-task` is shared, so the board's task detail gets the same slider. No board source change is expected.\n- Extract the shared switch declarations from `projects_pick_styles` (or add one shared constant) rather than copying the look.\n- Update the components README's pick paragraphs and the strategy README's Start paragraph.\n\n### Tests\n\n- `solace_task_test`'s effort test: the range's stops, labels, `aria-valuetext`, and the unchanged `EffortSelected` value; a model with no default, and one with a single effort.\n- `strategy_test`: the panel draws the shared slider and sends the same effort.\n",
+  "closedTime": 1792778127,
+  "column": "complete",
+  "createdTime": 1792767737,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/components",
+  "id": "d2c4de97948ecf52",
+  "links": [],
+  "milestone": null,
+  "rank": 106.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: effort slider"
+}

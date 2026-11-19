@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793983853,
+  "body": "A Tech Debt task's first suggested read points at the code its findings name, not at the wording used to file tech debt. Other tasks start as they do today.\n\nEvery Tech Debt task shares the description in `board::reviews.TECH_DEBT_BODY`; its findings are in its notes. `board::briefs.task_text` ranks on the title and description only, so the suggestion matches that fixed wording. Rank a Tech Debt task on its findings notes as well as its title and description; other tasks keep today's ranking. The board brief and the CLI path in `cli::routing.run_inner` both use `task_text`, so both change.\n\nThis amends D-151 point 1 (the reply uses the title and description); a new decision is needed before work. Notes also hold questions and replies, so only the findings are read.\n\ntask:680737 changes the same ranking for bare names in a task body; this handling should compose with it.\n\nAcceptance:\n- A Tech Debt task whose findings name `outside.tests`, `board::reviews.record_approved_layout` and `board::reviews.restore` starts with a `Next:` line naming that code rather than `board::briefs.TECH_DEBT_ASK` or `board::reviews.TECH_DEBT_BODY`.\n- An ordinary task's ranking is unchanged.\n- A findings note that names many symbols still fills the three suggested slots; a whole test module counts as one.\n- Tests cover a Tech Debt task and an ordinary task.\n\nLeft out: the empty \"Symbols most likely relevant\" list, which the session byte budget causes; the finding's \"handoff symbols\" wording, since a handoff is only a brief; and ranking on notes for every task.",
+  "closedTime": 1793923375,
+  "column": "complete",
+  "createdTime": 1793904960,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "20a1937f8f7f344b",
+  "links": [],
+  "milestone": null,
+  "rank": 270.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: point Tech Debt at its findings"
+}

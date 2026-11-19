@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159126,
+  "body": "Part of same-project Rust `extract` (D-185, D-187). Separate from moving impl blocks and methods: it is independent, small, and unblocks the CLI and model splits before the larger method-move work.\n\n**Do.**\n- When `extract` creates a test container in a target, write `#[cfg(test)] #[path = \"<module>_tests.rs\"] mod tests;` and put the tests in that sibling file. For a nested target, put the file beside the module's file, e.g. `board/reviews_tests.rs`.\n- Tests moved from a `#[path]` container stay in a file.\n- If the target already has a `#[path]` container, append the moved tests to it. Today any container already in the target is refused with `E1004`, which blocks a second move into the same module.\n- Keep symbol identity. A cargo check failure restores every row, file and history entry, as other moves do.\n- No new option: always write a file, since AGENTS.md requires tests in separate files.\n\n**Tests.** A new container writes the header and sibling file; a nested target writes beside the nested module; a second move appends; a `#[path]` source container stays a file; a cargo failure rolls back rows and files; `check --warnings` stays clean.\n\n**Out of scope.** Moving impl blocks or methods apart from their type (T1); Rust `merge` (T2); cross-project `extract`; converting an existing inline container in the target (it keeps today's `E1004`).",
+  "closedTime": 1793046765,
+  "column": "complete",
+  "createdTime": 1792720972,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "850a33d7aff739db",
+  "links": [],
+  "milestone": null,
+  "rank": 261.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust test containers as files"
+}

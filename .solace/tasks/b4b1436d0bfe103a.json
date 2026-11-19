@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793651935,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793639417,
+  "column": "complete",
+  "createdTime": 1793635191,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b4b1436d0bfe103a",
+  "links": [],
+  "milestone": null,
+  "rank": 242.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "check: dependent projects on every save"
+}

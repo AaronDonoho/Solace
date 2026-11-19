@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035351,
+  "body": "Rust: a function brought into its parent module by a `use` list loses every unqualified call, so `refs` says nothing uses it and the test check says no test reaches it. Both are wrong.\n\n**Example (solace-cli):** `board` has `use strategy::{strategy_brief, strategy_list, strategy_note_show, strategy_run_show, strategy_show};`. For all five, `refs` finds no bare-name calls:\n- `board::strategy.strategy_note_show` is called by `board::strategy.strategy_command` (same module), `board::tests.strategy_show_run_outlines_and_picks_steps` and `board::strategy.tests::strategy_note_show_names_notes_in_a_bad_list`, yet `refs` says \"Nothing uses\".\n- `strategy_run_show` shows only its `super::`-qualified call.\n- Functions that aren't in that `use` list (`in_parts`, `step_list`) resolve correctly.\n\n**Done when:**\n- Unqualified calls to a function count as uses of it, both in its own module and through a parent's `use` (including `use super::*` in tests).\n- `refs board::strategy.strategy_note_show` lists those three callers.\n- No test reaches warning appears for a changed function that a test calls this way.\n- A test pins this case.",
+  "closedTime": 1792987251,
+  "column": "complete",
+  "createdTime": 1792981330,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "95e12d0ef98680e1",
+  "links": [],
+  "milestone": null,
+  "rank": 86.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "refs: count calls through a parent's use"
+}

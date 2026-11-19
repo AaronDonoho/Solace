@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792036273,
+  "body": "The human's decision in task:6c746fe1f9058f87 (note 18): **an extract into another project that didn't finish is always undone**, as if it never ran. Solace never finishes a stopped extract and never keeps one for a human.\n\n## Change\n\nIn `extract/ahead.rs`, recovery (`recover` → `settle`) has three outcomes today: finish, roll back, or keep for a human (`E7029`). Leave only **roll back**:\n\n- Remove the finish path (`finish`, and the computed result that `complete` writes so finishing can replay it, if nothing else uses it).\n- Remove the kept state and `E7029`. No project is ever frozen, and revert and cancel never refuse because of an extract record.\n- **Edits made outside Solace while the extract was stopped are kept.** Undo puts back only what the extract itself wrote; the files `edited` finds are left as they are. Solace then picks them up as any outside change (D-58).\n- **The task gets a note** when an extract is undone, e.g. \"An extract of run <run> was interrupted and has been undone; run it again if it is still needed.\"\n- `E7028` (\"the other project is busy; try again\") stays as it is.\n- **Files the extract created are deleted only by the rollback.** The general cleanup in `outside.rs` (the loop that calls `remove_empty_dirs`) skips files an extract record covers, so the two never delete the same file.\n\n## Records\n\n- A decision in DECISIONS.md that amends D-103: the single recovery rule, outside edits kept, the note, and `E7029` removed.\n- Spec 3 (`specs/03-protocol.md`): the recovery rule and `E7028`.\n- Update the comments in `ahead.rs` that describe three outcomes.\n\n## Tests\n\n- Replace the `E7029` checks in `tests/workspace_acceptance.py` (the `files` and cancel refusals) with: an extract interrupted after one project committed is undone in both, the other side's outside edits are kept, the task has the note, and `files` and cancel work.\n- An interrupted extract with no outside edits is undone in both projects, and running it again succeeds.\n- Remove unit tests for finishing or keeping; keep `a_file_matching_neither_side_is_edited`.",
+  "closedTime": 1792010049,
+  "column": "complete",
+  "createdTime": 1791949690,
+  "dependsOn": [],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "67b368c6a6eacc60",
+  "links": [],
+  "milestone": null,
+  "rank": 118.0,
+  "scope": [
+    "."
+  ],
+  "title": "extract: always undo an interrupted extract"
+}

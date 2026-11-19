@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792991839,
+  "body": "Add a read command, `lookup <question>`, that returns the few passages of the project's own writing most likely to answer a plain-language question. Today agents can search only by exact words (`grep`), and a weak model often doesn't know the words the text uses.\n\n### Behaviour\n- **Sources:** Solace's own reference (`reference.REFERENCE`) and the project's watched Markdown files (here that includes `DECISIONS.md` and `specs/`). Unwatched files are not searched, the same as `grep`.\n- **Passages:** each Markdown file is split at its headings; a decision entry or spec section is one passage. The reference is split at its sections.\n- **Ranking:** by the words shared with the question, weighted so rare words count more than common ones (a standard method such as BM25; the worker picks). No model, no download, nothing to install.\n- **Reply:** the best 3 passages, each as its file (or `reference`), its heading, its line range for `read --lines`, and a short excerpt, within the normal reply budget. If nothing matches well, it says so and suggests `grep`.\n- Allowed wherever the other reads are, including strategy runs, with `--project <folder>` as for `grep`.\n\n### Docs\n- `reference.txt`: a line under Reading saying when to use `lookup` (a question, wording unknown) and when to use `grep` (exact text).\n- A decision in `DECISIONS.md` recording the command and that it uses no model.\n\n### Tests\nIn the `lockdown` tests, next to the `grep` ones:\n- a question worded differently from a heading still finds its passage when they share key words\n- unwatched files are never returned\n- the reply respects the budget\n- a question with no good match gets the \"nothing found\" reply\n\n### Out of scope\n- An embedding model or reranker: add one only if word-ranking proves to miss questions worded differently from the text. That needs a model client in Solace (see task:30881953fb66677f) and a model on each computer.\n- Searching code (that's `find`).\n- Knowledgebase pages (milestone:208dbeb9095a5a4b) as a source, until they exist.\n- General knowledge outside the project.",
+  "closedTime": 1792991675,
+  "column": "complete",
+  "createdTime": 1792991556,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "d3f56b1f75c73ac5",
+  "links": [],
+  "milestone": null,
+  "rank": 95.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "lookup: find passages that answer a question"
+}

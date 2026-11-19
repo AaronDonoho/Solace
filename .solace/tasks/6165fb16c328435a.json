@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793665637,
+  "body": "Add Settings-page controls for assigning a default and backup model or agent to each defined role.\n\n### Scope\n- List the canonical roles from task:7e5105f14ac6e1ec in Settings.\n- For each role, let the human choose a default and a backup from the configured models/agents.\n- Persist assignments through the server-backed settings API and machine configuration, following the existing settings pattern.\n- Keep missing or unknown assignments non-fatal: use the existing model fallback and show a clear empty state.\n- Add focused tests for persistence, round-tripping and fallback behavior.\n\n### Acceptance criteria\n- Every defined role has independent default and backup selections in Settings.\n- Assignments survive restart and are readable by the board.\n- The page explains what default and backup mean in plain language.\n- Invalid or missing configuration falls back without blocking the app.\n\n### Out of scope\nDefining role semantics, changing role names, defaulting model selectors elsewhere, Autorun, brief generation, and model-provider configuration.",
+  "closedTime": 1793569381,
+  "column": "complete",
+  "createdTime": 1792729959,
+  "dependsOn": [
+    "7e5105f14ac6e1ec"
+  ],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/settings",
+  "id": "6165fb16c328435a",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 267.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "Agent roles: assign models"
+}

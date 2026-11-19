@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159126,
+  "body": "Found in task:2414798176c466e4: runs 9f6696d0464e5adc and af333848436847ab. Most of its `extract` calls ended with *Not moved: the result does not type-check*, and the errors came from Solace's own rewrite, not from the agent's choices. So the agent fell back to editing by hand.\n\n1. **A staying caller isn't rewritten.** In run af333848436847ab, steps 53, 70 and 77, `extract crate.fail crate.usage --to diagnostics` left a bare `return fail(format!(` call in `crate.Store::submit_symbols_blocks` (line 49). The compiler suggested `use crate::diagnostics::fail`. `merge diagnostics.fail crate.fail` (step 83) failed the same way. Other calls in the same method were rewritten, so some call shape is being missed (possibly a multi-line call; not confirmed).\n2. **Moved code loses a trait import it needs.** In run 9f6696d0464e5adc, step 113, `extract crate.stdin --to cli` failed because `read_to_string` needs `std::io::Read` in scope, and that import wasn't carried over.\n3. **A moved type's private fields stay private when other modules use them.** In run 9f6696d0464e5adc, step 19, moving `Failure(String, i32)` and `Diag` left their fields private. That broke every outside site that builds `Failure(..)` or reads `.0`, `.1`, `d.symbol`, `d.text` and so on. D-205 says moved code's private fields become `pub(crate)` when needed. This step ran before task:9762fb9af04c8c77 changed when visibility is raised, so check whether it still happens.\n\n### Done when\n\n- Unit tests cover all three cases: a staying multi-line bare call to a moved function, moved code that calls a trait method, and a moved tuple struct whose fields are used outside the destination. Each one moves and type-checks.\n- `extract crate.fail crate.usage --to diagnostics` succeeds on a copy of solace-cli (or the case is reproduced in a test).\n- `check --warnings`, `rust-unit` and the extract acceptance suite pass.",
+  "closedTime": 1793120284,
+  "column": "complete",
+  "createdTime": 1793119263,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "c6a21e1622c6b25a",
+  "links": [],
+  "milestone": null,
+  "rank": 296.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: moved Rust code type-checks"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056540,
+  "body": "Add the engineering practices from the investigation (task `1f282969708a99a0`) to the built-in work and review briefs, so every project gets them.\n\n### Work runs\n\n- Look for existing code to reuse before adding new code; don't copy code; keep functions small and focused; give each new symbol a clear name and description.\n- Every behaviour change comes with tests. A bug fix includes a test that fails on the old code.\n- Report in the summary what was tested and how.\n\n### Review runs\n\n- Check that tests cover the change, and flag tests that were weakened, deleted or changed to fit the new code.\n- Flag duplication and growing complexity as findings; minor ones become tech debt (D-112).\n\n### Notes\n\nThe wording is the investigation's. Keep the brief short: use rules a weaker model can follow, not general advice. Put language-specific detail in `reference.txt` if it doesn't fit in the brief.",
+  "closedTime": 1794975864,
+  "column": "complete",
+  "createdTime": 1792092151,
+  "dependsOn": [
+    "1f282969708a99a0"
+  ],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "65a103e60528001a",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 160.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: built-in engineering practices"
+}

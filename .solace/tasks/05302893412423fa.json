@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1794972378,
+  "body": "The last release's artifacts are reachable from the Build tab.\n\n- The Build tab shows the latest release under the build: its version, and each artifact's name, size and checksum.\n- **Download:** `GET /releases/{version}/{path}` serves an artifact, and only paths listed in that release's `release.json` (no path traversal).\n- **Open folder:** in the desktop app, a button opens the release's folder in the system file manager through a Tauri command in `solace-app`. In a browser tab the button is hidden.\n\nWiden the scope to the Delivery page project and `solace-app` once they exist (D-127).\n\n**Tests:** the route serves a listed artifact and refuses an unlisted path or `..`; a view test checks that the button shows only in the desktop app.",
+  "closedTime": 1794891623,
+  "column": "complete",
+  "createdTime": 1791953401,
+  "dependsOn": [
+    "0e5af8f4b249b58e",
+    "a1368aa20450d228",
+    "6e93c06d910d2527"
+  ],
+  "feature": "420d08a86f2b840f",
+  "home": ".",
+  "id": "05302893412423fa",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 128,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "artifacts: download and open folder"
+}

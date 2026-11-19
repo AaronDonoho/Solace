@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312244,
+  "body": "The model pick currently shows Haiku 4.5 and not Haiku 5.5. The shipped `claude-haiku-4-5` entry in `solace-cli/src/default-models.toml` is a live exact model, and `board.served` prefers a live exact model over the `claude-haiku` alias. That alias is the one that means \"latest\", so the stale exact entry hides it. The same ranking can hide newer exact models returned by the provider's list.\n\nUpdate the built-in Anthropic presets to the current models, including Haiku 5.5 with the exact model string Claude Code accepts. Add a regression test that the list built from the shipped presets and Claude aliases shows Haiku 5.5 as the Haiku entry, and still shows one entry per family. Keep configured and provider-discovered models working as they do now.\n\nLeft out: automated refresh of the presets and a broader change to how provider-discovered models outrank built-in ones. Those are larger than the reported list fix; consider them separately if the stale-preset problem returns.",
+  "closedTime": 1793237572,
+  "column": "complete",
+  "createdTime": 1793223585,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "1f853013bb4cde6e",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 173.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "models: show the latest Claude models"
+}

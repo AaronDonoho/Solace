@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793482476,
+  "body": "The selector already discovers Codex models: `board::agents.codex_models` asks `codex app-server` and merges the answer, with the shipped presets only as a fallback. Claude is only partly dynamic. `board::agents.claude_models` offers one alias per family (`opus`, `sonnet`, `haiku`, `fable`), each meaning the latest of that family, and adds the exact ids from Anthropic's `/v1/models` when `ANTHROPIC_API_KEY` is set.\n\nThe gap is in `board.served` and `board.rank`: every live exact Claude model ranks the same, and a tie keeps the earlier entry. The shipped presets come first, so a hard-coded exact id can beat a newer exact id discovered from the provider. Today the presets happen to be current (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5), but the next release stays hidden until someone edits `solace-cli/src/default-models.toml`. Without an API key, the alias is the latest, yet the preset exact still hides it.\n\nMake the selector prefer, within a Claude family: the human's configured entry, then a provider-discovered exact model, then the family alias, then a built-in exact preset. A gone entry stays below a live one. Keep one entry per family and keep D-150's label rules.\n\nAdd a regression test with a shipped-style preset for `claude-opus-5-5` and a discovered `claude-opus-5-6` in the same family, asserting the pick serves 5.6. Add a case where a preset with no discovery gives way to the alias, and one where a human's configured entry stands in front.\n\nTradeoff to keep visible: without an API key the pick will show \"Opus (latest)\" rather than a version label until a run stores the exact model it used. That is the cost of not trusting a hard-coded id.\n\nLeft out: removing the presets, automatic refresh or editing of `default-models.toml`, discovering Claude families outside `FAMILIES` without an API key, and any change to Codex discovery. Follow-up to task:1f853013bb4cde6e.",
+  "closedTime": 1793479388,
+  "column": "complete",
+  "createdTime": 1793312435,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6b717a75d571aaff",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 205.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "models: latest outranks hard-coded presets"
+}

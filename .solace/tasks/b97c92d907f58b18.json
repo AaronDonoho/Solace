@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791928477,
+  "body": "Part of feature:3e8b5fe47bba41c4. Builds D-119 points 5 (wording) and 6, follow-on (d) from task:e9ad81a4e3fb4689. Waits for task:e3d0a457e8eb596d: the reference must not tell agents to batch `write` + `run` until a failed write stops the call.\n\n**What changes:**\n\n- `reference.txt` step 2: extend \"change and test in one call\" (written for `submit`, then `test`) to plain-file projects. **All the edits of one change, in one file or several, go in one `write` patch (a `*** Update File:` section per file, an `@@` hunk per edit), then `run <name>` on the next line.**\n- `reference.txt` `write` entries: the no-path `write` changes from \"several files at once\" to several edits, in one file or more, at once. `write <path>` with `old` is one replacement, for a single edit.\n- The brief's command list: `write [path]` reads as one replacement, or a patch of many edits.\n- `reference.txt` `task ask` line: check the task's Questions **and** Notes for what is already answered before asking. A discussion run can't `task ask`, so its answers live in notes (the re-ask on task:96249ceddc889684).\n- `board.rs::brief`: one line saying the same, next to the Questions and Notes it already prints.\n- The session-start reference stays under D-117's 3,700 bytes; if it doesn't fit, shorten elsewhere rather than drop any of these lines.\n\nWhy the write wording: work run `bf8401c6229117bd` on task:c1fdd765d7647455 made 11 single-replacement `write <path>` calls (7 on one file) where one patch would have done. Step 2's batching advice only covered `submit`, and \"several files at once\" read as if the patch were only for several files.\n\nThe grep and `files` entries in `reference.txt` change with their own tasks (task:c1fdd765d7647455, task:337a7c4850f58fd9), not here.\n\n**Checks:** `rust-unit` (the brief line, the reference size cap); `rust-acceptance` for any test that matches the reference or brief text.",
+  "closedTime": 1791854769,
+  "column": "complete",
+  "dependsOn": [
+    "e3d0a457e8eb596d"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "b97c92d907f58b18",
+  "links": [],
+  "milestone": null,
+  "rank": 106.0,
+  "scope": [
+    "."
+  ],
+  "title": "Reference: batch file edits, check before asking"
+}

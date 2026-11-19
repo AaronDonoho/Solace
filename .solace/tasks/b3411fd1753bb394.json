@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312247,
+  "body": "On task:21241abf8e6ac8a7 (run 97ca8ef169935123), four `extract … --to store_read`/`--to store_write` calls failed the type check, so nothing moved (steps 43, 55, 57, 71, 73). The worker got past them by guessing `use` lines into the target with `submit --imports` first. That only worked in part, and it left `unused import` warnings along the way. Every failure came from moving code **out of the crate root** into a new module.\n\n### What failed\n\n1. **Names the crate root could see weren't carried.** The moved bodies use `scope::dir` (a crate-root `mod scope;`), `Kind`, `Ref`, `operands`, `next_step` and `path_dependencies` (crate-root items or re-exports), and `Path` (a crate-root `use`). In the new module these need `use crate::…` or `use std::path::Path`, and the extract added none of them. The carrying code is in `extract::rust::imports`; it looks like the crate root as a *source* isn't covered there. Confirm by reproducing.\n2. **Other modules lost a name they reached through the root.** `rust_submit` uses `Diag` through `use crate::*`. Once the moved code left the root, the root's `use … Diag` went with it, and `rust_submit` broke in `submit_module_rust`, `submit_symbols_rust`, `submit_imports_rust` and `delete_rust`. Extract should either leave the root import in place or add the import to modules that relied on the glob. The worker ended up adding `use crate::diagnostics::Diag` to `rust_submit` by hand.\n3. **Private fields of a staying struct.** Moved `mark_served` builds `crate::reads::Served { project, symbol, … }`, but those fields are private to `reads` (E0451). Extract already raises a moved item's own fields (D-205). It should also raise fields of a staying type that the moved code uses, to `pub(crate)` or only as far as needed (D-211).\n\n### Done when\n\n- Each case has a test in `extract::rust::tests` that moves crate-root code into a new module. Each test failed before the fix and type-checks after it, with no hand-written imports and no new warnings.\n- `check --warnings` shows 0 warnings, and `rust-unit` and `rust-acceptance` pass.\n- The rust docs say what extract carries and raises. That's the subject of task:e1f8144821128de1, so keep the two consistent.",
+  "closedTime": 1793295894,
+  "column": "complete",
+  "createdTime": 1793256598,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b3411fd1753bb394",
+  "links": [],
+  "milestone": null,
+  "rank": 192.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: moving out of the crate root type-checks"
+}

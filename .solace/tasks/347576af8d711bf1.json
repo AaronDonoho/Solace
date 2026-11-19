@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793483697,
+  "body": "task:a902c13a6f97d93f moved the task viewer to the side once the window is at least 0.91 times as wide as it is tall. That was too aggressive. Change it to **1.1×**.\n\nToday `watch_side` in the board's `api.mjs` uses `(min-aspect-ratio: 91/100)`. The new value is `11/10`.\n\n## Done when\n- `watch_side` uses `(min-aspect-ratio: 11/10)`.\n- Text that names 0.91 says 1.1: the comment above `watch_side` in `api.mjs`, the doc comments on `solace_board.Model` (`side`), `solace_board.Msg` (`Sided`) and `solace_board.watch_side`, the doc comment on `solace_board_test.a_wide_window_puts_the_band_on_the_side_test`, and the board README.\n- The board's and the frontend's bundled `app.js` are rebuilt.",
+  "closedTime": 1792951476,
+  "column": "complete",
+  "createdTime": 1792950630,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "347576af8d711bf1",
+  "links": [],
+  "milestone": null,
+  "rank": 173.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "board: side band at 1.1× width"
+}

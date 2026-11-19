@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791858539,
+  "body": "In `<solace-task>` (`solace_task.gleam`), the Details tab gets a **Depends on** line when `dependsOn` isn't empty. Each dependency is a task link (D-98, `/task/<id>`, which the shell follows), shown with its title and its current column. Unfinished dependencies are marked as in the board task: not in a final column, with cancelled counting as finished.\n\n- Show only; Strategy's Roadmap tab still edits dependencies.\n- A dependency can be in another project, so get its title and column from the root. A task that can't be found shows its id.\n- It updates live when a dependency changes column or title, or when `dependsOn` changes.\n- The board and Strategy both host this component, so both get the line. Update the components README and the element's tests.",
+  "closedTime": 1791764681,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "29f4838ffb0cb0d0",
+  "home": "solace-cli/components",
+  "id": "7657312687f8d066",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Task details: list dependencies as links"
+}

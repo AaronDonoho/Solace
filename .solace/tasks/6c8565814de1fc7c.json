@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793656129,
+  "body": "### Need\nA change to a shared project (here the components' `solace_task.Column` gaining `role`) passed its own check, tests and review, but broke a project that depends on it (frontend's `knowledgebase.known_columns`). The break showed only in the full app build. See task:b0fadf061f7d551a, notes 1–2.\n\n### Required behavior\n1. When a change is saved in a project, every workspace project that depends on it by path (the same list `extract::deps.dependents` gives, but over all workspace projects, not only the task's) is type-checked against the change.\n2. A new error in a dependent, compared with what was already broken there, refuses the save: nothing changes. The refusal names the dependent project and its first errors. When the task doesn't cover that project, it says so and tells the agent to ask the human to add it to the task, as `extract`'s E5003 does for moves.\n3. When the task covers the dependent, the agent can fix both in one change, as `extract` already allows.\n4. \"What uses this\" (`refs`) also lists uses in dependent projects, marked with their project.\n\n### Acceptance\n- Repeating the `Column` change in components without updating frontend is refused, naming frontend and the `knowledgebase` call.\n- A change that leaves dependents clean saves as before.\n- `refs solace_task.Column` in components lists the frontend uses.\n\n### Left out\n- Running dependents' tests (separate task).\n- Projects that depend through anything other than a path dependency.",
+  "closedTime": 1793588167,
+  "column": "complete",
+  "createdTime": 1793583520,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6c8565814de1fc7c",
+  "links": [],
+  "milestone": null,
+  "rank": 237.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "check: dependent projects on every save"
+}

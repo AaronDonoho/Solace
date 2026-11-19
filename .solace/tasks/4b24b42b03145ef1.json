@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792368932,
+  "body": "A work run on task:da797576d0cfaaac lost the Solace tool for the rest of its run (run `d0f587f579672c1b`, step 34). The agent sent a batch whose first line was only `--project solace-cli/board`. `run_options` strips `--project <dir>`, which leaves no words, and then indexes `a[0]` (the `extract`/`merge` check in a board run). That panics, and the MCP server process dies because nothing in the `tools/call` loop catches a panic. Every later call got `Transport closed`, and the run ended as \"agent exited without finishing\".\n\n- **Empty command:** in `batch`, a line that has no verb once `--project <dir>` is removed is refused as that line's error: \"`--project` goes on the same line as its command, e.g. `view x.y --project <dir>`\". The rest of the batch runs as usual.\n- **Panic guard:** each `tools/call` runs inside `catch_unwind`. A panic becomes an error reply (\"Solace hit an internal error running `<line>`: <panic message>; nothing after it ran\"), and the server keeps serving. Per-call thread-local state (`SHOWN`, `COMMAND_DB`, `UNTESTED`) is reset before the next call. Any open transaction is rolled back, so no half-done change is kept.\n- Tests: a batch with a `--project`-only line replies with the refusal, and the next line still runs. A forced panic in a command returns an error, and the next call succeeds.\n\nOut of scope: auditing other `a[0]` indexing (the guard covers it); having the board notice a dead MCP server and say so in the run outcome.",
+  "closedTime": 1792343715,
+  "column": "complete",
+  "createdTime": 1792339700,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "4b24b42b03145ef1",
+  "links": [],
+  "milestone": null,
+  "rank": 225.0,
+  "scope": [
+    "."
+  ],
+  "title": "MCP: survive a bad command line"
+}

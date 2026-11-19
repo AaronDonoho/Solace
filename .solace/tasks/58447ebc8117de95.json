@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792192595,
+  "body": "**Bug:** a task stored at the root project (`.`) disappears from the board when the board connects or reconnects. This happens whether or not the task has a feature. Example: *Fix: Agent - Failed to authenticate* (144dce741564c638) is in Planning, but the board doesn't show it.\n\n**Cause:** at the end of every new stream, the server's `Events::strategy_state` (`board.rs`) sends the tasks with no project (D-129) as `{\"tasks\": [...], \"noProject\": true}`. That message has no `project` field. On the board, `solace_board.event_dir` sends a message with no `project` to the lane whose `base` is `\"\"`, which is the root's `.` lane. `task_event` then reads its `tasks` as that lane's full task list. So the `.` lane's tasks are replaced by the no-project list, which here is empty. Later single-task events add tasks back one at a time, so only tasks that changed after the connection show.\n\nThe same thing can happen with a single `{\"task\": ..., \"noProject\": true}` on a stream that isn't merged (`Events::next_task`): it would add a no-project task to the root lane.\n\n**Fix (board only):** the board ignores any `/events` message with `noProject: true`, both the list and a single task. These tasks are in no lane (D-129) and only the Strategy page uses them. Do this in `live` or `knows`, so held messages (`settle`) skip them too. The server and the Strategy page stay as they are.\n\n**Test:** in `solace_board_test`, set up a workspace model with a `.` lane that holds a Planning task with no feature. Applying `{\"tasks\":[],\"noProject\":true}` leaves the task in that lane's cards. Applying `{\"task\":{...},\"noProject\":true}` adds nothing.",
+  "closedTime": 1792079914,
+  "column": "complete",
+  "createdTime": 1792008883,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "58447ebc8117de95",
+  "links": [],
+  "milestone": null,
+  "rank": 31.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "board: no-project snapshot empties the root lane"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183766,
+  "body": "Any agent can find and read a design while working, by its `design:<id>`, without needing to know where the file lives.\n\n### Do\n\n- Add `design list` and `design show <id>` as read commands in work, investigate, review and strategy runs. They use the same reading code as `GET /designs`, so there is one way to read a design.\n- `design show` takes the ID bare or as `design:<id>`.\n- Document both in the reference and `help`. Keep the session-start reference within its limit (D-102).\n\n### Acceptance\n\n- Tests: both commands work in each run kind, an unknown ID gives a refusal that says how to list designs, and the reply is clearly limited for a very large design.\n\n### Left out\n\nPointing a task's brief at a design it names, which belongs to feature:2fbf4ee3c8e49977.",
+  "closedTime": 1794098917,
+  "column": "complete",
+  "createdTime": 1793913885,
+  "dependsOn": [
+    "ac6ed25bd94c0d4a"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "4b8e08231c2d7afe",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 339.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: agents read a design"
+}

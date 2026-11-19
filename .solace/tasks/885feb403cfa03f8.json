@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690239,
+  "body": "Summary\nI read through the D-77 task store: tasks.rs, the task paths in board.rs (adopt_tasks, needs_lock, guard, change, message, task_command, supervise, finish, Events), lockdown::recover, outside::absorb and the board client (api.mjs, solace_board.live / start). The design holds up overall: one writer thread, and project locks are always taken in the same order. But I found ways to lose edits, apply stale edits, leave the board out of step with the store, and stall it. They are listed by severity. Nothing was changed, and no tests were run (this run is read-only and run is refused).\n\nHigh: edits silently lost or applied wrongly\n\ntask done settles in the agent process before the server has applied the move (task_command, ~2547–2560). It predicts the final column from the task as it was, runs settle (approves the changes and drops the undo records) under the scope locks, and then sends the message. If the server's state has moved on (Stop/Cancel/move, or item 2 once fixed), the undo records are already gone but the task is not complete. Fix: settle only on the server side, at the moment the task really enters a final column: through an op taken under the guard, or have done ask the server to settle with the locks held.\nStop then Cancel can leave the task's file changes in place. Stop is lock-free and ends the run, and supervise kills the agent within about 50 ms, maybe mid-write. That leaves a pending undo record but no committed rows. Cancel then calls needs_lock, which sees no live work run, no board_touches and no board_before, so it cancels with no lock and no undo. At the next command or serve, lockdown::recover adopts the pending record for that task, so the cancelled task now owns changes that were never undone. Fix: needs_lock (and the check inside the op) should also return true when any scope project has a .solace/pending/*.json record for the task. Better still, revert/settle should run recover first while holding the locks.\n\neach needs an acceptance test (Stop→Cancel during a write; done racing Cancel).",
+  "closedTime": 1791423892,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "885feb403cfa03f8",
+  "links": [],
+  "milestone": null,
+  "rank": 35.0,
+  "scope": [
+    "."
+  ],
+  "title": "Task Store debt: edits silently lost or applied wrongly"
+}

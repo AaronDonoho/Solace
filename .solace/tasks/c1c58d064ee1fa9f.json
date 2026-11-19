@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183754,
+  "body": "Design becomes its own page in Solace, with **Architecture** and **UI/UX** tabs. The tabs are empty for now.\n\n### Do\n\n- Build `<solace-design>` in the new `solace-cli/design` project, a Lustre app like Strategy and Settings (D-90, D-97): the shell depends on it by path and registers it.\n- Add **Design** to the menu between Strategy and Board. D-146 lists the menu's order, so record the change in a decision amending it.\n- The server serves the shell at `/design`.\n- The tab shown is in the address, as Strategy's is (`?tab=`), following D-189: Back and Forward move between tabs, and a reload stays on the same tab.\n- Update the frontend README's routes and add a README to the new project.\n\n### Watch out for\n\n`frontend.page` treats every `tab` event as a Strategy tab, and `frontend.tab_changed` and `frontend.navigate` assume `/strategy`, so a Design tab change would jump to Strategy. task:4ecf4f5061289cbf has the same problem for Settings; whichever lands second should reuse the first one's fix. Tab styles are private to Strategy today, so share them rather than copy them if that stays small, or file the copy as tech debt.\n\n### Acceptance\n\n- Tests: both tabs are listed, the address round-trips a tab, an unknown tab falls back to the first, and choosing a Design tab stays on Design.\n- The menu shows Design between Strategy and Board.\n- `/design` loads directly.\n\n### Left out\n\nListing designs, and which tab comes first is the worker's call unless the human says otherwise.",
+  "closedTime": 1793921871,
+  "column": "complete",
+  "createdTime": 1793914350,
+  "dependsOn": [],
+  "feature": "9d778f6e03dea799",
+  "home": "solace-cli/design",
+  "id": "c1c58d064ee1fa9f",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 1.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design",
+    "solace-cli/frontend"
+  ],
+  "title": "design: page with two tabs"
+}

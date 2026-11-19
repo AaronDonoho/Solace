@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791690201,
+  "body": "Depends on \"Strategy Features tab: read-only list\".\n\n- A form with title, the shared Markdown `editor` (its own textarea id), a state `<select>` (`proposed|planned|active|complete|canceled`) and a milestone `<select>` with \"(none)\".\n- Add model fields for the draft, a saving flag and an error. Save sends `POST /features` with a `request` id, or `PATCH /features/{id}` with only the changed fields. Show errors (`E7001`, `E7023`).\n- Tests: the request bodies for create and for edit with only changed fields, plus a create/edit step in the JS flow. Update the README.\n\nPieces 2–4 of the Features tab all edit `features.gleam` and `update`, so run them one after another rather than in parallel.",
+  "closedTime": 1791651821,
+  "column": "complete",
+  "dependsOn": [
+    "d8c18f595afa4a0e"
+  ],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "64de3d5fa48b6b91",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy Features tab: create and edit"
+}

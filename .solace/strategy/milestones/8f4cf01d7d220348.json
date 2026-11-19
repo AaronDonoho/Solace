@@ -1,0 +1,9 @@
+{
+  "body": "Solace should support a subset of Rust as a symbol store, and fully adopt its implementation.",
+  "id": "8f4cf01d7d220348",
+  "rank": -2,
+  "request": "8fea8822-17f7-4db8-94f5-181baca4c1d3",
+  "state": "complete",
+  "targetDate": "2026-10-19",
+  "title": "Native Rust (Subset) Support"
+}

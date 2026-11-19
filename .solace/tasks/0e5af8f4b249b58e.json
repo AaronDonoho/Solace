@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972377,
+  "body": "A passed build's outputs become a stored release.\n\n1. **Decision first** in `DECISIONS.md`: the output folder and its read-only option, and what a release record holds.\n2. **Output folder.** `build-output` at the root by default. It is set on the Build tab and stored in the root `solace.toml` (`[build] output = \"build-output\"`); a change from the default is the human's, so it is written directly, not proposed. Never under `.solace/`. Solace adds it to `.gitignore` when it creates it.\n3. **Read-only option.** `[build] output_read_only = true` (default on): lockdown treats the folder as readable but not writable for agents (`write`, `remove` and creates under it are refused with an error naming the setting). Off: the folder is an ordinary unwatched folder. Only builds write to it either way.\n4. **Release record.** On a passed build, each recipe's `outputs` are copied to `build-output/<version>/<project>/`, and a `release.json` is written beside them: version, build id, time, each artifact's path, size and SHA-256, the source commit (and whether the tree had uncommitted changes), and the toolchain versions (`gleam --version`, `cargo --version`, `bun --version` as used). Until the versions task lands, the version is the build id.\n5. **API:** `GET /releases` and `GET /releases/{version}` read the records.\n6. **Specs:** Spec 14 (the read-only tier) and Spec 15 (the routes).\n7. **Tests:** outputs copied and hashed; a missing output fails the build with its path named; an agent write under the folder is refused when read-only and allowed when not; `.gitignore` gets the folder once. Run `rust-lockdown-tests`, `rust-board-tests`.",
+  "closedTime": 1794888719,
+  "column": "complete",
+  "createdTime": 1791953369,
+  "dependsOn": [
+    "a0e075890880e6a0"
+  ],
+  "feature": "420d08a86f2b840f",
+  "home": ".",
+  "id": "0e5af8f4b249b58e",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 124,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "artifacts: output folder and release records"
+}

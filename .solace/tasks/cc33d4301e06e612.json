@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1795056534,
+  "body": "A human changes what exists on a UI/UX design directly: with one element selected, they change its properties, such as its text or a color, and the change is saved through task:f90a4ae01bdae411.\n\n### Do\n\n- With one element selected (task:ab14673c99699681), the human can change the properties its type holds, including its style overrides (D-237).\n- A change the server refuses shows its message, and the design stays as saved.\n- There is no text editor for the design's data.\n\nAsk the human whether a change saves straight away or on a Save action, and how the properties are shown. The plan's inspector panel and color picker haven't been agreed.\n\n### Acceptance\n\n- Tests: changing a text and a color saves the expected operation, and a refusal leaves the drawing as saved.\n- Update the README.\n\n### Left out\n\nResizing and moving by dragging, and the Architecture tab.",
+  "closedTime": 1794976185,
+  "column": "complete",
+  "createdTime": 1794273281,
+  "dependsOn": [
+    "ab14673c99699681",
+    "f90a4ae01bdae411"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "cc33d4301e06e612",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 16.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/design"
+  ],
+  "title": "edit: change a selected element"
+}

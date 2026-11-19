@@ -1,0 +1,8 @@
+{
+  "body": "Solace works out of the box for people who don't know engineering practice, on any machine, for Gleam, Rust and JavaScript projects.\n\n- Agents talk to the human at the level the human picks, and put in front of them only the decisions they can make.\n- Good practice is built into Solace itself, not this repo's docs: maintainable code as the project grows, no regressions, and agents that push back when a task contradicts something.\n- A new user gets from install to a first task without a terminal or reading code.\n\nEverything here has to work in the shipped app, not only on the developer's machine.",
+  "id": "ef20b1d7f60b21cc",
+  "rank": -1,
+  "state": "complete",
+  "targetDate": "2026-10-28",
+  "title": "Approachable Solace"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159124,
+  "body": "D-206 puts a module's tests in `<module>_tests.rs` beside it, attached with `#[cfg(test)] #[path = \"<module>_tests.rs\"] mod tests;`. `extract` already does this (`extract::rust.test_file`). But `submit --new <module>.tests` still creates a nested `<module>/tests.rs`, and `move` refuses to rename source held as symbols (`E6001`). So in run 53395ca4a05b3ca3 on task:32ad4bda2e68c02d, the worker ended up with `src/fsx/tests.rs`, `src/jsonx/tests.rs` and `src/project_paths/tests.rs` and had no way to fix them. A later `extract` into `jsonx` was then refused with `E1004`.\n\n### Change\n\n- In a Rust project, `submit --new <module>.tests` writes `<module>_tests.rs` beside the module file and adds the `#[cfg(test)]` / `#[path]` / `mod tests;` lines to the module. Reuse `extract::rust.test_file` for the path.\n- Relocate the three misplaced test files to `src/fsx_tests.rs`, `src/jsonx_tests.rs` and `src/project_paths_tests.rs`, keeping each test's identity, and remove the empty `src/fsx/`, `src/jsonx/` and `src/project_paths/` folders.\n\n### Acceptance\n\n- Unit test: `submit --new a.tests` in a Rust crate writes `src/a_tests.rs` and the `#[path]` lines, and the crate builds.\n- A later `extract` of a test into that module appends to the file (D-206 point 2).\n- `rust-unit` passes and `check --warnings` is clean.",
+  "closedTime": 1793062648,
+  "column": "complete",
+  "createdTime": 1793059051,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "087385a9030ad17e",
+  "links": [],
+  "milestone": null,
+  "rank": 113.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: new Rust tests module as <module>_tests.rs"
+}

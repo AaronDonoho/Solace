@@ -1,0 +1,15 @@
+{
+  "archivedTime": 1793835062,
+  "body": "Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or canceled.",
+  "closedTime": 1793835060,
+  "column": "complete",
+  "createdTime": 1793833070,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "be15fe60abf311fa",
+  "links": [],
+  "milestone": null,
+  "rank": -1.0,
+  "title": "Unexpected Changes"
+}

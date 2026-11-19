@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159110,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793144236,
+  "column": "complete",
+  "createdTime": 1793140282,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "def7eba72b6c9273",
+  "links": [],
+  "milestone": null,
+  "rank": 138.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Investigate drafts drop not finding a retained draft: Tech Debt: Tech Debt"
+}

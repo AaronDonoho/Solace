@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972380,
+  "body": "Work task proposed by the investigation task:cb8fe9a6519e90d3 (its latest report, confirmed by its review). Goal: when a test run takes in code another unfinished task has changed, the reply and the task's run log on the board say so, so a pass or a failure isn't mistaken for this task's own work. This is diagnosis, not isolation (see task:f54a8d4394a0cc36).\n\n**Acceptance criteria**\n\n1. **Report on pass and fail.** The test reply and the task's run log name each other unfinished task whose changes the run included, with its project, e.g. *included unfinished changes from task \"Board drag fix\" in solace-cli/board*. The wording says \"included\", never \"caused\". The task that is running the tests is not named.\n2. **Only what the tests that ran can reach.** A task is named only when it changed something that one of the tests actually run can reach. An unrelated unfinished task gives no line. The union is built from the per-test reach of the tests that ran, not from every test: `store_write.Store::test_with` currently collects `reached` over all tests before the due filter, so it can't be reused as is (the review of the investigation found this).\n3. **Tests that did not compile or did not run.** When the code fails to compile, or cargo stops before any test runs, the cause can be anywhere in the crate, so name every unfinished task that has changes in the project's code, `Cargo.toml`, `Cargo.lock` or `build.rs`.\n4. **Unfinished** means not in a final column, as `board::briefs.waiting_on` decides (D-110), not `board.active`. Ownership comes from the recorded task changes (`board::reviews.changes_of`, which skips layout runs, and the `file:` entries). A task with changes in the same project counts, not only other projects.\n5. **Run log.** The line is written to the task's run log, in the way a server's end line already is (`board::runs.record_server_end`), not only returned in the reply.\n6. **Tests.** Built from recorded task changes and task records, not two live runs (D-83): an unfinished task with a change a run test reaches is named; one reached only by a test that did not run is not; a finished or canceled task is not; the task's own changes are not; a compile failure names every unfinished task with crate changes; pass and fail both report.\n\n**Out of scope:** the page bundle (`frontend/priv/app.js`): it has no owner, being over the watch limit and built by a command, so Solace can't say whose half-done work is in it. Recording the unfinished tasks in the bundle's fingerprint belongs with task:6f0e0c1ab314710e. Also out: reports for `build` runs, isolation per task (task:f54a8d4394a0cc36), and changes made outside Solace that no task has absorbed yet.\n\n**Not checked by the investigation:** how many unfinished tasks currently have changes in solace-cli, so how often the line will appear is reasoned, not measured; and how the board shows a line written this way beyond what `record_server_end` shows.",
+  "closedTime": 1794346617,
+  "column": "complete",
+  "createdTime": 1794325537,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "7aaa4d6b942bc278",
+  "links": [],
+  "milestone": null,
+  "rank": 372.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "build: report unfinished changes in tests"
+}

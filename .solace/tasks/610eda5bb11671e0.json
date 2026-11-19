@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794359898,
+  "body": "A human accepts or rejects a proposal as a whole. Accepting saves the design and a new version; rejecting saves nothing. This finishes the design agent's loop.\n\n### Do\n\n- Answering a proposal goes through the panel, as on Strategy. The agent gets the answer and carries on.\n- Accept validates again and saves through the save path, so it adds a version with the design run as its source.\n- A design that changed since the proposal is not overwritten: the accept is refused and the agent is told to propose again (compare D-93's vision rule).\n- Reject changes nothing, and the design goes back to being drawn as saved.\n- An ended run's proposal can't be answered.\n\n### Acceptance\n\n- Tests: accept saves the design and a version, and a new design appears in the list; reject changes nothing; a stale proposal is refused; and the agent's reply names the outcome.\n- One end-to-end check: a human asks for a screen, the proposal is drawn, it is accepted, and it shows in the list.\n\n### Left out\n\nAccepting only part of a proposal.",
+  "closedTime": 1794351476,
+  "column": "complete",
+  "createdTime": 1793914523,
+  "dependsOn": [
+    "149943de0d4deccf",
+    "0af5a7fe711b8a3a"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "610eda5bb11671e0",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 351.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "agent: accept or reject a proposal"
+}

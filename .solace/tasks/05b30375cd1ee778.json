@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793482476,
+  "body": "From the harness discussion on task:30881953fb66677f (note 10). A model provider can skip re-reading the start of a prompt if it is exactly the same as the start of an earlier one (prompt caching). In a fresh run's brief, though, the agent reference (the largest fixed block) comes after the `session start` reply, which is different for every task: status, then the work context, then other projects, then the reference. So no two runs share that cached start.\n\n### Change\n- Put the fixed agent reference first in a fresh run's brief, and the task's own content after it. Then every run on the same endpoint reuses one cached prefix (the agent program's prompt, the tools, the reference).\n- Check that nothing changing (time, ids, status counts) sits inside or before the reference.\n- Show a cache-hit ratio per run on the board's token line (tokens read from cache ÷ all input tokens, summed over the run). The board already reports cached tokens.\n\n### Acceptance\n- Two fresh briefs for different tasks start with the same bytes for the whole reference.\n- Resumed runs are unchanged.\n- The token line shows the ratio when the agent program reports cached tokens, and leaves it out when it doesn't.\n\n### Out of scope\nThe agent program's own system prompt (Solace doesn't control it), pinning a run to one llama.cpp server slot, and anything that needs a Solace-owned harness.",
+  "closedTime": 1793481721,
+  "column": "complete",
+  "createdTime": 1793459842,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "05b30375cd1ee778",
+  "links": [],
+  "milestone": null,
+  "rank": 225.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "title": "briefs: fixed reference first, for caching"
+}

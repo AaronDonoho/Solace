@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690200,
+  "body": "Add the Features tab to the Strategy page. It lists features grouped by target milestone.\n\n- Add the `Feature(id, title, body, milestone: Option(String), rank: Float, state: String)` type and a decoder where every field except `id` is optional. Give milestones a `rank`. Keep `features: List(Feature)` in the model. Adapt `keep`/`records`, the link selects and the test helpers.\n- `src/features.gleam` (D-90: one component per tab) shows milestone groups in rank order, then \"No milestone\". Inside each group, features are sorted by rank, then id. Each feature shows its title, a state badge, its body as Markdown (`solace_task.md`) and its linked tasks (`row.feature == Some(id)` across all projects). Clicking a task sends `Open(dir, id)` and switches to the Tasks tab.\n- Tests: the decoder and its defaults, grouping and order, and an `api.test.mjs` step that renders the list. Add a \"Features tab\" section to the README.",
+  "closedTime": 1791651414,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "d8c18f595afa4a0e",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy Features tab: read-only list"
+}

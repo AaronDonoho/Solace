@@ -1,0 +1,11 @@
+{
+  "body": "Autorun would be a toggle with three settings:\nA) Off: Humans must move tasks\nB) Autopilot: tasks are worked end to end, with tasks pulled by Solace and assigned to agents according to a simple ruleset. Questions are still asked as usual.\nC) Agent-Managed: allows agents to proceed with minimal human oversight; a managing agent also decides which task to pull next. before asking a question, agents consider the options and refer to the managing agent. questions would only be asked if decisions cannot be decided or deferred.\n\n### Classifier decisions\nA small, cheap model that only picks a label may make some of Autorun's quick calls. Rules come first; the classifier decides only what rules can't, and every label it gives is shown in the task's run log so the human can see why.\n- **Model for a task** (B and C): labels the task's difficulty; Solace picks the role's default or backup model and effort from that.\n- **Question gate** (C): labels each agent question as *manager can answer*, *can be deferred* or *needs the human*. When unsure, it goes to the human.\n- **Not the classifier's call:** which task is next (dependencies and rank decide), and approving finished work (review and the human decide).",
+  "colorSlot": null,
+  "id": "760cc1718abae3b4",
+  "milestone": "63a4809d1d3362ba",
+  "rank": 3.0,
+  "request": "50ea9b64-b598-44ee-bca1-1463ab50f271",
+  "startTime": null,
+  "state": "proposed",
+  "title": "Autorun"
+}

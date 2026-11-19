@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791924908,
+  "body": "Part of the `extract` feature. It covers the gap that keeps task:b31923a5d4b96175 (the submit hint) blocked. Run 5efe74d5bd67568c found that `extract --to-project` has landed, but nothing can move a symbol onto a copy that already exists. `extract` refuses with `E1004 X already exists in <module>; Y cannot move there` (the \"names taken in the target\" check in `extract.rs`). The board case is exactly this: `solace_task.Task` already existed in components, so `board.Task` had nowhere to go.\n\nSpec 1 §5 already defines the operation: `merge <survivor> <retired>`. The survivor keeps its identity. The other symbol is retired and linked `merged-into`, and all its references are redirected (invariant I3). This task builds that operation, so `extract` stays a pure move.\n\n**1. Decision first.** Add the next D-number to `DECISIONS.md`. It records that `merge` covers the duplicate case and that `extract`'s E1004 points to it. Update Spec 1 §5's Merge row with the refusals below, and Spec 3 §2's command row.\n\n**2. Command.** Add `merge <survivor> <retired>` in `run_inner`, plus usage, `help` (with a worked example), one line in `reference.txt` (stay under the 3,600-byte session reference, D-102), and the refusal lists for investigation, review and strategy runs.\n\n**3. Checks before anything changes.** Each refusal is one line that says what to do instead.\n- Both names must resolve (E1001/E1002), and they must be different symbols of the same kind (function/constant vs type).\n- Types: the constructors must match by name, arity and labels. Otherwise refuse, listing the differences. The retired type's constructors are redirected to the survivor's.\n- Every module that uses the retired symbol must be able to import the survivor: it is in the same project, or that project depends on the survivor's project through gleam.toml. Otherwise refuse, naming the module and the dependency to add. Projects outside the task's scope are refused as `extract` refuses them.\n- If redirecting a reference would create a module or package cycle, refuse with E5002, naming the uses, as `extract` does.\n- Private helpers that only the retired symbol used are named in the reply as now unused. They are not deleted.\n\n**4. Redirect.** Reuse `extract`'s reference rewriting: qualified uses, unqualified import items including constructor-only `{Task}`, and the clash rules (never invent an alias). Every reference, including tests and dependent projects the task covers, points at the survivor. Unused imports are removed.\n\n**5. One transaction**, gated on `check_all` like `submit`. If the result doesn't type-check, nothing changes, and the reply gives the first errors. This catches signature mismatches between two functions.\n\n**6. History and undo.** The retired symbol gets a `merged-into <survivor id>` history entry, and the rewritten symbols get new revisions. `board::record` rows make task revert and cancel undo it.\n\n**7. Point `extract` at it.** When `extract`'s E1004 finds a same-kind symbol in the target, the message adds: `to fold Y into it, use merge X Y`.\n\n**8. Lean reply.** Names and counts only:\n```\nMerged board.Task into solace_task.Task (components)\nRedirected 9 references in 3 modules (2 projects)\nNow unused: board.lane_of\n```\n\n**Tests (unit):** merge two functions across modules, and a type with its constructors, including an unqualified `{Task}` import. Afterwards the retired identity has no live references (I3). Refusals: kind mismatch, constructor mismatch, an unreachable user module, a cycle. A failed type-check leaves the store unchanged. Revert restores both symbols. E1004 names `merge`.\n**Acceptance:** the board case across two projects (`workspace_acceptance.py`).\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791836566,
+  "column": "complete",
+  "dependsOn": [
+    "d6ac4f3600093a97",
+    "96249ceddc889684",
+    "4e7afa39dcbc3f9a"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "c741943383761e9f",
+  "links": [],
+  "milestone": null,
+  "rank": 95.0,
+  "scope": [
+    "."
+  ],
+  "title": "`merge`: fold a duplicate symbol into its copy"
+}

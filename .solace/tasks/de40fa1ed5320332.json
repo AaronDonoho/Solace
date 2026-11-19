@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792539262,
+  "body": "A dedent or other reshaping of a Rust module should take one call, not hand-written indentation for every item. Evidence: task:97dd1c17a1bddaa5, review run `a2e030b8e527d781`, where `tests.a_plain_refusal_omits_a_project_without_code` ended up dedented one level too far.\n\n### Change\n\n- In a Rust project, `format <module>` runs rustfmt on that module's written file, using the project's `rustfmt.toml` and edition (as `cargo::format_item` does), then reads the file back into the store. Every item of that module is rustfmt's afterwards.\n- The change belongs to the `format` command, as for Gleam (D-58 point 2), and it is type-checked like a submit.\n- `format` with no module stays refused for Rust. The crate isn't rustfmt-clean (about 295 hunks, D-158 point 5), so one call would bury the task's real change. The refusal says to name a module.\n- A file the store doesn't hold (`build.rs`, for example) is out of scope.\n- Record a decision amending D-158 point 5: a human or agent can ask for a whole module to be formatted, and `submit` still formats only the items that changed.\n- Update `src/reference.txt` and `help format`.\n\n### Tests\n\n- A module with a badly indented item comes out formatted, its ids are unchanged, and the change is recorded as `format`.\n- `format` with no module in a Rust project gives the new refusal.\n- A module with a syntax error is not saved, and the reply names the item.",
+  "closedTime": 1792512708,
+  "column": "complete",
+  "createdTime": 1792509463,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "de40fa1ed5320332",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 16.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "format: one Rust module"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183764,
+  "body": "Remove the text: \"Instructions for agents. A skill saved here applies to every project in this workspace.\"\nMove Role Models section down one so it is closer to skills.\nPut the skill toggles for each role into a collapsible box; the expandable header should say \"Edit Skills\" and if there are none available, the expanded box would show only a clickable link \"Define skills\" that brings the view to the Skills section.\nReplace the text from the Role Models section that says \"Choose the model each role starts with. With None, pick one on each task.\" with \"Choose the default model for each role\" and remove the text that says \"Model\"\nRename the Role Models section to \"Roles\"\n",
+  "closedTime": 1794179183,
+  "column": "complete",
+  "createdTime": 1794177744,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "ec7af72641690b90",
+  "links": [],
+  "milestone": null,
+  "rank": 294.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "Settings page, Agents tab: improvements"
+}

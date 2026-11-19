@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125213,
+  "body": "Review `266b2c87d306bfa8` of task:e86828d20aaab5a2 raised this as **blocking**, but the task was completed and the finding was never filed.\n\nThe D-142 hint in `drafts.rs::apply_hunks` (\"`<line>` is line N with K leading spaces; a patch line is a whole line: copy all of it\") is computed only from the hunk's **first** non-blank old line. It fires whenever every old line exists somewhere when trimmed. So it also fires when:\n- the first line matches exactly and a **later** line has the wrong indentation, or\n- every line is right but the lines **aren't adjacent** (context skipped or out of order).\n\nExample on the test fixture `pub fn main() {\\n  let x = 1\\n  x\\n}`: the hunk `-pub fn main() {` / `-let x = 1` is refused with a hint about `pub fn main() {`. That line is already correct, and the hint steers the agent away from line 2, which is the real fault.\n\n## Change\n- Compute the hint from the **first old line with no exact match** (trailing space aside) anywhere in the target. Show the hint only when that line is found with different leading space.\n- When every old line matches somewhere but the hunk doesn't, say the lines aren't adjacent in the file. Don't give an indentation hint.\n- \"1 leading space\", singular (`main.rs::count`).\n- Spec 03's `submit` row and D-142 say what the hint names. Update them if the wording changes.\n\n## Tests\nIn `drafts.rs` tests:\n- A hunk whose first line is right and whose second line has the wrong indentation: the hint names the second line and its real leading space.\n- A hunk of correct lines that aren't adjacent: no indentation hint, and the message says they aren't adjacent.\n- A line with one leading space: the hint says \"1 leading space\".\n- The existing D-142 refusal case still passes.",
+  "closedTime": 1792079768,
+  "column": "complete",
+  "createdTime": 1792076804,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "fc9910f5495fd412",
+  "links": [],
+  "milestone": null,
+  "rank": 151.0,
+  "scope": [
+    "."
+  ],
+  "title": "submit: indent hint names the wrong line"
+}

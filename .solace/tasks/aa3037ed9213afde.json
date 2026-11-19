@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183762,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794019600,
+  "column": "complete",
+  "createdTime": 1794017402,
+  "dependsOn": [],
+  "feature": "7c9cdfad16609a44",
+  "home": "solace-cli",
+  "id": "aa3037ed9213afde",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 290.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "design: UI/UX tab: Tech Debt"
+}

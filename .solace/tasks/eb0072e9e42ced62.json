@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009419,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1791987422,
+  "column": "complete",
+  "createdTime": 1791957024,
+  "dependsOn": [],
+  "feature": "b74a151f65c05ebc",
+  "home": "solace-cli/strategy",
+  "id": "eb0072e9e42ced62",
+  "links": [],
+  "milestone": null,
+  "rank": 97.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Strategy: planning panel usability: Tech Debt"
+}

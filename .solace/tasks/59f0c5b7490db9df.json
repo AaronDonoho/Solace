@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794972394,
+  "body": "Clicking and dragging on the Design page canvas to select elements for a note also highlights the page's text.\n\n## Asked for\n\n- Dragging to select elements no longer highlights text.\n\n## Done when\n\n- A drag across the canvas selects elements without selecting any text.\n- Text in the note panel and the agent panel can still be selected and typed as before.",
+  "closedTime": 1794935678,
+  "column": "complete",
+  "createdTime": 1794935428,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "59f0c5b7490db9df",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 32.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "design select: drag doesn't highlight text"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792539265,
+  "body": "### Why\n\nThe work brief (`board.brief`) says to run `test --all` **and** \"the test commands its `solace.toml` declares\". `solace.toml` can't say which `[commands]` are tests, so agents guess. In task:c00c45bce4291567's work run the agent ran `test --all`, then `rust-unit`, `rust-board-tests`, `rust-lockdown-tests`, `rust-acceptance`, `spacing_parity`, `cargo-fmt-check`, `cargo-test` and `layout_audit`. `rust-unit` and `cargo-test` are the same suite as `test --all`, and the two `rust-*-tests` commands are parts of it. Then it ran most of them again after a one-line fix.\n\n### Change\n\n- A `[commands]` entry can be marked `test = true`, like `allowed_in_reviews`. The key is optional and defaults to false.\n- The work brief names the marked commands of each project the task covers: \"Before `task done`, after your last change, run `test --all` in each project with symbol-held source, and `run <name>` for: rust-acceptance, spacing_parity.\" If a project has no marked commands, the brief leaves that part out. It drops \"the test commands its `solace.toml` declares\".\n- Propose marking `rust-acceptance` and `spacing_parity` in solace-cli's `solace.toml` (a settings `write` with `reason`). They are the only declared suites that `test --all` doesn't run.\n- Update `board::tests.briefs_hold_what_the_agent_needs_as_text`, and record a decision.\n\n### Done when\n\nA work brief for a solace-cli task names exactly `rust-acceptance` and `spacing_parity`, and says to run them once, after the last change.",
+  "closedTime": 1792525682,
+  "column": "complete",
+  "createdTime": 1792472654,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "5957e6ffd37dfc02",
+  "links": [],
+  "milestone": null,
+  "rank": 13.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: name the test commands to run"
+}

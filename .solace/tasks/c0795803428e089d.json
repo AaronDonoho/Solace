@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1792201207,
+  "body": "Part of feature:f414f1311c67fe80. Builds on task:fe22a414170347a5. The board's projects panel moves to the Workspace page, and the board keeps only tasks.\n\n## Workspace page (`solace-cli/migration`)\nAbove the migration section, a **Projects** section has what `solace_board.projects_view` has now:\n- the board's projects (label, package name), each with **Remove**, except the root's own project (\"this folder\"), plus the removal confirmation (`removal_view`)\n- **Found in this folder**: **Add** for a project already set up; one that isn't set up points to the migration section below instead of linking to another page\n- **New project**: package name, folder (default: the package name), and target (Erlang or JavaScript)\n\nIt uses the same API as the board today: `GET /projects`, `POST /projects`, `POST /projects/new`, `DELETE /projects/{dir}`. Errors show on the page as the board shows them. When the list changes, the board's lanes follow through its event stream as they do now. Labels come from `solace_task.ui_label` where the board used it, so the wording stays the same.\n\n## Board (`solace-cli/board`)\nRemove the **Projects** header button, `projects_view`, `removal_view` and the model fields and messages only they use (`projects_open`, `project_name`, `project_dir`, `project_target`, `ToggleProjects`, `AddProject`, `RemoveProject`, `CreateProject`, …). The board still reads `GET /projects` for its lanes.\n\n## Docs\nThe board README (\"holds the lanes, cards, new tasks, projects…\"), the guide's \"Several projects on one board\" section, the root README and Spec 15 say projects are managed on the Workspace page.\n\n**Tests:** the board's project-panel test (`test/api.test.mjs`, \"the project panel sends only the requests its buttons make\") moves to the migration component's tests, with the same requests. Board view tests check that there's no Projects button. Workspace acceptance flows that use the panel still pass.",
+  "closedTime": 1792184366,
+  "column": "complete",
+  "createdTime": 1791957118,
+  "dependsOn": [
+    "fe22a414170347a5"
+  ],
+  "feature": "f414f1311c67fe80",
+  "home": ".",
+  "id": "c0795803428e089d",
+  "links": [],
+  "milestone": null,
+  "rank": 132.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "workspace: move projects panel off board"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690237,
+  "body": "An agent exited during discussion in such a way that \"Needs attention\" flag appeared with an error:\n\nagent exited without finishing (exit status: 0):\n\n…a: a task store the board writes, fed by messages.\n\nWanted: board changes that only touch tasks no longer take the project lock; an agent's run records and task notes go through the board; messages are saved before they're confirmed; a repeated create makes only one task.\nDone when: tests show create, note and stop going through while a command runs; a double-clicked create makes one task; the existing board and workspace acceptance tests still pass.\nAlso needs: a new decision record.\nYour follow-up: commands are locked because Solace can't tell in advance whether they'll change code. I recommended not making the gap. If you want relief before the task store exists, one option is marking a command as one that doesn't write code (for example writes = false) so it runs without the lock. The other is splitting the board's lock from the code lock.\nStill open: whether to fold this task into the task-store task or keep it for the writes = false stopgap.",
+  "closedTime": 1791351461,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "28123849c8f044bb",
+  "links": [],
+  "milestone": null,
+  "rank": 23.0,
+  "scope": [
+    "."
+  ],
+  "title": "Fix: Agent error "
+}

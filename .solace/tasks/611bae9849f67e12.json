@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056531,
+  "body": "The vision, personas, milestones and features are kept only on the machine that wrote them, because the root `.gitignore` block Solace writes (D-179) ignores all of `.solace/` except each project's `store.db` and `approved`. Commit them too.\n\n- Setup's marked block also shares the root's `.solace/strategy/vision.md`, `personas.json`, `milestones/` and `features/`.\n- Strategy run records (`.solace/strategy/runs/`) stay ignored: they are conversations, which D-179 keeps local because they can hold private data.\n- Running setup again on a root that has the old block replaces it with the new one and changes nothing else (D-179 point 2).\n- A record changed by `git pull` shows on the Strategy page without restarting Solace.\n- Record this as a decision amending D-179.\n\nOut of scope: sharing tasks (task:040fefdf07a5aeab), and design records.\n\n**Tests:** the block's text is pinned; a strategy record is not ignored by it and a strategy run is; an old block is replaced.",
+  "closedTime": 1795053968,
+  "column": "complete",
+  "createdTime": 1794787883,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "611bae9849f67e12",
+  "links": [],
+  "milestone": null,
+  "rank": 302.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "share: commit Strategy records"
+}

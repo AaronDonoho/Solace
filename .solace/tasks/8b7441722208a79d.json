@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792557311,
+  "body": "A fresh run's brief should hold the `session start --task` reply (D-151) in every project, so the agent never spends its first turn asking for it.\n\n**Why:** `board.rs::session_reply` gives up when the run's folder has no `.solace/store.db`, as D-151 point 1 allows (\"a folder with no store keeps the line\"). The root `.` is a plain-files project (D-60), so its briefs still carry the old `START` line. In task:c559cbe9135b318a's investigation run, the agent spent its first two calls on it: once without `text`, which failed, then again with the title. Yet `session start --task` answers fine there: `main.rs::plain_session` builds the reply with no store.\n\n**Change:**\n- `session_reply` builds the reply for a plain-files folder too, through the same path the `session start --task` command uses (check whether `Store::at` and `task_session` need a store file, and how the command handles a folder without one).\n- Only a folder where session start really can't answer keeps the `START` line, and the failure is logged as it is now.\n- Amend D-151 point 1 and Spec 15 §6 to match.\n\n**Done when:** a fresh work or investigate run of a task scoped to `.` gets a brief ending in the session start reply, with `HELD_START` in place of `START`. A test covers a plain-files folder, and the existing store-backed test still passes. Resumed, review and discussion briefs are unchanged.",
+  "closedTime": 1792211699,
+  "column": "cancelled",
+  "createdTime": 1792210668,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "8b7441722208a79d",
+  "links": [],
+  "milestone": null,
+  "rank": 186.0,
+  "scope": [
+    "."
+  ],
+  "title": "briefs: session start reply for plain-files projects"
+}

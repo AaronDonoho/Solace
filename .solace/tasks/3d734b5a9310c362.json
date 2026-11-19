@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977622,
+  "body": "`tasks.feature_waits`'s doc comment says `waits` remembers answers \"for a list or stream\". Streams no longer keep it, so the comment should drop \"or stream\".\n\n## Done when\n- The comment says `waits` remembers answers for a list only.\n- No code changes.",
+  "closedTime": 1792956733,
+  "column": "complete",
+  "createdTime": 1792950617,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "3d734b5a9310c362",
+  "links": [],
+  "milestone": null,
+  "rank": 69.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tasks: feature_waits comment drops stream"
+}

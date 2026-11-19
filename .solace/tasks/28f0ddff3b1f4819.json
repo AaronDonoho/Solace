@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "A Solace build runs on a macOS PC and a Windows PC, as it does on Linux: start, follow, cancel, release and download all work, and each PC makes its own platform's targets.\n\nIt's not known how much of the build currently assumes Linux, such as commands, paths, stopping processes and the desktop bundle's sidecar step. Report what had to change.\n\nDone when: Solace's own build passes on macOS and on Windows, and each release holds that platform's desktop bundle.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979665,
+  "dependsOn": [
+    "194dcc378e61ec67"
+  ],
+  "feature": "e40726481f932b3d",
+  "home": "solace-cli",
+  "id": "28f0ddff3b1f4819",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 408.0,
+  "scope": [
+    "solace-app",
+    "solace-cli"
+  ],
+  "title": "targets: build on macOS and Windows"
+}

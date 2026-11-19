@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792902076,
+  "body": "Part 3 of 3 from the friction in work run 972864856add02fd. Depends on task:2ceb8e80f20232ef only because both edit `drafts`, `reference.txt` and the spec's `submit` row.\n\n**Do.**\n- **Nothing saved.** `drafts.retry_advice`: start the footer with \"Nothing was saved.\" for `submit` and \"Nothing was written.\" for `write` (its other caller is `lockdown.patch_with_draft`). In the `--replace` case add: \"Fix only the failing block: `submit --draft <id> --replace` with `old` and `text`; the other blocks stay in the draft, so don't resend the whole patch.\" The RESEND case (a fault in the whole patch) keeps \"send it again whole\". Error codes stay first in each message, so `starts_with(\"E1003…\")` assertions hold.\n- **Rename via Update.** Solace has no `rename` command (human's answer: point to submit). Change `drafts.renamed` to: \"the patch renames {qname} (section at line {n}); `submit {qname}` with the new text renames it and keeps its id; change its callers in the same submit.\" Gleam's `drafts.unit_update_blocks` shares the message and gets the same text; nothing else in Gleam changes.\n\n**Docs.** `reference.txt`: replace \"a real rename goes under its own `*** Add:` header\" with the `submit <stored name>` advice. `specs/03-protocol.md` `submit` row: the rename refusal and \"Nothing was saved\" in the draft footer. Add both points to the decision from task:5dbf397f38dd23b5.\n\n**Tests** (`drafts::tests`, `store::submit_tests`): a submit with a compile error reads \"Nothing was saved\" plus the `--replace` advice; a RESEND fault still has no `--replace`; an Update that changes the item's name names `submit <stored name>`. Update `drafts.tests::whole_patch_faults_say_to_resend` and any assertions on the old `renamed` text.\n\n**Out of scope.** A `rename` command (D-103's future verb).",
+  "closedTime": 1792892413,
+  "column": "complete",
+  "createdTime": 1792622245,
+  "dependsOn": [
+    "2ceb8e80f20232ef"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "961636e3ad2c64fd",
+  "links": [],
+  "milestone": null,
+  "rank": 256.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "submit: refusals say what was saved"
+}

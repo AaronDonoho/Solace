@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1793483693,
+  "body": "At the **Director** involvement level, the task view on the board shows the human outcomes, not code.\n\n### Changes\n\n- Code-level detail (the task's changed symbols, diffs, and run step logs) is folded under a closed **Technical details** section. It is still available, just not in the way.\n- Each task's **Calls made** (from agents' notes) are listed in one place on the task, so the human can look over technical choices made for them. The human can turn a call into a question if they want to decide it themselves.\n- Collaborator and Engineer show what the board shows today.\n\nThe level comes from the board API (task `6a6a1895b45ee268`).",
+  "closedTime": 1793483687,
+  "column": "cancelled",
+  "createdTime": 1792092114,
+  "dependsOn": [
+    "fa07b428e6a616b8"
+  ],
+  "feature": "d597d4887f6e54eb",
+  "home": ".",
+  "id": "003fd9982f989fde",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 157,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "title": "board: Director task view and calls made"
+}

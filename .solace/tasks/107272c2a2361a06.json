@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793916051,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793652559,
+  "column": "complete",
+  "createdTime": 1793649844,
+  "dependsOn": [],
+  "feature": "081a981351f3e658",
+  "home": ".",
+  "id": "107272c2a2361a06",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 333.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Review Feedback Reliability"
+}

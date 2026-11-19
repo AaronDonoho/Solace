@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792009417,
+  "body": "Amends D-132 point 4: an active feature's tasks are planned by **state**, not only by the feature's transition.\n\n**Problem.** Backlog tasks under an already-active feature stay in Backlog, so they are off the board (D-133). Examples: `3fb4a6b4`, `133754b5`, `59d0b7ae`, `c3585499`, `e2b90ee2`, `53bf9de4`.\n\n**Wanted.**\n- A task whose feature is `active` is never in `backlog`. Whenever the task store is loaded or a task or feature is saved, such a task moves to `planning` with a `solace` note naming the feature, as D-132 point 4 does today.\n- This covers tasks that are already stored, so the six above move without a click.\n- Columns are found by id; a workflow without both `backlog` and `planning` is left alone.\n- A task with no feature, or whose feature is not `active`, is untouched.\n- Back to backlog stays refused for a task with a feature (D-132 point 1).\n\n**Also.**\n- Record the change as a new decision amending D-132 point 4.\n- Update Spec 15.\n- Add tests: an existing Backlog task under an active feature; a feature that is not active leaves its tasks alone; a workflow without the columns.",
+  "closedTime": 1792007580,
+  "column": "complete",
+  "createdTime": 1792006574,
+  "dependsOn": [],
+  "feature": "9461b59a8c0dd46b",
+  "home": ".",
+  "id": "00fe44fddf2ed887",
+  "links": [],
+  "milestone": null,
+  "rank": 139.0,
+  "scope": [
+    "."
+  ],
+  "title": "Workflow: active feature's tasks never Backlog"
+}

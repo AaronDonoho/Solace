@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792884691,
+  "body": "Model detection is telling the human the wrong thing: a model with no working OpenAI sign-in can show as available, Claude models can show as unavailable while Claude Code is signed in, and a non-Anthropic model run through Claude Code may be refused when Anthropic itself is not signed in. This has been attempted before, so this task should fix the detection rule rather than add another UI layer.\n\n**What I found**\n\n- `board::agents.local` infers a sign-in from a file, keychain item or environment variable being present. A Codex auth file with a refresh token, or Claude credentials with a refresh token, counts as signed in even if the account can no longer use it.\n- Native Claude discovery and availability read `~/.claude/.credentials.json` directly, while launching uses `claude_home()`. A configured Claude config folder can therefore be checked in one place and used from another.\n- Endpoint models correctly skip native sign-in for availability, but a Claude Code refusal is not recorded for them: `observe` ignores models on an endpoint. A non-Anthropic model can keep showing as available after Claude Code refuses it.\n- The 15-minute refresh is the model catalog, not sign-in. `/models` rechecks local auth every 10 seconds and the task picker polls it. I do not expect shortening the catalog refresh to fix a wrong sign-in result.\n\n**Work**\n\n1. Make availability ask the agent program for its current sign-in when it has a local status command that makes no model call. Treat that answer as the source of truth and keep files, keychain and nonempty key variables as fallback. Read the same home/config path that launching uses.\n2. Keep provider auth separate: an endpoint model depends on its endpoint key, not the native Anthropic or OpenAI sign-in. If Claude Code refuses an endpoint model, mark that model unavailable with the agent's reason; a later success or Try again clears it as today.\n3. Recheck after a run reports a model or sign-in failure, and after Try again, so the picker corrects itself without a restart. Keep the current polling unless a check shows the 10-second cache is visibly delaying a change.\n4. Cover with tests: fake CLI status answers for Codex and Claude, an empty key variable, Claude's configured config directory, signed-in Claude with no API key, an endpoint model without Anthropic sign-in, a Claude Code refusal of an endpoint model, and signing out/in reflected by `/models`. Add an acceptance case with fake agents.\n\n**Assumption**\n\nI am treating this as a request to correct the availability flag and run refusal, not to add more providers or redesign the picker.\n\n**Uncertain**\n\nI have not confirmed the current status command or output of each installed CLI, especially Claude Code. The task should use it only if it exists and makes no model call; otherwise keep the local fallback.\n\n**Left out**\n\nNo new picker design, manual refresh button, faster catalog polling or new provider support. A Settings status panel or per-model network probe would be a larger separate task.",
+  "closedTime": 1792864789,
+  "column": "complete",
+  "createdTime": 1792858795,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "eb61ac144a929e1c",
+  "links": [],
+  "milestone": null,
+  "rank": 270.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: detect real model availability"
+}

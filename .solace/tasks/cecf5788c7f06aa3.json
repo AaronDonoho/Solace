@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792731881,
+  "body": "Part 3 of same-project Rust `extract` (D-185). Depends on the command task task:4375a3b1075dced2.\n\n**Do.**\n- A moved type takes its inherent and trait `impl` blocks with it. Match an impl to the type by resolved path, not last name: moving local `Task` must not move `impl vendor::Task`; refuse an ambiguous move and name it.\n- Tests that reach only moved code move, including a test inside `#[cfg(test)] mod tests`: recreate or move the container with `use super::*`, `cfg(test)` and a stable stored name. A partial move of one eligible test out of a module with staying tests works (no E5002).\n- A test that uses a private helper moves with that helper: bring helpers before testing coverage.\n- `selected` refuses kinds that cannot move (nested methods, `use`, `impl` rows named directly) with a clear message.\n- `pub` promotion only on top-level items and inherent methods, never on trait-impl methods (E0449).\n\n**Tests.** Struct with inherent and trait impls; same-leaf `vendor::Task` impl stays; nested test moves with its module; partial test move; helper-using test; trait-impl method used across the boundary; no new warnings (`check --warnings`).\n\n**Out of scope.** Import carrying and E1004 namespaces (next task).",
+  "closedTime": 1792693325,
+  "column": "complete",
+  "createdTime": 1792611675,
+  "dependsOn": [
+    "4375a3b1075dced2"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "cecf5788c7f06aa3",
+  "links": [],
+  "milestone": null,
+  "rank": 251.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust impls and test modules"
+}

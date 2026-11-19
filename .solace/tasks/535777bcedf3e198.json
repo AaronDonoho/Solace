@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1791951685,
+  "body": "Part of General UI Polish (feature item 5). Many select boxes should become sliders, toggles, or other controls that fit the choice.\n\n- Strategy filters (`choice`, `link_select` in `strategy`): Column and Closed become segmented button groups; Project, Feature and Milestone stay selects (long lists) but use the label map from task b5762697be085893.\n- Settings: Dark mode stays a switch; Panel side (task 56fd25a7a57c79a) is a switch; any select in Settings becomes a switch or segmented group.\n- Task detail and plan panel: agent and effort choices become segmented groups; the new-task project picker (`solace_task.projects_pick`) becomes a list of toggle chips when the project count is small, a select when it is large.\n- Rank and target-date controls keep their native widgets; sliders are used where a numeric range is the choice.\n\n**Tests:** strategy, settings and components view tests assert the new controls and that choosing them sends the same messages the selects sent.",
+  "closedTime": 1791941954,
+  "column": "cancelled",
+  "dependsOn": [
+    "f30e3e81dbb57d09",
+    "b5762697be085893",
+    "56fd25a7a57c79a1"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "535777bcedf3e198",
+  "links": [],
+  "milestone": null,
+  "rank": 12,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Replace selects with controls"
+}

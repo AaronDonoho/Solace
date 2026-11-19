@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423235,
+  "body": "In work run 81e9243b4ac911b0 on task:da49ea4b9938994d, step 129 (`extract lockdown.Ignores --to lockdown::paths`) succeeded but reported:\n\n- `Now pub(crate): board.Board::new, board.Events::new, extract::rust::repair.OldBindings::new, language::rust.Piece::join, language::rust_refs.Refs<'a>::new`\n- `Tests staying: 244`\n\nNone of those methods has anything to do with `Ignores`. The likely cause is that `Ignores::new` / `ignored` are matched by method name rather than by type, so other types' `new` count as callers or callees. Their visibility was raised for no reason, and that change stays in the code.\n\n**Wanted:** a move only changes visibility of items that the moved code actually uses, or that actually use it. Same-named methods on other types are left alone.\n\n**Done when:** a test moves a type with a `new` method while another type in the crate also has `new`, and the other `new` keeps its visibility. Also: revert the five visibility raises from step 129 if task:da49ea4b9938994d hasn't already.",
+  "closedTime": 1793381349,
+  "column": "complete",
+  "createdTime": 1793341228,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "33f59a16605a84ba",
+  "links": [],
+  "milestone": null,
+  "rank": 213.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: don't touch unrelated same-named methods"
+}

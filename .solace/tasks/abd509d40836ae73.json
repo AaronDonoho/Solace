@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791690203,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nReplaces the separate archive page (see **Create Task Archive**, f3df2a07c44a8d64).\n\n- It reads `GET /tasks` (root) plus `/events` replay and updates. Each row shows title, column, project (`home`), feature, milestone and `closedTime`. Selecting a row opens `<solace-task>` beside or below the list.\n- **Sort and filter on the client.** Sort by `closedTime`, newest first, as the default. Filter by column, project, feature and milestone, which are now task fields (D-87). Text search covers title and body.\n- **What client-side search misses.** `GET /tasks` leaves out `notes` and `changes`. Searching them needs a server search endpoint. Defer it to the mass-edit/archive task, or add `GET /tasks?q=` then.\n- **Inline links.** Feature and milestone are edited inline through `PATCH /tasks/{id}`, which is allowed in final columns and during runs (D-87 point 4, D-88).\n- **Workspace roots.** Tasks of every project come from the root's `/tasks` only if the root's list includes them. Check `GET /tasks` at a workspace root before building; otherwise merge the lists per project from `/projects`.\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1791640405,
+  "column": "complete",
+  "dependsOn": [
+    "54bca89035fdb606",
+    "2d8964fa294263de"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "abd509d40836ae73",
+  "links": [],
+  "milestone": null,
+  "rank": 56.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: Tasks tab"
+}

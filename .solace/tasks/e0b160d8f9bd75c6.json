@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792598371,
+  "body": "The first review run of task:a4fae860b16cf3a9 (`cbdfcab6be1c0912`) ended cleanly with a complete **Assessment: Needs work** feedback in its final message, but no `task note` call reached the task. The board marked the run failed and the task had no review note; the final message even said the review was recorded. The model mistook its final message for the tool call, and the failed or missing call let the run end.\n\n1. **Decision first.** Add a decision amending D-76 and Spec 15 §6: a review run that exits cleanly without a note records its last message as its review note and ends `reviewed`, but only when the message's first line is exactly `**Assessment: Looks good**` or `**Assessment: Needs work**`. Recovery applies only when no review feedback was recorded, so a refused or failed `task note` is recoverable under this rule. A final message is still not a note in general.\n2. **Say what records a review.** In `board.brief`'s review role and `reference.txt`, state that only the `task note` call records the feedback; a final message is not recorded; if the call is refused, resend it; and don't claim it was recorded unless the reply says `Recorded.` Keep the wording short.\n3. **Fallback.** In `board.supervise`, when a review exits cleanly, the transcript has no error, no review feedback was recorded, and the last message's first line is exactly one of the two labels, record that message through the same review-note path as `task note`: one shared path does the checkpoint, the changed-during-review note and the `reviewed` transition. The fallback returns normally; it must not reuse the discussion `REPLIED` path or its `discussed` outcome. “No attention” means do not add attention: leave any existing attention mark in place. A missing label, a nonzero exit, or a work or investigate run keeps today's failure.\n4. **Tests.** Unit tests in `board_tests.rs` for the accepted fallback and these rejections: nonzero exit, transcript error, a work run, an investigate run, and an invalid label shape (prefix-only or extra first-line text). Also test that a refused or failed `task note` with a valid final assessment recovers and that existing attention is not cleared. A `board_acceptance.py` case with a fake review agent that says a full assessment then exits 0 without `task note`, asserting the note, `reviewed`, and no attention; and a review with no assessment still failing. Run `rust-board-tests`, `rust-acceptance`, `test --all`, and `check --warnings`.\n\n### Left out\n\nNo change to how the MCP tool reports `isError` (Solace cannot see a call that never reached it), no retry of the review process, and no fallback for work or investigate runs.",
+  "closedTime": 1792598182,
+  "column": "complete",
+  "createdTime": 1792595088,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "e0b160d8f9bd75c6",
+  "links": [],
+  "milestone": null,
+  "rank": 245.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "review: recover a lost note"
+}

@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792976238,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792951102,
+  "column": "complete",
+  "createdTime": 1792950737,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "2d9070759cdff6a5",
+  "links": [],
+  "milestone": null,
+  "rank": 71.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "proposals: approve a task into Planning: Tech Debt"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056550,
+  "body": "A fresh run's handoff (`board.rs::continuation_brief`) lists earlier runs as `Previous <kind>: <outcome>` with no run id and no step count, so even with `task run` the agent can't tell which run to open. From the investigation in task:2db5e0768167a057 (options 1a and 1c).\n\n1. **Name the runs.** Write each previous run as `Previous <kind> <run id> (<outcome>, <n> steps): …`, and add one line after them: \"`task run <id>` lists its steps; read the failed ones before redoing work.\"\n2. **Keep the start of the last message.** `board.rs::last_words` keeps the *last* 1000 bytes of the final message, so a run that timed out mid-thought leaves only a fragment. Keep the start of the message instead, or the whole message if it fits the budget, and say in the brief when it was cut.\n3. **Ask for a handoff before risky steps.** Add a line to the work brief or the reference asking for a `work add` before a long or risky step, so a run that times out still leaves its intent and its next step. Keep the session-start reference under 3,600 bytes (D-102 point 5).\n4. **Tests.**\n   - Unit tests in `board_tests.rs` for the new `Previous …` line and for `last_words` keeping the start of the message.\n   - A `board_acceptance.py` case: a second fresh work run's brief names the first run's id, and `task run <id>` returns its outline.\n   - Run `rust-board-tests` and `rust-acceptance`.",
+  "closedTime": 1792901840,
+  "column": "cancelled",
+  "createdTime": 1791926042,
+  "dependsOn": [
+    "59d0b7ae77d161d9"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "c358499741989777",
+  "links": [],
+  "milestone": null,
+  "rank": 114.0,
+  "scope": [
+    "."
+  ],
+  "title": "handoff: name previous runs in the brief"
+}

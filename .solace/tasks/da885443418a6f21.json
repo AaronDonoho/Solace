@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793582407,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793548173,
+  "column": "complete",
+  "createdTime": 1793548002,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "da885443418a6f21",
+  "links": [],
+  "milestone": null,
+  "rank": 235.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "submit: patch Add creates a nested Rust module"
+}

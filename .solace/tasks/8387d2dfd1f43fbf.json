@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037325,
+  "body": "Found by task:6d7d8a2d428cba97 (note 3). When a Rust probe panics, the reply ends with cargo's test-runner lines: `failures:`, `solace_probe::probe`, `error: test failed, to rerun pass --bin solace`. They point the agent at a cargo command it can't run.\n\n**Need**\n- A failed probe's reply shows the probe's own output and the panic message, without cargo's or the test runner's status lines.\n- A successful probe's output is unchanged.\n\n**Left out**\n- The generated-module listing appended to failed replies (`The probe ran as a #[cfg(test)] module in …`); keep it or drop it as the worker sees fit, but say which in the outcome.\n\n**Cursory suggestion, not a prescription:** extend the filtering in `rust_probe.clean` (and the `cargo::failure_text` fallback in `rust_probe.report`) to cover the failure summary lines. The worker decides.",
+  "closedTime": 1793034919,
+  "column": "complete",
+  "createdTime": 1793029250,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8387d2dfd1f43fbf",
+  "links": [],
+  "milestone": null,
+  "rank": 102.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: failed Rust probe shows only its output"
+}

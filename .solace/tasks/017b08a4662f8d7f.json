@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1794959364,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "017b08a4662f8d7f",
+  "links": [],
+  "milestone": null,
+  "rank": 180.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "techDebt": true,
+  "title": "board: short columns stay in view while scrolling"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791924907,
+  "body": "Part of the `extract` feature. Plan source: task:a9d18cc6be1c2a2a note 17 (Task 4). Needs task:96249ceddc889684 and task:4e7afa39dcbc3f9a (dependent projects, whose commits this task orders and recovers).\n\nThe stores run in WAL mode (`PRAGMA journal_mode=WAL` on open), so each project commits separately, and files on disk aren't in SQLite at all. Extend the existing write-ahead mechanism rather than adding a table: the `.solace/pending/` records, `lockdown::mark` and `crash_after` in `run`. Reuse the patterns of `recovery_skips_rows_already_committed` and `adopt_finishes_an_interrupted_move…`.\n\n**1. The pending record holds the computed result, not the command line:** rows and texts per store, files to write, gleam.toml lines to merge, and for each affected row and file both its **before** and **after** revision or hash. Replaying a stored result can't compute a different plan.\n\n**2. Order:**\n1. Write the pending record.\n2. Write the destination's files.\n3. Type-check.\n4. Commit the destination, with its undo rows.\n5. Commit the source and the dependents, each with its undo rows.\n6. Merge the gleam.toml lines.\n7. Clear the record.\nUndo rows are part of each commit, so there is never committed code without undo.\n\n**3. Recovery on open** runs before `outside::absorb`, takes the same locks in the same order, and settles each case:\n- Destination commit absent: discard the record and remove the destination files written for it.\n- Present, and every affected row and file matches its before or after state: finish the remaining steps. Merge gleam.toml lines; never write back saved copies (that would lose outside edits).\n- Present, source changed outside Solace but destination didn't: undo the destination commit. The extract never happened; the outside edit is kept.\n- Both sides changed: change nothing, keep the record, flag the task for attention (D-82) naming the rows and files. Revert and cancel refuse until a human decides.\n\n**4. Revert and cancel** first finish or roll back any pending extract.\n\n**5. Readers** (board, `impact`) may see a symbol in both projects or neither between commits. Acceptable: readers never write based on it.\n\n**Tests (acceptance, each with a deadline per D-83),** using test-only fault points like `crash_after`:\n- stop after the destination commit → next open finishes the extract; the task lists it once;\n- stop before it → next open rolls back; both projects unchanged;\n- stop after the destination commit, then an outside edit to the source → destination undone, edit kept;\n- revert with an extract pending finishes it first.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791924121,
+  "column": "complete",
+  "dependsOn": [
+    "96249ceddc889684",
+    "4e7afa39dcbc3f9a"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "2d8582468f258b46",
+  "links": [],
+  "milestone": null,
+  "rank": 76.0,
+  "scope": [
+    "."
+  ],
+  "title": "Atomic cross-project extract: a crash finishes or rolls back, never half-applies"
+}

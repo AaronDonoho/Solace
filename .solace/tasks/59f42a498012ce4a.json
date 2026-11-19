@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791858531,
+  "body": "The human can't see the planning agent's last message: it gets hidden.\n\nLikely causes, from `plan.run_view`:\n- All notes are drawn first and all questions (proposals) after, so a note the agent writes after a proposal lands **above** it, out of sight and out of order.\n- The conversation doesn't follow new messages: nothing scrolls the panel to the newest one, and the transcript and message box below it push it further down.\n\nFix:\n- Draw notes and proposals as one conversation in the order they happened. If a question has no time today, give it one when it is asked (server side, in the strategy run's record), and order one without a time after the notes that came before it.\n- When a new message or proposal arrives and the human was at (or near) the bottom, scroll to it; if they had scrolled up to read, don't jump, show a \"New message ↓\" button instead. Opening a run starts at its newest message.\n- The agent transcript moves out of the conversation's flow (e.g. a collapsed section at the top of the run, or a toggle in the run header) so it never sits between the newest message and the message box.\n\nFirst reproduce with the human's case to confirm the cause before fixing; if it is something else (e.g. the note isn't streamed until the agent's call returns), fix that and say so in the task notes.\n\n**Tests:** Gleam tests that notes and proposals interleave by time, and that a note after a proposal is drawn after it.",
+  "closedTime": 1791836955,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "b74a151f65c05ebc",
+  "home": "solace-cli/strategy",
+  "id": "59f42a498012ce4a",
+  "links": [],
+  "milestone": null,
+  "rank": 93.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "plan: agent's latest message stays visible"
+}

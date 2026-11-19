@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928477,
+  "body": "Part of feature:3e8b5fe47bba41c4. Builds D-119 point 4, follow-on (b) from task:e9ad81a4e3fb4689.\n\n**What changes** (`lockdown.rs::tree_rows` and the `files` reply):\n\n- Each listed file other than graph source ends with its **line count** when it is a UTF-8 file, or its **size in bytes** when it isn't, or when it is over `watch_limit`.\n- Folders stay one line with a file count; collapsed (unwatched) folders are not read.\n- Counting reads each listed file, so only expanded watched and protected files are counted.\n- `reference.txt`: the `files` entry adds \"and line counts\" (lands with this code, per D-119 point 9). The session-start reference stays under D-117's 3,700 bytes.\n\nWhy: agents pick `read --lines` ranges without probing.\n\n**Checks:** `rust-unit` (a text file, a non-UTF-8 file, a file over `watch_limit`, a collapsed folder); `rust-acceptance` for the new `files` output, updating any existing test that matches the old lines exactly.",
+  "closedTime": 1791856001,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "337a7c4850f58fd9",
+  "links": [],
+  "milestone": null,
+  "rank": 104.0,
+  "scope": [
+    "."
+  ],
+  "title": "files: line counts and sizes"
+}

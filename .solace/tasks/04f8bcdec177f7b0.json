@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792541972,
+  "body": "The delete button on a task note should always be in the top-right corner.\nJust like the archive button on the board's task cards, text should hug it (I believe this means using float: right).",
+  "closedTime": 1792249556,
+  "column": "complete",
+  "createdTime": 1792213030,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "04f8bcdec177f7b0",
+  "links": [],
+  "milestone": null,
+  "rank": 96.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "Task note delete button positioning"
+}

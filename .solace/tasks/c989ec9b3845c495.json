@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690225,
+  "body": "Since block is now an unused state, the unblock button is no longer necessary.",
+  "closedTime": 1791577646,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "c989ec9b3845c495",
+  "links": [],
+  "milestone": null,
+  "rank": 22.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Change unblock process"
+}

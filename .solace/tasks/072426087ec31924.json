@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794876820,
+  "body": "While a discussion on a task is waiting for the human's reply, the task is marked **Needs attention**, the same way as when an agent asks a question. The mark goes away once the human replies or the discussion ends.\n\n---\nFor the agent: today a waiting discussion only gives its notice (the pop-up) the attention border and plays the attention sound (`solace_board.waiting_discussion_notice`). The task's own `attention` field, which the card and task view show, is never set for it. The flag is set and held by `board::task_model` (`flag`, `hold`, `message`, `act`), and a discussion waits in `board::runs.wait_discussion`. The Knowledgebase text that lists when a task needs attention (`knowledgebase.sections` in solace-cli/frontend) should name this case too.",
+  "closedTime": 1794851501,
+  "column": "complete",
+  "createdTime": 1794846782,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "072426087ec31924",
+  "links": [],
+  "milestone": null,
+  "rank": 311.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "title": "board: Needs attention while a discussion waits"
+}

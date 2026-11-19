@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794183768,
+  "body": "A component can have named variants, such as a primary or secondary button, so a design picks a look by name.\n\n### Do\n\n- Add a `variant` property to components that have them. Each component lists its variants in the validator's table, as a closed list.\n- The renderer draws each variant from theme tokens.\n- A component with no variant set uses its default.\n- The variants for each component are agreed with the human before building them.\n\n### Acceptance\n\n- Tests: each variant validates and draws differently, an unknown variant is refused, and leaving it out draws the default.\n\n### Left out\n\nVariants defined by a project or by the design agent.",
+  "closedTime": 1794177176,
+  "column": "complete",
+  "createdTime": 1793914443,
+  "dependsOn": [
+    "4f894eee05d2e46d"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "b3464bbfdd4cbc60",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 344.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "ui: component variants"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794876821,
+  "body": "A review can say \"Looks good\" while the app doesn't load. Task 797e638cccead488 passed every test, yet its built pages never showed tasks, features or milestones, because no test opened the built bundle in a browser.\n\nAdd a check that opens the built app in a browser against a test server holding at least one task, feature and milestone. It fails when:\n- any page logs a console error, including errors from background workers, or\n- the Board or Strategy page doesn't show those records within a short wait.\n\nReview runs can run this check.\n\n### For the agent\n- The root command `layout_audit` (`solace-cli/tests/layout_audit.py`, D-139) already builds Solace, starts a test `solace serve` and drives headless Chromium through Playwright, and reviews are allowed to run it. Reuse its setup rather than adding a second browser harness: either extend it or add a sibling command beside it.\n- Worker errors don't reach the page's `console` listener. Also listen on each worker (Playwright `page.on('worker')`) and to page errors.\n- Check: with `task_api.worker_source` given a relative `/events` URL, as in task 797e638cccead488's version, the check fails. With that fixed, it passes.",
+  "closedTime": 1794850793,
+  "column": "complete",
+  "createdTime": 1794848639,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a50fdc95d13e8f36",
+  "links": [],
+  "milestone": null,
+  "rank": 312.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "tests: load the built pages in a browser"
+}

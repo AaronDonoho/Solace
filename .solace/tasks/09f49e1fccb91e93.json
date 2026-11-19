@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159126,
+  "body": "Required before the `Store`, `Board`, `Server` and `Index` splits. Needs a decision amending D-187 point 3, which refuses selecting `impl` rows and nested methods directly; that decision is the human's before work starts.\n\n**Do.**\n- Accept a chosen `impl` block, or a set of methods from one `impl`, and move them into an `impl` of the same type in another module of the crate.\n- Keep identity and revision unless the text changes.\n- Carry the imports the moved code needs; drop imports only staying code uses; alias a name that clashes in the target.\n- Adjust visibility of fields the moved methods use without widening the public API (`pub(crate)` or accessors).\n- Take along tests that reach only the moved methods; refuse a test that also reaches staying code (`E5002`).\n- Rewrite references and roll back every row, file and history entry on cargo failure.\n- Refuse an ambiguous or missing owner with a clear error.\n\n**Tests.** Inherent method move; trait-impl method move; a set of methods from one impl; private field access across modules; import carrying and aliasing; test moves; cargo failure rollback; no new warnings.\n\n**Out of scope.** Cross-project Rust `extract`; Rust `merge`; converting an existing inline test container (task:850a33d7aff739db handles test files).",
+  "closedTime": 1793042050,
+  "column": "complete",
+  "createdTime": 1792720992,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "09f49e1fccb91e93",
+  "links": [],
+  "milestone": null,
+  "rank": 262.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust impl and method moves"
+}

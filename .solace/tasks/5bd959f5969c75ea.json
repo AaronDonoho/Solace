@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056535,
+  "body": "**Complete** and **Cancel** always ask the human if they're sure before doing anything, and they ask inside the app, so the question works in the desktop app as well as the browser. Today the question is the browser's own pop-up, and it doesn't work in the desktop app.\n\nThe question keeps what it says today. Nothing happens unless the human says yes.\n\n---\nFor the agent: `solace_task.editor_events` handles `Action(\"complete\")` and `Action(\"cancel\")` with `confirm`, which is `globalThis.confirm` in `task_api.mjs`. Stop and note deletion use the same `confirm`, but they aren't part of this task.",
+  "closedTime": 1794790679,
+  "column": "complete",
+  "createdTime": 1794789562,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "5bd959f5969c75ea",
+  "links": [],
+  "milestone": null,
+  "rank": 126.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "Complete and Cancel ask in the app"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792719163,
+  "body": "On the Roadmap tab, show milestones by `targetDate`, earliest first. Milestones with no date come after them, ordered by rank and then id. \"No milestone\" stays last.\n\n- Remove the milestone **Up** and **Down** buttons. Nothing on this page sends a milestone `rank` any more.\n- Update the Roadmap tab section of the strategy README (Groups, Reorder) and the tests.\n\nLeft out: the Features tab keeps grouping in rank order, and the milestone `rank` field stays on the server.",
+  "closedTime": 1792698477,
+  "column": "complete",
+  "createdTime": 1792253554,
+  "dependsOn": [],
+  "feature": "cb03260b259b3c5c",
+  "home": "solace-cli/strategy",
+  "id": "ceadbe97c216db7a",
+  "links": [],
+  "milestone": null,
+  "rank": 99.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "roadmap: milestones sorted by due date"
+}

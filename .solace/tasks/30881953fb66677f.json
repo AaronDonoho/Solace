@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056550,
+  "body": "Decide whether Solace should run its own agent loop in place of Claude Code or Codex, and what that loop would gain. This continues task:2db5e0768167a057, which found that options 2 and 3 (agent-driven compaction, and anything else a custom harness enables) can't be done while the agent program owns the context.\n\n### Areas to assess\n\nFor each area, say what Solace already controls through the current harnesses, what only a Solace-owned harness could add, and roughly what that costs and gains:\n\n- **A. System prompts.** The agent's rules and workflow, for example inspect before editing and test after. Today these are the brief and `reference.txt`. What does owning the system prompt add?\n- **B. Tools.** What the agent can do, and how efficiently it can search, edit, run and inspect. Today this is MCP to `solace mcp`. Would a harness change the tool surface or the reply format, for example tool replies built for small models?\n- **C. Agent loop.** How the agent chooses actions, runs tools, judges results and decides what to do next. Look at turn limits, phase budgets (for example dropping the orientation bundles after the first `submit`), and stopping rules.\n- **D. Context management.** What the agent receives, what is dropped, and what survives compaction. Look at pruning or stubbing old tool replies, a prompt order that keeps the cache valid (static reference → brief → turns), a live run outline, and a scratchpad that survives compaction. If the harness calls Anthropic's API directly, check its server-side context editing: it is in beta, so confirm its current name and terms first.\n- **E. Validation and recovery.** How the agent detects mistakes, diagnoses failures, verifies fixes and recovers from failed attempts. Solace already type-checks each change and records failed steps. What could the loop add, for example pushing failures or answered questions into context mid-run?\n- **F. Multi-agent orchestration.** Agents dividing work, investigating, implementing and reviewing. Weigh the gain in throughput against the overhead, and relate it to the proposed **Autorun** and **Agent Roles** features rather than designing it here.\n- **G. Delegated Context Retrieval** \n- **H. Recursive Language Models**\n\n### Constraints already known\n\n- **The seam.** A model whose config has `run` (an argv array) launches that command in place of `claude`/`codex`, always with a fresh handoff (Spec 15 §6).\n- **Output format.** `board.rs::transcript` parses only Codex `exec --json` and Claude Code `stream-json`. A harness has to emit one of those, or the board transcript, the token figures and the `task run` reader see nothing.\n- **What the harness needs.** A model client per provider (hosted and local endpoints, D-63), an MCP client, timeouts, and tests in the lockdown setup. Spec 14 says the board runner and `bench.py` share one configuration.\n\n### Deliverable\n\nA note with:\n\n- a recommendation (build, build part, or don't build), and the areas that justify it\n- an effort estimate\n- a bench plan that measures before and after, including how much of the per-turn cost is context sent again on small-window local models\n\nIf the recommendation is to build, include a proposed decision and a first slice of tasks. Bench runs need Aaron's go-ahead.",
+  "closedTime": 1793459738,
+  "column": "cancelled",
+  "createdTime": 1791926681,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "30881953fb66677f",
+  "links": [],
+  "milestone": null,
+  "rank": 114,
+  "scope": [
+    "."
+  ],
+  "title": "Investigate a Solace-owned agent harness"
+}

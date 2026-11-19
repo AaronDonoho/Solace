@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792554933,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792554928,
+  "column": "complete",
+  "createdTime": 1792554256,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "d37e04409f0985b4",
+  "links": [],
+  "milestone": null,
+  "rank": 101.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "General UI Polish: Tech Debt"
+}

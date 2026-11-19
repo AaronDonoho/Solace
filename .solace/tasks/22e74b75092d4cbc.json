@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792557295,
+  "body": "A run still names the model saved when the run started, rather than the latest value known for it. `solace_task.run_label` prints the stored `model` and the raw `used` id, so the Runs tab and agent note authors show an alias's first saved name beside a raw concrete id instead of one current label. The server has the same first-match problem when an alias's `used` model matches several entries: `board::agents.merge_from` takes the first entry's label.\n\n- In `board::agents.merge_from`, when several entries run the same `model` string, use the later, current entry's label for an alias's `used` model, falling back to the id. Keep the alias as what the run passes to the agent.\n- Give the components one run-label resolver: `used` when it is nonempty, otherwise `model`; resolve it through the current `/models` labels, falling back to the id. Use it in `solace_task.run_label` and therefore the Runs tab and note authors, and share it with Strategy's `plan.state_text` instead of keeping two rules.\n- Show one label only: no requested model or raw used id beside it. A label refreshed after a model rename must update an already displayed run.\n- Cover: an alias whose run reports a concrete model; a run with no `used`; an unknown id; a renamed label after `ModelsRefreshed`; and several entries sharing one model string where the later label wins.\n\nLeft out: changing which model a run uses, a new model-management UI, availability refresh changes, or changing picker ordering. This makes the existing run surfaces show the current name of the model actually used.",
+  "closedTime": 1792556170,
+  "column": "complete",
+  "createdTime": 1792554070,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "22e74b75092d4cbc",
+  "links": [],
+  "milestone": null,
+  "rank": 26.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: run labels use latest model"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792036284,
+  "body": "Rather than both a Write and Preview tab of a text editor, show the markdown as it's being written.",
+  "closedTime": 1791956503,
+  "column": "complete",
+  "createdTime": 1791947685,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "df8da21df4ee1cbd",
+  "links": [],
+  "milestone": null,
+  "rank": 13.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Support markdown preview while editing"
+}

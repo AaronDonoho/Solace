@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690315,
+  "body": "**As a solace user,\nI want a Strategy page that enables defining of features, breaking out tasks per feature, and roadmapping,\nso that I don't have to work from a document.**\n\n## Basic Requirement Overview\n\nCreate a new page called **Strategy**\n\n> The Strategy page is intended to be built & reachable as any other solace page is. \n> The Strategy page should allow the user to work with an agent to create a vision, understand the current product (if it exists), define features, break features down into tasks (units of work), and a roadmap with milestones.\n> Each are saved to the solace root project.\n>\n> The vision drives the overall design direction and features of the product.\n> The features are attributes and/or capabilities of the product.\n> The roadmap displays the milestones and intended sequencing of the features / tasks.\n> All are allowed to change.\n>\n> The Strategy process leans heavily into getting a working product first, and then iterating.\n> It supports the principles of being agile by being open to change.\n> Solace reminds Agents to utilize the vision when defining features, tasks, or investigating a task.\n\n\n## How it is helpful\n\nThe Strategy page makes the following easy:\n\n- Human and Agent collaboration in the broadest scope of the product to ideate and make long-term plans\n- Defining features and tasks (each task can be associated with a feature)\n- Defining task dependencies\n- Sequencing the tasks\n- Establishing milestones / scope of releases\n- Editing the feature/task storage layer (to be created prior to starting work on this page)\n\nI believe it's also the best-suited home for what was to become the Archive page:\n\n> As a solace board user,\n> I want an archive to show all the tasks,\n> so that I can remove them from the board yet still have the tasks.\n>\n> This archive depends on having a milestone/feature/task store in place first.\n>\n> The archive should be a separate page.\n> The archive can display all tasks.\n> Selecting a task displays it in the same fashion as displayed by the board, and allows editing. So we will want a shared component between the board and the archive for that.\n>\n> The following are capabilities of the archive but require support by the Task Store to accomplish efficiently:\n> It is text-searchable by title, changes, or string matching within details or notes.\n> It shows tasks ordered by completion date (most recent at top). Can be filtered by status (a.k.a. column), project, milestone, feature (new fields on task).\n> The archive allows deleting tasks after a confirmation dialog.\n> The archive will support mass edits of tasks' project, milestone, or feature\n\n---------\n\n## Questions\n\n- What other backend components required by the Strategy page should be separated, and are they compiled to BEAM or javascript?\n",
+  "closedTime": 1791690314,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "72986e081ef982d9",
+  "links": [],
+  "milestone": null,
+  "rank": 13,
+  "scope": [
+    "."
+  ],
+  "title": "New page: Strategy"
+}

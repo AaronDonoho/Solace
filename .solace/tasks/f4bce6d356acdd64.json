@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792977610,
+  "body": "The task detail's editor sits above the tabs and holds the text for a note, a typed answer and an action's instructions. Move it into the Notes tab: the tab shows it only after **Add note** is pressed, which selects Notes, reveals and focuses the editor, and sends nothing. The editor's action, from task:646e203aaafe2aa7, sends `POST /tasks/{id}/notes`, then clears the text, hides the editor and keeps Notes selected. The Questions tab shows the same editor while a question is unanswered; its action answers the first unanswered question with the typed text, while the option buttons keep answering their own question. No editor shows on Details, Runs, Changes or Scope. An action still sends a non-empty editor text as its instructions.\n\n**Tests:** Gleam tests for no editor in Notes before Add note, Add note selecting Notes and revealing it, a note send clearing and hiding it, Questions showing the editor only with an unanswered question, a typed answer going to the first unanswered question, and an action still carrying the typed text. Update the existing Add note and composer tests.\n\n**Left out:** no separate note and answer text; the one editor keeps one text, as today. No change to note order, delete, or how an action uses its text.",
+  "closedTime": 1792883820,
+  "column": "complete",
+  "createdTime": 1792816334,
+  "dependsOn": [
+    "646e203aaafe2aa7"
+  ],
+  "feature": "a7563a250614b0b9",
+  "home": "solace-cli/components",
+  "id": "f4bce6d356acdd64",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 108.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "text editor: notes and questions"
+}

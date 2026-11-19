@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183764,
+  "body": "Change what the review brief asks of reviewers, so reviews stop overengineering and stop holding tasks open over unlikely, harmless cases. Reference: task:6959fbee975aa9bc went 9 \"Needs work\" rounds on a minor tech-debt item.\n\n### Needs work\n- The reviewer judges whether the task's goal and acceptance criteria are met.\n- **Needs work** only when the change doesn't meet the goal or acceptance criteria, has real bugs, or takes a direction that could be hazardous.\n- An unlikely, harmless edge case is never enough for Needs work on its own. The reviewer may mention it, but it doesn't block.\n\n### Direction and follow-ups\n- If the reviewer thinks the direction is wrong, or a follow-up task is warranted, it says so plainly and prominently in the review's Summary.\n\n### Tech debt\n- A higher bar for filing tech debt. Code repeated only once or twice is not tech debt by itself. Don't push for an abstraction unless it clearly pays for itself.\n- Don't file tech debt for unlikely, harmless edge cases.\n\n### Acceptance\n- The review brief states the rules above, and the existing review brief tests are updated to cover them.",
+  "closedTime": 1794170823,
+  "column": "complete",
+  "createdTime": 1794168334,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "73368801592bba85",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 293.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "reviews: judge the goal, not edge cases"
+}

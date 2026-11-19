@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793656130,
+  "body": "Agents must not add user-interface details (labels, wording, indicators, colours, new buttons or screens, layout) that the human didn't ask for. When a UI detail matters and the human hasn't given it, the agent asks instead of inventing it.\n\n### Why\nOn task:4736502dfcacdf06 the strategist's task body asked that an explicit model choice be \"shown as an override\" and \"visibly distinguished\" from the role default. Nobody asked for that. The work run then added \"Your choice\" wording to the model picker, which was a regression.\n\n### Scope\n- **Strategists (Strategy page runs) first:** a task, feature or milestone body names only the UI behaviour the human asked for. Any other UI detail is a question to the human, not something written into the body.\n- **Every task brief** (investigate, work, discuss, review): no UI suggestions or additions unless the task or the human asks for them. If a UI choice is needed, ask.\n- Agents can still report UI that is actually broken (a failing check, a button that doesn't work).\n- Reviewers flag UI additions the task didn't ask for.\n\n### Pointers\n- `board::briefs.behavior_sections` is shared by task briefs and `board::strategy.strategy_brief`. The strategist line probably belongs in the strategy brief's own direction. `board::briefs.review_role` already keeps implementation detail out of the UI; add the new flag beside it.\n- Add tests that every brief kind, including the strategy brief, carries the rule.\n\n### Out of scope\nUndoing the \"Your choice\" wording itself.",
+  "closedTime": 1793638897,
+  "column": "complete",
+  "createdTime": 1793635892,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "fc5fd85b2a1a30d2",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 243.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: no unasked UI details"
+}

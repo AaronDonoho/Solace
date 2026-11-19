@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1792598366,
+  "body": "A system setting (D-22) that turns Gleam or Rust off on a machine, even when its toolchain is installed.\n\n- When a language is off, its projects behave as if the toolchain were missing (task:da797576d0cfaaac): they show a message on the Workspace page, reads still work, and `submit`, `check` and `test` are refused. The message says the language is turned off in settings.\n- The default is on for every language whose toolchain is found.\n- Shown on the Settings page.",
+  "closedTime": 1792555266,
+  "column": "complete",
+  "createdTime": 1792252912,
+  "dependsOn": [
+    "da797576d0cfaaac"
+  ],
+  "feature": "42af7119fb6915f9",
+  "home": ".",
+  "id": "54d6927a5b3c50da",
+  "links": [],
+  "milestone": null,
+  "rank": 206.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/migration",
+    "solace-cli/settings"
+  ],
+  "title": "Settings: turn a language off"
+}

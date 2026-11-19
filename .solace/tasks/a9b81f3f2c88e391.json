@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792125217,
+  "body": "Run every model through **opencode** by default. Only Anthropic's models (the Claude presets and `endpoint.kind = \"anthropic\"`) keep running through **Claude Code**.\n\n### What exists today\n\n- The board knows two agent kinds, `codex` and `claude` (`agents.rs::KINDS`). OpenAI presets and OpenAI-compatible endpoints run through Codex (`board.rs::endpoint_args`). Anthropic presets and endpoints run through Claude Code.\n- opencode is used only by the bench. `bench.py::opencode_config` writes an `opencode.json` with a local OpenAI-compatible provider, the solace MCP server, every built-in tool off, `edit`/`bash` denied and `external_directory` denied. `bench.py::parse_opencode` reads `opencode run --format json` events. Benches 24–31 ran this way.\n\n### Work\n\n1. **An `opencode` kind** in `KINDS`: program `opencode`, its sign-in (confirm where current opencode keeps provider credentials, e.g. `~/.local/share/opencode/auth.json`, and which key variables it reads), its usage-limit messages (real ones, kept in `usage-limits.json` as a fixture, not guessed), and model discovery (confirm `opencode models` or the current equivalent; presets stay the fallback).\n2. **Launching.** Solace writes the run's `opencode.json` in the lockdown setup (like `lockdown::agent_config` does for Claude and Codex): the model's provider, the solace MCP server as the only tool, every built-in tool off, `edit`/`bash` denied, `external_directory` denied, no autoupdate, no share, no snapshot, no instructions files. Port the bench's config rather than writing a second one. A model's `endpoint` with `kind = \"openai\"` becomes an opencode provider, with the key read from `key_env`; its context window comes from the endpoint as in D-63.\n3. **Defaults.** OpenAI presets and OpenAI-compatible endpoints get `agent = \"opencode\"`. Claude presets and `kind = \"anthropic\"` endpoints stay `agent = \"claude\"`. Codex stays selectable with `agent = \"codex\"` in `[[models]]`. The model labels name the harness (`opencode · GPT-6 Sol`).\n4. **Transcript.** `board.rs::transcript`, the live context line, token figures and `task run` read opencode's `--format json` events (port `bench.py::parse_opencode`'s rules, including that opencode's `input` excludes cached input).\n5. **Continuity.** Decide whether a work run resumes the author's opencode session (`--session`/`--continue`, if they work non-interactively) or always gets a fresh handoff; follow D-75's compatibility rules either way.\n6. **Lockdown.** Confirm opencode works in `$PWD` (the bench sets `PWD`) and writes nothing outside the task's copy (the bench once found `.git/opencode`).\n\n### Checks\n\n- Unit tests: the `opencode` kind's detection, limit messages from the fixture, discovery parsing, the generated `opencode.json` (tools off, MCP present, endpoint provider), and transcript parsing of recorded events.\n- An acceptance test with a fake `opencode` that emits recorded events: a run on an OpenAI preset starts opencode, its transcript and tokens show on the board, and a usage-limit error marks the sign-in unavailable.\n- A Claude preset still starts Claude Code.\n\nRecord the change as a decision (it revises D-23's \"OpenAI-compatible through Codex\"), and update the Guide's Models section, README and Spec 15 to match.",
+  "closedTime": 1792117524,
+  "column": "cancelled",
+  "createdTime": 1792115995,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "a9b81f3f2c88e391",
+  "links": [],
+  "milestone": null,
+  "rank": 165.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: opencode as the default harness"
+}

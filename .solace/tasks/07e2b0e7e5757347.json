@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791858549,
+  "body": "**Scope:** `solace-cli/board`.\n\n**Depends on:** Task \"Task Links\".\n\n**Goal:** make the store usable before the Strategy page exists, without building any planning UI.\n\n**Work:**\n\n- Read `{milestones}`, `{features}` and their events from the stream, and keep them in the board's model.\n- The task detail panel shows the task's feature and milestone, each as a dropdown (with \"None\"), and saves changes through `PATCH /tasks/{id}`. The dropdowns also work for tasks in final columns.\n- A card shows a small feature chip when a feature is set. Renaming a feature updates its chips.\n- No creating, editing or ordering of features and milestones on the board. That is the Strategy page's job. Until then they are created through the API.\n\n**Tests:** Gleam tests for decoding the new events and fields, and for the detail panel's update message. One `js_tests` case if the dropdown needs shell code.\n\n**Done when:** a feature and milestone created through the API can be chosen on a task in the board, and the change shows on the card.",
+  "closedTime": 1791735606,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "07e2b0e7e5757347",
+  "links": [],
+  "milestone": null,
+  "rank": 21.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "(Optional) Add task links in the board"
+}

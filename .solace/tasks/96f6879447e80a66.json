@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792539260,
+  "body": "`plain`/`plain_session` refuse a plain project with \"this project has no Gleam code (no gleam.toml)\" even when the task's other projects have code; `submit`, `check`, `test` and `delete` at the root do not name `--project`.\n\n1. Keep `read_project`'s `store.lang.is_none() && !language::is_rust` gate (saved during the observed run) and add a regression test for `inspect`, `refs` and `find --project <rust>`.\n2. Make plain refusals language-neutral and, in a task run, name the task's projects and `--project <folder>` (reuse `other_projects`/`scope::of_task`).\n3. Make `grep` after a miss in a project with graph source say the source is `find`'s, not just \"No matches\"; keep `grep --in <graph file>`'s existing \"use `find`\" text. `grep --in` a Rust source path that is symbol-held (e.g. `src/store/submit_tests.rs`) must say \"use `find`\", not \"no such file or folder\" (seen in run `a348af56b1f15298`).\n4. When `submit` refuses with \"imports go through `--imports`\", name the block and the missing import; when a rename is refused, say how to keep the id (`submit <name>` replaces and may rename).\n5. Tests: root task + Rust project refusal names `--project`; `grep` miss in a Rust project names `find`; `grep --in` a symbol-held `.rs` path names `find`; `submit` import refusal names the block/import; `read_project` reads `inspect`, `refs`, `find`.\n\nChecks: `rust-unit`, `rust-board-tests`, `rust-acceptance`.",
+  "closedTime": 1792470866,
+  "column": "complete",
+  "createdTime": 1792466685,
+  "dependsOn": [
+    "ab610efd1a0c14d7"
+  ],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "96f6879447e80a66",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 5.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "commands: Rust refusal and routing"
+}

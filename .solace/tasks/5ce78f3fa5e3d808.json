@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464633,
+  "body": "Close the container refusals task:ba1542d1a967b9b7 left, so an agent can add a trait impl or the first method of a type before task:7db8dd126a22c863 makes `src/**/*.rs` and `tests/**/*.rs` submit-only. Command forms and replies match Gleam's. New modules are task:e6a34c9df7823031; `delete` is task:87caaab35442ab65. The investigation plan is note 4, part 1.\n\n- **New containers:** `submit --new <module>` takes a whole `impl`, `trait`, inline `mod` or `extern` block with its items. They are stored nested (`parent`, `ord`, `tail`), the same way import stores them (one helper shared with `store_pieces`), and formatted with `cargo::format_item`. This covers `impl Display for X` and adding the first method to a type.\n- **Empty containers:** adding to an empty `impl X {}` works: re-split the container with its new item so its `tail` becomes the closing `}`.\n- **Named container blocks** (`submit crate.Store` whose text is a container, or `*** Update: <container>` in a patch) stay refused, with a reply saying a new block goes through `submit --new <module>` and an existing one changes item by item. No task name in the reply.\n- **Docs:** `reference.txt` \"Rust projects\": `submit --new` takes whole blocks. Add the point to D-168.\n\n### Done when\nIn a scratch Rust store: a new `impl std::fmt::Display for X` block, a method for a type with no `impl` yet, and a method added to an empty `impl` each submit, check and project to files cargo builds. A named container block is refused with the new wording. Tests asserting the old refusal texts are updated.",
+  "closedTime": 1792372723,
+  "column": "complete",
+  "createdTime": 1792355407,
+  "dependsOn": [
+    "ba1542d1a967b9b7"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "5ce78f3fa5e3d808",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 228.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: new containers via submit --new"
+}

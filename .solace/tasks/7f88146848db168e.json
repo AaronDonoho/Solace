@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792215003,
+  "body": "Tasks' cards take up too much space on the board. To alleviate this, we will remove the scope from the taks card display and allow text to fill the card and not be blocked by the Archive button's column. Furthermore, limit the number of characters displayable on a task card's title to 200.",
+  "closedTime": 1792191988,
+  "column": "complete",
+  "createdTime": 1792188758,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "7f88146848db168e",
+  "links": [],
+  "milestone": null,
+  "rank": 180.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "UI: shrink tasks on board"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791858543,
+  "body": "When text moves, for example due to an active run adding new text and elements moving on the screen, the highlights from the find tool become stale.",
+  "closedTime": 1791816370,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "181d525e8db89fd9",
+  "links": [],
+  "milestone": null,
+  "rank": 9.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Fix find highlights not following moving text"
+}

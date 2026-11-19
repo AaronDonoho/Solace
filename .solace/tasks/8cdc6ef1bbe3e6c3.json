@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876819,
+  "body": "A proposal that edits a record names it only by id when the edit doesn't change its title, so the note left after it is answered reads like \"Proposal: Change task f81ea561a5792d67\". Show the record's title too.\n\n- The proposal's question, and the note it leaves once answered, name the record's current title beside its id, whatever fields the edit changes. This applies to tasks, features and milestones.\n- An edit that changes the title still names it.\n\n`tasks::strategy.proposal` adds the title only from the proposed `fields`; the current record (`current`) is already read there.\n\n**Tests:** an edit proposal that doesn't change the title names the current one in its question and in the answered note.",
+  "closedTime": 1794788818,
+  "column": "complete",
+  "createdTime": 1794787908,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8cdc6ef1bbe3e6c3",
+  "links": [],
+  "milestone": null,
+  "rank": 305.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "proposals: name the record's title"
+}

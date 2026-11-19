@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159124,
+  "body": "When a Rust `extract` removes an import from the source module because only the moved code seemed to use it, it misses modules that still reach that import through `use super::*` (a glob that pulls in everything the parent imports). The move then fails to type-check.\n\nSeen in task:1de4662d076cd92e (work run 126dabc61a1f2731, step 91): moving the `extract::rust::tests` symbols out of `extract::rust` dropped `Store` from `extract::rust::merge::tests`, which got it only through the glob chain (`E0425`/`E0433 cannot find type Store`).\n\n**Required:** when an import leaves a module, any module that still uses the name through a `use super::*` chain must end up with a working import, either by keeping the original or by adding a direct `use` to that module. The move then type-checks, and every symbol keeps its ID.\n\n**Check:** a new `extract::rust` test with a child module that uses a parent import only through `use super::*`. After extracting the parent's only other user, the extract succeeds and the child still compiles. `rust-unit` green, `check --warnings` clean.",
+  "closedTime": 1793066888,
+  "column": "complete",
+  "createdTime": 1793064476,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "e8e26ca38af0ac1c",
+  "links": [],
+  "milestone": null,
+  "rank": 116.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: keep imports glob-reached elsewhere"
+}

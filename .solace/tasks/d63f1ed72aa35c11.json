@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793035356,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793024503,
+  "column": "complete",
+  "createdTime": 1792990751,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "d63f1ed72aa35c11",
+  "links": [],
+  "milestone": null,
+  "rank": 94.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Work run friction fixes: Tech Debt"
+}

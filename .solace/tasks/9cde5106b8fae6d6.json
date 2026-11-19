@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056532,
+  "body": "The README explains the board, Contracts, migration and the desktop app, but it never names four pages in the menu: Strategy, Design, Delivery and Settings. It also tells the reader to edit `~/.config/solace/config.toml` for model and agent choices that the Settings page now offers.\n\nUpdate the README so a new reader can find each page and know what it is for, and so the Settings part points to the page for the choices it can change. Keep the README's existing structure and plain language. Leave the install, migration, benchmark and development instructions alone unless they contradict what the app now does.\n\nNo need to be overly detailed in a way that may become quickly out of date.\n\nFix any inaccuracies (the intro alludes to not having rust support, which is wrong)",
+  "closedTime": 1795045392,
+  "column": "complete",
+  "createdTime": 1795044438,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "9cde5106b8fae6d6",
+  "links": [],
+  "milestone": null,
+  "rank": 391,
+  "scope": [
+    "."
+  ],
+  "title": "README: bring the app tour up to date"
+}

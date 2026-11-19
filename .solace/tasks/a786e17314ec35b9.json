@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792977622,
+  "body": "Workers keep getting `submit` calls wrong. In task:2fe0aca763215fc8's work run, the worker made two mistakes in a row:\n\n1. **Patch in `command`.** It put the whole patch on the `command` line after `submit`, and `mcp.tool_call` refused the call (step 16).\n2. **Wrong project.** It sent `*** Update: board.created` without `--project solace-cli`, so the patch went to its own project (components). There, E0108 said the name \"is no symbol\" (step 18).\n\nThe reference (`reference.txt`, step 2) shows a patch's text, but it doesn't show the call: which field each part goes in, or where `--project` goes.\n\n## Change\nAdd one short example of a whole tool call to step 2 of `reference.txt`: `command` holds the command lines only, and `text` holds the patch. For example:\n\n```\ncommand: submit --project <folder>\n         test --project <folder>\ntext:    *** Begin Patch\n         *** Update: checkout.pay\n         @@\n         ...\n         *** End Patch\n```\n\nAlso add a line saying that a patch for symbols in another project needs `--project <folder>` on both `submit` and `test`. The example's exact wording is up to the worker. Add a short version of the same example to the `text` description in `mcp.tool_schema` (the worker tool, not the strategy one).\n\n## Done when\n- The reference and the worker tool's `text` description show `command` and `text` as separate fields, with `--project` on the command lines.\n- Tests that pin the reference or the schema text are updated.",
+  "closedTime": 1792951999,
+  "column": "complete",
+  "createdTime": 1792950769,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a786e17314ec35b9",
+  "links": [],
+  "milestone": null,
+  "rank": 72.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: full submit call example"
+}

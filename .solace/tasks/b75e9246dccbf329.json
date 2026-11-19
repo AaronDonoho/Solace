@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056540,
+  "body": "Add three structural element types, so a design can show how an interface is laid out without faking it with style overrides. The design agent faked the selected Board tab this way.\n\n- **Tabs**: a set of items where one is marked as current.\n- **Scroll area**: a region whose content scrolls inside it, so the rest of the screen stays put.\n- **Split pane**: two regions side by side or one above the other, divided by a divider the user can drag.\n\nThese are about structure. They add no new styling options (D-237 overrides still apply as they do now).\n\n## Done when\n\n- Each type is in `design.ELEMENT_TYPES` with its rules, and the design rules refuse a misuse, naming the element (for example, a split pane without exactly two regions, or tabs with no current item).\n- The Design page draws each one, and it can be selected and given notes like any other element.\n- The design README and the format list from task:7aaef771b4b69ffe include them.\n- A decision in `DECISIONS.md` amends D-230 with the new types.",
+  "closedTime": 1795031611,
+  "column": "complete",
+  "createdTime": 1794865869,
+  "dependsOn": [
+    "7aaef771b4b69ffe"
+  ],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "b75e9246dccbf329",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 317.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "elements: tabs, scroll area, split pane"
+}

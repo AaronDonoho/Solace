@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1795056531,
+  "body": "Let one screen describe a layout that changes with the window's shape or size. For example, the Board's task details sit at the bottom, but move to the right when the window is at least 1.1 times as wide as it is tall. Today the design agent needs a separate screen for each size, which makes one layout look like two.\n\n## Done when\n\n- A screen can say which of its elements are placed differently, and under what window condition.\n- The design rules check these conditions and refuse a bad one, naming the element.\n- On the Design page, the human drags to change the size of the window the screen is drawn in, and the layout changes as the conditions say. That size doesn't follow Solace's own window. The zoom and pan from task:3c3effae35814f99 let the human see a window bigger than the canvas.\n- The design README, the format list from task:7aaef771b4b69ffe and a `DECISIONS.md` entry amending D-230 include it.",
+  "closedTime": 1795047250,
+  "column": "complete",
+  "createdTime": 1794865885,
+  "dependsOn": [
+    "7aaef771b4b69ffe",
+    "3c3effae35814f99"
+  ],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "1cf044ccf5423404",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 319.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "elements: layout by window size"
+}

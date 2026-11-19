@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791690216,
+  "body": "The app should Support ctrl + f for finding text.\nThis is Lustre running in Tauri.",
+  "closedTime": 1791516052,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "e8b6497ab94c043c",
+  "links": [],
+  "milestone": null,
+  "rank": 20,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "Find in App"
+}

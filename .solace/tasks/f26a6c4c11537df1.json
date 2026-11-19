@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792812783,
+  "body": "Opening a task on the Board or Strategy raises app memory by up to about 100 MB. The panel is shared (`<solace-task>` in `solace-cli/components`), so fix the shared path once rather than either host. This follows task:88b61d902a98e554, which fixed observers retaining removed task panels; it does not assume that was the whole cost.\n\n- Measure the difference between opening a task, closing it, and opening another: record the baseline, the peak while open, and the memory retained after close. State whether the 100 MB is retained after the panel closes or a one-time bounded cost.\n- Attribute the dominant memory to parsed task JSON, run transcript entries, editor instances, DOM, observers, caches or the webview. Fix the largest owner; don't stack speculative small optimizations.\n- Keep the task view complete: details, notes, questions, runs, changes and scope must still load, and live updates must still arrive.\n- Add a regression test for the identified path where practical. If this environment has no browser or heap profiler, include a repeatable manual check and say plainly that memory was not measured.\n- Rebuild the bundled frontend asset if it changes.\n\n**Test:** opening and closing several representative tasks on both Board and Strategy returns memory near its baseline after each close, and opening one task does not retain a further ~100 MB per distinct task. If the cost is a one-time peak, it must not grow with repeated opens, and the remaining dominant cost must be named in the summary.\n\n**Leaves out:** speculative rewrites of the editor or markdown renderer, unrelated page polish, and fixing every independent leak in one pass. File follow-ups for separate causes found.\n\nNo feature or milestone: this is cross-cutting app memory, like task:88b61d902a98e554.",
+  "closedTime": 1792812556,
+  "column": "complete",
+  "createdTime": 1792810974,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f26a6c4c11537df1",
+  "links": [],
+  "milestone": null,
+  "rank": 54.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Task view: bound memory per open"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1791924906,
+  "body": "Part of the `extract` feature. Plan source: task:a9d18cc6be1c2a2a note 17 (Task 2). Needs `extract --to-project` (task:96249ceddc889684, done) and `merge` (task:c741943383761e9f), so that every hint names a command that will succeed.\n\nInvestigation (notes 2, 3 and 6) found that no submit can reject a removal of a used symbol. Patches can't delete, module submits give E0102, and block renames save. So the hint goes on these two places instead:\n\n1. **`delete`'s E5001** (`delete_all`): a removed symbol is still used, and a symbol with the same name and kind exists in another module of a project in the task's scope.\n2. **A rejected submit whose errors mix two same-name types**, e.g. a type mismatch between `board.Task` and `solace_task.Task` after references were rewritten by hand (the board case, D-103's \"Why\"). Build on `callee_hint`.\n\nThe hint names the command that will work:\n- The name is free in the target: `Hint: 9 references to board.Task now fail; solace_task.Task exists. To move symbols with their references, use extract board.Task --to solace_task [--to-project ../components]`. Include `--to-project` only when the target is in another project.\n- A copy exists in the target: `Hint: … solace_task.Task exists. To fold board.Task into it and redirect its references, use merge solace_task.Task board.Task`.\n\nShow it at most once per reply, and only on a refused delete or a rejected submit.\n\n**Tests:** a delete of a used symbol that has a same-name copy elsewhere gets the `merge` hint. Where the name is free in the target, it gets the `extract` hint, with `--to-project` across projects. A submit rejected for a `board.Task`/`solace_task.Task` mismatch gets the hint. A plain E5001 with no copy elsewhere gets no hint. A plain type error gets no hint.\n\n**Checks:** `rust-unit`.",
+  "closedTime": 1791921561,
+  "column": "complete",
+  "dependsOn": [
+    "d6ac4f3600093a97",
+    "96249ceddc889684",
+    "4e7afa39dcbc3f9a",
+    "c741943383761e9f"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "b31923a5d4b96175",
+  "links": [],
+  "milestone": null,
+  "rank": 74.0,
+  "scope": [
+    "."
+  ],
+  "title": "Submit hint: point to `extract` when references to moved symbols break"
+}

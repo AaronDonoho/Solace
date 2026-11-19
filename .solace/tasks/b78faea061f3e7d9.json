@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1792284199,
+  "body": "There are many failing tests across projects.\nIdentify why they are failing, and how they should be addressed.\n",
+  "closedTime": 1792271760,
+  "column": "complete",
+  "createdTime": 1792271059,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "b78faea061f3e7d9",
+  "links": [],
+  "milestone": null,
+  "rank": 212.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/contracts",
+    "solace-cli/frontend",
+    "solace-cli/migration",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "Address failing tests"
+}

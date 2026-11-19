@@ -1,0 +1,10 @@
+{
+  "body": "Release notes are drafted from the work Solace already records, then approved by the human.\n\n- When the human asks for notes on a release, an agent drafts them from the tasks, features and decisions completed since the previous release. Notes are never drafted on their own.\n- The draft groups changes by feature and links each entry to its task.\n- The human edits and approves the notes as they would a proposal; approved notes are stored with the release.\n\nDepends on: build: artifacts and versions (complete).",
+  "colorSlot": 35,
+  "id": "3637869b15413bc5",
+  "milestone": "f8b1014c90da26f9",
+  "rank": 1.0,
+  "startTime": 1794979755,
+  "state": "complete",
+  "title": "build: release notes from tasks"
+}

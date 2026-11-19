@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794972378,
+  "body": "Bring the Tauri desktop app under Solace, so its build can be a recipe. Today `solace-app` isn't in the root `solace.toml` `projects` list, so agents can't change it through a task scope.\n\n- Give `solace-app` its own `solace.toml`. Its `unwatched` covers `target/`, `binaries/` and `gen/`.\n- Adding `solace-app` to the root `projects` list goes to the human as a settings proposal (D-38).\n- Check that it works as a plain-files/Rust project: `files --project solace-app`, reads and grep, and a lane on the board.\n- Update the root README's project list.\n\nNo build changes here. The next task moves its build into a recipe.",
+  "closedTime": 1794889214,
+  "column": "complete",
+  "createdTime": 1791953380,
+  "dependsOn": [],
+  "feature": "5be8bc14e3676b85",
+  "home": ".",
+  "id": "6e93c06d910d2527",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 126.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "self-build: solace-app as a project"
+}

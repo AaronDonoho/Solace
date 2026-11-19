@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792009416,
+  "body": "The human wants to make a task with no feature active without giving it a feature. Backlog becomes a status that means *not active*, and Planning becomes the board's first column. This amends D-108 and D-128; it needs a new decision record.\n\nThe Strategy page's **Plan** and **Back to backlog** come first (5441d4a953670951), so a hidden Backlog task can still be planned. **Active feature plans its tasks** (3528b8bc59f7bb2b) moves an active feature's tasks out of Backlog.\n\n**Board**\n- The board shows no `backlog` task, with or without a feature. Planning is the first column.\n- D-128.4 still applies: a task of a proposed, upcoming or canceled feature stays hidden in any column.\n- Planning on the board no longer lists `to_backlog`.\n\n**Back to planning**\n- New action `to_planning` (\"Back to planning\"), listed on Assigned, Needs review and Canceled in `default-board.toml`. It replaces Canceled's `to_backlog` (D-108).\n- Complete gets no action: a completed task stays as it is.\n- From Assigned, it is refused (`E7001`) while a run is going. The human stops the run first.\n- From Needs review, it keeps the task's changes and clears `approved` (as Reassign does).\n\n**Docs and tests**\n- Spec 15 (the default board and actions), `guide.html` and the READMEs.\n- Rust tests in `board_tests.rs`, `board_acceptance.py` (D-108's test changes), and Gleam tests for the board's hidden Backlog.",
+  "closedTime": 1791992599,
+  "column": "complete",
+  "createdTime": 1791987516,
+  "dependsOn": [
+    "5441d4a953670951"
+  ],
+  "feature": "9461b59a8c0dd46b",
+  "home": ".",
+  "id": "35564bb525e93b96",
+  "links": [],
+  "milestone": null,
+  "rank": 134.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Board: Backlog off, back to planning"
+}

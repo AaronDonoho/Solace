@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928476,
+  "body": "Part of feature:3e8b5fe47bba41c4. Builds D-119 points 1–3, follow-on (a) from task:e9ad81a4e3fb4689.\n\n**What changes** (`lockdown.rs::grep`, `grep_hint`, `GREP_SYNTAX`):\n\n- `grep <text> [--in <path>] [--context n]`. Both options count only as the **last words** of the query, in either order; the text before them is searched as written and the query is never refused for syntax (D-109 point 5).\n- `--in <path>`: one file or folder, checked the way `read` checks a path (inside the project, no symlinks). A missing path is refused and named; an unwatched or internal path is named as not searched. No glob, no regex.\n- `--context n`, 1 to 5; any other number is a usage error. Context lines are marked `12-` against a match's `12:`. Windows that touch merge, gaps show as `…`, and context lines are cut around long lines the same way matches are (`around()`), so minified JS can't fill the reply.\n- Up to 10 matching lines per file (was 6) and 40 files. A file with more matches is headed `(N matches, showing 10)`.\n- The reply stops at a whole file within the call's **shared** reply budget (`grep` must now get the remaining budget, as `read` does in a batch) and says how many files it left out and to narrow with `--in`.\n- The miss hint: a path at the end of the query, or `--path <x>`, now says to use `--in <path>`; \"grep has no path filter\" goes.\n- `reference.txt`: the grep entry gives the new syntax (lands with this code, per D-119 point 9). The session-start reference stays under D-117's 3,700 bytes.\n\n**Review tech debt carried from task:e9ad81a4e3fb4689:**\n\n- Spec 14 §3 `grep` row: say that an out-of-range `--context` is a usage error, so it doesn't seem to conflict with \"never refused for syntax\".\n- D-119 point 3 still lists `--in <x>` as a hint trigger; it is now the option. Make `grep_hint` match Spec 14 (which is already right).\n\n**Checks:** `rust-unit` (context merge and gaps, the 1–5 range, `--in` with a file, a folder, a missing path, an unwatched path; counts; the budget stop; options only at the end of the query); `rust-acceptance` with one batch where a wide grep shares the budget with a `read` after it.",
+  "closedTime": 1791853755,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "c1fdd765d7647455",
+  "links": [],
+  "milestone": null,
+  "rank": 103.0,
+  "scope": [
+    "."
+  ],
+  "title": "grep: --in, --context, counts, budget stop"
+}

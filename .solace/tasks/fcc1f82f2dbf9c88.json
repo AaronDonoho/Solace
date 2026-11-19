@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125214,
+  "body": "`help work` printed nearly the whole help, though the reference says `help <command>` lists that command's options.\n\n**Cause** (`main.rs::agent_help`): a topic first matches paragraphs that have an indented line (`  `) starting with the command. `work` (`Work records, kept between sessions: work add …`) and the `Project: build | format | run <name>` line are not indented, so nothing matches. It then falls back to **every paragraph that has the word anywhere**. A common word like `work`, `run`, `build` or `format` appears in most of the reference, so the agent gets almost all of it.\n\n**Fix**\n- In `reference.txt`'s *Commands in full*, give every command its own indented entry (`work add`, `work list`, `work done <id>`, `build`, `build plan`, `format`, `run <name>`), the way the other commands are written. Then `help <command>` finds each one by its entry.\n- `help <command>` answers with the paragraph that holds the command's entry, not every paragraph that mentions the word. Drop the fallback that matches any word. A command with no entry gets `No command <x>` and the list of command names, not the whole reference.\n- Strategy runs and task runs keep their own reduced sets, as they do now.\n\n**Tests**\n- For every command in the summary table (the `Commands (…)` block), `agent_help(cmd)` contains that command's entry and is much shorter than the full help.\n- `help work` and `help run` each return their own section.\n- `help nosuch` returns the list of names, not the reference.\n- Extend the reference layout check (`solace-cli/tests/reference_layout.py`, D-143) so it fails when a command in the summary table has no indented entry in *Commands in full*.",
+  "closedTime": 1792121266,
+  "column": "complete",
+  "createdTime": 1792119568,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "fcc1f82f2dbf9c88",
+  "links": [],
+  "milestone": null,
+  "rank": 167.0,
+  "scope": [
+    "."
+  ],
+  "title": "help: one command's section only"
+}

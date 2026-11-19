@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690240,
+  "body": "Please give agents the capability to move a file via solace.\nFiles should be moveable only within the task's scope.\nWhen moving a file, if it would replace an existing file solace should respond that this is not allowed.",
+  "closedTime": 1791508956,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "aeb0b2dfeb67a1d5",
+  "links": [],
+  "milestone": null,
+  "rank": 46.0,
+  "scope": [
+    "."
+  ],
+  "title": "Add move file command"
+}

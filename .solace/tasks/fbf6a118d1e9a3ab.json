@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159124,
+  "body": "Rust `extract` refuses to move a shared helper when a test elsewhere uses it alongside code that stays (`E5002`, D-187 point 2). In run 53395ca4a05b3ca3 on task:32ad4bda2e68c02d, `extract crate.lock_file --to fsx` was refused because `language::cargo::tests::a_fetch_waits_for_the_fetch_lock` calls `lock_file` and also `cargo.fetch`, `tasks.send` and others. The worker then moved `fsx`, `jsonx` and `project_paths` by hand, so those helpers lost their permanent identity and history.\n\nThis matches the reference text (\"tests that reach only them … come along\"), but not the code (`extract::rust.move_tests`).\n\n### Change\n\n- A test that reaches **only** moved code moves with it, as today (D-206).\n- A test that reaches moved code **and** staying code stays where it is. Its references and imports get rewritten like any other caller's, including `super::x` / `crate::x` paths inside inline and `#[path]` test containers.\n- Apply the same rule to Rust `merge` (D-207 point 3): a test that reaches the retired item and staying code stays, with its references redirected to the survivor.\n- Record the change as a decision that amends D-187 point 2 and D-207 point 3.\n\n### Acceptance\n\n- Unit test: a helper used by a test in another module that also uses staying code moves, the test stays, and the crate builds.\n- The existing `extract::rust` tests and `rust-unit` still pass, and `check --warnings` is clean.",
+  "closedTime": 1793060951,
+  "column": "complete",
+  "createdTime": 1793059037,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "fbf6a118d1e9a3ab",
+  "links": [],
+  "milestone": null,
+  "rank": 112.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: tests that also use staying code stay put"
+}

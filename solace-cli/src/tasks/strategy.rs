@@ -1338,3 +1338,13 @@ pub(crate) fn start_notes_run(top: &Path, version: &str, message: &str) -> Resul
     put_run(top, &run)?;
     Ok(run)
 }
+
+/// Announces the vision as a root event when it differs from `seen`.
+pub(crate) fn announce_vision(top: &Path, seen: &mut Option<Value>) {
+    crate::tasks::store::announce(top, "vision", vision(top), seen);
+}
+
+/// Announces the personas as a root event when they differ from `seen`.
+pub(crate) fn announce_personas(top: &Path, seen: &mut Option<Value>) {
+    crate::tasks::store::announce(top, "personas", json!(personas(top)), seen);
+}

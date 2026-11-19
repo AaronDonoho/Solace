@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794183767,
+  "body": "Designs can use a default palette of components built into Solace, so a screen shows real controls rather than empty boxes.\n\n### Do\n\n- Agree the palette with the human before building it. A cursory suggestion, not a prescription: text, heading, button, text input, and an image placeholder.\n- Add each component to the validator's table with its own properties, such as a button's label.\n- Draw each in the renderer with Lustre.\n- Keep adding a component to one entry in each place, so the palette can grow.\n\n### Acceptance\n\n- Tests: each component validates, an unknown property on one is refused, each draws with its `data-design-id`, and a component can't hold children unless its type allows them.\n\n### Left out\n\nAttachments such as raster and SVG images, and a project's own component library as the palette.",
+  "closedTime": 1794074676,
+  "column": "complete",
+  "createdTime": 1793914428,
+  "dependsOn": [
+    "f44adde2caf463e2"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "a3611a3835587484",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 342.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "ui: default components"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464631,
+  "body": "`solace-cli/build.rs` runs the board's and frontend's `build-release` (bun, gleam) whenever their sources change, writes into their `priv/` folders, and panics if they fail. Under a Rust check that would fail on Gleam errors in another project and need write access to it.\n\n- Move the frontend bundling into the `[build]` plan (D-131 point 6), ordered before the Rust build.\n- Leave `build.rs` only embedding the already-built files (rerun when they change).\n- A missing bundle gives a clear build error naming the `[build]` step to run.\n\nIndependent of the other Rust tasks; must land before `solace-cli/` itself is adopted.",
+  "closedTime": 1792263136,
+  "column": "complete",
+  "createdTime": 1792252817,
+  "dependsOn": [],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "f5e747ac7ca73845",
+  "links": [],
+  "milestone": null,
+  "rank": 204.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "Self-build: bundling out of build.rs"
+}

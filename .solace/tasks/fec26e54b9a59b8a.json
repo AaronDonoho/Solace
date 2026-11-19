@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056535,
+  "body": "On a board task, a waiting question and a discussion each open only their own editor:\n\n- While a question is waiting for an answer, the answer editor opens on the **Questions** tab. It no longer opens the **Notes** tab's editor; Notes shows the plus (Add note) button as before.\n- While a discussion is waiting on the human, the **Notes** tab's editor opens. It doesn't open an editor on the Questions tab.\n- If both happen at once, each tab opens its own editor.\n\nPressing Add note, or a saved note draft, still opens the Notes editor as now.\n\n---\nFor the agent: `solace_task.note_editor_open` (solace-cli/components) opens the Notes composer when `first_unanswered(t)` finds a question; drop that case, so only `model.writing` or a discussion run (`kind == \"discuss\"`, `state != \"ended\"`) opens it, whether or not a question is also waiting. Update the doc comments on `note_editor_open` and `notes_view`. `solace_task.questions_view` already opens its editor only for a waiting question; leave it. Add a test for each direction and for both at once.",
+  "closedTime": 1794968109,
+  "column": "complete",
+  "createdTime": 1794933427,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "fec26e54b9a59b8a",
+  "links": [],
+  "milestone": null,
+  "rank": 129.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "task view: question opens only its own editor"
+}

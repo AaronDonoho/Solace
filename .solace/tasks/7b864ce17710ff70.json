@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312245,
+  "body": "Today only a review's `### Tech debt` section is filed (D-112, `board.tech_debt`). A reviewer never sees the work run's steps, so waste like the one in run 9d47034f122fa14c of task:56ecdeaa0356d0db goes unreported: `run cargo-fmt-check` printed a coloured diff of about 25 files the task never touched, and the run was compacted right after.\n\nChange:\n1. `board.work_role` asks the work agent to end its `task done` summary with a `### Tech debt` section (same format as `TECH_DEBT_ASK`) for items that look like bugs or steps that cost far more than they gave. Examples: a command whose reply was much larger than needed or mostly about code the task didn't touch, a reply too unclear to act on so the step was repeated, or a check that can't pass for reasons outside the task. Each item names the command or step, what was wasted, and what would fix it. If there was none, the agent leaves the section out.\n2. `board.tech_debt` also files the items from the last work run's summary, using the same Tech Debt task and one `solace` note per item, labelled `Tech debt from the work on task:<id> (work run <rid>)`.\n3. Amend D-112 so it covers work summaries as well as reviews.\n\nCheck: a board test where a completed task's work summary and review each have a `### Tech debt` item, and both are filed on the Tech Debt task with their sources named. A brief test checks that the work brief holds the ask.\n\n\n** worth knowing**\n\n- **Noise:** weaker models may pad that section with things that aren't really waste. the brief's wording must be tightened to prevent this.\n- **No automatic detection:** Solace doesn't yet flag oversized replies by itself, e.g. any reply over some size. That would catch waste even when the agent doesn't report it, so tell me if you want it as a task.\n- **Other projects:** there, a wasteful `run` command lives in that project's own settings. A filed item will point at their `solace.toml`, which only a human can edit.",
+  "closedTime": 1793232735,
+  "column": "complete",
+  "createdTime": 1793231171,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "7b864ce17710ff70",
+  "links": [],
+  "milestone": null,
+  "rank": 180,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "work: report wasteful steps as tech debt"
+}

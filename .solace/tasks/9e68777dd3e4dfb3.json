@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791951684,
+  "body": "Part of General UI Polish (feature item 9). On the board, selecting a card that is already selected (or double-clicking it) should scroll the page to its detail.\n\n- In `solace_board`, a `Select` for the already-selected card, and a double-click on any card, sends a scroll-to-detail signal: the detail band from task 812bda5e156af79a expands if collapsed and receives focus/scroll.\n- The board's `Select` message gains the \"same card again\" case; the double-click arrives as a second click within the click window, handled as the same signal.\n- Scrolling is a frontend behavior in `priv/app.js`/`shell.mjs` (the board page's shadow host), driven by a data attribute the board sets, so Gleam stays pure.\n\n**Tests:** board view tests assert the signal on re-select and double-click; the frontend test checks the scroll handler fires when the attribute is set.",
+  "closedTime": 1791940311,
+  "column": "cancelled",
+  "dependsOn": [
+    "812bda5e156af79a"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "9e68777dd3e4dfb3",
+  "links": [],
+  "milestone": null,
+  "rank": 10,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "ui: Re-select scrolls to detail"
+}

@@ -1,0 +1,10 @@
+{
+  "body": "Catches \"works on my machine\" before a release leaves the build: dependencies, files or environment variables that the build machine has but the package doesn't carry.\n\n- A build runs from a recorded copy of the source in a separate folder, with locked dependencies, rather than on the working tree as it is (D-246 left this to this feature).\n- The build records what it read from the machine: environment variables, files outside the project, tools on `PATH`. Tool versions are already recorded with each release (D-247).\n- The final package is inspected: its file list, linked libraries, and expected files that are missing.\n- An agent reviews the inspection and reports risks in plain language (e.g. \"reads `SOLACE_CONFIG` but nothing sets it in the package\"); the human sees the report with the release, and can file a task from any finding.\n\nLater milestones: deploying and testing the release in a sandbox (Deploy and Test tabs).\n\nDepends on: build: run from the Build page, build: artifacts and versions (both complete).",
+  "colorSlot": null,
+  "id": "334355678da937ab",
+  "milestone": "f8b1014c90da26f9",
+  "rank": 2.0,
+  "startTime": null,
+  "state": "proposed",
+  "title": "build: package inspection"
+}

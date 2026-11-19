@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312244,
+  "body": "Work run a8d64b91a9694804 on task:b5c87c892b7d275c started with no Solace tool. Codex gave the agent no `exec` tool and no `mcp__solace__solace`, so the agent couldn't read or change anything. A run with the same model and config 37 s later worked. So it happens only sometimes.\n\nThe likely cause, which is not confirmed, is that the `solace mcp` server doesn't start within Codex's default 10 s startup limit. Codex then goes on without it and doesn't stop. `lockdown.agent_config` writes `[mcp_servers.solace]` without `startup_timeout_sec` or `required`.\n\n**Do.**\n- In the Codex config `lockdown.agent_config` writes, mark the `solace` server `required = true`, so Codex stops at startup and doesn't run the agent without it.\n- Give it a longer `startup_timeout_sec` (for example 60).\n- Check the raw log of run a8d64b91a9694804 for Codex's MCP startup message. If it names a different cause (for example, the `solace` binary path from `env::current_exe` no longer exists after a rebuild), fix that cause instead and record it in the task note.\n\n**Tests.** Update `lockdown.tests::a10_agent_config_golden`. Codex accepts the written config (no config-load error).\n\n**Out of scope.** Automatic retries; Claude Code's MCP setup; changing how the outcome is worded.",
+  "closedTime": 1793252259,
+  "column": "complete",
+  "createdTime": 1793048724,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "5588f9c9afcac095",
+  "links": [],
+  "milestone": null,
+  "rank": 108.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "agents: Codex runs never start without Solace"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794359898,
+  "body": "The design agent gets its own narrow set of Solace commands, and is told only what it can do (D-96).\n\n### Do\n\n- A design run can read code, tasks, decisions, the vision, the personas and designs, as a strategy run reads the plan and code. It can also reply to the human with a waiting note. Everything else is refused.\n- It can't change code, tasks, features or milestones.\n- Give it its own tool description, hints and refusals in `solace mcp`, with no task-run or strategy advice.\n- Add a `help` section, and document the commands in the reference.\n\n### Acceptance\n\n- Tests: each allowed read works in a design run, a code change and a task change are refused, a run's note reaches the human and waits, and a refusal gives no task-run advice.\n\n### Left out\n\nProposing a change to a design, which is the next task but one.",
+  "closedTime": 1794280560,
+  "column": "complete",
+  "createdTime": 1793914485,
+  "dependsOn": [
+    "73718ff8c5f77922",
+    "4b8e08231c2d7afe"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "3257af90db11da80",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 349.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "agent: design run commands"
+}

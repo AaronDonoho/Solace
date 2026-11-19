@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794856677,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794852956,
+  "column": "complete",
+  "createdTime": 1794850793,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d4026e0f68ff027b",
+  "links": [],
+  "milestone": null,
+  "rank": 313.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "tests: load the built pages in a browser"
+}

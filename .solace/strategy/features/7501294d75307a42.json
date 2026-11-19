@@ -1,0 +1,11 @@
+{
+  "body": "1. Allow agent configuration in the Settings page.\n2. Support more harnesses / external agents.\n3. Automatically detect which are available; hide those that are unavailable from the UI when selecting agents\n",
+  "colorSlot": 6,
+  "id": "7501294d75307a42",
+  "milestone": null,
+  "rank": 4.09375,
+  "request": "385a152e-808f-4431-830b-eae8c88cec11",
+  "startTime": 1792032317,
+  "state": "complete",
+  "title": "Improved Agent Integration"
+}

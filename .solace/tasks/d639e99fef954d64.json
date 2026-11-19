@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794011266,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794009584,
+  "column": "complete",
+  "createdTime": 1793982121,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "d639e99fef954d64",
+  "links": [],
+  "milestone": null,
+  "rank": 358.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "tech debt: restore feature title suffix"
+}

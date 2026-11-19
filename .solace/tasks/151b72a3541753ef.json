@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792978309,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792977110,
+  "column": "complete",
+  "createdTime": 1792976372,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "151b72a3541753ef",
+  "links": [],
+  "milestone": null,
+  "rank": 282.0,
+  "scope": [
+    ".",
+    "solace-app"
+  ],
+  "techDebt": true,
+  "title": "launcher: switch projects reliably: Tech Debt"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1793636547,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793568867,
+  "column": "complete",
+  "createdTime": 1793555287,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": ".",
+  "id": "76e5df161bd8741e",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 329.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/contracts",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "Agent Roles"
+}

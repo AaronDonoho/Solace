@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791928478,
+  "body": "Agents guess wrong about what a path is relative to, and the refusal doesn't help. In task:2355fd5670e2d1be's run `63630cee55e7d077`, from `solace-cli/components`, these were all refused:\n- `--project ../strategy` (×2)\n- `grep … --in solace-cli/strategy` and `--in solace-cli/strategy/src` (×3), `E6002 no such file or folder`\n- `read solace-cli/strategy/src/api.mjs`, `E6002 no such file`\n\nThe agent got there by trial: `read src/api.mjs --project solace-cli/strategy`.\n\n**Accept root paths for reads.** In `read`, `grep --in` and `files`, a path that doesn't exist in the current project but starts with a project's folder from the Solace root (`solace-cli/strategy/src/api.mjs`) is read from that project, as if `--project` were given. The reply's header names the project. Reads only: `write`, `move` and `remove` keep refusing, and their refusal names the `--project` form.\n\n**Refusals name the base.** Any `E6002` for a missing path says what it was resolved against and, when the path exists in another project, the form that works: `no such file: solace-cli/strategy/x.md (paths are relative to solace-cli/components); it is x.md in solace-cli/strategy: add --project solace-cli/strategy`.\n\n**`--project` with a relative folder.** `--project ../strategy` (or `./x`) resolves against the current project. When that lands on a project under the root, use it. Otherwise the refusal says `--project` takes a folder from the Solace root and lists them, as now.\n\n**Unknown options are refused by name.** A command given an option it doesn't take says so instead of reading the option's value as a name or path: `view has no --lines; read takes --lines`. Today `view strategy.update --lines 50..80` gives `E1001 unknown name: 50..80`. List the command's options as `help <command>` does.\n\n**Tests:** Rust tests in `lockdown.rs` for a root path read through another project, the `write` refusal, and the `E6002` wording. A test in `main.rs` for the unknown-option refusal on `view`. An acceptance case for `--project ../<sibling>`.",
+  "closedTime": 1791925982,
+  "column": "complete",
+  "dependsOn": [
+    "6d111deb34c119e0"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "33f7c7b49563844a",
+  "links": [],
+  "milestone": null,
+  "rank": 110.0,
+  "scope": [
+    "."
+  ],
+  "title": "paths: one base, refusals that name it"
+}

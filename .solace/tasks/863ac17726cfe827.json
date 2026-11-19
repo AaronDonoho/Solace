@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056544,
+  "body": "On the Design page, when the note box beside the selected elements appears, only its background is see-through. Its border, Move handle, Note label, placeholder, typed text, and Add note button stay fully opaque.\n\n### Acceptance\n\n- A visual check shows the design beneath the note box through its background, but not through its contents.",
+  "closedTime": 1795012790,
+  "column": "complete",
+  "createdTime": 1795011655,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "863ac17726cfe827",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 40.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "notes: keep note box contents opaque"
+}

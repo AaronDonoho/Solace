@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791778987,
+  "body": "I added a new subproject and it wasn't available in the scope of tasks until I restarted Solace.",
+  "closedTime": 1791755311,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "0215b08bb4a2d236",
+  "links": [],
+  "milestone": null,
+  "rank": 67.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Scope options should update when a project is added/removed"
+}

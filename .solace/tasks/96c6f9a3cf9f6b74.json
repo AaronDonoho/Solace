@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793312248,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793299286,
+  "column": "complete",
+  "createdTime": 1793298551,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "96c6f9a3cf9f6b74",
+  "links": [],
+  "milestone": null,
+  "rank": 200.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "tech debt: drop \": Tech Debt\" title suffix: Tech Debt"
+}

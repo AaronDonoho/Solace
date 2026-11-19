@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159121,
+  "body": "In a Rust project, `extract` and `merge` are always refused with `E6013 this Rust project has no code held as symbols to extract`. The cause is in `crate.run_inner`: both are listed in `GLEAM`, and the Rust branch only lets `check`, `test`, `submit`, `delete`, `probe` and the reads through, so `extract`/`merge` fall to `lockdown::plain`. The Rust extract and merge work (D-185, D-205..D-207) was tested by calling the store directly, so nothing caught this. Found in run 1eb9fa406ebb94eb of task:ea673350c54b241e, whose worker had to move code by hand with `submit` and `delete`.\n\n### Change\n- Let `extract` and `merge` through the Rust branch of `run_inner`, needing cargo the way `submit` does.\n\n### Done when\n- A test runs `extract` and `merge` through the command path (not the store directly) in a Rust project and they succeed.\n- `test --all --project solace-cli` passes.",
+  "closedTime": 1793055565,
+  "column": "complete",
+  "createdTime": 1793052885,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "4e56d22b71a5382d",
+  "links": [],
+  "milestone": null,
+  "rank": 109.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: Rust extract and merge reachable from the CLI"
+}

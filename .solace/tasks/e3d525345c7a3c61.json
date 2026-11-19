@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690228,
+  "body": "Changes on tasks should have selectable text.",
+  "closedTime": 1791516346,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "e3d525345c7a3c61",
+  "links": [],
+  "milestone": null,
+  "rank": 19.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Selectable changes text"
+}

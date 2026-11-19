@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793665636,
+  "body": "Fixes the human's role-model issues 1–4 (Agent Roles feedback, 2026-11-01).\n\n### What changes\n1. **No backup.** Each role has one model choice. Remove the backup picker from Settings, the `backup` field from `GET/POST /role-models` and the saved config, and the backup step from the task page's role default (`solace_task.role_models_chosen`, `ModelSource.RoleBackup`). A `backup` value already in a machine's config is ignored, never an error.\n2. **Same model list everywhere.** The role picker in Settings lists the same models as the task page's model picker, including the built-in Claude and Codex models. Today `settings.entries_decoder` keeps only models set up under Models and drops built-in and discovered ones. Use one source for both pickers rather than a second list.\n3. **No \"Use fallback\".** Replace the empty option in the role picker (`settings.model_options`) with a plain choice meaning \"no model for this role — pick one on each task\", e.g. \"None (choose on each task)\". Update the section's help text to match, with no mention of a backup or fallback.\n4. **Placeholder on the task page.** When a role has no model, the task page's model picker shows \"Select a model\" until one is picked, never a blank box. `solace_task.placeholder_option` already exists; find why it isn't showing (one guess: the picker holds a value that isn't in the list, which hides the placeholder and leaves the box blank — unverified).\n\n### Acceptance criteria\n- Settings shows one model picker per role, listing built-in Claude/Codex and set-up models.\n- Saving and reloading keeps each role's choice; an old config with a backup still loads.\n- A role with no model: Settings says so in plain words; a task in that role shows \"Select a model\".\n- Focused tests for each of the four points; existing tests that use `backup` updated.\n\n### Out of scope\nSkills, adding new models, Autorun.",
+  "closedTime": 1793585734,
+  "column": "complete",
+  "createdTime": 1793584475,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli",
+  "id": "747bf8c446ba332b",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 239.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/settings"
+  ],
+  "title": "Agent roles: one model, full model list"
+}

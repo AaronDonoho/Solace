@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690222,
+  "body": "Recommend a few approach options.",
+  "closedTime": 1791235781,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "9b725c028c13c1d7",
+  "links": [],
+  "milestone": null,
+  "rank": 4.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Selected task card is easily identified"
+}

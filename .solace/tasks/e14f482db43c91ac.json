@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690224,
+  "body": "As a solace board user,\nI want the board to remember the last agent I used\nso that i don't have to keep making the same decisions.",
+  "closedTime": 1791237958,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "e14f482db43c91ac",
+  "links": [],
+  "milestone": null,
+  "rank": 9.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Remember the agent"
+}

@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1794893343,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794893336,
+  "column": "cancelled",
+  "createdTime": 1794892649,
+  "dependsOn": [],
+  "feature": "5be8bc14e3676b85",
+  "home": ".",
+  "id": "e643fade11a362c9",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 384.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/delivery",
+    "solace-cli/design",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "build: Solace builds itself: Tech Debt"
+}

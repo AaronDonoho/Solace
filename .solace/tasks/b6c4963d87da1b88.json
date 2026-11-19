@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539260,
+  "body": "A Rust `submit` that fails to parse names neither the block nor where the item was placed. In task:1ba2b996f1282bbb run `a348af56b1f15298` the first reply was `line 28: cannot parse string into token stream: }` (no block, no file); the retry named a temp file `.solace/format-<hash>.rs:28`. The agent spent a long turn guessing which of four blocks was at fault, when the cause was the item being wrapped in the wrong container.\n\nGleam's errors are located by symbol; Rust's should be too.\n\n1. When `cargo::format_item` or the `syn` parse in `store.submit_items` fails, report the block's header name (`<module>.<name>`) and the line within the submitted text, not within the wrapper or temp file.\n2. When the item was wrapped in a container (an `impl`, `trait` or inline `mod`), say so: \"added inside `<container qname>` (<kind>)\", so a wrong placement is visible.\n3. Never show the `.solace/format-*.rs` path; drop the bare \"cannot parse string into token stream\" form for the located one.\n4. Tests: a multi-block submit with one bad block names that block and its own line; an `*** Add` placed in an inline `mod` names the container; no reply contains `.solace/format-`.\n\nChecks: `rust-unit`, `rust-acceptance`.\n\nLeft out: fixing container placement itself (note 2 on task:1ba2b996f1282bbb).",
+  "closedTime": 1792469921,
+  "column": "complete",
+  "createdTime": 1792468907,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "b6c4963d87da1b88",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 8.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: Rust syntax errors name the block"
+}

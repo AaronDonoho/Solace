@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972379,
+  "body": "When a board task names a design, the agents working and reviewing it are told so, and how to use it. This is the one part of Design that is task work.\n\n### Do\n\n- When a task's body names `design:<id>` (D-234), its work run's brief says the design exists, how to read it with `design show`, and points at the translation guide (task:3d346fcd77e0cede).\n- Its review run's brief asks the reviewer to check the built screen against the design: its elements, their order and their text, judged as a goal (D-236), not pixel by pixel.\n- A named design that doesn't exist or isn't valid is said in the brief, not hidden.\n- Record this in a decision.\n\n### Acceptance\n\n- Tests: a task naming a design gets the lines in its work and review briefs, a task naming none gets neither, and a missing design is reported.\n\n### Left out\n\nLinks from tasks to single elements, and help for projects that don't use Lustre.",
+  "closedTime": 1794933518,
+  "column": "complete",
+  "createdTime": 1794273266,
+  "dependsOn": [
+    "3d346fcd77e0cede"
+  ],
+  "feature": "2fbf4ee3c8e49977",
+  "home": ".",
+  "id": "2a47c5c3669b4bef",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 368.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "from design: briefs name the task's design"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791834448,
+  "body": "Test output is filling agents' context. Shorten the test results while keeping relevant information available.",
+  "closedTime": 1791779000,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "21d6c106e7ad4251",
+  "links": [],
+  "milestone": null,
+  "rank": 87.0,
+  "scope": [
+    "."
+  ],
+  "title": "Reduce test output"
+}

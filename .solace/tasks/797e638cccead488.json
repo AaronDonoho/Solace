@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794876814,
+  "body": "When the Design page loads, or when switching away from it to another page, Solace becomes nearly unresponsive for a moment.\n\nLoading the Design page and switching to or from it should not make Solace stop responding.\n\n### For the agent\nThe cause is not known yet; find it as part of this task and fix it. Places worth checking first (cursory, not confirmed): the Design page's first load and replay of runs and designs (`design.settle`, its `reload`), drawing large designs or flow diagrams, and the shell's watchers over every page's shadow DOM (`watch_shadow_hosts` in `shell.mjs`), which observe each page and could do heavy work when a page is shown or hidden. Report what the cause was in your notes.",
+  "closedTime": 1794849145,
+  "column": "complete",
+  "createdTime": 1794800688,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "797e638cccead488",
+  "links": [],
+  "milestone": null,
+  "rank": 23.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "design: page stops freezing Solace"
+}

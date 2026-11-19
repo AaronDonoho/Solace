@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312247,
+  "body": "A Codex work run sometimes starts without the `solace` MCP tool in its tool list, so the agent can do nothing and exits.\n\n**Seen in** task:d55c1a70adf88be3, run `a219a34c96ad6bc6` (model `commandcode-deepseek-v4.1-flash`): the agent only had `list_mcp_resources` / `read_mcp_resource` / `list_mcp_resource_templates`. Those calls reached `solace mcp` (it answered `-32601 method not found`, since it serves tools only), so the server was running and connected; the tool itself just wasn't offered to the model. The next run, `2062ff989e85ef1c`, with the same model, got the tool and worked normally. The run was reported only as \"agent exited without finishing (exit status: 0)\", plus an unrelated model-metadata warning.\n\n**Needed**\n- Find out why Codex sometimes leaves the tool out (for example, how Codex exposes MCP tools to a model that has no metadata, given the features `lockdown.agent_config` turns off), and fix it so a worker reliably gets the tool.\n- If the agent ends without ever making a solace call, the run's outcome says plainly that the agent didn't get the Solace tool, instead of the generic \"exited without finishing\".\n\n**Check:** a test covers the outcome message for a run that made no solace call.",
+  "closedTime": 1793301970,
+  "column": "complete",
+  "createdTime": 1793296117,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a651a0e8a2412e00",
+  "links": [],
+  "milestone": null,
+  "rank": 196.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "board: Codex worker sometimes lacks Solace tool"
+}

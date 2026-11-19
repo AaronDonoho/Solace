@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765932,
+  "body": "Replace the Tasks tab's Project, Feature and Milestone select boxes with text inputs that act as comboboxes. Typing shows suggestions from the loaded records: case-insensitive substring matches in the project label or folder, feature title or id, and milestone title or id, with prefix matches first and then by title. Choosing a suggestion applies the same filter id the select sent; clearing the input means All.\n\nThe current choice's title/label fills the input and is marked in the list. While text is typed but no suggestion is chosen, keep the current filter. Support click, Up/Down, Enter and Escape, with combobox/listbox roles and `aria-activedescendant`. Matching is literal substring, not typo-tolerant edit distance; no suggestions is a clear empty state.\n\n**Tests:** matching and ordering for each filter; choosing, clearing and no-match behavior; keyboard navigation; duplicate titles remain distinct by id; the task query still combines with all three filters.",
+  "closedTime": 1792724286,
+  "column": "complete",
+  "createdTime": 1792708004,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "73fa3e1e8e4a8a9e",
+  "links": [],
+  "milestone": null,
+  "rank": 105.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: filters suggest as typed"
+}

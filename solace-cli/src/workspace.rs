@@ -51,16 +51,18 @@ pub fn enclosing(start: &Path) -> Result<Option<PathBuf>, Failure> {
         [] => Ok(start.ancestors().filter(|d| has_store(d)).last().map(Path::to_path_buf)),
         [r] => match r.ancestors().skip(1).find(|d| has_store(d)) {
             Some(p) => invalid(format!(
-                "{} lists projects inside the Solace project {}; list them in that project's solace.toml instead",
+                "{} lists projects inside the Solace project {}; list them in that project's solace.toml instead, or {}",
                 r.display(),
-                p.display()
+                p.display(),
+                open_on_its_own(r.display(), p.display())
             )),
             None => Ok(Some(r.to_path_buf())),
         },
         [inner, .., outer] => invalid(format!(
-            "the Solace root {} is inside the root {}; one root holds all its projects, so list them in the outer one",
+            "the Solace root {} is inside the root {}; one root holds all its projects, so list them in the outer one, or {}",
             inner.display(),
-            outer.display()
+            outer.display(),
+            open_on_its_own(inner.display(), outer.display())
         )),
     }
 }
@@ -115,7 +117,10 @@ fn listed(root: &Path) -> Result<Vec<String>, Failure> {
         match p.as_str() {
             Some(".") => return invalid("`.`: the root's own project is always included; list only folders below it"),
             Some(d) if contained(root, d) && is_root(&root.join(d)) => {
-                return invalid(format!("{d} lists projects of its own; one root holds all its projects"));
+                return invalid(format!(
+                    "{d} lists projects of its own; one root holds all its projects, so {}",
+                    open_on_its_own(d, "this root")
+                ));
             }
             Some(d) if contained(root, d) => out.push(d.to_string()),
             _ => return invalid(format!("{p}: expected a folder below the root, reached without symlinks")),
@@ -340,7 +345,7 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} has no gleam.toml or Cargo.toml."));
     }
     if is_root(&path) {
-        return fail(format!("{dir} lists projects of its own; one root holds all its projects."));
+        return fail(format!("{dir} lists projects of its own; one root holds all its projects, so {}", open_on_its_own(dir, "this root")));
     }
     let mut all = dirs.clone();
     if root.join("gleam.toml").exists() && has_store(root) {
@@ -701,11 +706,23 @@ mod tests {
         assert_eq!(find(&root.join("a")).unwrap(), root.0);
         // A second root inside it, or a root inside a project, is refused.
         fs::write(root.join("inner/solace.toml"), "projects = [\"b\"]\n").unwrap();
-        assert!(enclosing(&root.join("inner/b")).unwrap_err().0.contains("is inside the root"));
+        let refusal = enclosing(&root.join("inner/b")).unwrap_err().0;
+        assert!(refusal.contains("is inside the root"), "{refusal}");
+        assert!(refusal.contains("list them in the outer one"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("move {} out of {} and open it on its own", root.join("inner").display(), root.display())),
+            "{refusal}"
+        );
         fs::remove_file(root.join("inner/solace.toml")).unwrap();
         fs::create_dir_all(root.join("a/docs")).unwrap();
         fs::write(root.join("a/docs/solace.toml"), "projects = []\n").unwrap();
-        assert!(enclosing(&root.join("a/docs")).unwrap_err().0.contains("is inside the root"));
+        let refusal = enclosing(&root.join("a/docs")).unwrap_err().0;
+        assert!(refusal.contains("is inside the root"), "{refusal}");
+        assert!(refusal.contains("list them in the outer one"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("move {} out of {} and open it on its own", root.join("a/docs").display(), root.display())),
+            "{refusal}"
+        );
         setup(&root, "inner/b").unwrap();
         assert_eq!(members(&root).unwrap(), [".", "a", "a/tools", "inner/b"]);
         remove(&root, "a").unwrap();
@@ -834,6 +851,34 @@ mod tests {
         let out = crate::lockdown::dispatch(&s, &v, &["read", "DECISIONS.md"], &mut input, None, 10_000).unwrap().unwrap();
         assert!(out.contains("## D-1 Top"), "{out}");
     }
+
+    #[test]
+    fn a_root_inside_a_project_names_the_folder_to_open() {
+        let root = Scratch::new();
+        project(&root, "a");
+        fs::create_dir_all(root.join("a/.solace")).unwrap();
+        fs::write(root.join("a/.solace/store.db"), "").unwrap();
+        project(&root, "a/docs");
+        fs::write(root.join("a/docs/solace.toml"), "projects = []\n").unwrap();
+        let refusal = enclosing(&root.join("a/docs")).unwrap_err().0;
+        assert!(refusal.contains("lists projects inside the Solace project"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("move {} out of {} and open it on its own", root.join("a/docs").display(), root.join("a").display())),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn setting_up_a_project_that_lists_projects_names_the_folder_to_open() {
+        let root = Scratch::new();
+        project(&root, "a");
+        setup(&root, "a").unwrap();
+        project(&root, "a/docs");
+        fs::write(root.join("a/docs/solace.toml"), "projects = []\n").unwrap();
+        let refusal = setup(&root, "a/docs").unwrap_err().0;
+        assert!(refusal.contains("lists projects of its own"), "{refusal}");
+        assert!(refusal.contains("move a/docs out of this root and open it on its own"), "{refusal}");
+    }
 }
 
 /// The language of a project the New project form creates.
@@ -900,4 +945,9 @@ fn remove_created(root: &Path, dir: &str, keep: &Path) {
 /// Whether `root` sits inside a Git repository, so a new project joins it.
 fn in_repository(root: &Path) -> bool {
     root.ancestors().any(|d| d.join(".git").exists())
+}
+
+/// The advice for a workspace that sits inside another: it can't be opened where it is.
+fn open_on_its_own(inner: impl std::fmt::Display, outer: impl std::fmt::Display) -> String {
+    format!("move {inner} out of {outer} and open it on its own")
 }

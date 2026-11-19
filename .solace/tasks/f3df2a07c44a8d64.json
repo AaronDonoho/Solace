@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791685672,
+  "body": "As a solace board user,\nI want an archive to show all the tasks,\nso that I can remove them from the board yet still have the tasks.\n\nThis archive depends on having a milestone/feature/task store in place first.\n\nThe archive should be a separate page.\nThe archive can display all tasks.\nSelecting a task displays it in the same fashion as displayed by the board, and allows editing. So we will want a shared component between the board and the archive for that.\n\nThe following are capabilities of the archive but require support by the Task Store to accomplish efficiently:\nIt is text-searchable by title, changes, or string matching within details or notes.\nIt shows tasks ordered by completion date (most recent at top). Can be filtered by status (a.k.a. column), project, milestone, feature (new fields on task).\nThe archive allows deleting tasks after a confirmation dialog.\nThe archive will support mass edits of tasks' project, milestone, or feature.\n\n\n",
+  "closedTime": 1791680738,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "f3df2a07c44a8d64",
+  "links": [],
+  "milestone": null,
+  "rank": 9,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/frontend"
+  ],
+  "title": "Create Task Archive"
+}

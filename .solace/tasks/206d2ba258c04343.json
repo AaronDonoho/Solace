@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792977611,
+  "body": "When a run proposes a body edit, the plan panel shows the whole old body under `Old:` and the whole new body under `New:` (`solace_task.old_and_new`, called from `solace_task.proposal_view`). Changing one line of a long body looks like the whole thing changed. D-116 and Spec 15 §6 still describe a line diff, but even that kept only the unchanged lines at the start and end, so an edit in the middle still showed everything between as changed.\n\n1. **Decision first.** Add a decision amending D-116 point 1 and Spec 15 §6: a changed body or vision text shows as a line diff that matches unchanged lines anywhere in the text, not only at the start and end. Removed lines aren't struck through.\n2. **The diff.** Replace `old_and_new` with a line diff of the old and new text, in the text's order. It finds the lines both versions share, wherever they are (a longest-common-subsequence match). Lines only in the old text get the deletion tint `.old-value` uses now, and lines only in the new text get the addition tint `.new-value` uses now. No strikethrough. Each run of unchanged lines collapses to one muted line (\"3 lines unchanged\"), keeping one line of context on each side of a change. Lines are compared as D-116 says: space around a line is ignored and blank lines are left out.\n3. **Unchanged:** the open \"New body\" section with the new text as Markdown, \"No change\" for a body that only differs in spacing, and creates showing every field.\n4. **Tests** in `solace_task_test.gleam`: rework `proposal_body_shows_old_and_new_test` and `proposal_styles_show_old_and_new_test` so that one line changed in the middle of a long body shows only that line in the deletion tint and its replacement in the addition tint, with no `<del>` or strikethrough, the unchanged runs collapsed and one line of context; also cover a line added at the end, a line removed at the start, and a vision text. Run the components tests and the Strategy page tests that check proposals.",
+  "closedTime": 1792946663,
+  "column": "complete",
+  "createdTime": 1792901710,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "206d2ba258c04343",
+  "links": [],
+  "milestone": null,
+  "rank": 115.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "proposals: body diff shows only changes"
+}

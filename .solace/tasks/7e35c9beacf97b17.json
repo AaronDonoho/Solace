@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690228,
+  "body": "Clicking Create while the server is slow to answer sends another create request each time. On Oct 6 the server waited 82 seconds for a project lock, and one task was created four times.\n\nWanted: while a create request is in progress, the button is disabled and shows that the task is being created. If the request fails, the button works again and the error is shown. The same applies to other buttons that create something (for example, new projects) if they have the same problem.\n\nDone when: a client test shows that a second click during a pending create sends no second request.",
+  "closedTime": 1791389906,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "7e35c9beacf97b17",
+  "links": [],
+  "milestone": null,
+  "rank": 13.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Disable the create button while a task is being created"
+}

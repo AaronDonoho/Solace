@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972381,
+  "body": "A build with a chosen version fails in Gleam with `error: Incompatible locked version`. The reason: the build writes the new version into every `gleam.toml`, but each Gleam lock file (`manifest.toml`) still records the workspace's own local packages (`source = \"local\"`, e.g. `delivery`, `components` in `solace-cli/frontend/manifest.toml`) at their old version, `1.0.0`. This must work for any project Solace manages, not only Solace itself.\n\nWhen a build writes a version (D-251), it also updates every lock file that records the version of a package the build just changed, in each workspace project:\n- **Gleam** `manifest.toml`: entries with `source = \"local\"`.\n- **Cargo** `Cargo.lock`: `[[package]]` entries with no `source` (the workspace's own crates), so builds run with `--locked` still pass.\n- **npm** `package-lock.json`: the top-level `version` and `packages[\"\"].version`, plus entries for local workspace packages.\n- **bun** `bun.lock`: the `version` of the workspace's own packages, where the file records one.\n- Any other lock file that records the workspace's own package versions in the formats above. Lock files that don't record them (e.g. `pnpm-lock.yaml`, `yarn.lock`) are left alone. Before changing anything, check each format against its tool's current documentation or behaviour.\n\nRules:\n- Change only the version of packages the build wrote. Leave downloaded (registry) entries, formatting and the rest of the file unchanged.\n- A failed, canceled or interrupted build restores these lines along with the manifests. `release.json`'s file list includes them.\n- Spec 15 and D-251 get the lock-file rule.\n\nDone when:\n- In a workspace with each of these manifest kinds and its lock file, a build that changes the version from `1.0.0` to `0.1.1` succeeds, with Gleam building, `cargo build --locked` and `npm ci`/`bun install --frozen-lockfile` passing. Each is tested.\n- Solace's own Build tab release recipe gets past `gleam build`.",
+  "closedTime": 1794957923,
+  "column": "complete",
+  "createdTime": 1794938628,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "91096b01c6786f30",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 390.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "versions: keep lock files in step"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792215002,
+  "body": "Show the board's **Needs review** column as **Review**.\n\n- Change the column's `label` in `solace-cli/src/default-board.toml` from `\"Needs review\"` to `\"Review\"`.\n- Keep the id `needs_review` so saved tasks, `events.finished` and tests still work, as `cancelled` does for the Canceled label.\n- Update the wording people read: README.md (the *needs review* / Needs review mentions), and the column name in specs where it names the label. Leave the id wherever code or config uses it.\n- Any test that checks the label text changes with it.\n\nDone when the board shows **Review** and the existing board tests pass.",
+  "closedTime": 1792213465,
+  "column": "complete",
+  "createdTime": 1792124707,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "d595639a11b598d8",
+  "links": [],
+  "milestone": null,
+  "rank": 170.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend"
+  ],
+  "title": "board: rename Needs review column to Review"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792292717,
+  "body": "#### Discussion\n\n**Human:**\n\nhow about conditional pipe commands?\nsolace write | run test\nor\nsolace run test --if write\n\n**Agent (claude-opus-5-5):**\n\n#### Answer\n\nSolace already has these conditionals, just without the syntax. In a batched call, the lines run in order, and two rules make them conditional:\n\n- **A call stops at a failed change** (D-119 point 5). If a `write` or `submit` is refused, the lines after it don't run. So `write …` with `test` on the next line already means `test --if write`.\n- **`task done` waits for a passing test** (D-152). It's skipped if the earlier `test` fails or names changed symbols that no test reaches.\n\nI'd advise against adding `|` or `--if`. It would give two ways to say the same thing, which goes against the vision's \"1 way to do anything\". It would also add syntax that small models get wrong. Each of the forms you suggest raises its own question: what does `|` pass along? What does `--if` refer to when there are two writes?\n\n#### Where an explicit condition could still help\n\nOnly one case isn't covered: running something **because a test failed**. For example, `test` followed by `inspect X` only when X's test fails. I don't think it's worth adding:\n\n- Today the reads after a failing `test` still run. That's usually what the agent wants, because it sent them expecting to need them.\n- What fixes a failure depends on the failure. The agent has to see the result before deciding, so a pre-planned branch rarely matches.\n\n#### Gaps worth checking instead\n\n- **The reference should say the rule plainly**, along the lines of: \"lines after a refused change don't run, so send `submit` and `test` together.\" The model then knows it doesn't need a condition. Point 5 is in the reference; I haven't checked how clearly it's worded.\n- **A failing `test` followed by another change in the same call.** At the moment that change still runs, because a test isn't a change. Stopping changes after a failed test would match D-152's logic and still let the reads run. It's rare, so I'd count it in the offline analysis before building anything.\n\n#### Suggestion\n\nDon't add conditional syntax. If the per-model counts show agents sending `submit` without `test`, or sending them in separate calls, improve the reference and the \"Next:\" hints rather than the grammar.\n\n**Human:**\n\nokay. yeah, the reference doesn't direct agents to use conditionals.",
+  "closedTime": 1792290200,
+  "column": "complete",
+  "createdTime": 1792289234,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "d151438a704c427e",
+  "links": [],
+  "milestone": null,
+  "rank": 216.0,
+  "scope": [
+    "."
+  ],
+  "title": "Utilize conditional calls"
+}

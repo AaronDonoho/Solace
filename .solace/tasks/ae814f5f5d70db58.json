@@ -1,0 +1,26 @@
+{
+  "archivedTime": 1792598366,
+  "body": "Add `solace-cli/` as a Rust project, so its `.rs` files are symbols changed only by `submit`.\n\n- Import it; the written files must match the current ones exactly, apart from any rustfmt changes accepted in task:4f32c653e33b9caf. The import reads the whole crate first and, if any line is outside the subset (D-158 point 2), refuses it and names each line, leaving no store; fix what it names and import again.\n- `cargo check` and `cargo test` pass under Solace, with bubblewrap on Linux.\n- `build.rs` and Cargo.toml's dependency keys need approval, as other settings do.\n- The Rust subset lines appear in the brief for tasks scoped to it (already in place: `store.rs::RUST_BRIEF`).\n- Dependencies are fetched before the first `--offline` check (task:2ce59934929721f0, D-158 point 4), so adoption works on a machine whose cargo cache lacks them.\n- Before adopting, commit or settle any edits made outside Solace, since after adoption they become reviewed work (D-58).\n\n### Settings moves\nThe crate's settings move from the root's `solace.toml` to a new `solace-cli/solace.toml`, so its checks run as that project's, in its sandbox. Each is a `write solace.toml` the human approves.\n\n- **`projects`:** the root gains `solace-cli`. Only a human changes that list, from the Workspace page (E6020, D-57), so ask for it.\n- **`[validators]`:** the `solace-cli/src/reference.txt` entry moves, so the layout check (D-143) follows the file.\n- **`[commands]`:** every entry that runs the crate or a script in `solace-cli/tests/` moves: `rust-board-tests`, `rust-lockdown-tests`, `rust-unit`, `rust-acceptance`, `layout_audit`, `spacing_parity`, `cargo-timings`, `cargo-cold-clean`, `cargo-cold-timings`, `cargo-cold-timings-debug`, `cargo-check-json`, `cargo-fmt-check`, `cargo-test`. Paths become relative to `solace-cli/`: drop `--manifest-path solace-cli/Cargo.toml`, and `solace-cli/tests/x.py` becomes `tests/x.py`. Check that each script still finds its own files when run from there. `bundle` builds `solace-cli/frontend` and stays at the root.\n- **`[build]`:** the `cargo` step (D-159 point 2) moves, still after `solace-cli/frontend`, and the root's `[build]` is removed so the crate isn't built twice. `build plan` lists it once, under `solace-cli`.\n\n### Done when\nAfter import, `check` and `test` pass in `solace-cli`, each moved command runs from there, and `build plan` shows the crate's step once, after the frontend.",
+  "closedTime": 1792464504,
+  "column": "complete",
+  "createdTime": 1792252946,
+  "dependsOn": [
+    "7db8dd126a22c863",
+    "f5e747ac7ca73845",
+    "d7aa4d5e523a065c",
+    "ba1542d1a967b9b7",
+    "2ce59934929721f0",
+    "ba3b986a554dd17f"
+  ],
+  "feature": "42af7119fb6915f9",
+  "home": ".",
+  "id": "ae814f5f5d70db58",
+  "links": [],
+  "milestone": null,
+  "rank": 207.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Adopt solace-cli into the store"
+}

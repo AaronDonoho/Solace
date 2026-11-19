@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793159112,
+  "body": "Audit the Rust crate (`solace-cli/src`) and produce the refactor plan the later tasks follow.\n\n### Where to look\n\n- Module size and mixed responsibilities: `main.rs` (5302 lines), `board.rs` (4532), `lockdown.rs` (3196), `tasks.rs` (2810), `extract.rs` (2474), `view.rs`, `reach.rs`.\n- Duplication between modules and repeated inline logic (path checks, project resolution, JSON plumbing).\n- Dead code and unused helpers; test layout (`board_tests.rs`, `tests/*.py`) and what the Rust tests vs Python acceptance tests cover.\n- How modules share state and which boundaries `extract`/`merge` can move cleanly.\n\n### Deliverable\n\nA plan note: which modules to split and into what, shared helpers to extract, dead code to remove, and the order of work — each step small enough for one task, ordered so tests keep passing. Flag anything that needs a decision from the human as questions.",
+  "closedTime": 1793057846,
+  "column": "complete",
+  "createdTime": 1792211521,
+  "dependsOn": [
+    "f9b3a60e7dd8547f"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "fc9bf315f4eddc7a",
+  "links": [],
+  "milestone": null,
+  "rank": 187.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate root project refactor plan"
+}

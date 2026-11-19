@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792201209,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792196657,
+  "column": "complete",
+  "createdTime": 1792180139,
+  "dependsOn": [],
+  "feature": "f414f1311c67fe80",
+  "home": ".",
+  "id": "3d236b89c7aa99f8",
+  "links": [],
+  "milestone": null,
+  "rank": 177.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "techDebt": true,
+  "title": "Workspace page: Tech Debt"
+}

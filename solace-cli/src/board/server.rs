@@ -84,14 +84,7 @@ impl Board {
     }
     /// `(dir, root)` for each set-up project.
     pub(crate) fn projects(&self) -> Result<Vec<(String, PathBuf)>, Failure> {
-        Ok(workspace::members(&self.top)?
-            .into_iter()
-            .map(|d| {
-                let r = scope::path(&self.top, &d);
-                (d, r)
-            })
-            .filter(|(_, r)| r.join(".solace/store.db").exists())
-            .collect())
+        Ok(self.listed()?.into_iter().filter(|(_, r)| r.join(".solace/store.db").exists()).collect())
     }
     /// Holds the project's serve lock for this server's life: a second
     /// server would end the first one's runs as a restart. `announce` says
@@ -133,26 +126,33 @@ impl Board {
     }
     fn listing(&self) -> Result<Value, Failure> {
         let projects: Vec<Value> = self
-            .projects()?
+            .listed()?
             .into_iter()
             .map(|(dir, root)| {
+                let stored = root.join(".solace/store.db").exists();
                 let (base, label) = if dir == "." {
                     (String::new(), self.top.file_name().map_or(".".into(), |n| n.to_string_lossy().to_string()))
-                } else {
+                } else if stored {
                     (format!("/p/{}", percent_encode(&dir)), dir.clone())
+                } else {
+                    (String::new(), dir.clone())
                 };
-                let needs = match crate::language::id(&root) {
-                    Some(id) => match crate::language::reason(id) {
-                        Ok(Some(reason)) => reason,
-                        Ok(None) if id == crate::language::RUST => fs::read_to_string(root.join(".solace/fetch-failed"))
-                            .ok()
-                            .map(|t| t.trim().to_string())
-                            .filter(|t| !t.is_empty())
-                            .unwrap_or_default(),
-                        Ok(None) => String::new(),
-                        Err(e) => e.0,
-                    },
-                    None => String::new(),
+                let needs = if !stored {
+                    "Store missing".to_string()
+                } else {
+                    match crate::language::id(&root) {
+                        Some(id) => match crate::language::reason(id) {
+                            Ok(Some(reason)) => reason,
+                            Ok(None) if id == crate::language::RUST => fs::read_to_string(root.join(".solace/fetch-failed"))
+                                .ok()
+                                .map(|t| t.trim().to_string())
+                                .filter(|t| !t.is_empty())
+                                .unwrap_or_default(),
+                            Ok(None) => String::new(),
+                            Err(e) => e.0,
+                        },
+                        None => String::new(),
+                    }
                 };
                 json!({"dir":dir,"label":label,"name":workspace::name(&root),"target":workspace::target(&root),"base":base,"needs":needs})
             })
@@ -402,6 +402,17 @@ impl Board {
     pub(crate) fn watching_guard(&self) -> std::sync::MutexGuard<'_, ()> {
         self.watching.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// `(dir, root)` for each project the workspace lists, with or without a store.
+    fn listed(&self) -> Result<Vec<(String, PathBuf)>, Failure> {
+        Ok(workspace::members(&self.top)?
+            .into_iter()
+            .map(|d| {
+                let r = scope::path(&self.top, &d);
+                (d, r)
+            })
+            .collect())
+    }
 }
 
 fn percent_encode(s: &str) -> String {
@@ -464,17 +475,17 @@ pub(crate) fn respond(req: tiny_http::Request, status: u16, value: Value) {
 
 /// The `/events` stream: one project's events, or in a workspace's merged
 /// stream every project's, each naming its `project`, with a `{projects}`
-/// event when the list changes. A merged stream's event id holds each
-/// project's position as JSON (D-57). A new stream starts from each project's
-/// workflow and tasks as they are, then follows the changes (D-78).
+/// event when the list changes. An event id holds the task position and each
+/// project's workflow position as JSON (D-57). A new stream starts from each
+/// project's workflow and tasks as they are, then follows the changes (D-78).
 pub(crate) struct Events {
     /// Whether the snapshot a new stream starts with is still to be sent.
     pub(crate) fresh: bool,
     pub(crate) board: std::sync::Arc<Board>,
     pub(crate) merged: bool,
-    /// The position in the task log, shared by every project (D-77).
+    /// The position in the log for task events (D-77).
     pub(crate) tasks: i64,
-    /// `(dir, root, seq)`: each project's position in its workflow events.
+    /// `(dir, root, seq)`: each project's position in the log's workflow events.
     pub(crate) streams: Vec<(String, PathBuf, i64)>,
     /// Whether this connection has sent `ready`, the end of what it missed.
     pub(crate) caught_up: bool,
@@ -482,12 +493,12 @@ pub(crate) struct Events {
 }
 
 impl Events {
-    /// An event id is `{"tasks": n, dir: seq, ...}`; any other starts from the beginning.
+    /// An event id is `{"tasks": n, dir: seq, ...}`; an older id's project
+    /// positions are read as positions in the shared log.
     pub(crate) fn new(board: std::sync::Arc<Board>, root: Option<PathBuf>, last: Option<&str>) -> Events {
         let seen: HashMap<String, i64> = last.and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
         let at = |d: &str| seen.get(d).copied().unwrap_or(0);
         let tasks = at("tasks");
-        let fresh = seen.is_empty() || task_position_stale(&board.top, tasks);
         let (merged, streams) = match root {
             Some(root) => {
                 let d = scope::dir(&board.top, &root);
@@ -495,25 +506,17 @@ impl Events {
             }
             None => (true, board.projects().unwrap_or_default().into_iter().map(|(d, r)| (d.clone(), r, at(&d))).collect()),
         };
+        let fresh = seen.is_empty() || task_position_stale(&board.top, tasks);
         Events { fresh, board, merged, tasks, streams, caught_up: false, bytes: Default::default() }
     }
     /// What a new stream starts from: the log positions first, then the files,
     /// so a change made in between is seen again as an event, never missed.
     fn snapshot(&mut self) -> std::io::Result<String> {
         let top = self.board.top.clone();
-        self.tasks = if store_dir(&top).is_dir() {
-            let db = crate::tasks::events(&top).map_err(|e| std::io::Error::other(e.0))?;
-            db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0)).map_err(std::io::Error::other)?
-        } else {
-            0
-        };
+        let position = log_position(&top).map_err(|e| std::io::Error::other(e.0))?;
+        self.tasks = position;
         for stream in &mut self.streams {
-            stream.2 = Connection::open(stream.1.join(".solace/store.db"))
-                .and_then(|db| {
-                    db.busy_timeout(Duration::from_secs(10))?;
-                    db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
-                })
-                .unwrap_or(0);
+            stream.2 = position;
         }
         Ok(self.state_of(&(0..self.streams.len()).collect::<Vec<_>>()) + &self.strategy_state())
     }
@@ -618,7 +621,6 @@ impl Events {
                 self.fresh = true;
                 return Ok(None);
             }
-            self.tasks = seq;
             // A row with no project is a root record's (D-87); a row whose
             // project is no member is a task with no project (D-129), shown
             // on the root's streams and marked.
@@ -629,9 +631,19 @@ impl Events {
                 self.streams.iter().any(|s| s.0 == project) || (self.at_root() && homeless)
             };
             if !shown {
+                self.tasks = seq;
                 continue;
             }
             let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+            if v.get("workflow").is_some() {
+                // Leave an unsent workflow for the next poll, before tasks move past it.
+                if self.streams.iter().any(|s| s.0 == project && s.2 < seq) {
+                    return Ok(None);
+                }
+                self.tasks = seq;
+                continue;
+            }
+            self.tasks = seq;
             if self.merged && !project.is_empty() {
                 v["project"] = json!(project);
             }
@@ -644,8 +656,8 @@ impl Events {
             return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
         }
     }
-    /// Follows a change to the workspace's list: new projects start at their
-    /// latest event, since the board loads them whole.
+    /// Follows a change to the workspace's list: new projects get their state
+    /// from their files, since the board loads them whole.
     fn members_changed(&mut self) -> std::io::Result<Option<String>> {
         let now = self.board.projects().map_err(|e| std::io::Error::other(e.0))?;
         if now.iter().map(|p| &p.0).eq(self.streams.iter().map(|s| &s.0)) {
@@ -653,22 +665,17 @@ impl Events {
         }
         let old = std::mem::take(&mut self.streams);
         let mut added = vec![];
+        let position = log_position(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
         for (d, r) in now {
-            let seq = match old.iter().find(|s| s.0 == d) {
-                Some(s) => s.2,
-                None => {
-                    added.push(self.streams.len());
-                    Connection::open(r.join(".solace/store.db"))
-                        .and_then(|db| {
-                            db.busy_timeout(Duration::from_secs(10))?;
-                            db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
-                        })
-                        .unwrap_or(0)
-                }
-            };
-            self.streams.push((d, r, seq));
+            if !old.iter().any(|s| s.0 == d) {
+                added.push(self.streams.len());
+                self.streams.push((d, r, position));
+            } else {
+                let seq = old.iter().find(|s| s.0 == d).map_or(0, |s| s.2);
+                self.streams.push((d, r, seq));
+            }
         }
-        // The new projects' state follows the list: their positions were read before their files.
+        // The new projects' state follows the list, read from their files.
         let dirs: Vec<&String> = self.streams.iter().map(|s| &s.0).collect();
         let list = format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs}));
         Ok(Some(list + &self.strategy_state() + &self.state_of(&added)))
@@ -700,30 +707,14 @@ impl Events {
                     self.bytes = std::io::Cursor::new(text.into_bytes());
                     return self.bytes.read(out);
                 }
-                for i in 0..self.streams.len() {
-                    let (dir, root, seq) = &self.streams[i];
-                    // Opened on each poll, not kept: a kept connection would follow a store
-                    // that adopting or undoing a migration moved away.
-                    let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
-                    db.busy_timeout(Duration::from_secs(10)).map_err(std::io::Error::other)?;
-                    let row = db
-                        .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
-                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                        })
-                        .optional()
-                        .map_err(std::io::Error::other)?;
-                    if let Some((seq, data)) = row {
-                        let dir = dir.clone();
-                        self.streams[i].2 = seq;
-                        let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
-                        if self.merged {
-                            v["project"] = json!(dir);
-                        }
-                        self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {v}\n\n", self.id()).into_bytes());
-                        return self.bytes.read(out);
-                    }
-                }
                 // Workflow events first, so a replay draws the columns before their tasks.
+                if let Some(text) = self.next_workflow()? {
+                    self.bytes = std::io::Cursor::new(text.into_bytes());
+                    return self.bytes.read(out);
+                }
+                if self.fresh {
+                    break;
+                }
                 if let Some(text) = self.next_task()? {
                     self.bytes = std::io::Cursor::new(text.into_bytes());
                     return self.bytes.read(out);
@@ -745,6 +736,50 @@ impl Events {
             self.bytes = std::io::Cursor::new(b": keepalive\n\n".to_vec());
             return self.bytes.read(out);
         }
+    }
+
+    /// The next workflow event for one of this stream's projects, each in the
+    /// log's order. A project with none moves to the newest position read, so
+    /// another project's pruning doesn't rebuild it from the files.
+    fn next_workflow(&mut self) -> std::io::Result<Option<String>> {
+        if !store_dir(&self.board.top).is_dir() {
+            return Ok(None);
+        }
+        let db = crate::tasks::events(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
+        for i in 0..self.streams.len() {
+            let dir = self.streams[i].0.clone();
+            let mut last = self.streams[i].2;
+            let found = {
+                let mut stmt =
+                    db.prepare("SELECT seq,data FROM events WHERE seq>? AND project=? ORDER BY seq").map_err(std::io::Error::other)?;
+                let mut rows = stmt.query(rusqlite::params![last, &dir]).map_err(std::io::Error::other)?;
+                let mut found = None;
+                while let Some(row) = rows.next().map_err(std::io::Error::other)? {
+                    let seq: i64 = row.get(0).map_err(std::io::Error::other)?;
+                    let data: String = row.get(1).map_err(std::io::Error::other)?;
+                    last = seq;
+                    let v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+                    if v.get("workflow").is_some() {
+                        found = Some((seq, v));
+                        break;
+                    }
+                }
+                found
+            };
+            if let Some((seq, mut v)) = found {
+                self.streams[i].2 = seq;
+                if self.merged {
+                    v["project"] = json!(dir);
+                }
+                return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
+            }
+            self.streams[i].2 = last.max(self.tasks);
+            if task_log_stale(&db, self.streams[i].2).map_err(|e| std::io::Error::other(e.to_string()))? {
+                self.fresh = true;
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -845,10 +880,15 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     }
     std::io::stdout().flush()?;
     let mut designs = crate::design::listed(&board.top).ok();
+    let mut milestones = Some(json!(crate::tasks::records(&board.top, "milestones")));
+    let mut features = Some(json!(crate::tasks::records(&board.top, "features")));
+    let mut vision = Some(crate::tasks::vision(&board.top));
+    let mut personas = Some(json!(crate::tasks::personas(&board.top)));
     let watcher = board.clone();
     std::thread::spawn(move || {
         let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
         let mut flows: HashMap<PathBuf, Option<Value>> = HashMap::new();
+        let mut tasks: Option<Value> = None;
         let mut tick = 0u64;
         loop {
             tick += 1;
@@ -857,6 +897,15 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 continue;
             }
             crate::design::announce_change(&watcher.top, &mut designs);
+            // Strategy records changed outside Solace, such as by `git pull`,
+            // reach open pages without a restart (D-179).
+            crate::tasks::store::announce_records(&watcher.top, "milestones", &mut milestones);
+            crate::tasks::store::announce_records(&watcher.top, "features", &mut features);
+            crate::tasks::strategy::announce_vision(&watcher.top, &mut vision);
+            crate::tasks::strategy::announce_personas(&watcher.top, &mut personas);
+            // Task files changed outside Solace, such as by `git pull`, reach
+            // open boards without a restart.
+            crate::tasks::store::announce_tasks(&watcher.top, &mut tasks);
             for (_, root) in watcher.projects().unwrap_or_default() {
                 // About once a second, read in code changed outside Solace (D-58).
                 if tick % 10 == 1 {
@@ -1336,4 +1385,13 @@ fn releases_route(top: &Path, method: &str, path: &str, body: &Value) -> Option<
         ("POST", ["releases", _, "notes", "reject"]) => Some(crate::releases::reject(top, &version)),
         _ => None,
     }
+}
+
+/// The newest position in the board's local log, or 0 when it has none.
+fn log_position(top: &Path) -> Result<i64, Failure> {
+    if !store_dir(top).is_dir() {
+        return Ok(0);
+    }
+    let db = crate::tasks::events(top)?;
+    Ok(db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?)
 }

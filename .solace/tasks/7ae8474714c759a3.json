@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794183761,
+  "body": "Six tech-debt items raised during feature:9d778f6e03dea799 never reached a Tech Debt task. Solace files only the last work summary and the last review of a completed task, so these were left behind. Items 1–3 were confirmed against the current code on 2026-11-06, and item 6 by a `grep` refusal.\n\n### From the review of task:d0e9e89b7706591a (note 15)\n\n1. `design.save`: the function runs to about 58 lines, with an `append` closure taking two `Option`s where only one is ever used. Extract a `keep_current` helper for the repo version and split `append` into design and raw forms, because the function mixes reading, deciding and writing.\n   Check: `test design` passes and `view design.save` shows the read, keep and write steps at one level.\n2. `design.save`: `String::from_utf8_lossy` changes bytes in a damaged file that isn't valid UTF-8, so `raw` isn't an exact copy, while task:6bf990cec2871755 promises no earlier state is lost. Keep such files exactly, for example in a base64 field used only when the bytes aren't valid UTF-8.\n   Check: a test saves over a file holding `ff fe 41` and recovers those exact bytes from the version.\n\n### From the investigation of task:d0e9e89b7706591a (note 13)\n\n3. `find`: a search holding escaped quotes never matches. `find \"\\\"kind\\\"\"` reports no matches though `\"kind\"` is in `design.save`. Make it match.\n   Check: a test finds a symbol by a search with escaped quotes.\n\n### From work summaries\n\n4. `submit` (task:c1c58d064ee1fa9f, note 5): adding one type variant and several tests took repeated retries because hunks spanning symbols were rejected, and renaming a test needed a separate submit. Accept those edits in place, or name both symbols in the error.\n5. `submit --draft --replace` (task:6bf990cec2871755, note 3): the prefix rule for `old` was unclear. The first reply asked for patch prefixes, but a multi-line block with them still didn't match. Say plainly whether the current text is patch lines or merged code, and show a short matching example.\n6. `grep` (task:c1c58d064ee1fa9f, note 5): the rebuilt app bundle is over the search limit, so its contents can't be checked. Provide a way to confirm what an embedded bundle contains, whatever its size.\n\n### For the agent\nItems 4 and 5 were not rechecked against the current commands. Confirm each still happens first. If one is already fixed, say so in the summary and leave it. Readers of design versions must keep accepting an entry with no `design`, and any new raw field must suit task:091f7027d62e571e.\n\n### Acceptance\nEach item is either fixed, with its check passing, or reported as already fixed.\n\n### Out of scope\nChanging which runs Solace files tech debt from.",
+  "closedTime": 1793986881,
+  "column": "complete",
+  "createdTime": 1793981207,
+  "dependsOn": [],
+  "feature": "9d778f6e03dea799",
+  "home": "solace-cli",
+  "id": "7ae8474714c759a3",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 285.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "design: page and records: unfiled tech debt"
+}

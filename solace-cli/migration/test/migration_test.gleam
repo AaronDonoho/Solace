@@ -15,6 +15,7 @@ pub fn failed_without_a_report_shows_the_problem_test() {
     migration.Model(
       migration: Some(api.Migration(
         state: "failed",
+        reason: "",
         top: "/work/project",
         original: "/work/project",
         copy: "/work/solace-migration",
@@ -50,6 +51,7 @@ pub fn adopted_without_undo_offers_no_way_back_test() {
     migration.Model(
       migration: Some(api.Migration(
         state: "adopted",
+        reason: "",
         top: "/work/project",
         original: "/work/project",
         copy: "/work/solace-migration",
@@ -86,6 +88,7 @@ pub fn a_check_time_that_is_not_seconds_is_shown_as_it_is_test() {
     migration.Model(
       migration: Some(api.Migration(
         state: "in_progress",
+        reason: "",
         top: "/work/solace-migration",
         original: "/work/project",
         copy: "/work/solace-migration",
@@ -331,4 +334,47 @@ pub fn a_reload_closes_a_removal_whose_project_is_gone_test() {
   // A reload where the project is gone closes it.
   let #(model, _) = migration.update(model, migration.ProjectsLoaded(one, True))
   assert model.projects.removing == None
+}
+
+pub fn nothing_to_migrate_shows_the_message_and_reason_test() {
+  let html = fn(reason) {
+    let model =
+      migration.Model(
+        migration: Some(api.Migration(
+          state: "none",
+          reason: reason,
+          top: "/work/project",
+          original: "/work/project",
+          copy: "",
+          step: "",
+          candidates: [],
+          report: None,
+          flagged: [],
+          problem: "",
+          blockers: [],
+          undo: False,
+        )),
+        migration_open: False,
+        migration_projects: [],
+        migration_smoke: "",
+        migration_busy: False,
+        migration_generation: 0,
+        migration_error: "",
+        migration_dismissed: False,
+        migration_connected: True,
+        migration_poll_id: 0,
+        projects: migration.no_projects,
+      )
+    element.to_string(migration.view(model))
+  }
+  let no_projects =
+    html("This folder has no Gleam projects that still need migrating.")
+  assert string.contains(no_projects, "Nothing to migrate here.")
+  assert string.contains(
+    no_projects,
+    "This folder has no Gleam projects that still need migrating.",
+  )
+  let uses_solace = html("This folder already uses Solace.")
+  assert string.contains(uses_solace, "Nothing to migrate here.")
+  assert string.contains(uses_solace, "This folder already uses Solace.")
 }

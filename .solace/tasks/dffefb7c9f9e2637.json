@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792765927,
+  "body": "On the strategy page, on the features tabs, when a feature is expanded so that its tasks are visible, the tasks should:\nhave a green checkmark displayed when completed (reuse symbol from the task runs status)\nhave a red x displayed when canceled (reuse symbol from the task runs status)",
+  "closedTime": 1792723120,
+  "column": "complete",
+  "createdTime": 1792722590,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli",
+  "id": "dffefb7c9f9e2637",
+  "links": [],
+  "milestone": null,
+  "rank": 43,
+  "scope": [
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "features: display task status"
+}

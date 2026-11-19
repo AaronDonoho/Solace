@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972383,
+  "body": "On a Strategy run, the run bar shows both **End** and **Stop**. They do the same thing: each ends the run and saves its conversation. The only difference is a hidden label on the past run (\"planned\" or \"stopped\"), so a user can't tell them apart and gains nothing from choosing.\n\n**Change:** the run bar shows one button, **End**, which ends the open run. **Stop** is removed.\n\nThe Design page uses the same planning panel and has the same pair, so it gets the same single button.\n\nFor the agent: today `POST .../end` gives outcome `planned` and `.../stop` gives `stopped`; otherwise `tasks::strategy.change_run` treats them alike. Keep one route and one outcome, keep past runs saved as `stopped` readable, and update Spec 15 (strategy and design run routes) and the run-bar test.\n",
+  "closedTime": 1794956711,
+  "column": "complete",
+  "createdTime": 1794938896,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f5bc3dd5cdcde8d6",
+  "links": [],
+  "milestone": null,
+  "rank": 391,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/strategy"
+  ],
+  "title": "planning panel: one End button"
+}

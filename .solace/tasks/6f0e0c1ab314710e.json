@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794972379,
+  "body": "Work task proposed by the investigation task:4cf396f7259e3fc2 (latest work-run note, confirmed by its review). Goal: the \"out of date\" mark for the pages' bundle can be trusted on any PC, after a fresh clone, and after any checkout or branch switch.\n\n**Acceptance criteria**\n\n1. **One bundle command.** Every way of remaking `solace-cli/frontend/priv/app.js` runs one shared definition: the frontend's `[build]` `release` step, the root `bundle` command agents use, the frontend's own `bundle`, and the pre-build command in `solace-app/tauri.conf.json`. The duplicate copies are removed or call that one definition.\n2. **Committed fingerprint.** A passing run of that command writes a fingerprint file beside `priv/app.js` holding the output hash and the input hashes. It is meant to be committed, so it travels with the bundle across clones, PCs and branches.\n3. **Judged only by the fingerprint.** `build plan` and `GET /build/plan` decide whether the bundle is stale only from that fingerprint. A missing or unreadable fingerprint is reported as such, telling the user to run the step, instead of guessing from file times. The file-time fallback (`recipe.FRESH`) goes for this output.\n4. **Inputs.** Inputs stay worked out from the frontend's `gleam.toml` path dependencies (D-159 point 4); `manifest.toml` is added to `recipe.SOURCES`.\n5. **No tool versions** (bun, gleam) in the hash.\n6. **Review flag.** The root `bundle` command drops `allowed_in_reviews = true`, since it writes project files (D-161).\n7. **Records.** A new decision amends D-159 point 4, D-163 and D-166 points 2–3, and records that `cargo tauri build` always remakes the pages. Specs 14 and 15 (build plan) and `solace-cli/build.rs` comments updated.\n8. **Tests.** The `recipe::tests` built on file times (about seven) are reworked for the fingerprint; new tests cover a fresh checkout with a matching fingerprint (fresh), a changed input (stale), and a missing fingerprint.\n\n**Out of scope:** `build.rs` reading the input list (D-166 point 1), a hand-written input list, a `task done` stale check (task:f2b453a82a7a565e), the `cargo build` stop (task:82d0c66e0de90dca), and putting the board's own page bundle in the plan.",
+  "closedTime": 1794327164,
+  "column": "complete",
+  "createdTime": 1794324087,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "6f0e0c1ab314710e",
+  "links": [],
+  "milestone": null,
+  "rank": 371.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "title": "build: bundle fingerprint beside app.js"
+}

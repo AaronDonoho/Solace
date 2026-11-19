@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792902165,
+  "body": "Reported: from the board, use a Contract view link and come back. The board shows E7001, and text being written in a task editor is gone.\n\n**Two causes are visible in the code.**\n- The Contract view links on a task's Changes tab and in a lane header are ordinary links inside component shadow roots. The shell's router only follows links in the page's ordinary DOM, so these links reload the whole app instead of changing pages. A reload throws away anything typed in the task's editor.\n- The board is mounted, hidden, on every page. On a page at `/p/<dir>/contracts`, the board's `api.mjs` guesses its API prefix from the address, so its root `/projects` request becomes `/p/<dir>/projects`. That is not a root route and comes back E7001; the hidden board keeps the error and shows it when the human returns.\n\n**Fix both.** Contract links, including the contract page's **← Board** link, change pages in place as record links do. The board asks its root routes (`/projects`, `/events`) at the root and never under `/p/<dir>`. Keep the open task, its details and any editor text while moving between pages.\n\n**Acceptance**\n- In a workspace, open a task's and a lane's Contract view; return with Back and with Board. There is no full reload, the open task and editor text remain, and no E7001 appears.\n- Open `/p/<dir>/contracts` directly, then Board: no E7001.\n- The same flow works in a single-project root.\n- Tests cover a link inside a shadow root and the board's root requests; the workspace acceptance test covers the E7001 case.",
+  "closedTime": 1792868529,
+  "column": "complete",
+  "createdTime": 1792864729,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8bec75c6369c638b",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 60.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/contracts",
+    "solace-cli/frontend"
+  ],
+  "title": "board: contract view keeps work"
+}

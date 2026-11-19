@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1793665635,
+  "body": "Let the human add a skill for one agent role by typing it into a text box in the app. Every run in that role receives the skill.\n\n### Scope\n- For each role from task:7e5105f14ac6e1ec, show a list of that role's skills. Allow adding or removing these skill references. Skills are automatically removed from a role if the concrete skill is removed.\n- Add a text box (name, short description, body) to add, edit or remove skills.\n- Save each skill as an ordinary skill file in the project's skills folder (D-27). It is still a human-owned file, so agents can read it and can't change it. A skill with no `roles` key goes to every role, as now.\n- A run's brief carries the skills for its role (and the unscoped ones). Skills meant for other roles are left out.\n- The skill UI belongs to the settings page.\n- Document the `roles` key in `reference/skills.txt` and D-27.\n- Add focused tests: role filtering in the brief, saving and reading from the text box, unscoped skills unchanged.\n\n### Acceptance criteria\n- A skill assigned to a role, for example the Reviewer role, shows up in that run's brief.\n- Skills already in the folder keep working unchanged.\n- An empty name or body is refused with a plain message and nothing is written.\n- Each skill is limited to 1000 characters.\n\n### Open choice\n- Under D-27, a brief **lists** a skill (name, description, path), and the agent reads it when it needs it. Whether a role skill instead goes into the brief **in full** is for the human to settle before work starts.\n\n### Out of scope\nModel assignment per role, uploading files, skill scripts, per-task skills.",
+  "closedTime": 1793560484,
+  "column": "complete",
+  "createdTime": 1793459680,
+  "dependsOn": [
+    "7e5105f14ac6e1ec"
+  ],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli",
+  "id": "ea1f22858a109da6",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 223,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/settings"
+  ],
+  "title": "Agent roles: skills per role"
+}

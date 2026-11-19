@@ -1,0 +1,29 @@
+{
+  "archivedTime": 1792215001,
+  "body": "Part of General UI Polish (feature item 3). Visual alignment of elements is last because every layout change above moves elements: labels, input widths, removed headings, the compact feature cards, the paginated table, the board's editor removal, the bottom detail band, and the panel side setting all change where things sit.\n\n- One pass over `solace_board`, `strategy`, `settings`, `solace_task` and `index.html`: consistent margins and padding between sections, label/input alignment on the same baseline, button heights, table cells aligned by content type, card padding equal across pages, header spacing equal across tabs, and the sticky column bar aligned with the lanes.\n- Shared spacing values go in the base styles in `solace_task` so pages inherit them instead of each defining its own.\n\n**Tests:** view tests that assert layout text stay green. The pass is checked with the `layout_audit` command (task:ce0537de0edf53ca): its numbers before and after go in the run's notes, along with its screenshots of the four pages.",
+  "closedTime": 1791986620,
+  "column": "complete",
+  "createdTime": 1791909844,
+  "dependsOn": [
+    "535777bcedf3e198",
+    "9e68777dd3e4dfb3",
+    "812bda5e156af79a",
+    "2588a8e653d89fb6",
+    "ce0537de0edf53ca"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "3fb4a6b4e4a05bbe",
+  "links": [],
+  "milestone": null,
+  "rank": 13,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Visual alignment pass"
+}

@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1793665638,
+  "body": "Make role-aware model selection default to the model assigned to that role.\n\n### Scope\n- When an agent or run is associated with a role, preselect that role's default model from task:6165fb16c328435a.\n- Use the role's backup only when the default model is unavailable or unconfigured.\n- Keep the selection editable: an explicit human choice overrides the role default and is shown as an override.\n- Apply the default to new selections or runs, without silently changing an existing run's model.\n- Keep the board API and Settings UI consistent about which assignment supplied the value.\n- Add focused tests for default selection, backup fallback, manual override and existing-run preservation.\n\n### Acceptance criteria\n- Opening a role-aware model selector starts with the role's configured default when available.\n- Unavailable defaults fall back to the configured backup and then the existing model fallback.\n- An explicit selection is preserved and visibly distinguished from the role default.\n- Existing runs are not rewritten when role assignments change.\n\n### Out of scope\nDefining roles, editing role assignments, provider setup, brief generation, Autorun task selection, and changing model behavior after a run starts.",
+  "closedTime": 1793582397,
+  "column": "complete",
+  "createdTime": 1792729988,
+  "dependsOn": [
+    "6165fb16c328435a"
+  ],
+  "feature": "9a9d3f7bd153e158",
+  "home": ".",
+  "id": "4736502dfcacdf06",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 268.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "Agent roles: default models"
+}

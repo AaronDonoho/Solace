@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423236,
+  "body": "In run 6518a89e4dd755a7 of task:da49ea4b9938994d (step 109), `extract board.start … --to board::runs --project solace-cli` panicked with `Invalid span with no related FileInfo!`. After that, every command that parses Rust (`view`, `inspect`, `extract`, `format`, `submit`, `test`, `drafts`, `run`) in the same server panicked too (`start byte index N is out of bounds…`, `assertion failed: file.span_within(span)`), until the server was restarted.\n\nBoth messages come from `proc-macro2`'s per-thread span table (the crate is built with `span-locations`). `language::rust.split` clears that table after every parse (`invalidate_current_thread_spans`), so any span made earlier on the thread and read after a nested `split` points at the wrong text or panics. `mcp.guarded` catches the panic, but `cli::batching.reset_after_panic` only resets the database and test state, not the span table, so the broken state carries over to later calls.\n\n**Needed:**\n1. A panic in one command must not break later commands in the same server. At minimum, clear the span table after a caught panic.\n2. Find what made `extract board.start --to board::runs` panic and fix it, so that extract either works or refuses with a normal message. The likely cause is code in extract or refs that reads spans from a parse after `split` has run, but this hasn't been confirmed. Add a test that reproduces it.\n\n**Done when:** the failing extract is reproduced in a test and no longer panics, and a test shows a command after a caught parser panic still works.",
+  "closedTime": 1793418249,
+  "column": "complete",
+  "createdTime": 1793393957,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b91bd9db06813b23",
+  "links": [],
+  "milestone": null,
+  "rank": 220.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Fix: extract crash breaks later commands"
+}

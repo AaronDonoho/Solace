@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539266,
+  "body": "### Problem\nReview run `7befde0957526de9` on task:de40fa1ed5320332 reads many symbols one at a time; the earlier review `a8eea7f746f351a8` does the same. There is no tool limit: `inspect a b c --context` takes several names, and both runs batch some related symbols. The review role says \"Read what you need in small batches, one concern at a time,\" which invites one symbol per call. Reviews also do not get the session-start reference, so they miss its \"Read once: `inspect checkout.pay payments.capture --context`\" guidance.\n\nThe result is more turns: each call re-reads the conversation. Batching unrelated symbols would add noise and can trim `--context`, so the fix is one call per concern, not one call for everything.\n\n### Change\n- In `board.brief`'s review role, replace \"Read what you need in small batches, one concern at a time\" with: \"For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed.\" Keep the concern-by-concern focus.\n- Add a short read-once line to review briefs, without adding the full session start: \"A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names.\"\n- Leave work, investigate and discuss briefs unchanged; they already carry the read-once reference.\n\n### Tests\n- A review brief contains the one-call-per-concern line and the read-once line, and no longer says \"small batches.\"\n- A review brief still holds the task diff and does not gain the full session-start reply.\n- Run `rust-unit` and `rust-board-tests`.\n\n### Not checked\nNo code was run or changed in this planning run.",
+  "closedTime": 1792515659,
+  "column": "complete",
+  "createdTime": 1792512776,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "57c1d5636ab5b812",
+  "links": [],
+  "milestone": null,
+  "rank": 19.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "reviews: batch a concern's reads"
+}

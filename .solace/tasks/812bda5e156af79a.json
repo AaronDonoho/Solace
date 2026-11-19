@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009424,
+  "body": "Part of General UI Polish (feature item 11). The board's task detail (the `<solace-task>` element below the lanes) scrolls away with the page; the feature asks for it to be collapsible and to stick to the bottom.\n\n- Add a collapsed state to the board model with a header bar that shows the selected task's title and a collapse/expand control; the detail area is a fixed band at the bottom of the board page.\n- Expanding shows the full `<solace-task>` as today; collapsing shows the one-line bar.\n- The lanes area takes the remaining height, so the page does not scroll to reach the detail.\n- Selection, notices, and the column bar keep working with the detail band in place.\n\n**Tests:** board view tests for collapsed and expanded states, and for the detail band's presence after selecting a card.",
+  "closedTime": 1791937407,
+  "column": "complete",
+  "createdTime": 1791909811,
+  "dependsOn": [
+    "f236ac8333726412"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "812bda5e156af79a",
+  "links": [],
+  "milestone": null,
+  "rank": 9,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "ui: Collapsible detail pinned bottom"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690241,
+  "body": "The following is a conversation:\n\nHuman:\nneed to understand what went wrong here: /home/aaron/Documents/Projects/solace/solace-cli/frontend/.solace/board/ddba1873470bf294/b86af0a480d5a576.jsonl\n  the latest work on this task tried \"solace submit test --all\" and failed, then it ran \"solace help submit drafts\" so i have an indication something in the solace system's docs is unclear. what could be changed?\n\n\nAgent:\nA missing + caused the failure, and the docs then promised a way to recover that didn't exist.\n\nWhat happened\n1. The agent sent a 228-line patch made of *** Add: sections. Line 207, the closing } of copy_markdown_test, had no + in front of it.\n2. Solace refused the patch: E0108 in `*** Add: frontend_test.copy_markdown_test` every line starts with `+`: }. Because the command was submit followed by test --all, the tests still ran on the old code and reported \"10 passed\". So one result said the patch failed while the next said everything passed.\n3. Next it ran help submit and then drafts. It wasn't confused about the patch format. It wanted to fix one character instead of resending all 228 lines. The help text says: \"Rejected text is kept as a draft; the error gives its id… A rejected patch's draft holds the symbols it changed.\" But the error gave no draft id, and drafts returned an empty list.\n4. So it rewrote everything in the block format and resent it, which worked.\n\nRoot cause. In drafts.rs, patch_blocks turns a patch into blocks first, and only that converted result can become a draft. When the patch fails to parse (E0108 on + lines, a missing @@, a hunk that doesn't match), the function returns before any draft is saved. The help text promises a draft for every rejection, but this path never makes one.\n\nWhat could change (best first)\n1. Make the help text true. Keep the raw patch as a draft when it fails to parse, and put the draft id in the E0108 message. Then the agent's first idea would have worked: submit --draft <id> --replace with old: \"\\n}\\n*** Add: frontend_test.copy_markdown_of_part_test\". That's the fix for the root cause.\n2. Or, at minimum, fix the docs. Say that a patch that fails to parse is not kept as a draft and has to be resent.\n3. Make the error easier to act on. Give the line number inside the patch (line 207) and the line before it. A bare } could be almost any line in a 40-line test.\n4. Skip chained commands after a failed submit. Running test --all against the old code and printing \"10 passed\" is misleading. Either skip it or label it \"ran on the unchanged code\".\n5. Optional: accept an unprefixed } as the closing line of an *** Add: section. Agents drop the + on a final brace often, and there's only one sensible way to read it.\n\nThe cost of this failure was resending about 230 lines, so I'd rank 1 and 3 first. I haven't changed any code; tell me which of these you want.\n\n--------\n\n\nLet's do 1 and 3 for this task.",
+  "closedTime": 1791554035,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "cbb8a48d59a042d6",
+  "links": [],
+  "milestone": null,
+  "rank": 49.0,
+  "scope": [
+    "."
+  ],
+  "title": "Improve drafts"
+}

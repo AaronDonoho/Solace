@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794340346,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792978897,
+  "column": "complete",
+  "createdTime": 1792977946,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "959e4e23ca365bb0",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-app"
+  ],
+  "techDebt": true,
+  "title": "app: several workspaces open at once: Tech Debt"
+}

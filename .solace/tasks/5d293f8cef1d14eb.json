@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423233,
+  "body": "Found in work run 81e9243b4ac911b0 on task:da49ea4b9938994d.\n\n1. **A test import points into the new test module (step 61).** Moving `lockdown::settings.limit` into a new `lockdown::settings_tmp` wrote `use crate::lockdown::settings_tmp::tests::limit;` in the parent. `limit` is not in `tests`, and that module is `#[cfg(test)]`, so it fails with E0432. The import should name the item where it actually lives.\n2. **A move into a parent that has an inline `mod tests` is refused (step 53).** `extract lockdown::settings.limit --to lockdown` stops with `E1004 lockdown.tests already exists in lockdown`. Tests that come along should join the existing test module, not try to create a second one.\n\n**Done when:** a test covers each case, and both moves type-check with no edits.",
+  "closedTime": 1793376936,
+  "column": "complete",
+  "createdTime": 1793340954,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "5d293f8cef1d14eb",
+  "links": [],
+  "milestone": null,
+  "rank": 210.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: test imports and inline tests"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794359908,
+  "body": "Starting a review on a task in another column (e.g. Assigned) moves the task to the Needs review column, so a task under review isn't left in the work column.\n\nFor agents: the default workflow allows `review` in `assigned` and `needs_review` (specs/15-board-api.md §2–3); a `review` action today starts the run without a column move. Update spec 15 to match.",
+  "closedTime": 1794359499,
+  "column": "complete",
+  "createdTime": 1794325398,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "460740f02ac0bb53",
+  "links": [],
+  "milestone": null,
+  "rank": 301.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "board: reviewing moves a task to Needs review"
+}

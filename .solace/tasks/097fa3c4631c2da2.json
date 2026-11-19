@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690240,
+  "body": "Still to do:\nLock-retry path in change(): testing it first needs a small change outside the tests, such as passing needs_lock in.\ntick(): extracting it from start().\nOne task-id check: merging the three copies into a single function.\nSurvey: the non-test code in board.rs and main.rs, before splitting either file.",
+  "closedTime": 1791478944,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "097fa3c4631c2da2",
+  "links": [],
+  "milestone": null,
+  "rank": 43.0,
+  "scope": [
+    "."
+  ],
+  "title": "Tests enabling Refactoring"
+}

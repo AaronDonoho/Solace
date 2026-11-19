@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792598374,
+  "body": "With `store.db` committed (D-179), the Rust and Gleam files Solace writes from the store are a second copy in git. Stop committing them.\n\n### Change\n\n- `outside::share_store` adds every file the store holds to Solace's marked block in the root `.gitignore` (from task:3e62a89651121a52). That means `.rs` and `.gleam` files in every project. It lists those files only. Plain files stay committed: FFI `.mjs` and `.erl`, plain-file `.rs`, `Cargo.toml`, `Cargo.lock`, `gleam.toml`, `manifest.toml` and `build.rs`.\n- **Fresh clone:** `outside::absorb` writes a held file that is missing from disk from the store. Today, a clone has no `.solace/written`, so a missing file counts as deleted outside Solace and its module is removed from the store. Recovery keeps this rule for files Solace wrote and has a record of.\n- Tests cover a Rust project and a Gleam project. For each: a clone with no source files (every file written, nothing removed), a file deleted after Solace wrote it (still treated as a deletion), and the block's contents.\n\n### Decision\n\nA new decision amends D-58 and D-179: git holds the store and git ignores the written source. Update Spec 15 and the README.\n\n### Left out\n\n- Removing the files git already tracks (`git rm --cached`). The human does this once, in the commit that adds the block.\n- Building with plain `cargo` or `gleam` on a clone before Solace has opened it.\n- Migration, which still reads source files from disk on the first import.",
+  "closedTime": 1792527518,
+  "column": "cancelled",
+  "createdTime": 1792527138,
+  "dependsOn": [
+    "3e62a89651121a52"
+  ],
+  "feature": "42af7119fb6915f9",
+  "home": "solace-cli",
+  "id": "b16c07b5108ea9ec",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 22.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "setup: git-ignore written source files"
+}

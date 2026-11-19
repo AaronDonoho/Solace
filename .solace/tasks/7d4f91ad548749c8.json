@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792869169,
+  "body": "The planning panel's proposal preview (`solace_task.proposal_view` and `proposal_styles` in `solace-cli/components`) misreads: a changed body's Markdown sits behind a closed \"New body\" toggle, so the preview looks like raw source; the old and new values look alike; and record ids in short fields are plain text.\n\n**Show the Markdown.** Make the proposed body or vision text visible as rendered Markdown without a click: open the existing \"New body\" section by default, and fix it if it still does not render. Keep the `Old:` and `New:` source values for comparison.\n\n**Tint the values, not the labels.** The old value reads slightly red and the new one slightly green, using the page's `--del` and `--add` tokens (background or text color, whichever reads better); the `Old:` and `New:` labels stay `--soft`. No hard-coded colors.\n\n**Links.** Every record reference in the preview is an anchor to `/task/<id>`, `/feature/<id>` or `/milestone/<id>`, so the shell follows it like a Markdown reference (`frontend`'s `task_link.follow_links`): `feature`, `milestone` and each id in `dependsOn`, for both an edit's `old → new` value and a create's field list, plus the records in `reopens`. Show the record's title when `name` has one, else `kind:id`.\n\n**Tests.** Gleam view and style tests: the rendered new body is visible without a click; the old and new values carry the tint while their labels do not; `feature`, `milestone`, `dependsOn` and `reopens` render anchors with the right href and title or fallback, in a create and in an edit. A browser helper test if the anchor path needs one.\n\nKeep the current full old/new display; a line diff is not part of this task.",
+  "closedTime": 1792731038,
+  "column": "complete",
+  "createdTime": 1792596289,
+  "dependsOn": [],
+  "feature": "b74a151f65c05ebc",
+  "home": "solace-cli/components",
+  "id": "7d4f91ad548749c8",
+  "links": [],
+  "milestone": null,
+  "rank": 102.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/frontend"
+  ],
+  "title": "plan: proposal diffs show Markdown and links"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792557298,
+  "body": "Make Strategy's model picker and working-run display agree with the model actually used, in lock-step with the board.\n\n- Refresh `GET /models` whenever the Strategy page reconnects or catches up, and when the planner receives live run or task updates, using the same preserve-and-fallback semantics as `solace_task`: keep the picked model and effort while they remain available, fall back only when the pick disappears, and keep unavailable reasons and Try again behavior aligned.\n- Reuse the shared `solace_task.Agent` decoding and selection behavior rather than giving Strategy a second model-list policy.\n- Render a run's model by one label (D-150): use the run's actual `used` model when present, otherwise its requested `model`, and resolve that id to the same `Agent.label` shown in the picker. An unknown id falls back to the id; do not show a second raw model string beside the label.\n- Make the working state and the Earlier runs list use that same display rule, so the model named as working is the model the run actually used.\n- Cover initial load, reconnect/catch-up refresh, a refresh after a live update, a failed refresh leaving the old list unchanged, a retained unavailable pick, effort narrowing or removal, an alias whose run reports the concrete model, a run with no `used` value, and an unknown model id.\n\nLeft out: a new model-management UI, model availability push events, changing the board's model API, model tooltips, and changing which model a running agent uses. The smallest version makes the existing pick and run status reflect the same actual model and one shared label.",
+  "closedTime": 1792551690,
+  "column": "complete",
+  "createdTime": 1792541852,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli/components",
+  "id": "bf02012813b50e3c",
+  "links": [],
+  "milestone": null,
+  "rank": 98.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: sync model display"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792902075,
+  "body": "Part 2 of 3 from the friction in work run 972864856add02fd. Depends on task:5dbf397f38dd23b5 (shared docs and decision).\n\n**Do.** A patch can add a type and its methods together: either one `*** Add: m.X` block holding `struct X` plus `impl X { … }`, or `*** Add: m.X::new` for a type added earlier in the same patch. Today the first is refused (the task said E0100 \"cannot parse\"; the code shows the `block_note` refusal — reproduce with a test first) and the second is refused.\n- `drafts.add_blocks` (Rust branch): accept an `impl`/`trait` block (`store::is_block`) when the Add targets a module, not an existing container. `submit_symbols_rust` already saves a whole top-level block as `m.X`: `rust_target` falls through to the module, `submit_items` with no parent keeps the container, and `rust_namespace` keeps `impl` (0) apart from `struct` (1).\n- Push the block's own formatted text; don't use `Store::rust_block_text`, which returns only a container's first child.\n- `drafts.patch_blocks`: keep a per-patch map of pending impls keyed by (module, type), from earlier Add sections. An `*** Add: m.X::new` whose container isn't stored but whose type or impl was added earlier goes into that pending impl. If only `struct X` was added, open a new `impl X { … }` with the struct's generics (read with `syn`). Render pending impls as blocks at the end, so the patch yields one `impl X`.\n\n**Docs.** `reference.txt` patch paragraph: an `*** Add` may hold an item plus its `impl`, or `<module>.<Type>::<fn>` for a type added earlier in the patch. `specs/03-protocol.md` `submit` row: the two Add forms. Add to the decision from part 1 that this amends D-168 point 4 (a block's own text only through `submit --new`).\n\n**Tests** (`store::submit_tests`, `drafts::tests`): one `*** Add: m.X` with `struct X` plus `impl X { fn new }` saves and compiles; `*** Add: m.X` then `*** Add: m.X::new` saves, compiles and yields one `impl X`; a generic struct's new impl carries its generics.\n\n**Out of scope.** Trait impls for types added in the same patch beyond what the block form already gives.",
+  "closedTime": 1792891727,
+  "column": "complete",
+  "createdTime": 1792622236,
+  "dependsOn": [
+    "5dbf397f38dd23b5"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "2ceb8e80f20232ef",
+  "links": [],
+  "milestone": null,
+  "rank": 255.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "submit: a new type and its impl together"
+}

@@ -650,6 +650,57 @@ class Root(unittest.TestCase):
         self.api('DELETE', '/projects/b')
         self.assertTrue((self.root/'b/.solace/store.db').exists())
 
+    def test_a_listed_project_without_a_store_is_on_the_board_and_gets_no_store(self):
+        # A clone can miss one project's committed store (D-179, D-191): the
+        # board still names it, says its store is missing, and creates none.
+        project(self.root/'a')
+        project(self.root/'b')
+        self.migrate('--project', 'a', '--project', 'b')
+        shutil.rmtree(self.root/'b/.solace')
+        self.start()
+        v = self.api('GET', '/projects')
+        self.assertEqual(
+            [(p['dir'], p['base'], p['needs']) for p in v['projects']],
+            [('.', '', ''), ('a', '/p/a', ''), ('b', '', 'Store missing')])
+        self.call('GET', '/')
+        self.api('GET', '/projects')
+        events = self.stream()
+        self.until_ready(events)
+        events.close()
+        self.refused('GET', '/p/b/workflow', None, 'unknown project')
+        self.assertFalse((self.root/'b/.solace/store.db').exists())
+
+    def test_a_listed_project_without_a_store_under_a_root_that_is_not_a_project(self):
+        # The root only holds projects here; its own code is not set up, so
+        # no lane takes the root's place and the missing project must not
+        # borrow it for its workflow.
+        project(self.root/'a')
+        project(self.root/'b')
+        self.migrate('--project', 'a', '--project', 'b')
+        # The root's own code arrives later, unmanaged (D-59): it has no store,
+        # so it has no lane.
+        (self.root/'src').mkdir()
+        (self.root/'src/app.gleam').write_text('pub fn one() { 1 }\n')
+        (self.root/'gleam.toml').write_text('name="root"\nversion="1.0.0"\ntarget="javascript"\n')
+        (self.root/'.solace/store.db').unlink()
+        shutil.rmtree(self.root/'b/.solace')
+        self.start()
+        v = self.api('GET', '/projects')
+        self.assertTrue(v['workspace'])
+        self.assertEqual(
+            [(p['dir'], p['base'], p['needs']) for p in v['projects']],
+            [('a', '/p/a', ''), ('b', '', 'Store missing')])
+        self.assertEqual(self.call('GET', '/')[0], 200)
+        self.api('GET', '/projects')
+        events = self.stream()
+        self.until_ready(events)
+        events.close()
+        # Neither the root nor the missing project answers a project request.
+        self.refused('GET', '/workflow', None, 'unknown route')
+        self.refused('GET', '/p/b/workflow', None, 'unknown project')
+        self.assertFalse((self.root/'b/.solace/store.db').exists())
+        self.assertFalse((self.root/'.solace/store.db').exists())
+
     def test_a_new_rust_project_is_a_cargo_package(self):
         # D-192: the New project form creates a one-crate Cargo binary package
         # and lists it, so `found` stops offering it.
@@ -820,14 +871,20 @@ class Root(unittest.TestCase):
             self.assertFalse((outside/'new').exists())
             # A project that lists projects of its own would be a second root.
             (self.root/'a/solace.toml').write_text('projects = []\n')
-            self.refused('POST', '/projects', {'dir': 'a'}, 'lists projects of its own')
+            status, v = self.call('POST', '/projects', {'dir': 'a'})
+            self.assertEqual(status, 409, v)
+            self.assertIn('lists projects of its own', v['message'])
+            self.assertIn('move a out of this root and open it on its own', v['message'])
             (self.root/'a/solace.toml').unlink()
             self.api('POST', '/projects', {'dir': 'a'})
             # So would a folder of projects inside the root, or inside a project.
             for nested in ['inner', 'a/docs']:
                 (self.root/nested).mkdir(exist_ok=True)
                 (self.root/nested/'solace.toml').write_text('projects = []\n')
-                self.assertIn('is inside the root', self.cli('serve', cwd=self.root/nested, ok=False))
+                text = self.cli('serve', cwd=self.root/nested, ok=False)
+                self.assertIn('is inside the root', text)
+                self.assertIn(f'/{nested} out of', text)
+                self.assertIn('open it on its own', text)
                 (self.root/nested/'solace.toml').unlink()
         finally:
             subprocess.run(['rm', '-rf', str(outside)])

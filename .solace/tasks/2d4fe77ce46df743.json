@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690224,
+  "body": "The column names are not visible when scrolled down the page of a multi-swimlane board. The column names should be a proper bar which sticks until the user scrolls far enough down that no swimlane is visible.",
+  "closedTime": 1791255552,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "2d4fe77ce46df743",
+  "links": [],
+  "milestone": null,
+  "rank": 10.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Sticky column names"
+}

@@ -1,0 +1,10 @@
+{
+  "body": "Follow-up to task:4ea2064f16119df8, which fixed the moment: `cargo tauri build` runs the bundle step again and agents have `run bundle`.\n\nThis feature holds the fuller design from that task's discussion, as **investigations only**. Each task decides whether its part is worth doing and, if so, files the work task. Nothing here changes code until the human agrees.\n\nKnown debt it would address: the bundle step is written in three places (`tauri.conf.json`, the root `bundle` command, the frontend's `build-release`), and no decision record yet says `cargo tauri build` always remakes the pages (amends D-159, D-163).",
+  "colorSlot": 14,
+  "id": "bd81ac86d19c335b",
+  "milestone": null,
+  "rank": 14.0,
+  "startTime": 1792720884,
+  "state": "active",
+  "title": "build: bundles never go stale"
+}

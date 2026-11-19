@@ -1,0 +1,9 @@
+{
+  "body": "A likely use case for solace is orchestrating work on many projects at once. For instance, shared libraries and their dependencies. Or microservices.\nHow should this be supported?",
+  "id": "33a2a9f13360b3e8",
+  "rank": 5.0,
+  "request": "97a49e2a-de03-4885-a786-e4fada2504bb",
+  "state": "proposed",
+  "targetDate": "2026-12-10",
+  "title": "Multi-Project Support"
+}

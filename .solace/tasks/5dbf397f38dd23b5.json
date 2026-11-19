@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792902075,
+  "body": "Part 1 of 3 from the friction in work run 972864856add02fd on task:10e5b94213c1e788. Parts 2 and 3 depend on this one, since all three edit the same docs.\n\n**Do.** `Type::method` (e.g. `language::rust_refs.Refs::new`) resolves to `Refs<'a>::new` in every name-taking command when only one impl matches.\n- Add `store.without_generics(name)`: drop each balanced `<…>` group that follows an identifier (`Refs<'a>::new` → `Refs::new`). Leave names starting with `<` (trait impls such as `<Failure as From<…>>::from`) unchanged.\n- Add `store.names_loosely(s, input)`: like `store.names`, but compares against `without_generics(s.name)`.\n- `crate.Store::resolve` and `rust_submit.rust_named`: exact matches first; loose matches only when nothing matches exactly. This covers `view`, `inspect`, `refs`, `impact`, `delete` (through `resolve`) and patch headers plus `*** Add: m.Type::fn` containers (through `rust_symbol`, `rust_container`, `rust_container_in`).\n- More than one match: the existing E1002 already lists the full names; no change.\n\n**Docs.**\n- `store.RUST_BRIEF`: after \"A method is `<module>.<Type>::<fn>`\" add \"generics may be left out (`Refs::new`) when one impl matches\".\n- `solace-cli/src/reference.txt`: say a method name may leave out generics.\n- `specs/03-protocol.md`, `view` row: the generic-free name match.\n- `DECISIONS.md`: add a new decision for these submit/naming changes (check the last number first; the same-project extract tasks also plan one). Parts 2 and 3 add their points to it.\n\n**Tests** (`store::read_tests`, `store::submit_tests`): `view` and `*** Update: m.Refs::new` reach `Refs<'a>::new`; `impl Foo<u8>` and `impl Foo<i32>` with the same method give E1002 listing both; an exact name still wins over a loose match.\n\n**Out of scope.** Agent-side mistakes from that run; Gleam naming.",
+  "closedTime": 1792885288,
+  "column": "complete",
+  "createdTime": 1792618914,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "5dbf397f38dd23b5",
+  "links": [],
+  "milestone": null,
+  "rank": 254.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "names: Rust methods without generics"
+}

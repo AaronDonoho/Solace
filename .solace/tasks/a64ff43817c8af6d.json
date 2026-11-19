@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794876827,
+  "body": "A human turns the selected elements into a note and sends it with their next message to the design agent.\n\n### Do\n\n- With elements selected (task:ab14673c99699681), the human can add a note: those element IDs plus text.\n- The next message sent from the panel on the Design page carries the notes added since the last one, through task:a9c5cc32e0283494.\n- A sent note is cleared from the page; it is not kept on the design.\n- Nothing changes on the Strategy page's panel.\n\nAsk the human how a note's text is entered, and how waiting notes are shown and removed before sending.\n\n### Acceptance\n\n- Tests: a note holds the selected IDs and its text, sending a message posts its notes, and the notes are cleared after sending.\n- One end-to-end check: a human selects a button, adds a note, sends a message, and the agent's reply names that button.\n- Update the README.\n\n### Left out\n\nNotes that stay on a design, and resolving notes.",
+  "closedTime": 1794855415,
+  "column": "complete",
+  "createdTime": 1794273238,
+  "dependsOn": [
+    "ab14673c99699681",
+    "a9c5cc32e0283494",
+    "16e74dc0a596d71f"
+  ],
+  "feature": "afd9fe8bae36c59c",
+  "home": "solace-cli/design",
+  "id": "a64ff43817c8af6d",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 14.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/design"
+  ],
+  "title": "notes: add a note from the panel"
+}

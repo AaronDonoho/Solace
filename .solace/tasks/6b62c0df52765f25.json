@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792284197,
+  "body": "Agents' questions (`task ask`) explain what they need and why (D-66), but the human still has to picture what each option would actually do. A question should show it: for each option, a concrete example of the result the human would see.\n\n## Change\n\n1. **Brief** (`board.rs::brief`, the `ask` and `responses` text): when asking, give each option a short concrete example of its outcome, in the human's terms: what a user sees, what the command prints, what the page shows, what a file or record ends up as. Not how the code would be changed. For example:\n\n   > ### Question\n   > What should the board show for a task with no project?\n   >\n   > ### Options\n   > - **Root lane**: the card appears under *Root* beside the other projects.\n   > - **Own lane**: a new *No project* lane at the bottom holds it.\n   >\n   > ### Why this matters\n   > ...\n\n   The `options` stay short labels matching the bold names; the examples go in `text`.\n2. **Reference**, the `task ask` line: one short clause saying the same (each option with an example of its outcome).\n3. Discussion runs ask in notes, not `task ask`: their brief gets the same guidance for questions put to the human.\n4. A short decision in `DECISIONS.md`, amending D-66.\n\n## Checks\n\n- rust-unit: the work and investigate briefs and the reference contain the new wording.\n- The reference layout check (D-143) and `help task` still pass.",
+  "closedTime": 1792211843,
+  "column": "complete",
+  "createdTime": 1792191409,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "6b62c0df52765f25",
+  "links": [],
+  "milestone": null,
+  "rank": 181.0,
+  "scope": [
+    "."
+  ],
+  "title": "agents: questions show example outcomes"
+}

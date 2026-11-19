@@ -689,3 +689,23 @@ fn rejecting_approved_notes_keeps_them_with_the_release() {
     assert_eq!(read["notes"]["text"], json!("# Approved"));
 }
 
+/// A workflow row the workflow stream has not sent keeps tasks from
+/// moving past it, so a later poll can send it first (D-78).
+#[test]
+fn a_workflow_row_waits_for_the_workflow_stream_before_tasks_advance() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = crate::scope::top(&p.root);
+    let board = std::sync::Arc::new(Board::new(top, 0));
+    let last = json!({"tasks": 0, ".": 0}).to_string();
+    let mut events = Events::new(board, Some(p.root.clone()), Some(&last));
+    let store = crate::board::task_model::open(&p.root).unwrap();
+    let workflow = crate::board::task_model::flow(&p.root).unwrap();
+    crate::board::task_model::event(&store, json!({"workflow": workflow.clone()})).unwrap();
+    assert_eq!(events.next_task().unwrap(), None);
+    assert_eq!(events.tasks, 0);
+    let text = events.next_workflow().unwrap().expect("no workflow event");
+    let data = text.lines().find_map(|line| line.strip_prefix("data: ")).expect("no data line");
+    let event: Value = serde_json::from_str(data).unwrap();
+    assert_eq!(event["workflow"], workflow);
+}
+

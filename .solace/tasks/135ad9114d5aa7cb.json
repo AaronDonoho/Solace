@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183779,
+  "body": "A human can see a design's past versions and go back to one from the left-hand list.\n\n### Do\n\n- Each design in the list has an arrow next to it. Clicking the arrow expands that design's history as a list beneath it, and clicking again collapses it. Opening a design and expanding its history are separate actions.\n- The history comes from `GET /designs/{id}/versions`, newest first.\n- A version can be restored through `POST /designs/{id}/restore`. Restoring adds a new version and loses nothing, and the expanded list shows it.\n- A refused restore shows the server's message.\n\n### Acceptance\n\n- Tests: the arrow expands and collapses the history without opening the design, the versions show newest first, a restore adds a version, and a refused restore shows its message.\n\n### Left out\n\nNamed versions and comparing versions. Ask the human what each history row shows and how a restore is started, and whether a past version can be looked at before restoring it.",
+  "closedTime": 1794023495,
+  "column": "complete",
+  "createdTime": 1793914365,
+  "dependsOn": [
+    "20edf290e52a37fc",
+    "091f7027d62e571e"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": "solace-cli/design",
+  "id": "135ad9114d5aa7cb",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 3.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "design: version history in the list"
+}

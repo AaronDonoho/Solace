@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765933,
+  "body": "On Strategy > Tasks, replace the Milestone column's selector with a read-only link to the milestone record. For a task with a milestone, render the loaded milestone title as an `<a href=\"/milestone/{id}\">`; when the milestone is not loaded, link its id instead. A task with no milestone shows `—`. Keep the Feature column's selector, Milestone sorting, row opening and paging unchanged.\n\nThis is the milestone-only part of canceled task:97659639c8ac4bbf; the Feature column stays editable.\n\n**Tests:** a loaded title and its href; an unloaded id and its href; no milestone as `—`; no select in the Milestone cell; Feature and Milestone sorting, paging and row opening stay green. **Docs:** update the Tasks tab's inline-links section in the Strategy README to say only Feature remains an inline selector and Milestone is a read-only link.",
+  "closedTime": 1792732583,
+  "column": "complete",
+  "createdTime": 1792731456,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "8555b2513f749a83",
+  "links": [],
+  "milestone": null,
+  "rank": 115.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: milestone link read-only"
+}

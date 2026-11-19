@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794876821,
+  "body": "The design format can describe an Architecture design as a diagram of a named type, starting with flow diagrams. This adds rules only. It comes after the UI/UX tab and the design agent, as the human asked.\n\n### Do\n\n- An Architecture design names its diagram type. Add `flow` to the validator's table, in a way that lets sequence and other types arrive later with no format change.\n- A flow diagram holds **nodes** and **edges**, each an element with a permanent ID. An edge names the node it starts from and the node it goes to, and may have a label.\n- A node has a label and a free description of what it represents. It is not limited to a fixed list.\n- The design agent's operations work on nodes and edges with no special handling.\n\nRecord the additions in the format decision.\n\n### Acceptance\n\n- Tests: a valid flow diagram passes, an edge naming a missing node and an unknown diagram type are each refused, and the agent's add, remove and change-property operations work on a diagram. Removing a node that edges still use is refused unless they are removed too.\n\n### Left out\n\nSequence diagrams and other types, and starting a diagram from the project's code.",
+  "closedTime": 1794358580,
+  "column": "complete",
+  "createdTime": 1793914532,
+  "dependsOn": [
+    "610eda5bb11671e0"
+  ],
+  "feature": "b993a7a21b436618",
+  "home": ".",
+  "id": "be0eb694f480ac1c",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 352.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "arch: flow diagram rules"
+}

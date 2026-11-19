@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183782,
+  "body": "Opening a UI/UX design draws its screens: the row and column structure, sized as the design says, rendered with Lustre inside the Design page.\n\n### Do\n\n- Add a renderer in Lustre that takes a design's element tree and draws it. It holds the only mapping from layout properties to styles, so the format itself stays free of CSS.\n- Every element it outputs carries `data-design-id` with the element's ID. Pointing depends on this later (feature:afd9fe8bae36c59c).\n- A design with several screens shows all of them. Ask the human how they should be arranged before building this.\n- Keep the renderer separate from the page's state, so proposals can draw through it later.\n\n### Acceptance\n\n- Tests: each layout property produces the expected output, nested containers draw in order, fill, hug and fixed each size correctly, and every drawn element carries its ID.\n- A browser check that a nested layout looks right; say in the task note if it has to be manual.\n\n### Left out\n\nComponents, theme and click-through behavior, which are the next tasks. Drawing keeps to elements that exist today.",
+  "closedTime": 1794009480,
+  "column": "complete",
+  "createdTime": 1793914414,
+  "dependsOn": [
+    "cc53574fe681ca23",
+    "20edf290e52a37fc"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": "solace-cli/design",
+  "id": "f44adde2caf463e2",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 4.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "ui: draw a screen's layout"
+}

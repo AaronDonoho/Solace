@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690219,
+  "body": "As described in the Migration App Planning task:\n1. Record the decision (next D-number): shell project, apps as Lustre components, and the URLs:\n- / → board\n- /migrate → migration (/migration is already the JSON API)\n- /view and /p/<dir>/view → contract view\n\nAlso record the contract each app follows: the app's package exposes register() -> Result(Nil, lustre.Error), a tag name, attributes it reads (e.g. base, the /p/<dir> prefix), and its own CSS.",
+  "closedTime": 1791158936,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/migration",
+  "id": "c763292ecae6f54a",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    ".",
+    "solace-cli/migration"
+  ],
+  "title": "Record the decision"
+}

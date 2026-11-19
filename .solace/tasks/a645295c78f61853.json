@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792709567,
+  "body": "Stop investigation briefs from prescribing the worker's implementation or submission shape.\n\n**Do.**\n- Change `board.brief`'s investigate role so a report states the required behavior, constraints, acceptance criteria and risks. It may continue to instruct which symbols require attention but it may not tell a worker which or how many `submit` calls to make. They should not probe or run tests unless needed to more thoroughly define the issue.\n\n**Tests.** Investigate prompts for a code change and a settings change report requirements without prescribing edits or tool calls; work prompts still own `submit`/`write` and checks.\n\n**Left out.** Work-run implementation strategy, review prompts, task packet generation, and any broader brief rewrite.",
+  "closedTime": 1792688364,
+  "column": "complete",
+  "createdTime": 1792679347,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "a645295c78f61853",
+  "links": [],
+  "milestone": null,
+  "rank": 257,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: outcomes, not edits"
+}

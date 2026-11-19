@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928478,
+  "body": "A task whose scope covers several projects gets its brief from just one of them, and the brief doesn't say which. Evidence: task:2355fd5670e2d1be's investigate run `63630cee55e7d077`. The scope was `solace-cli/components` + `solace-cli/strategy` and the body named only `plan.*` (strategy). The session started in components, the \"most relevant symbols\" were all `solace_task.*`, and the agent's first call (`view plan --project ../strategy`) failed. 7 of the run's 9 failed commands came from not knowing where it was or how paths resolve.\n\n**Start where the work is.** When the body names symbols as `module.name` (`named` in `main.rs`), resolve them in every scoped project and start the session in the project holding the most. Otherwise, start in the first scoped project as now. The \"most relevant symbols\" list comes from all scoped projects, each symbol labelled with its project when it isn't the current one.\n\n**Say where the agent is.** The brief's project section (`other_projects`) says:\n- `You are in <folder> (<name>).` first;\n- the task's scoped projects (can change) apart from the other projects (read only);\n- that `--project <folder>` takes a folder **from the Solace root** as listed (not `../x`), applies to **its own line only**, and works for `grep` too (it's missing from the current list);\n- that paths in `read`, `grep --in`, `files`, `write` and `move` are relative to the project the line runs in.\n\n**Cross-project name hint.** `E1001 unknown name` (`resolve`): when the name resolves in another scoped project, the error adds `found in <folder>: add --project <folder>`. Other projects under the root count only after scoped ones.\n\n**Briefing review.** The reference (`reference.txt`) and the session brief have been condensed several times. Read both against the run above and the recent failure patterns. Restore what a fresh agent needs to orient: which project it's in, the path rules, that options belong to specific commands (`--lines` is `read`'s, not `view`'s), and that `help <command>` lists them. Make it clearer rather than longer: the brief's length stays about the same. Record what was cut or restored in a decision.\n\n**Tests:** a multi-project workspace acceptance test (`workspace_acceptance.py`): a task scoped to two projects whose body names a symbol in the second starts there and says so. The brief names the scoped projects and the path rule. A name from the other scoped project gets the `--project` hint. Update the existing `Other projects under this Solace root` assertion.",
+  "closedTime": 1791904014,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "6d111deb34c119e0",
+  "links": [],
+  "milestone": null,
+  "rank": 109.0,
+  "scope": [
+    "."
+  ],
+  "title": "session: orient on the task's scoped projects"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792977672,
+  "body": "A run sees almost nothing of the plan around its task. The brief's **Feature** section has the feature's title and latest direction note only (D-138 point 3). **Depends on** appears only when a dependency is unfinished (D-110 point 3), and it gives no content. Tasks waiting on this one aren't mentioned, and no command looks any of this up, so agents ask the human to paste notes (task:19798e790ee4ae99 asked twice).\n\n1. **Decision first.** Add a decision amending D-110 point 3, D-138 point 3 and Spec 15 §6. A task run may read its own feature, the tasks it depends on, the tasks that depend on it, and the tasks named as `task:<id>` in its body or notes. It may not read other tasks or features, or any task's runs.\n2. **Brief.** In every run kind, and in `session start --task` in a board run:\n   - **Feature**: the feature's state and whole body, after its title and before the latest direction note. No cut.\n   - **Depends on**: always shown when the task has dependencies, finished ones included: `task:<id> <title> (<column>)`. The D-110 warning line stays, and only appears when one is unfinished.\n   - **Needed by**: a new section listing the tasks that depend on this one, with the same one-line format.\n   - One line saying `task peek <id>` reads a listed task, and `task peek feature` reads the feature. Keep the session-start reference under its size limit (D-102 point 5).\n3. **Command.** Read-only, so reviews and investigations can use it too:\n   - `task peek <task>`: title, column, feature, dependencies and body, with `--notes` adding the notes in full, paged with `--from n` the way `strategy show note` is, through the shared reader from task:59d0b7ae77d161d9. A task outside the list in point 1 is refused, and the refusal lists the tasks it can read.\n   - `task peek feature`: the feature's title, state, whole body and its tasks with their columns. A task with no feature is refused.\n4. **Docs and tests.** Update the usage line, `help task` and `reference.txt`. Unit tests in `board_tests.rs` for: the feature body in the brief; Depends on with only finished dependencies; Needed by; `task peek` on a dependency, a dependent and a task named in the body; `--notes` with paging; refusing a task that isn't linked; `task peek feature` with and without a feature. Run `rust-board-tests` and `rust-acceptance`.",
+  "closedTime": 1792976368,
+  "column": "complete",
+  "createdTime": 1792257772,
+  "dependsOn": [
+    "59d0b7ae77d161d9"
+  ],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "85340d3c543cb846",
+  "links": [],
+  "milestone": null,
+  "rank": 210.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: surrounding plan and task peek"
+}

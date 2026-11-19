@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793507413,
+  "body": "Put the personas in the investigate, work, discuss and review briefs. The vision is left out of review briefs (D-91 item 4), but personas are wanted there: a review also judges whether the change serves them.\n\n- Each persona is shown by name with its non-empty Objectives, Tools, Concerns and Other.\n- The section is capped (propose a size like the vision's 1000 characters); personas past the cap are named and marked as cut, never silently dropped.\n- No section when there are no personas.\n- Strategy runs: decide in the task whether they see personas in full; they can already read the plan.\n- Document in specs/15-board-api.md and DECISIONS.md.\n\nLeft out: choosing which persona applies to a task.",
+  "closedTime": 1793490432,
+  "column": "complete",
+  "createdTime": 1792601895,
+  "dependsOn": [
+    "cf2a0c42be1e6541"
+  ],
+  "feature": "310e17a1d12ca5da",
+  "home": "solace-cli",
+  "id": "a589b4fd0581fdf6",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 30.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "personas: agent briefs carry them"
+}

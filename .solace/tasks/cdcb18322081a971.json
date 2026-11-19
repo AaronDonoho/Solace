@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793656133,
+  "body": "A line declaring a public Gleam function with a return type (`pub fn name(arg: T) -> R {`) is mistaken for a case arm when Solace finds what Gleam code refers to. `language::gleam.is_arm` only excludes lines starting with `fn`, not `pub fn`.\n\nConfirmed by reading the code, not by running it. Likely effects:\n- the function's own name counts as a local name inside its body, so a recursive call to itself isn't seen as a use of the function;\n- parameter names (`arg:`) are recorded as field reads.\n\nFix: such lines are no longer treated as case arms. A test shows a recursive public function with a return type is found as a use of itself, and its parameters aren't recorded as field reads.",
+  "closedTime": 1793650135,
+  "column": "complete",
+  "createdTime": 1793649191,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "cdcb18322081a971",
+  "links": [],
+  "milestone": null,
+  "rank": 252.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "gleam refs: public functions aren't case arms"
+}

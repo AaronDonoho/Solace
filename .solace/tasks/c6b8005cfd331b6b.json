@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159127,
+  "body": "The review of task:2414798176c466e4 found `crate::failure::...` (previously `crate::diagnostics::...`) in signatures and bodies throughout the split. This is the tool's doing: `extract::rust.moved_reference` always returns `full_path(target, name)`, so step 22 rewrote 640 symbols to fully qualified paths. That is correct but makes signatures long and cuts off outline lines. The worker then has to add `use` lines and shorten the bodies by hand.\n\nWhen `extract` rewrites a moved reference in a staying module, prefer a `use` line and the short name when the name is free in that module. Fall back to the full path when the short name would clash with a local item, another import, or a name the module uses. Add one import per distinct item, and do not leave an unused import.\n\nAdd unit tests in `extract::rust::tests`:\n\n- several signatures in one module using a moved type get one `use crate::failure::Failure;` and short names;\n- a module with its own `Failure` keeps the full path for the moved one;\n- a module with an existing import of the moved item does not get a duplicate;\n- `check --warnings` stays clean in each case.\n\nRun `check --warnings`, `rust-unit`, `rust-acceptance` and `spacing_parity`.\n\nOut of scope: a general `solace tidy` command and a crate-root re-export. A re-export is a fine fallback if the worker finds it smaller, but the behavior to test is the readable code, not the mechanism.",
+  "closedTime": 1793135664,
+  "column": "complete",
+  "createdTime": 1793131413,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "c6b8005cfd331b6b",
+  "links": [],
+  "milestone": null,
+  "rank": 303.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: import moved references"
+}

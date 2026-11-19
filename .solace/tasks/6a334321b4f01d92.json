@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793916049,
+  "body": "An outside edit to a Rust file should be read into the store by symbol, as a Gleam edit is, so an Unexpected Changes task lists real changes that can be reviewed. Today every such task is empty (seen on task:e0ec72f5ff2c41ee).\n\n### Cause\n\n`outside.read_in` returns \"changes to Rust files outside Solace aren't read in yet\" for every Rust project. `outside.absorb` therefore records no changes and opens the task with only that note. Completing keeps nothing in the store, cancelling restores nothing, and `Store::materialize_to` then skips the file because it differs from `.solace/written`, so later submits to that module don't reach it.\n\n### What it should do\n\n- A changed Rust module file is split with the Rust parser (`language::rust.split`) and its symbols and header are updated as new revisions, matching existing symbols by name, nested items included. A removed file retires its symbols.\n- D-58 then holds for Rust as for Gleam: during a work run the change joins that task; with no run it goes to Unexpected Changes with the changed symbols and compile result; approved code is read in quietly; completing keeps the change; cancelling restores the file and the store.\n- Code that compiles badly is still read in (D-58 point 4). A file that can't be parsed or breaks the D-158 subset stays unread, as now.\n- A file already marked unreadable by the old refusal is read in once rather than skipped because its hash is on the bad list.\n\n### Tests\n\nExtend the D-58 tests in `outside` and Spec 15 U1–U3 to a Rust project: edit read in, complete keeps it, cancel restores file and store, approved change stays quiet, edit during a run joins the task.\n\n### Not in scope\n\n- A file that can't be read in: the next task.\n- New `.rs` files the store doesn't list yet (`graph_files` only sees known modules).\n- Repairing old Unexpected Changes tasks.",
+  "closedTime": 1793890908,
+  "column": "complete",
+  "createdTime": 1793839033,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6a334321b4f01d92",
+  "links": [],
+  "milestone": null,
+  "rank": 259.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "outside: read in Rust changes"
+}

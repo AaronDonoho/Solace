@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791924907,
+  "body": "Part of the `extract` feature. Plan source: task:a9d18cc6be1c2a2a note 17 (Task 5). Needs task:d6ac4f3600093a97; the cross-project part needs task:96249ceddc889684.\n\nFirst, confirm how Gleam resolves `@external(javascript, …)` paths: relative to the module file, and whether they can cross package boundaries. Then:\n\n- **Same project:** when symbols move between modules in different directories, rewrite their `@external(javascript, \"./x.mjs\", …)` paths by the change in directory (e.g. `./` → `../`). If the `.mjs` sits beside the source module and every symbol that uses it moves, no rewrite is needed.\n- **Across projects:** a relative path can't reach another package, so the `.mjs` moves with the symbols, using the D-84 file move and its undo.\n  - If the destination already has that file, refuse and name it.\n  - If staying symbols still use the file, refuse and name them.\n- **Imports between `.mjs` files:** when a `.mjs` moves, scan the other `.mjs` files for relative `import … from \"./x.mjs\"` and rewrite those paths. An import that would have to cross packages is refused, naming the importing file.\n- **JS tests:** don't run them inside the extract (it would hold the project lock, and `run` is refused in some run kinds). When `.mjs` files change, the reply names the project's declared JS test command for the agent to run next.\n\n**Tests:** unit tests rewrite paths between nested and sibling directories, and rewrite a sibling `.mjs` import. Acceptance: a cross-project extract carries its `.mjs`, and cancel restores it.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791833998,
+  "column": "complete",
+  "dependsOn": [
+    "d6ac4f3600093a97",
+    "96249ceddc889684"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "26888110ffda582a",
+  "links": [],
+  "milestone": null,
+  "rank": 77.0,
+  "scope": [
+    "."
+  ],
+  "title": "`extract`: carry JS FFI files and rewrite their paths"
+}

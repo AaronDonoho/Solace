@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423235,
+  "body": "**Problem.** When a Rust test fails, `test` passes the panic text through unchanged. In task:da49ea4b9938994d (run fe31569cdc4c32bc, step 53) the agent saw only this:\n\n```\npanicked at src/orientation_tests.rs:248:5:\nassertion `left == right` failed\n  left: 0\n right: 1\n```\n\nThe location is a line in a generated file, and `read` refuses that file because its code is held as symbols. Nothing said which assertion failed or what it checks. The agent had to guess, and in the end it deleted the assertion (step 57).\n\nGleam test output already gets mapped back to symbols (`language::gleam.relocate`). The Rust branch of `store_write.Store::test` doesn't do this yet.\n\n**Change.** In each Rust failure that `test` prints, swap every `src/<file>.rs:<line>:<col>` location for its symbol and line. Use the same form compile errors already use (`at orientation::tests.the_scanner_reads_this_crate, line N`). Then quote the failing line plus the comment lines directly above it, like compile errors already show a snippet.\n\n**Done when.**\n- A failing `assert_eq!` in a Rust test is reported with its symbol, its line, and its source line.\n- A location outside any symbol is left as it is.\n- A test covers both cases.",
+  "closedTime": 1793380474,
+  "column": "complete",
+  "createdTime": 1793341701,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "6e564f2fcc621e29",
+  "links": [],
+  "milestone": null,
+  "rank": 214.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "test: show where a Rust test failed"
+}

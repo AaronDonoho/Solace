@@ -1,0 +1,10 @@
+{
+  "body": "A developer who clones a Solace project gets a working copy of it: its projects, code store, strategy and tasks. Solace explains plainly when something can't be set up.\n\n**In scope:** committing tasks without their conversations or run details; clear messages when a clone has nothing to migrate, is missing a project's store, or sits inside another workspace.\n\n**Out of scope for now:** blocking a task from being started on two computers; merging two people's edits to one task; merging code stores (feature:08df236ce13570c0).",
+  "colorSlot": 37,
+  "id": "bd067a7e2e2adcfc",
+  "milestone": null,
+  "rank": 18.0,
+  "startTime": 1795056129,
+  "state": "complete",
+  "title": "Share a project with teammates"
+}

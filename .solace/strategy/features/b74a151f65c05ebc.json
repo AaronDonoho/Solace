@@ -1,0 +1,10 @@
+{
+  "body": "Make planning with an agent on the Strategy page easy to follow and act on. The planning panel (`plan.gleam` in `solace-cli/strategy`, proposals drawn by `solace_task.proposal_view` in `solace-cli/components`, built by `tasks.rs::proposal`) should:\n\n- show a proposal that edits a record as **what changes**: only the fields that differ from the record now, with the body as a before/after diff, not the whole record;\n- never hide the agent's latest message: the conversation reads in order and follows new messages;\n- keep run management (what the run is on, its state, earlier runs, starting a new run) **pinned at the top**, the message box **pinned at the bottom**, and only the conversation scrolling between them;\n- use the same markdown editor as the task editor for messages, sized for writing and growing with its text.",
+  "colorSlot": 3,
+  "id": "b74a151f65c05ebc",
+  "milestone": null,
+  "rank": 11.0625,
+  "startTime": 1791843623,
+  "state": "complete",
+  "title": "Strategy: planning panel usability"
+}

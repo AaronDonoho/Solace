@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792009436,
+  "body": "Rework the planning panel's layout (`plan.view`, `plan.body`, `plan.run_view`, `plan.start_view`, `plan.past_view`, `plan.styles`) so the human never scrolls far up or down to work.\n\n**Three parts, top to bottom:**\n1. **Run bar, pinned at the top:** what the run is on, its state and model, and the run controls. Replaces \"Runs on this\" at the bottom of the panel with an **Earlier runs** menu (a select or dropdown: time · state, newest first) and a **New run** button that is always there. New run with a run already open on the same record shows that run (the server allows one) instead of a dead end. End and Stop move here too.\n2. **Conversation:** the only part that scrolls.\n3. **Message box, pinned at the bottom:** the same markdown editor the task editor uses (`solace_task.editor`: Write/Preview and the formatting toolbar) with Send. Its height starts at about 5 lines and grows with the text up to about 40% of the panel, then scrolls inside; no manual resizing needed. Ctrl/Cmd+Enter sends. For a new run, the model and effort choice sits with this box, and Send starts the run.\n\nAn ended run shows the run bar and conversation, no message box, with New run in the bar.\n\nOn narrow windows (`max-width:900px`), where the panel is below the page, keep the same order without pinning.\n\nWording: no \"Runs on this\"; say \"Earlier runs\" and \"New run\". Keep the page's look (square corners, `--edge` borders, custom-property colors).\n\n**Tests:** Gleam view tests for the run bar's controls (open run, ended run, none) and that the message box uses the editor; update `strategy_test.gleam` where it looks for the old text.",
+  "closedTime": 1791899753,
+  "column": "complete",
+  "createdTime": 1791818539,
+  "dependsOn": [
+    "59f42a498012ce4a"
+  ],
+  "feature": "b74a151f65c05ebc",
+  "home": "solace-cli/components",
+  "id": "2355fd5670e2d1be",
+  "links": [],
+  "milestone": null,
+  "rank": 3.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "plan: pinned run bar and message editor"
+}

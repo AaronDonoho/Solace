@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876824,
+  "body": "A human selects one or more elements of an open design by clicking them, so a note can point at them later (feature:afd9fe8bae36c59c). Selection is by element ID.\n\n### Do\n\n- Outside the click-through preview, clicking a drawn element selects it by its `data-design-id`. In preview a click still follows links, as now.\n- A human can select more than one element, and clear the selection.\n- Selection is lost when another design, tab or version is opened, or when a live reload removes a selected element.\n- Keep the selected IDs in the page model where the panel and direct editing can read them later (feature:c3bed08cc1bbbbb8).\n\nAsk the human how a selected element is shown, how more than one is selected, and how a selection is cleared.\n\n### Acceptance\n\n- Tests: a click selects the right ID, a nested element selects itself and not its parent, preview clicks still navigate, and opening another design clears the selection.\n- Update the README.\n\n### Left out\n\nRegions, the Architecture tab, and sending a note.",
+  "closedTime": 1794844827,
+  "column": "complete",
+  "createdTime": 1794273214,
+  "dependsOn": [],
+  "feature": "afd9fe8bae36c59c",
+  "home": "solace-cli/design",
+  "id": "ab14673c99699681",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 12.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "notes: select elements by clicking"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1791951683,
+  "body": "Part of General UI Polish (feature item 13). A setting for preferring panels on the left or right side of the screen, starting with the plan panel.\n\n- `settings` gains a Panel side switch (Left/Right) stored in the settings store under a key beside `theme_key` (`solace-panel-side`), with `load`/`save`/`subscribe` as the theme uses.\n- `strategy`'s plan panel follows it: the `.strategy` grid's `minmax(0,1fr) auto` becomes `auto minmax(0,1fr)` for left, and the plan panel's collapse/drag behavior keeps working on either side.\n- The board's detail band (task 812bda5e156af79a) and any future docked panel read the same key, so one setting moves every docked panel.\n- `shell.mjs` applies the stored value at page load, before the first paint, so panels do not flip after render.\n\n**Tests:** settings tests for the new key's load/save/subscribe; strategy view tests for both grid orders; the frontend test checks the attribute is applied at load.",
+  "closedTime": 1791941283,
+  "column": "cancelled",
+  "dependsOn": [
+    "812bda5e156af79a"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/settings",
+  "id": "56fd25a7a57c79a1",
+  "links": [],
+  "milestone": null,
+  "rank": 11,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Panel side setting"
+}

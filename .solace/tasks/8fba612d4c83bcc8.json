@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009430,
+  "body": "On the Strategy Tasks tab, clicking a column heading sorts the table by that column. The page sorts and filters on the client today, with one fixed order: closed tasks newest first, then open ones by title.\n\n- Every heading is a button and can be sorted on: title, column, project, feature, milestone, created and closed. The first click sorts ascending, the next descending, and so on.\n- The sorted heading shows ▲ or ▼, and its `aria-sort` is set. The other headings show nothing.\n- Each column's order:\n  - **Column** follows the workflow's column order, not alphabetical.\n  - **Feature** and **milestone** sort by title. Tasks without one go last either way.\n  - **Created** and **closed** sort by time. A missing time goes last.\n  - **Project** sorts by label, with \"No project\" last.\n  - Ties fall back to title, then id, so the order is stable.\n- When no column has been clicked, the table keeps today's default order.\n- Filters and search apply first, then the sort. The sort stays across filter changes and tab switches for the page session. It doesn't need to persist across reloads.\n- The open task's details stay below the table, and the open row stays open when the order changes.\n- If paging (task `fa381a3d2079fb08`) lands first or later, sorting comes before paging, and a new sort goes back to page 1.\n- Update the Tasks tab section of the strategy README.\n\n**Tests:** strategy tests for:\n- each column's order and its tie-break;\n- clicking the same heading flips the direction;\n- missing values go last;\n- the default order when nothing has been clicked;\n- `aria-sort` and the arrow on the sorted heading only.",
+  "closedTime": 1792007035,
+  "column": "complete",
+  "createdTime": 1791955834,
+  "dependsOn": [
+    "f25e5b1f0d3e1069"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "8fba612d4c83bcc8",
+  "links": [],
+  "milestone": null,
+  "rank": 96.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: sort by clicking a column"
+}

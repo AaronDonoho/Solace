@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690242,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9).\n\nFiles: `board.rs`, `main.rs`, `reference.txt`. Scope: `.`.\n\n- Launching and finishing strategy runs, their brief and the `agent_guard` rules.\n- `strategy list`, `strategy show` and `strategy note`.\n- Acceptance with a fake agent: links followed, `E7010` on code changes, `strategy note` waits.",
+  "closedTime": 1791665093,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "4f0f816755b44428",
+  "links": [],
+  "milestone": null,
+  "rank": 64.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy: launching the agent and reading the graph"
+}

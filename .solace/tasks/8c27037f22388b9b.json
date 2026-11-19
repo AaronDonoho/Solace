@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792539264,
+  "body": "`format <module>` refuses every module that declares child modules after its items (such as a trailing `mod tests;`). It compares the `mod` list in the stored header with the `mod` list of the whole formatted file, so a trailing child module looks like it was added. This blocks `crate`, `orientation`, `reads`, `recipe`, `store` and `rust_submit` (found on task:0afd9dabfee200d1).\n\nSeparately, D-180 runs rustfmt with `reorder_modules = false`, but `cargo fmt --check` reads only `rustfmt.toml`, which keeps rustfmt's default of sorting modules. So the two disagree on `main.rs`.\n\n### Change\n\n- `rust_submit.Store::format_module_rust`: compare the formatted file's `mod` list with the **whole old file's** `mod` list, wherever the declarations sit, not with the header's list alone.\n- `solace-cli/rustfmt.toml`: add `reorder_modules = false`, so `cargo fmt --check` and `format` read the same setting. Record this in D-180.\n\n### Out of scope\n\n- Reordering any `mod` list, and the no-module refusal.\n\n### Tests\n\n- A module with items followed by `mod tests;` formats and saves, and its ids are unchanged.\n- A format that really adds or drops a `mod` is still refused.\n- `a_whole_module_format_keeps_an_unsorted_mod_list` still passes.",
+  "closedTime": 1792532979,
+  "column": "complete",
+  "createdTime": 1792529712,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "8c27037f22388b9b",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 25.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "format: parent modules with `mod tests;`"
+}

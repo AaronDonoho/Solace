@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690241,
+  "body": "**Scope:** `solace-cli` (task server, `tasks.rs`, and the HTTP routes in `serve`).\n\n**Depends on:** Task \"Specify the Feature/Milestone Store\".\n\n**Goal:** implement the milestone and feature records and their API as written in Spec 15.\n\n**Work:**\n\n- Load and save `<root>/.solace/strategy/milestones/` and `features/` through the task server's single writer: one operation at a time, written atomically (write, then rename). Missing folders mean there are no records.\n- Add the routes from Spec 15 §4: `GET/POST/PATCH/DELETE` for `/milestones` and `/features`, including `request` idempotency on create and `rank` placement at the end on create.\n- Validate `feature.milestone` against existing milestones, using the new error code.\n- `DELETE /milestones/{id}` clears `milestone` on linked features. Clearing it on tasks happens in Task 3; until then there is nothing to clear.\n- Events: `{milestone}`, `{feature}`, `{removedMilestone}`, `{removedFeature}` on the root task log, plus the replay of `{milestones}` and `{features}` after `{tasks}` for new connections. `Last-Event-ID` resumes them through the existing `tasks` position.\n- Per-project routes (`/p/{dir}/...`) don't serve these: they are root records.\n\n**Tests (short and bounded, D-83):**\n\n- Unit tests in `tasks.rs`: create, edit, reorder and delete each kind. Deleting a milestone clears the feature's link. An unknown milestone on a feature is refused.\n- One acceptance test in `board_acceptance.py`: create a milestone and a feature through HTTP, check that the events arrive, restart `serve` and check that both are still there and replayed.\n\n**Done when:** the API behaves as Spec 15 says, the tests above pass, and `rust-acceptance` and `rust-board-tests` still pass.",
+  "closedTime": 1791570507,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "d1f896976e976b84",
+  "links": [],
+  "milestone": null,
+  "rank": 51.0,
+  "scope": [
+    "."
+  ],
+  "title": "Task Server stores Milestones and Features"
+}

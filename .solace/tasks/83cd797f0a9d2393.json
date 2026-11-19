@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690236,
+  "body": "When an agent runs a declared command (`run <name>`), Solace holds the project lock until the command finishes. Board changes to that project wait the whole time: creating a task, moving one, adding a note.\n\nWhat happened (Oct 6, 22:48:50–22:50:12): an agent ran `run rust-acceptance --project .`, which took 82 seconds. Creating a task on the root project hung until the command finished. Each click on the create button queued another request, so the task appeared four times at 22:50:12.\n\nWhere: `agent_guard` in `solace-cli/src/board.rs` takes the locks, and `run` in `main.rs` keeps them until the command returns. Creating a task takes the same lock (`guard` → `lock(root)`).\n\nWanted: release the project lock while a declared command's process runs, and take it again afterward if the command's result needs to be recorded. A declared command doesn't change the store, so the board doesn't need to wait for it. Decide what happens if the task changes while the command runs (for example, it's paused, stopped or cancelled).\n\nDone when: a test shows that a board change to the project goes through while an agent's declared command is still running.",
+  "closedTime": 1791471389,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "83cd797f0a9d2393",
+  "links": [],
+  "milestone": null,
+  "rank": 21.0,
+  "scope": [
+    "."
+  ],
+  "title": "Don't block the board while an agent's command runs"
+}

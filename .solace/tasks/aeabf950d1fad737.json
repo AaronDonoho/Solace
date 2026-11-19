@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791776826,
+  "body": "Why: work run 9a5c10f20b7a7dd5 on task:8eea6d3d89b0bfe5 (steps 8–9) looked for Rust match arms with `grep \"write\" |` and `grep \"write\" =>`. Both were refused with the syntax message, and the agent had to fall back to reading line ranges. D-96 point 3 refuses a query that starts with a quoted term followed by more text (`lockdown.rs` `grep`, the `trailing` check). The aim was to catch `grep \"x\" file.rs`, but it also refuses literal code. Its other two refusals block real code too:\n- a query starting with `-` blocks `grep -> Result`;\n- a query containing `\\|` blocks `grep a \\| b` in Markdown tables (Spec 14 itself has them).\n\n**1. Decision first.** Add a decision at the end of `DECISIONS.md` with the next free number. It amends D-96 point 3 and Spec 14's `grep` row:\n- `grep` always searches its text literally and never refuses for syntax.\n- When nothing matches and the query looks like a misuse, the no-match reply adds one line saying what was searched and the syntax (`GREP_SYNTAX`). A misuse is a leading `-` option, `\\|`, or a quoted term followed by more text.\n- So nothing misses silently (the reason for D-96), and code text is searchable.\n\n**2. Quoting.** Today `unquoted` strips the quotes around a whole query, so `grep \"write\"` searches `write`. Keep that, but strip them only when the whole query is one quoted term. `\"write\" =>` is searched with its quotes as written. The no-match hint shows the exact text searched, quotes included.\n\n**3. Docs.** Update `GREP_SYNTAX`, `help grep`, `reference.txt` (keep the session-start reference under its byte limit, D-102 point 5) and the strategy-run hints. Say that code text, quotes and symbols included, is searched as written. Check the golden MCP file.\n\n**4. Batch status (look into it, and fix it if small).** A batched call is shown as `failed` in the run log when any one command in it is refused, even when the others succeeded (steps 8 and 9 above). That made the call look as if nothing worked. If the log's step status can say `partly failed`, or name the refused command, do it. Otherwise note it on this task.\n\n**Tests (unit, lockdown.rs):**\n- `\"write\" =>`, `\"write\" |`, `-> Result` and `a \\| b` each find matching lines.\n- `grep -i foo` and `grep \"x\" src/a.rs` with no match reply with the syntax hint, not a refusal.\n- A plain miss gets no hint.\n- `\"write\"` alone still searches `write`.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791764746,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "aeabf950d1fad737",
+  "links": [],
+  "milestone": null,
+  "rank": 81.0,
+  "scope": [
+    "."
+  ],
+  "title": "`grep`: search code text containing quotes, `->` and `\\|` instead of refusing it"
+}

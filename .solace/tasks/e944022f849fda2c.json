@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793665638,
+  "body": "In Settings, the skill form's Name and Description boxes ignore typing (human's issue 5, 2026-11-01).\n\n### Cause (found while planning)\n`settings.skill_text_field` sends its field name (`skill-name`, `skill-description`) with each keystroke, but `settings.update` on `SkillField` only recognises `name`, `description` and `body`, so those keystrokes are dropped. The Body box works because it sends `body`.\n\n### Fix\nMake the two names agree, so typing in Name and Description updates the form. Smallest is to keep the HTML field names and pass the update its own key, or match on the names sent — implementer's call.\n\n### Acceptance criteria\n- Typing in Name and Description shows the text and saves it.\n- A test drives the real form's input events (not only `SkillField(\"name\", …)` directly, which is why the existing test missed this).\n\n### Out of scope\nThe layout change in the separate skills task.",
+  "closedTime": 1793643563,
+  "column": "complete",
+  "createdTime": 1793584484,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/settings",
+  "id": "e944022f849fda2c",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 268.0,
+  "scope": [
+    "solace-cli/settings"
+  ],
+  "title": "skills: name and description accept typing"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159127,
+  "body": "task:2414798176c466e4's work run cba69e7f2e9a90f2 shows that moving tests still takes hand work. The diagnostics symbols moved, but their tests stayed in `tests`. When the worker moved those tests explicitly, their helper `grouped_site` landed in the `diagnostics` runtime module instead of `diagnostics_tests.rs`. Moving the CLI tests then failed because `testing::` and `board::` were visible through the crate root's `use super::*`, and `extract` did not carry those module imports. The worker added the imports to the target by hand and retried (steps 22, 65-72 and 90-102).\n\nMake one `extract` call move a file-backed test module's tests, their test-local helpers and the imports they need.\n\n- Treat a file-backed `#[cfg(test)] mod tests` as a test module in `belongs_in_test_file` and `test_covered`, not only an inline `mod tests` or a `tests/` folder. A test that reaches only moved code then moves with its helper (D-208).\n- Put a helper that only moved tests reach in the target test file (`<module>_tests.rs`), not the runtime module (D-206).\n- Carry an unqualified module name visible through an ancestor glob as `use crate::...;` in the target test header, or qualify the references. A moved test using `testing::Scratch` or `board::api` through the crate root's `use super::*` must type-check on the first call.\n- Keep a test that also reaches staying code where it is (D-208), and name it and the staying symbol in the reply so the worker need not read every test to find out.\n\nAdd unit tests in `extract::rust::tests`:\n\n- a source file-backed `#[cfg(test)] mod tests` whose test uses a test-local helper; one extract moves the test and helper into the target `_tests.rs`, leaves the runtime module without the helper, and `check --warnings` is clean;\n- a test using a crate-root module (`testing::...`) through `use super::*`; the target test file gets `use crate::testing;` and type-checks without hand-added imports;\n- a test that also reaches staying code stays and is named in the reply.\n\nRun `check --warnings`, `rust-unit`, `rust-acceptance` and `spacing_parity`.\n\nOut of scope: a preview or dry run of the move, automatic choice of which tests belong to a split, and the exact-name ambiguity between `tests.foo` and `cli::tests.foo` (D-193). The first two are not needed if the closure is right; the third is a separate bug.",
+  "closedTime": 1793134755,
+  "column": "complete",
+  "createdTime": 1793131103,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "c782c2de941a99d0",
+  "links": [],
+  "milestone": null,
+  "rank": 302.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: tests move with their helpers"
+}

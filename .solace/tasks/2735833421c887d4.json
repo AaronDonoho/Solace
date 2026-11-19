@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056554,
+  "body": "The \"Close All\" button should appear when there are 3 or more notifications.\nIt should appear at the bottom of the stack of notifications.",
+  "closedTime": 1793552086,
+  "column": "complete",
+  "createdTime": 1793551907,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "2735833421c887d4",
+  "links": [],
+  "milestone": null,
+  "rank": 175.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Board: change the \"Close All\" button"
+}

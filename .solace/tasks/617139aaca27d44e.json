@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793665640,
+  "body": "Remove the text shown under the task viewer's action buttons that names the model each action will use (e.g. \"Model: B\").\n\nThe actions themselves keep running on the same model as now; only the text goes.\n\nFor the agent: the line comes from `solace_task.action_model_label`, used only by `solace_task.action_view`. The test `planning_actions_use_their_roles_model_test` checks for this text and will need its `Model: …` checks removed (the checks on which model each action sends stay).",
+  "closedTime": 1793648450,
+  "column": "complete",
+  "createdTime": 1793639030,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/components",
+  "id": "617139aaca27d44e",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 122.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "task viewer: drop model line under action buttons"
+}

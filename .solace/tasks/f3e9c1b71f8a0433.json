@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972382,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794968584,
+  "column": "cancelled",
+  "createdTime": 1794968406,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f3e9c1b71f8a0433",
+  "links": [],
+  "milestone": null,
+  "rank": 397.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "planning panel: one End button"
+}

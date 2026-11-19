@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792284194,
+  "body": "Saves one turn per fresh run.\n\nThe board runs `session start --task` with the task's title and description before the agent starts, and puts the reply in the brief where the `START` line is now. Resumed runs are unaffected: `board.rs::continuation_brief` already removes that line for them.\n\n**Check first: state held by the session.** If `solace mcp` keeps state from `session start` (where the run works, D-123, or the reads it remembers), the agent's own `solace mcp` process won't have it once the board runs the command. Either:\n- move that state into the task store, so the agent's process loads it, or\n- if that isn't practical, keep the plain \"start here\" line and report why.\n\n**Cap the open work records.** The reply can be large: one task's \"Open work records\" section alone was over 10k characters. In the brief, cap that section within the reply budget (D-14) and say what was left out and how to read it.\n\n**Done when:** a fresh work run's brief holds the session start reply and no `START` line; a resumed run's brief is unchanged; the agent's first call works as it did when the agent ran `session start` itself; board tests cover both kinds of run. Record the change as a decision and update spec 15 and the reference wherever they say the agent runs `session start` first.",
+  "closedTime": 1792210751,
+  "column": "complete",
+  "createdTime": 1792202460,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "dc8b6b408a3357ac",
+  "links": [],
+  "milestone": null,
+  "rank": 182.0,
+  "scope": [
+    "."
+  ],
+  "title": "briefs: session start in the brief"
+}

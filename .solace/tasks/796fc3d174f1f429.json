@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792709561,
+  "body": "When an inherent `impl` block has no members left, for example after its methods are moved (`extract`, D-187) or deleted, Solace removes the block when it saves the module.\n\n**Why:** an empty `impl X` shares its name with the type or alias `X`. The item wins name resolution (D-158), so `delete` and module patches can't reach the block. That's why `impl Index`, `impl Sym` and `impl ModuleRow` are stuck in `crate` (task:9e4f1d8e5d683fab).\n\n**Acceptance**\n- Moving or deleting the last method of an inherent impl leaves no empty `impl` behind, and `view <module>` doesn't list one.\n- Saving a module that already has empty inherent impls removes them. Once `crate` is saved, its three are gone, and the aliases `crate.Index`, `crate.Sym` and `crate.ModuleRow` stay along with their users.\n- Trait impls, and inherent impls that have any member, are kept unchanged.\n- Tests cover both the move case and the delete case.\n\n**Left out:** a general way to name shadowed or unnamed containers, such as a `delete --impl` flag.",
+  "closedTime": 1792709309,
+  "column": "complete",
+  "createdTime": 1792706874,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "796fc3d174f1f429",
+  "links": [],
+  "milestone": null,
+  "rank": 42.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Rust: drop empty inherent impls"
+}

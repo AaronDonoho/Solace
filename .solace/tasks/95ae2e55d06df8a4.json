@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794183767,
+  "body": "`design:<id>` works in any Markdown Solace renders, like `task:<id>`, `feature:<id>` and `milestone:<id>` (D-98, D-122): it shows the design's title, and clicking it opens that design on the Design page, on its tab.\n\n### Do\n\n- Add `design` to the link forms in the shared Markdown renderer and editor (`task_api.mjs`, `md_editor.mjs`) and to the shell's record links (`task_link.mjs`, `frontend.RecordLink`, `frontend.to_markdown`).\n- Add `GET /designs/find/{id}` giving `{id, title, tab}`, with the same errors as the other find routes, and serve the shell at `/design/<id>`.\n- Opening a link goes through the existing focus path, so Back and Forward retrace it (D-189).\n- A design ID is the same form as a task's ID. If task:c7b617fbc8184707 chose another form, follow it.\n- A link to a missing design gives the same toast as other missing records: \"Design does not exist\".\n- Copying a rendered link gives `design:<id>` back.\n- Update Spec 15 §4, and record this in a decision amending D-122.\n\n### Acceptance\n\n- Tests: a bare and a labelled link both render, the title shows, a click opens the right design on the right tab from another page, a missing design gives the toast, and copying round-trips.\n- A `design:<id>` inside code stays literal.\n\n### Left out\n\nAgent proposals turning `design:` into an ID field, and links to single elements.",
+  "closedTime": 1794076265,
+  "column": "complete",
+  "createdTime": 1793914391,
+  "dependsOn": [
+    "20edf290e52a37fc"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "95ae2e55d06df8a4",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 340.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend"
+  ],
+  "title": "design: design:<id> links"
+}

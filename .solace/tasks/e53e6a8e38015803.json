@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690237,
+  "body": "Task 1: Locks, part 1: agent_guard and safe recovery\nContext: Read D-77 (points 3–5) and Spec 15 §28. Cite D-17, D-18 and D-61 point 4 as amended by D-77. Part A (computed changes_of) is done.\n\nGoal: agent task … commands take no project lock, and lockdown::recover can never adopt a live run's records.\n\nSteps:\n\nagent_guard (board.rs ~2378): for a[0] == \"task\", take no lock and return Ok(vec![]). Keep the task-file re-read (atomic rename), the pause handling and the refusal of ended runs. Update the doc comment.\nmain.rs run_options: move the task diff / task … dispatch (~lines 220–226) to right after agent_guard, before lockdown::recover and outside::absorb. Check that task diff and review_state don't depend on absorb having run first. If they do, note it, because they would show stale changes.\nlockdown::recover (lockdown.rs ~190): take the held lock as a parameter (e.g. _held: &[fs::File]). Update every caller (main.rs, recover_project, serve startup, watcher, tests), and confirm that each holds that project's lock. Doc comment: recovery runs only under the project lock, because a live command holds it until its records are dropped. A \"run not running\" check alone is wrong, because a run whose command crashed (SOLACE_FAIL_AFTER=command) stays running and must be adopted.\nTests:\n\nagent_guard_follows_the_run (board.rs ~3332): with lock(&s.root) held on the test thread, agent_guard([\"task\",\"note\",\"x\"]) on another thread returns an empty guard within about 1 s. In contrast, [\"view\",\"app\"] still waits.\nAcceptance (board_acceptance.py), recover/live-run hazard: slow is a Python script that writes priv/a, writes a marker, then sleeps about 1.5 s (under the fixture's 2 s timeout). While it runs, the CLI with SOLACE_TASK/SOLACE_RUN sends task note x. Assert:\nit returns in under 1 s;\npending/run-<rid>.json and command-<rid>.json still exist;\nthere are no board_touches rows yet.\nAfter the run, the rows are ['file:priv/a'] exactly once (check with COUNT(*)), and cancel restores the original.\n\nRun rust-acceptance, rust-board-tests and rust-lockdown-tests.",
+  "closedTime": 1791415176,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "e53e6a8e38015803",
+  "links": [],
+  "milestone": null,
+  "rank": 29,
+  "scope": [
+    "."
+  ],
+  "title": "Task Store: Locks, agent_guard"
+}

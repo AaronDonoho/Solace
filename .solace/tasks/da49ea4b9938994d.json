@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793423237,
+  "body": "Steps 11–13 of the refactor plan (task:fc9bf315f4eddc7a, notes 6 and 12). This is part 4 of 4 of the module splits.\n\n- **`lockdown`:** split into `settings`, `paths`, `files`, `commands` and `recovery`. Keep `dispatch` as the facade, and keep dispatch and validation behavior unchanged.\n- **`tasks`:** split into `server`, `store`, `strategy` and `api`. Keep the inbox order and the guarantee that only one writer changes the task store at a time.\n- **`board`:** split into `task_model`, `runs`, `reviews`, `briefs` and `server`. Keep `agents`, `setup` and `strategy` as they are, and leave `board` as a thin facade.\n\n`lockdown` and `tasks` still have inline `mod tests`, so move code out of them first.\n\nThe rules for every split task are in task:2414798176c466e4.",
+  "closedTime": 1793342145,
+  "column": "complete",
+  "createdTime": 1793057979,
+  "dependsOn": [
+    "1433afceee3ca3e7"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "da49ea4b9938994d",
+  "links": [],
+  "milestone": null,
+  "rank": 294.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Refactor: split lockdown, tasks, board"
+}

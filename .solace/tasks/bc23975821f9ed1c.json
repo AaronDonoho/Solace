@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792977609,
+  "body": "When you click a task link, `frontend.target` sends it to the board unless the task is archived or has no project (D-98, D-129). The board also hides tasks in **Backlog**, and tasks whose feature is proposed, upcoming or canceled (D-128). A link to one of those opens the board, and the task isn't there.\n\n1. **Decision first.** Add a decision amending D-98, D-129 and Spec 15 (`GET /tasks/find/{id}`): a task link opens the task on the board only when the board shows it. Otherwise it opens that task on the Strategy page, the same way an archived task's link does today (`frontend.go` hands it to the Tasks tab as its `focus`), not just the tab.\n2. **Server.** `GET /tasks/find/{id}` adds `onBoard`. It is false when the task is archived, is in Backlog, has no project, or has a feature that is proposed, upcoming or canceled. A task whose feature can't be found stays on the board, matching the board.\n3. **Link.** `frontend.target` gives `OnBoard` only when `onBoard` is true, and `InStrategy` otherwise. A reply without `onBoard` (from an older server) keeps today's rule.\n4. **Tests.** Extend `frontend_test.a_task_link_opens_where_its_task_is_test` for `onBoard` true, false and missing. Add a test that a Backlog task's link opens the Strategy page with that task focused. Add a Rust test for the find reply covering a Backlog task, a task under a proposed feature, an active feature's task, and an archived task. Run the frontend tests and `rust-board-tests`.",
+  "closedTime": 1792944342,
+  "column": "complete",
+  "createdTime": 1792901438,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "bc23975821f9ed1c",
+  "links": [],
+  "milestone": null,
+  "rank": 63.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "links: open on the board only if shown"
+}

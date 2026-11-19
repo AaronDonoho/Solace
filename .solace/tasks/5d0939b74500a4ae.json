@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794972390,
+  "body": "On the Design page, buttons and containers are all drawn with dotted outlines, which looks odd.\n\n## Asked for\n\n- Buttons and containers are no longer drawn with dotted outlines.\n\n## Done when\n\n- Buttons and containers on the canvas are drawn without dotted outlines, on both drawn designs and proposals.\n- Change markings (added, removed, changed, moved) are still visible.\n\n## Open (ask the human)\n\n- What the outline should look like instead, if anything beyond \"not dotted\" matters.",
+  "closedTime": 1794936151,
+  "column": "complete",
+  "createdTime": 1794935374,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "5d0939b74500a4ae",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 30.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "design canvas: solid outlines"
+}

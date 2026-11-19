@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792464635,
+  "body": "The automatic catch guesses at a compaction and is one turn late (D-157 point 5). Replace it with an ask: the agent notices the compaction and asks for what it needs — its task, and what this run has done.\n\nThe task half matters because a resumed brief drops the notes the conversation already saw (`board.rs::continuation_brief` filters them by `notes_seen`), and a run has no way to read its task's notes: `task note | task ask | task done` and `task diff` are all it has. Work run d39ea9e78842aab9 of task:dc959b53b88e089f opened with one 127 kB thinking step rebuilding its task, the plan and its own permissions from a compacted transcript, because its brief held neither the 12 tech-debt findings nor the investigator's plan.\n\n**Command.** `session remember`: read-only, in a task run (work, investigate and review), refused in a discussion run with `E7010`. It reads the task and the run's own record, so outside a task run there is nothing to show.\n\n**Reply.** Within the reply budget (D-14), in this order:\n- the task's context, as a fresh brief gives it: title, body, the notes so far, its feature and what it waits on;\n- `What this run read or changed since its last change, as it is now:` the window D-157 keeps (`reads::Reads::others`), printed as `view` prints it;\n- `This run so far, one step per line:` `board::run_outline` (D-99), the newest steps that fit.\nWhat the budget leaves out is named (`Not shown, to fit the size limit: `). The ask is repeatable: it changes no state and never uses a catch.\n\n**The guess goes.** `reads.rs::reread`, `Reads::caught`, the once-per-window rule and the trigger in `Run::end_call` are removed; the window itself stays (`mark_served`, `record`, `new_window`, the reads saved on the run), because the ask reads it. A re-read of an unchanged symbol adds nothing on its own.\n\n**Docs and decision.** `reference.txt` gets a `session remember` line in the Session section (the layout validator, D-143); the MCP tool description (`mcp.rs`) names `session remember` after a compaction notice, where it now names `session start --task`; `session start --task` keeps the code and workflow. Amend D-157 in `DECISIONS.md`.\n\n**Done when.** A unit test builds a task with notes and a window with a change in it, asks twice, and gets the task's notes, then the window's views, then the run's steps, cut to a small budget with what did not fit named; the detection tests are gone and the window's stay; `run rust-unit`, `run rust-board-tests`, `run rust-acceptance` and `run spacing_parity` pass.",
+  "closedTime": 1792428264,
+  "column": "complete",
+  "createdTime": 1792375998,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "ed9ad6a8235c5b02",
+  "links": [],
+  "milestone": null,
+  "rank": 233.0,
+  "scope": [
+    "."
+  ],
+  "title": "session: a run asks for its context"
+}

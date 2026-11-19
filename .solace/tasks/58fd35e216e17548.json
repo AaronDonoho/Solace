@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159115,
+  "body": "Part of splitting task:3254586664024306. From its notes 3–5; the original notes stay on the parent record. These are naming and documentation cleanups in the crate, with no behavior change.\n\n- **Short type names (note 3).** `crate.Store` methods and other `crate` functions mix short and long names for the same types. Some say `Failure`/`Out` (`Store::open`, `Store::view`); others say `crate::Failure`/`crate::Out` (`Store::work_list`, `Store::drift_error`, `Store::record_module_file`, `Store::warning_baseline`, `has_column`, `import`, `insert_symbol`, `unknown_module_hint`). Inside the crate root, `crate::` adds nothing. The same `crate::Failure` form was added in `tasks.finish_write`, `tasks.claim_journal`, `migrate.inventory`, `extract.check_cycles`, `lockdown.edited`, `drafts.pending_impl_at` and `workspace.save`. Use the short names everywhere, adding `use crate::{Failure, Out, fail};` to module imports where needed, so signatures stay short and outline lines are not cut off. Check: `grep \"crate::(Failure|Out|fail|usage)\\b\"` matches only `use` lines, and `check --warnings` shows 0 warnings.\n- **Short diagnostic names (note 4).** `crate` refers to `crate::diagnostics::FileMap` and `crate::diagnostics::Diag` by full path in `Store::materialize`, `Store::materialize_to`, `Store::check_all`, `Store::callee_hint`, `Store::record_warnings` and `unknown_module_hint`. Import them in the crate header (`use diagnostics::{Diag, FileMap};`) and use the short names. That keeps signatures readable and stops `unknown_module_hint` from being cut off in the outline. Check: `view crate` shows `Diag`/`FileMap` without the `crate::diagnostics::` prefix.\n- **Module comment (note 5).** `failure` has no `//!` module comment, though the work note says one was added; `view failure` shows only the doc comment on `Failure`. Add one, for example \"A command's failure and result type, shared by every command\", to match `cli` and `diagnostics`. Check: `view failure` shows a module comment.",
+  "closedTime": 1793150000,
+  "column": "complete",
+  "createdTime": 1793135900,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "58fd35e216e17548",
+  "links": [],
+  "milestone": null,
+  "rank": 306.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Cleanup: short names and module docs"
+}

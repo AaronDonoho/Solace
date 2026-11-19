@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037326,
+  "body": "Two small reply fixes for Rust `probe`, both found by task:6d7d8a2d428cba97.\n\n**1. Say how long the run took.** Without a time, a slow first build looks the same as a hang, and there's no way to tell whether a repeat run reused the build. Note: the probe builds in its own folder (`target/solace-probe/target`), so the first probe on a machine compiles the whole crate.\n\n**2. Compile-error snippets show the probe's line as written.** At the moment the quoted line keeps the wrapper's 8-space indent. It should read `1 | let x: i32 = …`.\n\n**Acceptance**\n- Every Rust probe reply, whether it passes, panics or fails to compile, ends with how long it took.\n- `probe` with `let x: i32 = \"not a number\";` quotes `1 | let x: i32 = \"not a number\";` with no extra indent.\n- In solace-cli, a second identical probe reports a clearly shorter time than the first.",
+  "closedTime": 1793036888,
+  "column": "complete",
+  "createdTime": 1793035664,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8e32eeb0cbcf57c1",
+  "links": [],
+  "milestone": null,
+  "rank": 106.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: Rust replies show timing and clean snippets"
+}

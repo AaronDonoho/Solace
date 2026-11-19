@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159125,
+  "body": "Rust's reference graph overestimates. `refs` shows uses that aren't real, and test reach runs tests that can't be affected. Both should follow one standard: drop what is **certainly not** a use, and keep everything that **might** be one.\n\n### What goes wrong today\n\n`refs crate.batch --project solace-cli` reports 25 users. Only about 7 of them call it:\n\n- `mcp.tool_call`\n- `board::tests.a_repeated_command_reports_the_copy_that_failed`\n- the `tests.*` batch tests\n\nThe other 18 are certainly not uses:\n\n- `tasks.batch` itself, along with its callers and tests. That's a different function that happens to have the same name.\n- Functions that only have a local variable named `batch`, such as `tasks.batch_commit` and `board.note_recorded`.\n\n**Why it happens:** `language::rust_refs` deliberately links a name it can't resolve to every item with that last name, so that test reach never misses a test (see its module comment). The same module also has an exact resolver (`rewrite_sites` / `resolve_exact`), which `extract` uses when it rewrites references.\n\n### Required behavior\n\nEach mention is classified one of three ways:\n\n- **Exact:** it resolves to the symbol.\n- **Possible:** it can't be resolved without type inference, so it might be a use. Example: a method called as `x.name()`, where the type of `x` isn't known.\n- **Not a use:** it resolves to something else, such as a different item, or a local variable or parameter that shadows the name.\n\nThe classification then applies like this:\n\n- `refs` lists exact uses, then the possible ones under their own heading.\n- Test reach and `impact` count both exact and possible uses.\n- A mention that isn't a use is dropped everywhere.\n- When in doubt, a mention counts as possible, never as not a use.\n\n### Done when\n\n- Unit tests cover:\n  - a same-named function in another module, which is not a use for both `refs` and test reach;\n  - a same-named local variable, which is not a use for both;\n  - a method called through a value, which is possible: `refs` lists it, and test reach still runs its test.\n- A test that calls the symbol only inside a macro such as `assert!(…)` is still reached.\n- `check --warnings`, `rust-unit`, `rust-acceptance` and the acceptance suites that cover `refs` and test reach pass.\n\n### Why it matters\n\n- The refactor rules say to remove a wrapper only after `refs` shows nothing calls it. False hits make dead code look used.\n- Test reach runs tests the change can't affect.",
+  "closedTime": 1793077995,
+  "column": "complete",
+  "createdTime": 1793075349,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "557b230ec2e4db52",
+  "links": [],
+  "milestone": null,
+  "rank": 123.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "refs and test reach: one Rust standard"
+}

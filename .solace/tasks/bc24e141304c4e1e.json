@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690237,
+  "body": "One owner for task data: a task server and task store\n\nProblem\n\nEvery board write takes the project lock (guard, board.rs:1084), and so does every agent command. A long agent command blocks create, move, note and stop, even though those only touch task data. Repeated clicks pile up behind the lock, which produced the four duplicate tasks on Oct 6. Task data is also spread across every project's .solace/board/, and it moves when a task's home changes.\n\nWanted\n\nA task server owns the task store, the single source of truth for tasks. It's a Rust module (tasks.rs) inside solace serve, with its own API (/tasks/...). Its clients don't depend on how it's built, so it could later move to Gleam/BEAM.\nOne task store for the whole root, at <root>/.solace/tasks/. Tasks no longer live in a home project and never move (this amends D-61 point 4 and D-17). Run logs, conversations and review checkpoints stay in each project's .solace/board/<tid>/.\nThe task server is the only writer of task files. It applies operations one at a time, in order, writing each file atomically (write, then rename).\nThe board is a client. The future archive and Strategy pages will be clients too. All of them display, create and change tasks only through the task server.\nAgents send messages, not writes. task note, task done, ask, verification and settings proposals go to the task server as messages. A message is on disk before it's acknowledged, so a crash loses nothing. If no server is running, messages wait until serve starts.\nWhat a task changed, and how to undo it, stays in each project's store, committed atomically with the code change and keyed by task id. Undo goes by task id alone. *(Depends on the question above.)*\nAgents' run checks need no lock. agent_guard reads the task state from the task store to find paused or ended runs.\nTask-only actions take no project lock: create, edit, move, note, stop, cancel without undo, scope, and answers.\nActions that change code still take the store lock of each project they touch: undo, moving into a final column, approving a settings proposal, accepting outside changes, and adding or removing a project.\nCreating a task is idempotent. The same request sent twice makes one task.\nDone when\n\nA test shows create, note and stop going through while an agent's declared command is still running.\nA test shows a double-submitted create (sent in sequence and in parallel) makes one task.\nA test shows a message left on disk is applied after serve restarts.\nA test shows existing tasks from two projects keep their scopes and conversations after they move to the root store.\nA test shows a crash between a code change and its undo record leaves neither, or both.\nThe existing board and workspace acceptance tests still pass.\nNeeds: a decision record (D-77), since this changes how the board and agents share state (D-17, D-18, D-61), plus the Spec 15 updates to storage, event ids and the request key.",
+  "closedTime": 1791381072,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "bc24e141304c4e1e",
+  "links": [],
+  "milestone": null,
+  "rank": 22,
+  "scope": [
+    "."
+  ],
+  "title": "Task Store"
+}

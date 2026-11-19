@@ -20,12 +20,26 @@ pub fn share_store(project: &Path) -> Result<(), Failure> {
     remove_generated_store_ignore(project)
 }
 
-/// What the root's block shares from every project (D-179, D-191).
+/// What the root's block shares: every project's store and the root's
+/// strategy records (D-179, D-191).
 pub(crate) const STORE_IGNORE: &str = concat!(
     "# Solace: shared store files begin; setup replaces the lines below (D-179).\n",
     "**/.solace/*\n",
     "!**/.solace/store.db\n",
     "!**/.solace/approved\n",
+    "!/.solace/strategy/\n",
+    "/.solace/strategy/*\n",
+    "!/.solace/strategy/vision.md\n",
+    "!/.solace/strategy/personas.json\n",
+    "!/.solace/strategy/milestones/\n",
+    "/.solace/strategy/milestones/*\n",
+    "!/.solace/strategy/milestones/*.json\n",
+    "!/.solace/strategy/features/\n",
+    "/.solace/strategy/features/*\n",
+    "!/.solace/strategy/features/*.json\n",
+    "!/.solace/tasks/\n",
+    "/.solace/tasks/*\n",
+    "!/.solace/tasks/*.json\n",
     "# Solace: shared store files end.\n"
 );
 
@@ -109,6 +123,11 @@ fn share_root_ignore(root: &Path) -> Result<(), Failure> {
     };
     let wanted = current.as_deref().map_or_else(|| STORE_IGNORE.to_string(), with_store_block);
     if current.as_deref() != Some(wanted.as_str()) {
+        // Split task files before the block that commits them, so an older
+        // build's combined file never publishes a conversation.
+        if current.as_deref().is_none_or(|text| !text.contains("/.solace/tasks/\n")) {
+            crate::tasks::store::split_legacy(root)?;
+        }
         fsx::write_atomic(&path, wanted)?;
     }
     Ok(())

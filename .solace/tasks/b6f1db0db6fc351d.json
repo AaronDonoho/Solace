@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793483690,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793477556,
+  "column": "complete",
+  "createdTime": 1793464237,
+  "dependsOn": [],
+  "feature": "d597d4887f6e54eb",
+  "home": ".",
+  "id": "b6f1db0db6fc351d",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 321.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "Agent behaviour settings"
+}

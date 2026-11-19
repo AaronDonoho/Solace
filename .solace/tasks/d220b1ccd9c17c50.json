@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792208846,
+  "body": "Strategy agents name tasks by their bare id (`350ee2924e07ad4c`) or put the id in a code span. Neither one is a link. D-98 and D-122 already make a bare `task:<id>`, `feature:<id>` or `milestone:<id>` in rendered markdown a link with the record's title, so the agent only needs to write that form.\n\n## Change\n- **Strategy brief (`strategy.rs`):** next to \"Cite code by name\", tell the agent to name tasks, features and milestones in notes and proposal bodies as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks, because code spans stay literal (D-98). The human can then click through.\n- **Tool replies the agent copies from:**\n  - A proposal's answer says `created task:<id>` (and the same for feature and milestone) instead of `created task <id>` (`tasks.rs`, the \"Approved and applied\" replies).\n  - `strategy show`'s `links` stay plain ids, since they are data.\n- **Reference (`reference.txt`):** the strategy section's \"In notes and proposals, cite code by name\" line gets the same sentence. The work agents' notes line (\"In notes, cite code by name\") gets it too, so work-run notes link as well.\n- A short decision in `DECISIONS.md`.\n\n**Tests:** rust-unit tests check that the brief and the reference contain the sentence and that a create's answer reads `created task:<id>`. Update the board acceptance tests that match `created task <id>`. The reference layout check (D-143) still passes.",
+  "closedTime": 1792187631,
+  "column": "complete",
+  "createdTime": 1792180716,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "d220b1ccd9c17c50",
+  "links": [],
+  "milestone": null,
+  "rank": 179.0,
+  "scope": [
+    "."
+  ],
+  "title": "strategy: refer to records as links"
+}

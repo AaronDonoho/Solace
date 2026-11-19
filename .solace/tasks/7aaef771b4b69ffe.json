@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795056531,
+  "body": "Give a design run one command that shows the whole design format. That means every element type, its required and optional properties, the values each property allows, and a minimal valid example of each, plus the shape of each proposal operation (D-241 point 2). The design agent's report said this lookup was most of its work. Today the format can only be learned by reading the Rust constants and test JSON.\n\n## Done when\n\n- A design run can call the command, and the run's commands and help list it.\n- What it prints comes from the same table the rules check against (`design.ELEMENT_TYPES` and its `ElementType` entries), not from a hand-written copy. A test shows every listed example passes `design.validate`.\n- Spec 15's design run paragraph names it.\n\n## Suggested (cursory, not prescriptive)\n\n- A name like `design schema`, plus a short line in the Designer brief saying it exists.",
+  "closedTime": 1795019608,
+  "column": "complete",
+  "createdTime": 1794865745,
+  "dependsOn": [],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "7aaef771b4b69ffe",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 314.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: list the element format"
+}

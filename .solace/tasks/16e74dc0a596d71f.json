@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794359902,
+  "body": "A human talks to the design agent in a panel on the Design page, like Strategy's planning panel.\n\n### Do\n\n- Show the shared panel on the Design page, on both tabs, using design runs.\n- Starting, sending messages, ending and stopping a run, picking a model, drafts and earlier runs all work as they do on Strategy, with nothing added.\n- A run answering while the page is hidden flags the Design menu tab, as Strategy's does.\n- The panel sits on the opposite side from the left-hand list, as it does on Strategy, unless the human says otherwise.\n\n### Acceptance\n\n- Tests: a run starts from the panel, a reply shows, the draft survives a reload, and a reply on a hidden page flags the menu tab.\n- The panel keeps its width and collapses like Strategy's.\n\n### Left out\n\nProposals, and which design the run is on beyond what task:73718ff8c5f77922 settles.",
+  "closedTime": 1794325012,
+  "column": "complete",
+  "createdTime": 1793914500,
+  "dependsOn": [
+    "ffbb783dd0d6fcea",
+    "3257af90db11da80"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": "solace-cli/design",
+  "id": "16e74dc0a596d71f",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 5.0,
+  "scope": [
+    "solace-cli/design",
+    "solace-cli/frontend"
+  ],
+  "title": "agent: panel on the Design page"
+}

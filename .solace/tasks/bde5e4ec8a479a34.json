@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794972396,
+  "body": "Build the Solace desktop bundle from the Build tab. This is the milestone's main acceptance test.\n\n1. **Recipes.**\n   - `solace-cli/board` and `solace-cli/frontend` keep their `build-release` command as their recipe step.\n   - The root project (`solace-cli`) builds after them: `cargo build --release --locked`.\n   - `solace-app` builds last, in three steps: the sidecar copy (what `scripts/sidecar.sh` does), then `cargo tauri build`, with outputs `deb` and `appimage` on Linux.\n2. **Tauri config.** Remove the `beforeBuildCommand` chain from `solace-app/tauri.conf.json` (`git rev-parse`, the cargo build, `sidecar.sh`), since the recipe order does that work now. `cargo tauri dev` still has to work; document how.\n3. **`solace-cli/build.rs`** keeps building the frontend bundles for a plain `cargo build`, so a developer build still works. It reads the same recipe steps instead of the `build-release` command directly. If that's more than a small change, leave a note and keep it as it is.\n4. **Check:** a build from the Build tab produces a versioned release in `build-output` holding the `deb` and AppImage, and the AppImage starts. Record the result in a task note.\n\nOnce `solace-app` is a project, widen the scope to include it and the frontend projects (D-127).",
+  "closedTime": 1794893926,
+  "column": "complete",
+  "createdTime": 1791953388,
+  "dependsOn": [
+    "6e93c06d910d2527",
+    "baab6475ff65b0b2",
+    "0e5af8f4b249b58e"
+  ],
+  "feature": "5be8bc14e3676b85",
+  "home": ".",
+  "id": "bde5e4ec8a479a34",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 127,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli/board"
+  ],
+  "title": "self-build: desktop bundle from a recipe"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464632,
+  "body": "Import a one-crate Cargo package into the store (D-158 points 1, 2 and 5). Part 2 of 2, split from task:7e0b9beb30f88ed3, which adds the schema, the function that stores one split file, and the exact projection. The detailed design is in that task's note 4 (steps 2, 3 and 5).\n\n- **Splitter** (`language/rust.rs`): `cut` leaves a leading `mod x;` (no body) to the header, after `//!` docs, `#![…]` and `use`; a later `mod x;` (such as `#[cfg(test)] #[path = \"…\"] mod tests;`) stays an item. `File` gains `mods`: every top-level `mod x;` with its `#[path]` file. Update the expected header in `items_take_their_leading_comments_and_are_named_in_rust_syntax` if needed.\n- **`rust::package(root)`**: reads `Cargo.toml`, returns each file as (path, module path, split `File`).\n  - Refuses with D-158 point 2's texts: \"`x` is a proc-macro crate; Solace doesn't hold proc-macro crates yet.\" and \"This is a workspace of N crates; add each member as its own project.\" A `[package]` with a `[workspace]` of no other members is accepted.\n  - Walks `mod` from `src/main.rs` or `src/lib.rs` (module `crate`): `x.rs`, `x/mod.rs`, or the `#[path]` file beside its parent. So `src/board_tests.rs` is `board::tests`, `src/strategy.rs` is `board::strategy`, `src/language/gleam_tests.rs` is `language::gleam::tests`.\n  - Each `tests/*.rs` is its own root, module dir `tests` (`tests/acceptance.rs` is `acceptance`).\n  - A syntax error or subset refusal fails the import, naming file, line and message.\n- **Import** (`main.rs::import`): when `Cargo.toml` exists and `gleam.toml` doesn't, use `rust::package` and store each file with task:7e0b9beb30f88ed3's function; `written.record` uses the module's file. The Gleam branch is unchanged.\n- **Refused for now, each naming the files**: a `mod x;` inside an inline `mod { … }`; two modules with one name (a `tests/x.rs` and a `src` module `x`); a package with both `main.rs` and `lib.rs`, or with `src/bin/`.\n\n**Decide before starting:** D-158 only says \"one crate\" and gives no message for the last case. The plan's text is \"This package has N crates (…); Solace holds a package of one crate.\" Ask the human to confirm it; it doesn't block `solace-cli/`, which has only `main.rs`.\n\nNot checked yet: whether `tests/acceptance.rs` and the `#[path]` files reached through `orientation_tests.rs` (`sample_tests.rs`) split with no refusals; the existing join-back test covers only `src/`.\n\n### Done when\n\nImporting a copy of `solace-cli/` (`Cargo.toml`, `src/**/*.rs`, `tests/*.rs`) into a scratch folder, removing the `.rs` files and materializing gives byte-identical files; the `mod board;` line is in `crate`'s header and `src/board_tests.rs` is held as `board::tests`. Branch tests in `rust_tests.rs` cover the two refusals, the accepted one-member workspace, the three ways `mod x;` resolves, and `mods` listing a header and an item `mod`. Gleam projects are unchanged.",
+  "closedTime": 1792292443,
+  "column": "complete",
+  "createdTime": 1792276504,
+  "dependsOn": [
+    "7e0b9beb30f88ed3"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "c3d066ecc30262a7",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 214.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: import a one-crate package"
+}

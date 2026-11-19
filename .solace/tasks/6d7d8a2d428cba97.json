@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037323,
+  "body": "Check that the Rust `probe` built by task:63c5cdaffb07c951 (and its tech-debt fixes in task:d63f1ed72aa35c11) works as intended in this project. This is a read-only run, which also tests that `probe` works where no code can be saved.\n\n**Before running:** the Solace binary must be rebuilt first. The last review found the running binary still refused Rust `probe`.\n\n**Try each, and report pass or fail with the call and the reply:**\n- Statements that call a public item of the crate print their output; a single expression is shown as if wrapped in `dbg!`.\n- A panic shows its message.\n- A compile error is reported against the probe's own text, like `check` reports errors.\n- Calling another module's private function from the crate root fails, and the reply names `probe --in <module>`. Running again with `--in` works.\n- `--from` and `--trace` are refused as Gleam only.\n- Running the same probe a second time is clearly faster than the first.\n- Afterwards nothing shows up as a project change, in the store or as a test run, and `src/` is untouched.\n- Anything an agent would find confusing or slow in the replies.\n\n**Outcome:** a short report, one line per check. For each failure or friction point, say what should change, written so it can become its own task. No code changes in this task.",
+  "closedTime": 1793037322,
+  "column": "complete",
+  "createdTime": 1793025890,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6d7d8a2d428cba97",
+  "links": [],
+  "milestone": null,
+  "rank": 97.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Investigate Rust probe in real use"
+}

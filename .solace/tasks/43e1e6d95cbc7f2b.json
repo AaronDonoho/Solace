@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1792814719,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792781814,
+  "column": "complete",
+  "createdTime": 1792778776,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli",
+  "id": "43e1e6d95cbc7f2b",
+  "links": [],
+  "milestone": null,
+  "rank": 53.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Strategy page: remaining fixes: Tech Debt"
+}

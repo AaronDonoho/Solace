@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792464630,
+  "body": "`check` and `test` work on Rust projects, ready for task:ba1542d1a967b9b7 to check every submit (D-158 point 3). Plan: this task's investigation, note 8.\n\n- `check` runs `cargo check --all-targets --message-format=json --offline`, one `target/` per project, warmed at import without making import wait. Measured on `solace-cli/`: 0.71 s warm after a one-function edit, 10.4 s cold.\n- Map each error's primary span to its symbol with `FileMap` / `locate`; follow `expansion` back to the macro call site. An error reported once per target is shown once.\n- Borrow errors only appear once type errors are fixed, so a fix can take a second round; the reply says so.\n- `cargo::format_item` formats one item with rustfmt and the project's `rustfmt.toml` (methods wrapped in `impl _ { … }`); never a whole file, since the crate isn't rustfmt-clean (D-158 point 5). Used by the submit task.\n- `test` runs `cargo test` (26–28 s) and reads failures by libtest name (`board::tests::x`).\n- A machine without `cargo`: the project's lane on the board shows \"Needs the Rust toolchain (`cargo`)\" (a `needs` flag in `/projects`, drawn in `solace-cli/board`), reads still work, and `submit`/`check`/`test` are refused with that message.\n- Until task:ba1542d1a967b9b7 lands, `submit` to a Rust project replies \"Rust projects can't take `submit` yet\".\n- An undo (`board.rs::revert`) in a Rust project is checked too.\n\nOut of scope: Rust `submit` (task:ba1542d1a967b9b7), the bubblewrap sandbox (task:7db8dd126a22c863), cargo's suggested fixes, refs and test reach.",
+  "closedTime": 1792354533,
+  "column": "complete",
+  "createdTime": 1792252805,
+  "dependsOn": [
+    "c3d066ecc30262a7"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "da797576d0cfaaac",
+  "links": [],
+  "milestone": null,
+  "rank": 202.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Rust: check, test and missing cargo"
+}

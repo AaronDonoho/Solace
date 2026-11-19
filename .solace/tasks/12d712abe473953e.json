@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792705648,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792678028,
+  "column": "complete",
+  "createdTime": 1792616438,
+  "dependsOn": [],
+  "feature": "2985e05d2e799ef8",
+  "home": "solace-cli",
+  "id": "12d712abe473953e",
+  "links": [],
+  "milestone": null,
+  "rank": 34.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Agent working summary on resume: Tech Debt"
+}

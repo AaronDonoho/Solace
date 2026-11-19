@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792977613,
+  "body": "Let work, review and investigation runs read their own task's run logs, so a fresh run can see what earlier runs did and what failed instead of working it out again from notes. From the investigation in task:2db5e0768167a057 (option 1c).\n\n1. **Decision first.** Add a decision that amends D-99 and Spec 15 §6: work, review and investigation runs may read their own task's run logs. Other tasks' runs stay out of reach.\n2. **Shared reader.** Move `strategy_run_show`, `step_line`, `step_list`, `cut_line`, `in_parts`, `with_part`, `longest_text`, `from_flag` and `number_list` out of `strategy.rs` into a module both callers use (for example `runlog.rs`). Move them with `extract`, don't copy them. Strategy keeps the wording of `strategy show run`.\n3. **Command.** Add `task run <run> [<steps>|all] [--from n]` to `board.rs::task_command`, limited to the current task's runs. An unknown run, or another task's run, is `E7023`. The command is read-only, so reviews and investigations can use it too. Update the usage line, `help task` and `reference.txt`, and keep the session-start reference under 3,600 bytes (D-102 point 5).\n4. **Tests.**\n   - A `board_tests.rs` unit test for `task run`: the outline, chosen steps, paging with `--from`, `E7001`/`E7023`, and refusal of another task's run.\n   - The existing `strategy_run_show` test still passes through the shared module.\n   - Run `rust-board-tests` and `rust-acceptance`.",
+  "closedTime": 1792901784,
+  "column": "cancelled",
+  "createdTime": 1791926033,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "59d0b7ae77d161d9",
+  "links": [],
+  "milestone": null,
+  "rank": 114.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "run logs: work runs read their task's runs"
+}

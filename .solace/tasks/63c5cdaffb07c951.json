@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035356,
+  "body": "Rust projects refuse `probe` today (`lockdown.plain`: deferred by D-158 point 6). The suggested substitute, `test <name>` with a new `#[test]`, saves code, so read-only runs (reviews, investigations) can't run any new Rust code at all, while Gleam runs can.\n\n**Need**\n- `probe` with `text` works in a Rust project: the statements run, their output is shown, and nothing is saved. It works in read-only runs, like the Gleam probe (D-41).\n- The probe can call the crate's items, private ones included (it should see what a test in the crate sees).\n- Whatever temporary file or line the probe adds is always removed, even when it fails to compile, and never shows up as a project change or in the store.\n- Compile errors are reported against the probe's own text, the way `check` reports them.\n- The reference and the Rust \"Not available\" lines are updated; `probe --trace` stays Gleam only and says so.\n\n**Left out**\n- `--trace` for Rust (Rust has no easy way to watch calls at run time).\n- `--from <test>` for Rust; it could follow as its own task.\n\n**Cursory suggestion, not a prescription:** run the text as a temporary `#[cfg(test)]` module of the crate through `cargo test` filtered to that one test, with `dbg!`/`println!` standing in for Gleam's `echo`. The worker decides.",
+  "closedTime": 1793023061,
+  "column": "complete",
+  "createdTime": 1792989449,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "63c5cdaffb07c951",
+  "links": [],
+  "milestone": null,
+  "rank": 93.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: run throwaway Rust code"
+}

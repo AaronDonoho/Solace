@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972379,
+  "body": "**Question:** should a plain `cargo build` stop with \"Frontend bundle is stale; run `solace bundle`\" instead of quietly embedding an old `app.js`, and should `cargo tauri build` run Solace's build instead of its own copy of the step?\n\n**Only worth it if the check is reliable**, which needs the fingerprint from task:4cf396f7259e3fc2.\n\n**Points from task:4ea2064f16119df8:**\n- `build.rs` emits `rerun-if-changed` for every declared input, or Cargo never reruns the check.\n- Bootstrap: Tauri must compile `solace` before Solace can run the build. That first compile skips only the stale check, via an env variable with `rerun-if-env-changed`, so Cargo can't keep the skipped result for later builds.\n- Rust tests (including review runs) would fail until the bundle is remade; the message must name the command to run.\n\n**Answer in a note:** whether the safety net is worth the new failure mode, and a recommendation. If yes, propose the work task. No code changes.",
+  "closedTime": 1794785009,
+  "column": "complete",
+  "createdTime": 1792291918,
+  "dependsOn": [
+    "4cf396f7259e3fc2",
+    "6f0e0c1ab314710e"
+  ],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "82d0c66e0de90dca",
+  "links": [],
+  "milestone": null,
+  "rank": 220.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate build.rs stale-bundle check"
+}

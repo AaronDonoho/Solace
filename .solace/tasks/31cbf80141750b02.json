@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795105049,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795064426,
+  "column": "cancelled",
+  "createdTime": 1795063662,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": "solace-cli",
+  "id": "31cbf80141750b02",
+  "links": [],
+  "milestone": null,
+  "rank": 422.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "techDebt": true,
+  "title": "Share a project with teammates: Tech Debt"
+}

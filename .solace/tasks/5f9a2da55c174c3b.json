@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690223,
+  "body": "Consider some reasonable approaches to display sort order of the changes section for best human comprehension.",
+  "closedTime": 1791237840,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "5f9a2da55c174c3b",
+  "links": [],
+  "milestone": null,
+  "rank": 5.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Set display order in Changes section"
+}

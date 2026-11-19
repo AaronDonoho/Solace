@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792731881,
+  "body": "Part 4 of same-project Rust `extract` (D-185). Depends on the impls and test modules task.\n\n**Do.**\n- Carry into the target only the source `use` entries moved code needs, computed from resolved references and trait needs: external globs (`use std::collections::*`), custom traits for method calls, imported macros. Do not copy imports only staying code uses.\n- If a source import conflicts with a name already in the target, alias or qualify it; do not treat any target-local name as satisfying it.\n- Model Rust namespaces for E1004: types (struct, enum, trait, type, mod) in one; values (fn, const, static) in another. Moving `fn foo` beside `mod foo` is allowed; moving `struct Foo` beside `mod Foo` is E1004, not a cargo E0428. Apply the same fix to `rust_submit.rust_namespace` if it shares the bug.\n- `reply`: report suite and index errors instead of ignoring them; report `Created module` for a target that gained code only if it was new; return retired modules as a list, not a joined string.\n\n**Tests.** A moved fn using `HashMap`, a glob and a custom trait compiles with no new warnings; staying-only imports are not copied; a conflicting import is aliased; the two namespace cases above; reply errors surface.\n\n**Out of scope.** Splitting the large `extract::rust.extract` function and the shared Rust command-list constant stay as tech debt for later.",
+  "closedTime": 1792698587,
+  "column": "complete",
+  "createdTime": 1792611680,
+  "dependsOn": [
+    "cecf5788c7f06aa3"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "f9b3a60e7dd8547f",
+  "links": [],
+  "milestone": null,
+  "rank": 252.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust imports and namespaces"
+}

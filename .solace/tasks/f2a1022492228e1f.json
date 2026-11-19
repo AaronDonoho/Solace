@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794864194,
+  "body": "Work run 9906f67256212151 on task:def7eba72b6c9273 changed two draft refusal messages, then `test --all` in `solace-cli` failed across many unrelated tests with `E0100 ... Could not locate working directory`, while the targeted draft tests passed. The human has seen this in other runs. A worker's change then looks unsafe even when it is fine.\n\nThe likely cause, not yet proven: `cli.Within::enter` changes the process-wide current working folder with `env::set_current_dir`, and Cargo runs unit tests in parallel. Overlapping scopes can restore a scratch folder another test has already deleted, leaving the process in a folder that no longer exists. `cli.Within` assumes one call at a time, which holds for the CLI/MCP process but not for the test process. This also conflicts with D-83 point 3: tests should not share process-wide state.\n\n**Do.** Make the parallel test suite keep a valid working folder and leave no shared working-folder state behind. Keep the production one-call-at-a-time behavior. A cursory suggestion, not a prescription: in tests, pass the project folder to `run_options` instead of changing the process folder; if the real cause is elsewhere, fix that cause and record it in the task note.\n\n**Acceptance.**\n- `solace test --all` in `solace-cli` passes under its default parallel run, repeatedly, with no `Could not locate working directory`.\n- The two draft tests added in run 9906f67256212151 pass in that same full run.\n- A test shows that invoking `run_options` with `--project` leaves the process's working folder unchanged.\n- The fix does not serialize the whole suite, lower the test thread count, or weaken cargo/rustc checks.\n\n**Out of scope.** Retrying tests, the two refusal messages themselves, test speed unrelated to this race, and changing production command behavior.",
+  "closedTime": 1794360802,
+  "column": "cancelled",
+  "createdTime": 1793144194,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f2a1022492228e1f",
+  "links": [],
+  "milestone": null,
+  "rank": 141.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tests: no shared working folder"
+}

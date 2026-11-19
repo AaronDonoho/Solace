@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792719164,
+  "body": "Each milestone on the Roadmap tab starts collapsed. Its heading row shows the title, state badge, `targetDate` and a feature count. Expanding it shows the body, its features and their tasks. Clicking the heading switches between collapsed and expanded.\n\n- The heading's controls (**Edit**, **Delete**) stay on the collapsed row.\n- A `milestone:<id>` link (D-122), and any link to a feature inside the milestone, expands that milestone before scrolling to it.\n- Opening **Edit** expands the milestone.\n- Which milestones are expanded is kept only until the page reloads.\n- Update the README and the tests.\n\nLeft out: remembering which milestones were expanded across reloads, and an expand-all button.",
+  "closedTime": 1792705165,
+  "column": "complete",
+  "createdTime": 1792253603,
+  "dependsOn": [
+    "5fe0996f86a964b7"
+  ],
+  "feature": "cb03260b259b3c5c",
+  "home": "solace-cli/strategy",
+  "id": "d85495f7121c11d3",
+  "links": [],
+  "milestone": null,
+  "rank": 101.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "roadmap: collapsible milestones"
+}

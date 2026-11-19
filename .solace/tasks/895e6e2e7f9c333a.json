@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312244,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793231708,
+  "column": "complete",
+  "createdTime": 1793223884,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "895e6e2e7f9c333a",
+  "links": [],
+  "milestone": null,
+  "rank": 174.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "extract: keep staying code compiling: Tech Debt"
+}

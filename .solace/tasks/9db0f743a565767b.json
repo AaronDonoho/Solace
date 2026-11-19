@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791840901,
+  "body": "Let's check: is the extract tool functional?\nIs it explained in the solace brief?\nIs it understandable?\nWhat sorts of code/files can it be used on?\n\nDo not use it on existing code/files.",
+  "closedTime": 1791840899,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "9db0f743a565767b",
+  "links": [],
+  "milestone": null,
+  "rank": 97,
+  "scope": [
+    "."
+  ],
+  "title": "Extract tool check"
+}

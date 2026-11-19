@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795045309,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795014041,
+  "column": "complete",
+  "createdTime": 1795012790,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "20c7ca756f1b964d",
+  "links": [],
+  "milestone": null,
+  "rank": 41.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "notes: keep note box contents opaque"
+}

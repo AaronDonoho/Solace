@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792812792,
+  "body": "Investigate options for reducing `.solace/tasks/events.db`. It logs a full task, strategy run, feature, milestone or vision snapshot on every change and is never pruned. Start with a bounded log: prune old events on `serve` and let the board rebuild from the JSON files (D-78). Compare that with compact event rows (ids and kinds) and with changing the `/events` replay protocol. Recommend the smallest safe option, its retention behavior and its tests. Do not change the task, strategy or board JSON formats. Left out: redesigning the event system in this task.",
+  "closedTime": 1792767191,
+  "column": "complete",
+  "createdTime": 1792454366,
+  "dependsOn": [],
+  "feature": "77663b4d3edef315",
+  "home": "solace-cli",
+  "id": "109098cc65244cf4",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 2.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tasks: reduce event log size"
+}

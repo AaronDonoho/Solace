@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792765932,
+  "body": "On the Features tab, move the new/edit feature form out of the feature stack and into a bottom band pinned to the page, reusing the bottom-band pattern from task:fdcadc58d9156a49 rather than adding a second one. The band is absent until New feature or Edit opens it, and it opens expanded.\n\nIts bar names the work (`New feature` or `Edit <title>`) and has a collapse/expand control. Collapsing hides the form but keeps its draft; reopening shows the same draft. The feature stack takes the remaining height and scrolls, so the page itself does not scroll to reach the form. Cancel closes and clears the band. Refusals stay in the band, and Save keeps its current behavior. On narrow screens the band remains usable without a fixed page height.\n\nLeave out drag/resize, a stored collapsed preference, and changes to the Tasks tab's pane.\n\n**Tests:** new and edit open expanded; collapse and reopen preserve the draft; cancel clears it; refusal remains visible; the open feature stack scrolls independently; existing feature save, delete and task-link tests stay green.",
+  "closedTime": 1792728981,
+  "column": "complete",
+  "createdTime": 1792709897,
+  "dependsOn": [
+    "fdcadc58d9156a49"
+  ],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "b7e2b389a4649977",
+  "links": [],
+  "milestone": null,
+  "rank": 108.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "features: bottom editor pane"
+}

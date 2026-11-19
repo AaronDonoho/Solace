@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793483698,
+  "body": "A Tech Debt task auto-filed for a completed task with no feature stores `feature: null`, which is correct (`board.new_debt`). But the board stylesheet has `.card:has(.debt){--tab:var(--test)}`; that overrides the card stripe with the purple test color for every Tech Debt card, so a featureless one is purple instead of the gray default. D-114 and Spec 15 §1 say a card's stripe is its feature's color, gray with no feature or one not started.\n\nRemove that override so the stripe follows the feature: the feature's color when the Tech Debt task has one, gray when it does not. Keep the \"Tech debt\" badge and tooltip; the badge, not the stripe, marks the category.\n\nAdd regression coverage in `solace-cli/board`: a featureless Tech Debt card renders with no feature stripe and no `.card:has(.debt)` override; a Tech Debt card with a feature uses that feature's color; both show `class=\"debt\"`. Keep the existing badge test.\n\nLeft out: changing how Tech Debt tasks are filed, titled or grouped, and any broader card or palette redesign.",
+  "closedTime": 1793480234,
+  "column": "complete",
+  "createdTime": 1793312604,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "f17b9d93abbc1312",
+  "links": [],
+  "milestone": null,
+  "rank": 174.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "board: featureless tech debt cards stay gray"
+}

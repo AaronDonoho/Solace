@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792009416,
+  "body": "Part of the Backlog-off-the-board change (see **Workflow: Backlog off the board**, 35564bb525e93b96, which depends on this). Once that change lands, the board no longer shows Backlog, so the Strategy page becomes the place where a task goes active or back on hold.\n\n- **Plan** (Backlog → Planning) on the task detail and on the task's Tasks tab row. Any task in `backlog` can be planned.\n- **Back to backlog** (Planning → Backlog), offered only on the Strategy page and only for a task with no feature. A task with a feature is refused (`E7001`) by the server, not just hidden by the page.\n- Both actions use the board's existing actions API. The Rust side restricts `to_backlog` to tasks with no feature.\n- Tests: Rust for the refusal, Gleam for the buttons showing up (and not showing up).",
+  "closedTime": 1791990060,
+  "column": "complete",
+  "createdTime": 1791987638,
+  "dependsOn": [],
+  "feature": "9461b59a8c0dd46b",
+  "home": ".",
+  "id": "5441d4a953670951",
+  "links": [],
+  "milestone": null,
+  "rank": 135.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: Plan and Back to backlog"
+}

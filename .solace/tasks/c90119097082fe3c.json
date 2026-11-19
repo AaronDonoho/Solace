@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792009413,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1791942404,
+  "column": "complete",
+  "createdTime": 1791898023,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "c90119097082fe3c",
+  "links": [],
+  "milestone": null,
+  "rank": 111.0,
+  "scope": [
+    "."
+  ],
+  "techDebt": true,
+  "title": "Agent Tooling Efficiency: Tech Debt"
+}

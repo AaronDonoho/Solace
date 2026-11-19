@@ -1227,7 +1227,7 @@ mod tests {
         fs::write(dir.join("junk.json"), "not json").unwrap();
         fs::write(dir.join("bare.json"), r#"{"id":"bare","column":"backlog","home":"."}"#).unwrap();
         let before = |names: &[&str]| -> Vec<Vec<u8>> { names.iter().map(|n| fs::read(dir.join(format!("{n}.json"))).unwrap()).collect() };
-        let others = ["junk", "bare", "t1"];
+        let others = ["junk", "t1"];
         let kept = before(&others);
         let note = |tid: Value| json!({"kind": "note", "task": tid, "text": "x"});
         for m in [note(json!("../x")), note(json!("")), note(json!(null)), note(json!("missing")), note(json!("junk")), note(json!("bare"))]
@@ -1238,7 +1238,12 @@ mod tests {
         fs::write(root.join("solace.toml"), "[board\n").unwrap();
         flag_set_aside(&root, &note(json!("t1")), "why");
         fs::remove_file(root.join("solace.toml")).unwrap();
-        assert_eq!(before(&others), kept, "an invalid id, a missing or unparseable file, no notes list, or no flow: nothing is written");
+        assert_eq!(before(&others), kept, "an invalid id, a missing or unparseable file, or no flow: nothing is written");
+        assert_eq!(
+            board::task(&root, "bare").unwrap()["notes"].as_array().unwrap().len(),
+            1,
+            "a shared task with no local part takes a note"
+        );
         flag_set_aside(&root, &json!({"kind": "agent", "task": "t1"}), "the reason");
         let t = board::task(&root, "t1").unwrap();
         assert_eq!(t["notes"].as_array().unwrap().len(), 1);
@@ -3407,5 +3412,26 @@ mod tests {
         let run = crate::tasks::strategy::strategy_run(&root, &rid).unwrap();
         assert_eq!((run["state"].as_str(), run["outcome"].as_str()), (Some("ended"), Some("finished")));
         assert_eq!(crate::releases::saved(&root, "1.0.0").unwrap()["text"], "new notes");
+    }
+
+    /// A strategy notice the log cannot take leaves `seen` alone, so a later
+    /// check tries again; an unchanged list adds no event.
+    #[test]
+    fn a_failed_strategy_announcement_is_retried() {
+        let top = crate::testing::Scratch::new();
+        let blocked = crate::board::task_model::store_dir(&top).join("events.db");
+        std::fs::create_dir_all(&blocked).unwrap();
+        let mut seen = None;
+        crate::tasks::store::announce_records(&top, "milestones", &mut seen);
+        assert_eq!(seen, None);
+        std::fs::remove_dir(&blocked).unwrap();
+        crate::tasks::store::announce_records(&top, "milestones", &mut seen);
+        assert_eq!(seen, Some(json!([])));
+        assert_eq!(root_events(&top), [json!({"milestones": []})]);
+
+        let count = |top: &Path| events(top).unwrap().query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        let before: i64 = count(&top);
+        crate::tasks::store::announce_records(&top, "milestones", &mut seen);
+        assert_eq!(count(&top), before);
     }
 }

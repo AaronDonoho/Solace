@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159109,
+  "body": "Seen in run 0442c97d6b8bf128 on task:be36c1d67353660d (step 21). `task peek task:3254586664024306 --notes 1 2 8 9 10 11 12` was refused with just `task peek has no 2`. `board.peek_flags` takes the next word as the note list, and then any further word is an unknown flag.\n\nOther list readers already use one comma form, `3,7,10..12` (`read --lines`, `strategy show note`, `strategy show run`). `task peek --notes` keeps that form, so there is one way to name several items. No space-separated form is added.\n\n- `task peek --notes` accepts `3,7,10..12` (check it already does, and add support if not).\n- A bare number after the list is refused with a message that says notes take one list, e.g. `--notes 1,2,8..12`.\n- `help task` shows the form in the `task peek` line.\n\nCheck: a unit test where `--notes 1 2` is refused with the `1,2` example, and `--notes 1,8..9` returns notes 1, 8 and 9.",
+  "closedTime": 1793139180,
+  "column": "complete",
+  "createdTime": 1793137479,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "3bf06a997bf09479",
+  "links": [],
+  "milestone": null,
+  "rank": 133.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "task peek: note lists like other reads"
+}

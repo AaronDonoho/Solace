@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "The human reports that browser Back and Forward still move only between app pages. A Strategy tab change and a task, feature or milestone link click do not appear as stops, so Back does not restore the tab or the focused record. This regresses D-189 and task:e36e92b5a154dbb2.\n\nExpected, from D-189:\n\n- A Strategy tab change adds `/strategy?tab=<name>` as a stop; Back and Forward restore that tab in the mounted page.\n- A task, feature or milestone link adds a stop for the page and focus it opens, even when that page is already shown; Back and Forward restore the page, tab and focused record.\n- A direct record address resolves in place, leaving no dead stop.\n- Modified clicks keep the browser's new-tab behavior.\n\nPage-to-page navigation already works. The existing tests pass, but they exercise the model and never drive the real browser history or the mounted custom element, so the cause is not established. Reproduce it once in the running app, fix the actual integration, and add a regression test where the harness allows; if a browser check has to be manual, say so in the task note.\n\nAcceptance, checked in the running app:\n\n- From Strategy, switch Vision to Features; Back shows Vision and Forward shows Features, with filters, sort, selection and planning-panel state intact.\n- Follow a record link from the Strategy Tasks tab, including one whose destination page is already shown; Back returns to the previous page, tab and focus, and Forward restores the linked record.\n- Follow a task link from the Board; Back and Forward retrace it.\n- Load `/strategy?tab=tasks` directly; it shows Tasks, and Back does not stop on a dead record address.\n- Ctrl, Cmd, Shift and Alt clicks still open a new tab.\n\nThe fix should not change D-189 or redesign navigation. Leave out app-owned Back/Forward buttons, page-to-page navigation that already works, and a broad history rewrite; add a browser end-to-end harness only if the task cannot be verified without one.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1792865598,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "a6ee3ccc5b698455",
+  "links": [],
+  "milestone": null,
+  "rank": 17.0,
+  "scope": [
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "nav: Back retraces tabs and records"
+}

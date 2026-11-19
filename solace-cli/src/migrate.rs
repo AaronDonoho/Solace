@@ -1355,7 +1355,7 @@ pub fn undo(top: &Path) -> Result<PathBuf, Failure> {
 /// `GET /migration`, apart from a step that is running.
 pub fn status(top: &Path) -> Result<Value, Failure> {
     let mut out = json!({"state":"none","top":top,"original":null,"copy":null,"step":null,"candidates":[],"report":null,
-        "blockers":[],"undo":false,"flagged":[],"problem":null});
+        "blockers":[],"undo":false,"flagged":[],"problem":null,"reason":null});
     let Some(mut state) = load(top) else {
         // A board serving the original still shows the migration beside it.
         let copy = top.with_file_name(COPY);
@@ -1368,6 +1368,8 @@ pub fn status(top: &Path) -> Result<Value, Failure> {
         if !c.is_empty() {
             out["state"] = json!("available");
             out["candidates"] = json!(c);
+        } else {
+            out["reason"] = json!(nothing_reason(workspace::enclosing(top)?.is_some()));
         }
         return Ok(out);
     };
@@ -1379,6 +1381,8 @@ pub fn status(top: &Path) -> Result<Value, Failure> {
             out["state"] = json!("adopted");
             out["original"] = json!(top);
             out["undo"] = json!(true);
+        } else {
+            out["reason"] = json!(nothing_reason(true));
         }
         return Ok(out);
     }
@@ -1436,6 +1440,11 @@ fn text(v: &Value) -> String {
                 out += &format!("{label}: {}\n", path(k));
             }
         }
+    }
+    if v["state"] == "none"
+        && let Some(reason) = v["reason"].as_str().filter(|r| !r.is_empty())
+    {
+        out += &format!("{reason}\n");
     }
     if let Some(p) = v["problem"].as_str() {
         out += &format!("\n{p}\n");
@@ -1705,6 +1714,18 @@ mod tests {
         });
         assert!(hold_within(&p.root, Duration::from_secs(10)).is_ok());
     }
+
+    #[test]
+    fn nothing_to_migrate_says_why() {
+        let empty = crate::testing::Scratch::new();
+        let none = status(&empty).unwrap();
+        assert_eq!(none["state"], "none");
+        assert_eq!(none["reason"], nothing_reason(false));
+        let root = crate::testing::Scratch::new().with(&[("solace.toml", "projects = []\n")]);
+        let none = status(&root).unwrap();
+        assert_eq!(none["state"], "none");
+        assert_eq!(none["reason"], nothing_reason(true));
+    }
 }
 
 /// A test run from a task must not see the agent's task context (D-71): the
@@ -1905,4 +1926,8 @@ fn sandboxed_with(argv: &[String], dir: &Path, protect: Option<&Path>, unshare_p
     };
     c.current_dir(dir);
     c
+}
+
+fn nothing_reason(uses_solace: bool) -> &'static str {
+    if uses_solace { "This folder already uses Solace." } else { "This folder has no Gleam projects that still need migrating." }
 }

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159125,
+  "body": "Split out of task:5d91514e330169b3 (review run 1be93e49b144889f, item 1). The two test modules `extract::rust::tests` and `extract::rust::merge::tests` still live at `src/extract/rust/tests.rs` and `src/extract/rust/merge/tests.rs`, not at their D-206 paths (`<module>_tests.rs` beside the module's file). Deleting and recreating them would lose their symbol IDs and history, and `extract` can't do it safely (see the work run note on that task).\n\n## Need\nA store-aware way to move a Rust module's file to a new path in the same crate. The module path and every symbol ID in it stay the same.\n\n## What it does\n- Updates the module's stored file and folder (`ModuleRow.file`, `dir`, `owns_dir`).\n- Adds or changes the parent's `#[path = \"...\"]` line on the `mod` declaration.\n- Records the old file and the undo state so the task's change can be reviewed and undone like any other.\n- Refuses before anything changes when the new path is taken, is outside the crate, or the module isn't Rust.\n\nAgents call it, so it needs a decision in DECISIONS.md and an entry in `src/reference.txt`. The command's name and shape are the worker's to propose in that decision.\n\n## Then use it\nMove `extract::rust::tests` to `src/extract/rust_tests.rs` and `extract::rust::merge::tests` to `src/extract/rust/merge_tests.rs`.\n\n## Check\n- `files src/extract` lists no `tests.rs`.\n- `refs extract::rust::tests.a_child_glob_keeps_its_parents_imports` shows the same ID as before the move.\n- `check --warnings` is clean; `run rust-unit` passes.\n\n## Not included\nGleam, moving to another crate or project, and renaming the module path itself.",
+  "closedTime": 1793073294,
+  "column": "complete",
+  "createdTime": 1793071239,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "44ef085e24b493c2",
+  "links": [],
+  "milestone": null,
+  "rank": 119.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "rust: move a module's file, keeping IDs"
+}

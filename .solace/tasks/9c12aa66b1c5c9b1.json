@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159125,
+  "body": "Rust `extract` breaks when it moves code **out of the crate root** (`main.rs`) into a child module. Every failure below comes from run 9f6696d0464e5adc on task:2414798176c466e4. In each case the moved code type-checked where it was, and `extract` refused the move or wrote broken code.\n\n1. **Privacy.** A private item in the crate root can be seen by the whole crate. Once it moves, it can't. `extract` must raise the moved items, and their fields, to `pub(crate)` wherever code that stays behind uses them. That includes tuple-struct fields like `Failure(String, i32)`. Seen with `Failure`, `Out`, `Diag` and `FileMap` (step 19).\n2. **Root-relative imports.** A crate-root import such as `use language::Language` was copied into the new module unchanged, where it no longer resolves. It must become `crate::language::Language` (steps 55, 107).\n3. **Unqualified root names.** Moved code that names a crate-root item without a path, such as `REFERENCE`, must have that name rewritten to `crate::REFERENCE` or imported. The agent had to patch this by hand (step 107).\n4. **Trait imports.** Moved code that calls a trait method must bring the trait's import along. Example: `read_to_string` needs `std::io::Read` (step 113).\n5. **Associated-type bindings.** `impl Iterator<Item = &Diag>` was rewritten to `impl Iterator<crate::language::Item = &Diag>`, which doesn't parse. A binding name like `Item = …` is not a path and must never be qualified (step 69).\n\n### Done when\n\n- A unit test covers each of the 5 cases, moving from a crate root into a new child module, and each move type-checks.\n- The moves the run attempted succeed, or are refused for a reason the message names:\n  - `Failure`, `Out`, `Diag`, `FileMap` with their helpers → `diagnostics`\n  - `stdin` and `options_of` → `cli`\n- `check --warnings`, `rust-unit` and the extract acceptance suite pass.",
+  "closedTime": 1793076711,
+  "column": "complete",
+  "createdTime": 1793074686,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "9c12aa66b1c5c9b1",
+  "links": [],
+  "milestone": null,
+  "rank": 120.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: moves out of the Rust crate root"
+}

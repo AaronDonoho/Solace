@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794340342,
+  "body": "Please assess whether there is genuine need for this, and how valuable it is. Consider its size and difficulty. Which parts are worth doing, which cause other problems and so aren't worth doing, and which are misguided changes. We don't want to change solace's tooling in such a way that leaves it in an undesirable state.\n\nTech debt from the work on task:aadad6d6a9dcb1a8 (work run cc5c48e3bfc6fb7f):\n\n`submit` / `submit --draft --replace`: the patch applier repeatedly rejected otherwise-correct hunks as non-adjacent or ambiguous when context lines were truncated, hunks crossed a symbol boundary, or identical blocks repeated; fixing this needed several oversized draft views and retries far out of proportion to the change. It would help to report an ambiguous hunk up front, treat a blank line between hunks as a separator rather than context, and allow a whole-symbol replacement in one submit.\n",
+  "closedTime": 1794185618,
+  "column": "complete",
+  "createdTime": 1794184081,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "7c58d999b0623d59",
+  "links": [],
+  "milestone": null,
+  "rank": 297.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Submit draft: changes to patch applier"
+}

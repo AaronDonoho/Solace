@@ -1,0 +1,10 @@
+{
+  "body": "Solace's own desktop app is built from the Build page: the milestone's main acceptance test.\n\n- Bring `solace-app` under Solace: add it to the root `solace.toml` `projects`, with a recipe.\n- Replace the `beforeBuildCommand` chain in `solace-app/tauri.conf.json` (`git rev-parse`, cargo release build, `scripts/sidecar.sh`) with recipe steps: frontend bundles → `solace-cli` release → sidecar copy → Tauri bundle.\n- The build produces the host platform's bundles (`deb`, `appimage` on Linux) as versioned artifacts.\n\nDepends on: build: recipes in solace.toml, build: artifacts and versions.\n\nDone when: a fresh Solace desktop bundle is built, versioned and downloadable from the Build page.",
+  "colorSlot": 32,
+  "id": "5be8bc14e3676b85",
+  "milestone": "e84433b01fd0791f",
+  "rank": 4.0,
+  "startTime": 1794888738,
+  "state": "complete",
+  "title": "build: Solace builds itself"
+}

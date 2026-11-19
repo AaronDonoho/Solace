@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793933489,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793933468,
+  "column": "complete",
+  "createdTime": 1793931404,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d7f0d2dae9fdeece",
+  "links": [],
+  "milestone": null,
+  "rank": 275.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "outside: reviewable unreadable changes"
+}

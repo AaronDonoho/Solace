@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928476,
+  "body": "Part of feature:3e8b5fe47bba41c4. Examine every file-tier command against its CLI equivalent, list where Solace is the weaker tool, and propose a set that is competitive with a shell **without granting one**. Deliverable: a decision (D-n) and the reference/spec changes; implement in follow-on tasks.\n\n**Comparison to start from (the implementer's call):**\n\n- `grep` vs `rg`: Solace caps at 6 lines per file and 40 files, no context lines, no path filter. `rg -C 3` returns the match and its surroundings in one call. Preliminary: `grep --context n`, raise the caps, show per-file match counts, and a path filter limited to the task's scope.\n- `read` vs `cat`/`sed`: size limits and `--lines` ranges force range hunting. Preliminary: whole-file reads under a size limit; `files` lists line counts so the agent picks ranges without probing; keep `--tail`.\n- `write` vs Edit: hunk matching is parity; the rule refusing a whole text that leaves under half of a 200+ line file forces part edits — check it helps or relax it. Preliminary: a `write --dry-run` that validates hunks and reports the diff without applying, so a failed patch costs no turn.\n- `run` vs `cargo test`: condensing (D-111) keeps failures and summaries; the compiler's full error block for the changed file is worth keeping verbatim. Preliminary: condense per command, not one rule for all.\n- Turn discipline: the reference's \"change and test in one call\" is written for `submit` + `test` (Gleam). Extend it to `write` + `run` so Rust edit-test loops batch. The work brief should carry the task's answered questions (a board fix; the work run on task:96249ceddc889684 re-asked a question already answered in its discussion run).\n- `files` vs `ls`: add sizes and line counts; nested folders as one line with a count is already there.\n\n**Checks:** `rust-unit`, `rust-acceptance` for any new options; reference.txt, Spec 3 and Spec 14 updated through the decision.",
+  "closedTime": 1791853112,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "e9ad81a4e3fb4689",
+  "links": [],
+  "milestone": null,
+  "rank": 100.0,
+  "scope": [
+    "."
+  ],
+  "title": "Toolset review: file tools vs CLI"
+}

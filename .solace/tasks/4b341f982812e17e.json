@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793482472,
+  "body": "In work run 81e9243b4ac911b0 on task:da49ea4b9938994d, step 133 (`drafts drop 12ab84e2b873e8d7` followed by `submit --imports lockdown::paths`) got `Transport closed`. Every call after it failed the same way, and the agent exited with status 0 without finishing. The board then started a new run.\n\nThe server process ended. It didn't return an error reply: `mcp.guarded` already turns a panic into one. So the cause is something the guard can't catch, such as an abort, a stack overflow, `process::exit`, or the harness killing the process. Nothing recorded which one.\n\n**Wanted:**\n- When `solace mcp` ends for any reason other than stdin closing, the reason (and the command being run) shows up in the run log, so a lost server can be diagnosed.\n- If the cause can be found from step 133's input (the run log holds it in full), fix it and add a test.\n\n**Uncertain:** the next run sent a similar `submit --imports lockdown::paths` and got a normal error reply. So it may not reproduce, and the cause may be on the harness side (commandcode).",
+  "closedTime": 1793460104,
+  "column": "complete",
+  "createdTime": 1793340965,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "4b341f982812e17e",
+  "links": [],
+  "milestone": null,
+  "rank": 211.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "mcp: find why the server was lost"
+}

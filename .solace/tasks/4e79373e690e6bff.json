@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791858541,
+  "body": "Tasks that lack an associated feature should receive a color that does not collide with the feature tasks. I suggest a Light Gray would be fine.. ",
+  "closedTime": 1791836356,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "4e79373e690e6bff",
+  "links": [],
+  "milestone": null,
+  "rank": 8.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/strategy"
+  ],
+  "title": "Color tasks without features"
+}

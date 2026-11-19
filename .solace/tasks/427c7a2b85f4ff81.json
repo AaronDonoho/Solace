@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056532,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795054162,
+  "column": "complete",
+  "createdTime": 1795049933,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "427c7a2b85f4ff81",
+  "links": [],
+  "milestone": null,
+  "rank": 417.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "build: default step timeout 2400s"
+}

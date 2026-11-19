@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035350,
+  "body": "Gleam `submit` adds missing imports for you (`missing_imports`), but only for a module in this project whose last path segment matches the qualifier, or for one on the fixed stdlib list. A work run on another project (task 4c636ac1a94fc001 there) was refused four times with \"Unknown module `sqlight` / `json`\", and once more for a qualifier that was an alias (`test_db`, meaning `temp_db_test`). A patch that only fixed the imports was then refused with E0108 (\"imports are added automatically\").\n\n## Change\n1. **Dependency modules.** A qualifier that matches exactly one module in the project's dependencies (by last path segment, e.g. `sqlight`, `gleam/json`) is added like a project module. When several match, nothing is added and the refusal lists them.\n2. **Aliases already in use.** A qualifier that no module matches, but that another module in the project already imports `as <qualifier>` from exactly one module, gets that same import with that alias.\n3. **When nothing can be added**, the Unknown-module refusal names the call that fixes it: `submit --imports <module>` with the module's current imports plus the new line.\n4. **An import-only patch.** The E0108 refusal for a patch that changes only a module's imports names `submit --imports <module>`, not \"imports are added automatically\", because that isn't always true.\n\n## Cautions\n- **Find the source first.** It isn't yet confirmed how Solace can list a dependency's modules; `missing_imports` sees only this project's modules and the stdlib list. Work out where the dependency module list comes from, and say so in your summary, before writing the change. If it can't be found reliably, do points 3 and 4 and ask before going further.\n- **A wrong guess is worse than a refusal.** Add an import only when exactly one module matches. Otherwise refuse and list the candidates.\n- **Keep what works.** Today's project-module and stdlib behaviour stays the same; existing tests for it stay unchanged.\n- **Test the hard cases**, not just the happy path: two packages with a module of the same last name; an alias that points to different modules in different files; a test-only module used from `src`.\n\n## Done when\n- Each point is pinned by a test in the store's submit tests.\n- `src/reference.txt` says which imports are added (project, dependency and stdlib modules, and aliases already used in the project).\n\nOut of scope: accepting import lines inside a patch; Rust imports.",
+  "closedTime": 1792979440,
+  "column": "complete",
+  "createdTime": 1792975721,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "0a7b15f56ea4febc",
+  "links": [],
+  "milestone": null,
+  "rank": 82.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "imports: add dependency modules and known aliases"
+}

@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794856674,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794852477,
+  "column": "complete",
+  "createdTime": 1794849145,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/design",
+  "id": "d2f724b78999d41d",
+  "links": [],
+  "milestone": null,
+  "rank": 25.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "design: page stops freezing Solace"
+}

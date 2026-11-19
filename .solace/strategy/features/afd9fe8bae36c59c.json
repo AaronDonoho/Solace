@@ -1,0 +1,10 @@
+{
+  "body": "A human points at exact elements while talking to the design agent, and the agent knows what is meant by computation, without vision. Depends on the design agent (feature:aff58e018ae80474) and on the tabs that draw elements (feature:b993a7a21b436618, feature:7c9cdfad16609a44).\n\n## Asked for\n\n- A core requirement: a user can select a component or region and add a note to it. An agent can then work out exactly what is being called out by computation, without vision.\n- The simplest form: a reference to an element ID and associated text.\n- It is just something to point at elements with, for now.\n\n## Decided\n\n- **A note is one or more element IDs plus text**, sent with a chat message to the design agent.\n- **A dragged-out region becomes the IDs of the elements inside it.**\n- **A note is not kept on the design.** A note that stays is a narrative, which is not planned.\n- Notes work alongside the chat. Chat is how the human talks to the agent; a note is how they point at something exact.\n\n## From the other agent's plan (direction, not gospel)\n\n- Clicking an element selects it by ID.\n- It stored notes as IDs plus a path in the tree. Storing was dropped, but the path may still help an agent place an element.\n\n## Suggested (cursory, not prescriptive)\n\n- Selection reads the `data-design-id` the renderer puts on each element (feature:7c9cdfad16609a44), so pointing works the same on both tabs.\n\n## Open\n\n- What a region means when an element is only partly inside it.\n- Whether a note can point at an edge on the Architecture tab as well as a node. The assumption is yes, since both are elements.\n\n## Not in this feature\n\nNotes that stay on a design, resolving notes, and notes from one agent to another.",
+  "colorSlot": 28,
+  "id": "afd9fe8bae36c59c",
+  "milestone": "583db3463f7dda5e",
+  "rank": 5.0,
+  "startTime": 1794843142,
+  "state": "complete",
+  "title": "design: notes"
+}

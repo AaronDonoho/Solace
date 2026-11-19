@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056541,
+  "body": "The human edits and approves a release's drafted notes the same way they would a proposal. Approved notes are stored with the release and show with it on the Build tab.\n\n- Rejected notes are not stored.\n- Approved notes stay with the release after a restart.\n\nDone when: a drafted set of notes can be edited and approved, and the approved notes are kept with that release and shown with it.",
+  "closedTime": 1795048499,
+  "column": "complete",
+  "createdTime": 1794979622,
+  "dependsOn": [
+    "b0f3849ee3123643"
+  ],
+  "feature": "3637869b15413bc5",
+  "home": "solace-cli",
+  "id": "c432a1456017ec9c",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 402.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "notes: edit, approve and store"
+}

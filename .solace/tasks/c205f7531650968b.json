@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231415,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793210058,
+  "column": "complete",
+  "createdTime": 1793207045,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c205f7531650968b",
+  "links": [],
+  "milestone": null,
+  "rank": 157.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "probe: use the project's own crates: Tech Debt"
+}

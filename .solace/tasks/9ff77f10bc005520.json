@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312245,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793237885,
+  "column": "complete",
+  "createdTime": 1793231923,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "9ff77f10bc005520",
+  "links": [],
+  "milestone": null,
+  "rank": 183.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "run: strip colour codes from command output: Tech Debt"
+}

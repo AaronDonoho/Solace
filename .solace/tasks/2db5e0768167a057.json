@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928476,
+  "body": "Examine these ideas to improve the efficiency of agents trying to work on tasks",
+  "closedTime": 1791925961,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "2db5e0768167a057",
+  "links": [],
+  "milestone": null,
+  "rank": 102,
+  "scope": [
+    "."
+  ],
+  "title": "Examine hand-offs and custom harness"
+}

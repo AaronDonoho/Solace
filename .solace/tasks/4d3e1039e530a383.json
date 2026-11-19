@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794972393,
+  "body": "The floating note panel on the Design page covers the design and can't be moved. Its Add note button is darkened when disabled and red when enabled, which doesn't match Solace's buttons anywhere else.\n\n## Asked for\n\n- The floating note panel is 50% transparent.\n- It can be moved by dragging a visible handle.\n- The Add note button follows Solace's usual button styling in both its enabled and disabled states.\n\n## Done when\n\n- The panel is drawn at 50% opacity.\n- Dragging the handle moves the panel. Text in the panel can still be typed and selected.\n- The Add note button uses the shared button look. It is no longer red when enabled.",
+  "closedTime": 1794957667,
+  "column": "complete",
+  "createdTime": 1794935424,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "4d3e1039e530a383",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 31.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "note panel: see-through, movable, usual button"
+}

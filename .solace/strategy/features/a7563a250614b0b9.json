@@ -1,0 +1,10 @@
+{
+  "body": "The shared markdown editor should be where a task is written, answered and acted on. Three tasks, in order:\n1. Give the editor one context-provided action in its bottom-right corner: a send icon by default, Save as words for the task details and forms.\n2. Move the task detail's editor into the Notes tab, reveal it from Add note, and show it in Questions while a question is unanswered.\n3. Keep each editor's text in the browser and clear it when its action succeeds or the edit is canceled.\n\nNo milestone: shared UI polish, like feature:5561308bebd3bc9d. Left out: drafts for plain inputs (title, rank, target date, selects); server-side or cross-device drafts; a second editor or preview; no change to what each action sends.",
+  "colorSlot": 17,
+  "id": "a7563a250614b0b9",
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 2.625,
+  "startTime": 1792872405,
+  "state": "complete",
+  "title": "Text editor: notes, actions and drafts"
+}

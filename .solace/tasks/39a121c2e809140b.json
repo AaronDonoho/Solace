@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794340340,
+  "body": "A design can be clicked through like an interactive mockup: following a link on one screen shows another.\n\n### Do\n\n- Add `action` (a name) and `navigates_to` (a screen in the same design) to the validator's table, for elements that can be clicked. A `navigates_to` naming a missing screen is refused.\n- In the renderer, clicking such an element shows the target screen. `action` is recorded in the design only and does nothing when clicked.\n\n### Watch out for\n\nLater, clicking an element selects it for notes and direct editing (feature:afd9fe8bae36c59c, feature:c3bed08cc1bbbbb8). Keep the click behavior easy to switch. Ask the human how a preview is started and left, since the design view doesn't have one yet.\n\n### Acceptance\n\n- Tests: a valid link validates and a click shows the target screen, a missing screen is refused, and an action alone changes nothing when clicked.\n\n### Left out\n\nScreen states and mock data.",
+  "closedTime": 1794196367,
+  "column": "complete",
+  "createdTime": 1793914456,
+  "dependsOn": [
+    "a3611a3835587484"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "39a121c2e809140b",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 346.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "ui: click-through preview"
+}

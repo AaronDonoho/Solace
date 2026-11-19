@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690240,
+  "body": "When asking a question, sometimes an agent produces a note along with it. the note should be part of the question. This seems to occur at least when it's asking for a settings change, maybe also in other cases. Solace should restrict this - just one ask, no other action allowed with the ask.",
+  "closedTime": 1791578828,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "0a3e93e97116d76d",
+  "links": [],
+  "milestone": null,
+  "rank": 42.0,
+  "scope": [
+    "."
+  ],
+  "title": "Keep Questions contained"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792539268,
+  "body": "### Problem\nIn task:de40fa1ed5320332's investigation (`6bc610d0e4032257`), the report was addressed by source paths (`src/language/cargo.rs`, `src/rust_submit.rs`). The brief says \"no file access\" but not that source files are projections; `view <file>` still reads Rust graph source, and the reference's `view <file>` and `board.rs::within` examples teach path-based reading.\n\nGleam is already blocked for reads: `read`, `write`, `move` and `remove` on `src/` and `test/ *.gleam` return `E6001`; `grep` skips graph and points at `find`; `view` has no `.gleam` file form. `files` lists graph paths as `[graph]`, without contents, and stays that way.\n\n### Change\n- Treat Rust graph `.rs` like Gleam: `view <file>` and `view <file>::<name>` on graph source return `E6001`. Keep `view <file>` for `.py` and for `.rs` in a plain-file project.\n- Give both languages the same graph-path hint. When the module is held, name `view <module>` and `inspect <symbol>`; when the source path is not in the store yet, name `submit --new <module>`. Derive the module from the path for a new Rust file too, not only from an existing store row. The hint follows `read`, `write`, `move` and `remove` for both languages; `grep` keeps its \"not searched; use find\" message and `files` keeps listing `[graph]`.\n- Brief: add one line to the common part that code held as symbols is read and cited by name, not by source path; source files are projections written by Solace. In the investigate role, replace \"names every file it reaches\" with \"names every module or symbol it changes and every non-source file it reaches.\" The review, work and discuss roles get the common line.\n- Reference: say graph files are read by symbol; `view <file>` is Python and plain-file only; graph tier includes `view`; `files` lists graph paths without contents. Replace the `board.rs::within` and `board.rs::Store::view` examples with symbol names (`lockdown::dispatch`, `checkout.pay`). Update the strategy role's `board.rs::within` example the same way.\n- Record a decision amending D-121 points 1-3 and D-162: in a symbol-held project, source files are projections; `view <file>` is refused for graph source, and the shared hint names the module or `submit --new`; `files` may list graph paths without contents.\n\n### Tests\n- Rust graph `view <file>` and `view <file>::<name>`: `E6001`, hint names `view <module>` and `inspect <symbol>`.\n- Rust graph path not in the store: `view` and `read` name the module and `submit --new <module>`.\n- Gleam graph path: `view src/app.gleam` and `read src/app.gleam` give the same hint; a new `src/new.gleam` names `submit --new new`.\n- Python `view <file>` and a plain-file project's `.rs` still work.\n- `grep` still skips graph; `files` still lists graph paths as `[graph]`.\n- The brief has the common line in every role and the investigate plan wording; the reference and strategy role examples are updated.\n- Run `rust-unit` and the full test gate for the touched code; the reference layout validator runs when `src/reference.txt` is written.\n\n### Not checked\nNo code was run or changed in this planning run.",
+  "closedTime": 1792515054,
+  "column": "complete",
+  "createdTime": 1792511285,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "2266607cf5c584c6",
+  "links": [],
+  "milestone": null,
+  "rank": 242.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "sources: block direct source reads"
+}

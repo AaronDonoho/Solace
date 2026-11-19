@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690242,
+  "body": "**Scope:** `solace-cli` (task server).\n\n**Depends on:** Task \"Task Server stores Milestones and Features\".\n\n**Goal:** add the five new task fields from D-87 and Spec 15 §1.\n\n**Work:**\n\n- **Loading:** tasks saved before this change load with `feature`, `milestone`, `closedTime` and `archivedTime` as null and `dependsOn` as `[]`. They are written in the new form at their next save; there is no separate migration.\n- **`PATCH /tasks/{id}`** accepts `feature`, `milestone` and `dependsOn`:\n  - An unknown id is refused, using the new error codes.\n  - Setting `feature` on a task whose `milestone` is null sets `milestone` to the feature's milestone. An explicit `milestone` in the same request wins.\n  - `dependsOn` must name existing tasks, not the task itself, and must not create a cycle.\n  - `feature` and `milestone` are accepted on a task in a final column (D-87 point 4). Every other field there still gets `E7004`. The existing `E7003` while a run is going stays for every field except these two. **(Confirm in Task 1 whether this exception should also apply while a run is going. I'd allow it, since the links don't affect the agent.)**\n- **`closedTime`:** set to the current time when a task first enters a final column, by any action or event. It is never cleared. Tasks already in a final column when this ships get `closedTime` from the last `finished`/run end time if there is one, otherwise from the file's modification time, so the Archive can sort them later.\n- **`archivedTime`:** stored and returned, always null for now. No endpoint sets it; the archiving task will add one.\n- **Link cleanup:** `DELETE /features/{id}` clears `feature` on its tasks, and `DELETE /milestones/{id}` clears `milestone` on its tasks. Each is part of the same operation, and sends `{task}` for each changed task.\n- `GET /tasks` includes the new fields.\n\n**Tests:**\n\n- Unit tests: an old task file loads with the defaults. Setting a feature fills in an empty milestone and leaves a set one alone. A dependency cycle is refused. Entering `complete` sets `closedTime`, and moving later doesn't change it. Feature and milestone are editable in a final column while `title` is not. Deleting a feature clears it on its tasks.\n- One acceptance test: create a feature with a milestone, create a task, link it through `PATCH`, complete the task, check `closedTime`, delete the feature and check that the task's `feature` is null and its `milestone` is kept.\n\n**Done when:** the behaviour above holds, the tests pass, and existing acceptance and board tests still pass.",
+  "closedTime": 1791571629,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "c091ca77d963ff16",
+  "links": [],
+  "milestone": null,
+  "rank": 52.0,
+  "scope": [
+    "."
+  ],
+  "title": "Task Links"
+}

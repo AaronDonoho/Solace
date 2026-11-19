@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792765931,
+  "body": "Browser Back and Forward retrace page changes today, but not Strategy tab changes or record-link activations. Make them retrace all three.\n\n- A Strategy tab change adds a history entry for `/strategy?tab=<name>`, and Back/Forward restores that tab in the mounted page rather than only reading it on load.\n- Following a `task:<id>`, `feature:<id>` or `milestone:<id>` link adds a history entry for the resulting page focus; Back/Forward restores the previous page, tab and focused record. A link that stays on the same page must add an entry too.\n- Direct visits to `/task/<id>`, `/feature/<id>`, `/milestone/<id>` and `/strategy?tab=<name>` still work. Resolve a direct record link in place so it does not add a dead entry; modified clicks still keep the browser's new-tab behavior.\n\nD-90 point 3 chose `replaceState` for tabs, so record a new human-approved decision amending it before changing that behavior.\n\n**Tests:** tab changes and Back/Forward restore the tab and model; record-link activation and Back/Forward restore page and focus; same-page links; direct-URL in-place resolution; modified clicks are untouched.",
+  "closedTime": 1792730009,
+  "column": "complete",
+  "createdTime": 1792708015,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/frontend",
+  "id": "e36e92b5a154dbb2",
+  "links": [],
+  "milestone": null,
+  "rank": 16.0,
+  "scope": [
+    ".",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "nav: Back follows tabs and links"
+}

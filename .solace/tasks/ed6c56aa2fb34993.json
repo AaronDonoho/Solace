@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791951668,
+  "body": "Regression found while manual testing of UI: board's column names are no longer sticky. They should be sticky while task swimlanes are in view.",
+  "closedTime": 1791910112,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "ed6c56aa2fb34993",
+  "links": [],
+  "milestone": null,
+  "rank": 26.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Regression: Board column names sticky"
+}

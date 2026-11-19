@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792719163,
+  "body": "The milestone editor (**New milestone** and **Edit**) lists the features in that milestone, each with **Remove**. Below the list is a search over the other features, the same way the Dependencies editor searches tasks, with **Add**. A feature can be in only one milestone, so adding a feature that is in another milestone moves it.\n\n- **Add** sends `PATCH /features/{id} {milestone}`, and **Remove** sends `{milestone: null}`. Each one applies straight away, as Dependencies does, and is not part of **Save**.\n- Remove the milestone select from each feature on the Roadmap tab (\"Move a feature\" in the README). The feature form on the Features tab keeps its milestone select.\n- Update the README and the tests.",
+  "closedTime": 1792701069,
+  "column": "complete",
+  "createdTime": 1792253568,
+  "dependsOn": [
+    "ceadbe97c216db7a"
+  ],
+  "feature": "cb03260b259b3c5c",
+  "home": "solace-cli/strategy",
+  "id": "5fe0996f86a964b7",
+  "links": [],
+  "milestone": null,
+  "rank": 100.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "roadmap: add features from the milestone editor"
+}

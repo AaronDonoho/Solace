@@ -1,0 +1,10 @@
+{
+  "body": "Past releases can be browsed from the Build tab, which today shows only the newest release.\n\n- A list of builds: version, date, status, and the source commit it was built from.\n- Each release shows its artifacts (download, open folder), release notes and build log.\n- Compare two releases by the tasks and features that went in between them.\n\nDepends on: build: release notes from tasks.",
+  "colorSlot": null,
+  "id": "a7f49e5036236ae5",
+  "milestone": "f8b1014c90da26f9",
+  "rank": 3.0,
+  "startTime": null,
+  "state": "proposed",
+  "title": "build: release history"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690241,
+  "body": "How projection works today\n\nI read materialize_to (solace-cli/src/main.rs:1097). The modules aren't written to a separate generated directory. They go in place into the project's own src/ and test/, next to files people own, such as api.mjs, main.mjs and the FFI. For every module in the index, it:\nwrites src/<module>.gleam (or test/…), but only when the content on disk differs;\nskips a file that was changed outside Solace (D-58). That file gets read back in on the next command instead;\nrecords every file it wrote in a Written ledger (outside::Written).\nIt never deletes anything. A file with no module behind it stays where it is. The other half of the problem is delete (line 2321): it retires one symbol, and nothing ever retires a module.\nWhy \"wipe and regenerate\" doesn't fit\n\nThere's no directory Solace fully owns. Clearing src/ before writing would delete the FFI .mjs files and anything edited outside Solace that hasn't been read in yet. That second case is exactly what D-58 protects.\nWhat I'd build: prune what Solace owns\n\nThe ledger already lists every file Solace wrote, so Solace can clean up its own files without touching anyone else's.\nRetire empty modules. When delete removes a module's last symbol, it also retires the module, as long as no other module imports it. Also allow delete <module>, refused (like E5001) while something still imports the module. That covers the case where the module has an import or a module comment but nothing else.\nPrune during materialize. For each file in the ledger with no module behind it:\nif the file is unchanged since Solace wrote it, delete it and drop it from the ledger;\nif someone edited it, leave it and report it, so a person's work is never deleted.\nRollback. transaction already writes everything back from the store after a rollback. With step 2 it would also remove files belonging to modules the rolled-back change had created.\nStale build output. build/dev/javascript/solace_board/solace_view.mjs can stay after its source is gone. I haven't checked whether gleam build removes it, so either check that or have prune drop the matching compiled .mjs too.\nTests. Add a Rust unit test in the style of delete_refuses_a_used_symbol_…: delete the last symbol, check that the module and the file are gone, and check that a file edited by hand survives the prune and gets reported.",
+  "closedTime": 1791579714,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "5d8ee6becb0457c6",
+  "links": [],
+  "milestone": null,
+  "rank": 47.0,
+  "scope": [
+    "."
+  ],
+  "title": "Prune during materialize"
+}

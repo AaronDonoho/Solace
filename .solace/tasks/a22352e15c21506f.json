@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778990,
+  "body": "An agent working on a task should know when the tasks it depends on aren't finished. Unfinished means the same as on the board: not in a final column, with cancelled counting as finished.\n\n- Where a task run is told about its task (the run prompt `board.rs` builds, and `session start --task` in `main.rs`), list the task's dependencies with their ids, titles and columns, and mark the unfinished ones.\n- Add a short line to the brief: \"This task depends on unfinished work. Check whether you can do your part without it. If you can't, ask the human (`task ask`) before building on code that doesn't exist yet.\" Keep it advice; nothing is refused.\n- With no dependencies, or only finished ones, say nothing, so the brief stays short.\n- Dependencies can be in another project; read them from the root.\n- Tests: a brief with an unfinished dependency names it; a brief with none or only finished ones has no such line. Update Spec 15 or 03 where the brief's contents are described.",
+  "closedTime": 1791777685,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "29f4838ffb0cb0d0",
+  "home": ".",
+  "id": "a22352e15c21506f",
+  "links": [],
+  "milestone": null,
+  "rank": 83.0,
+  "scope": [
+    "."
+  ],
+  "title": "Agents: name a task's unfinished dependencies in its run brief"
+}

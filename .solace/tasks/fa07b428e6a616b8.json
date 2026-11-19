@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793483689,
+  "body": "Every run's brief gets a short section, chosen by the **involvement** setting, on how to talk to the human: work, investigate, review and discuss (`board.rs::brief`) and Strategy (`strategy.rs`). Today every brief speaks to an engineer.\n\n### Per level\n\n- **Guided:** plain words; no code, symbol names, file paths or error codes in human-facing text unless the human asks for them. Questions are about what the software should do, never how. Each option says what the human will see happen, and one option is marked as recommended. If a choice can't be put that way, the agent makes the call and records it with `task note` under a **Calls made** heading, giving the plain reason. A call made is never written to the decision log.\n- **Collaborator:** technical terms are explained the first time they appear; trade-offs are summarised in a sentence each; one option is recommended.\n- **Engineer:** as today.\n\nA Guided or Collaborator explanation given to the human on any Note is separate from that of any future planner/investigator/worker/reviewer. It should be given a header near the top of the note \"Summary\" so humans know they can read just that section.\n\n### Checks\n\n- A brief test for each level, like `briefs_hold_what_the_agent_needs_as_text`.\n- A short bench or fake-agent check that a Guided question has no code in it.",
+  "closedTime": 1793465643,
+  "column": "complete",
+  "createdTime": 1792092101,
+  "dependsOn": [
+    "6a6a1895b45ee268"
+  ],
+  "feature": "d597d4887f6e54eb",
+  "home": ".",
+  "id": "fa07b428e6a616b8",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 155,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "briefs: speak at the involvement level"
+}

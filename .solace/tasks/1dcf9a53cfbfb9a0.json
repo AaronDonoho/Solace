@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690214,
+  "body": "Task B: the shell's settings (human, before Task C)\n1. In solace-cli/frontend/solace.toml (protected), add under [commands]:\n- install = { run = [\"bun\", \"install\"] }\n- bundle = { run = [\"bun\", \"build\", \"src/main.mjs\", \"--outfile\", \"priv/app.js\", \"--minify\", \"--target\", \"browser\"] }",
+  "closedTime": 1791221546,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "1dcf9a53cfbfb9a0",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Add solace.toml commands"
+}

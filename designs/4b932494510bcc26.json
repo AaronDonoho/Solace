@@ -1,0 +1,612 @@
+{
+  "elements": [
+    {
+      "children": [
+        {
+          "id": "page-title",
+          "properties": {
+            "align": "left",
+            "height": "hug",
+            "level": 1,
+            "text": "Workspace",
+            "width": "fill"
+          },
+          "type": "heading"
+        },
+        {
+          "id": "page-intro",
+          "properties": {
+            "align": "left",
+            "height": "hug",
+            "text": "Manage the projects Solace works on, or bring in an existing project.",
+            "variant": "muted",
+            "width": "fill"
+          },
+          "type": "text"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "id": "projects-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 2,
+                    "text": "Projects",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "id": "projects-intro",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Projects Solace works on in this folder.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "project-self-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "app",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "project-self-folder",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "This folder",
+                                "variant": "muted",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "project-self-info",
+                          "properties": {
+                            "align": "start",
+                            "gap": "none",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "project-self",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "project-web-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "web",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "project-web-folder",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "web",
+                                "variant": "muted",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "project-web-info",
+                          "properties": {
+                            "align": "start",
+                            "gap": "none",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "project-web-remove",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Remove",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "project-web",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "project-tools-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "tools",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "project-tools-folder",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "tools",
+                                "variant": "muted",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "project-tools-info",
+                          "properties": {
+                            "align": "start",
+                            "gap": "none",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "project-tools-remove",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Remove",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "project-tools",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "project-list",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "found-title",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Found in this folder",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "id": "found-intro",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Projects in this folder that Solace isn't using yet.",
+                        "variant": "muted",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "children": [
+                        {
+                          "id": "found-name",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "text": "api",
+                            "variant": "body",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "id": "found-add",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Add",
+                            "variant": "secondary",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "found-item",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "found-section",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "new-project-title",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "level": 3,
+                        "text": "New project",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "name-label",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Package name",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "name-input",
+                              "properties": {
+                                "height": "hug",
+                                "placeholder": "my_app",
+                                "width": "fill"
+                              },
+                              "type": "text_input"
+                            }
+                          ],
+                          "id": "name-field",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "folder-label",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Folder",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "folder-input",
+                              "properties": {
+                                "height": "hug",
+                                "placeholder": "Default: the package name",
+                                "width": "fill"
+                              },
+                              "type": "text_input"
+                            }
+                          ],
+                          "id": "folder-field",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "new-project-fields",
+                      "properties": {
+                        "align": "end",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "start",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "language-label",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Language",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "language-input",
+                              "properties": {
+                                "height": "hug",
+                                "placeholder": "Gleam",
+                                "width": "fill"
+                              },
+                              "type": "text_input"
+                            }
+                          ],
+                          "id": "language-field",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "target-label",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Runs on",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "target-input",
+                              "properties": {
+                                "height": "hug",
+                                "placeholder": "Erlang (BEAM)",
+                                "width": "fill"
+                              },
+                              "type": "text_input"
+                            }
+                          ],
+                          "id": "target-field",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "create-project",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Create project",
+                            "variant": "primary",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "new-project-options",
+                      "properties": {
+                        "align": "end",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "start",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "new-project-section",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "projects-panel",
+              "properties": {
+                "align": "stretch",
+                "gap": "lg",
+                "height": "hug",
+                "justify": "start",
+                "padding": "lg",
+                "variant": "card",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "id": "bring-in-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 2,
+                    "text": "Bring in an existing project",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "id": "bring-in-intro",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Copy an existing project, try Solace in the copy, then switch when you're ready.",
+                    "variant": "body",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "bring-in-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Your original folder stays unchanged.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "migrate-button",
+                  "properties": {
+                    "height": "hug",
+                    "label": "Migrate this project",
+                    "variant": "primary",
+                    "width": "fill"
+                  },
+                  "type": "button"
+                }
+              ],
+              "id": "bring-in-panel",
+              "properties": {
+                "align": "stretch",
+                "gap": "md",
+                "height": "hug",
+                "justify": "start",
+                "padding": "lg",
+                "variant": "card",
+                "width": {
+                  "fixed": 360
+                }
+              },
+              "type": "column"
+            }
+          ],
+          "id": "layout",
+          "properties": {
+            "align": "start",
+            "gap": "lg",
+            "height": "hug",
+            "justify": "start",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "type": "row"
+        }
+      ],
+      "id": "workspace-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "lg",
+        "height": "fill",
+        "justify": "start",
+        "padding": "xl",
+        "width": "fill"
+      },
+      "type": "screen"
+    }
+  ],
+  "id": "4b932494510bcc26",
+  "schemaVersion": 1,
+  "tab": "ui",
+  "title": "Workspace page layout"
+}

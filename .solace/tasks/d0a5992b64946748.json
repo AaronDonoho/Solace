@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794340358,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794179208,
+  "column": "cancelled",
+  "createdTime": 1794179183,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d0a5992b64946748",
+  "links": [],
+  "milestone": null,
+  "rank": 296.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "Settings page, Agents tab: improvements"
+}

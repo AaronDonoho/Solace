@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792679746,
+  "body": "Two input mistakes in run `a348af56b1f15298` (task:1ba2b996f1282bbb) cost turns because the reply didn't say what was wrong:\n\n- `view rust_submit.Store::resolve_module 2>/dev/null || true` replied E1001 unknown name, quoting the whole line, so the agent kept writing shell suffixes.\n- A patch sent in `command` instead of `text` replied \"needs the new code in the `text` argument\" and listed 102 skipped lines (every patch line read as a command).\n\n1. A command line containing a shell redirect, pipe or `||`/`&&` (outside quotes) is refused before running, once: \"commands are not shell: drop `2>/dev/null || true`\" (naming the part found).\n2. When `command` holds a line starting `*** Begin Patch`, refuse the whole call with \"the patch goes in `text`; `command` is just `submit`\" and don't list the patch lines as skipped.\n3. Both are language-neutral.\n4. Tests: each refusal's wording; a quoted `|` in `grep` or `find` text still runs.\n\nChecks: `rust-unit`, `rust-acceptance`.\n\nLeft out: running the command anyway with the suffix stripped (it would hide the mistake from the agent and from review).",
+  "closedTime": 1792615252,
+  "column": "complete",
+  "createdTime": 1792468958,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "3b86431dc7424151",
+  "links": [],
+  "milestone": null,
+  "rank": 11.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "hints: shell syntax and patches in command"
+}

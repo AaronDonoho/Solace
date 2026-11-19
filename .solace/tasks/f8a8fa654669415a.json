@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Each artifact of a passed build is inspected, and the result is kept with the release:\n\n- its file list,\n- the libraries it links to,\n- files it is expected to carry that are missing.\n\nDone when: a release of Solace's own desktop bundles records each bundle's file list and linked libraries, and a package with an expected file missing is reported as missing it.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979647,
+  "dependsOn": [
+    "58d49588e9fbc20b"
+  ],
+  "feature": "334355678da937ab",
+  "home": "solace-cli",
+  "id": "f8a8fa654669415a",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 406.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "inspection: check the final package"
+}

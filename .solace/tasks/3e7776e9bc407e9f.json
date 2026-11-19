@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791778988,
+  "body": "",
+  "closedTime": 1791736479,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "3e7776e9bc407e9f",
+  "links": [],
+  "milestone": null,
+  "rank": 70.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy runs: `strategy show task` leaves out the run log"
+}

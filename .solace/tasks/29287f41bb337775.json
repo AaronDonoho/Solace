@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792009423,
+  "body": "Part of General UI Polish (feature item 4, whose text in the feature body is unfinished - it ends at \"Consistency in labeling:\"). Interpretation: the same thing is named the same way on every page.\n\n- Pick one vocabulary for each control and apply it in `solace_board`, `solace_task`, `strategy` and `settings`: one word for creating a task, one for saving a draft, one for closing notices, one for the scope picker, one for run controls.\n- Use the label map built by task b5762697be085893 as the single source, so a name change is one edit.\n- Headings, tab names, and the words inside sentences match the control names (e.g. a panel named \"Plan\" is addressed as \"Plan\" everywhere).\n\n**Tests:** view tests assert the shared names on each page; tests that asserted the old wording are updated.\n\n**Note for the human:** the feature's item 4 text is incomplete, so this task's scope is my reading of it - confirm or narrow it before a run starts.",
+  "closedTime": 1791924396,
+  "column": "complete",
+  "createdTime": 1791909753,
+  "dependsOn": [
+    "b5762697be085893"
+  ],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "29287f41bb337775",
+  "links": [],
+  "milestone": null,
+  "rank": 2,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Consistent labeling pass"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977617,
+  "body": "When a task that has no feature is completed, its last review's `### Tech debt` findings go to a new Tech Debt task in Planning. It shows on the board right away.\n\n## Today (D-112)\nOnly tasks with a feature get tech debt filed. `board.brief` asks only their reviews for the `### Tech debt` section (`board.TECH_DEBT_ASK`), and `board.tech_debt` returns nothing when the task has no feature.\n\n## Change\n- Reviews of every task get asked for the section. The wording should no longer say \"part of a feature\".\n- If the completed task has no feature, `board.tech_debt` creates a task with `techDebt: true`:\n  - in `planning`, or the first column if the workflow has none, as D-132 says;\n  - with no feature and no milestone;\n  - with the completed task's `scope` and `home`;\n  - titled `<task title>: Tech Debt`;\n  - with one `solace` note per finding, as today.\n- The completed task gets the note naming it, as today.\n- Tasks with a feature work as they do today.\n\n## Done when\n- `board::tests` cover a task with no feature filing a new Tech Debt task, and one with no section filing nothing.\n- D-112 is amended by a new decision, and Spec 15 §6 and A20 are updated.",
+  "closedTime": 1792947216,
+  "column": "complete",
+  "createdTime": 1792944887,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "fadc6b3b1048a62c",
+  "links": [],
+  "milestone": null,
+  "rank": 65.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "tech debt: file for tasks with no feature"
+}

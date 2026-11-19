@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792464629,
+  "body": "Assess what it takes to hold Rust in the store by symbol and type-check every change, as Gleam is. Use Solace's own crate (`solace-cli/`) as the test case: it is real Rust, written by agents.\n\n### Questions\n\n1. **Guardrails at risk.** Which Rust features would defeat symbol identity, per-change type checking or lockdown? Look at least at:\n   - macros that make items (`macro_rules!`, proc and attribute macros); `derive` is likely fine\n   - `#[cfg]` items (the same name defined twice, code that is checked only on some builds)\n   - `include!`, `include_str!`, `#[path]` modules, `build.rs`\n   - items with no name of their own (`impl Trait for Type`, blanket impls) and how they get a stable ID\n   - `unsafe`, `extern` and FFI\n   - workspaces with several crates\n   For each: allow, allow with a rule, or refuse, and why.\n2. **Subset needed?** Does the answer to 1 add up to a subset? If so, state it in a few lines an agent can follow, and the refusal message for each refused feature.\n3. **Will agents be tripped up?** Count how often `solace-cli/` uses each refused feature today. Would a capable model write those by habit? What would stop the retry loop: the brief, the refusal text, a suggested rewrite?\n4. **Checking.** How fast is `cargo check` on a one-symbol change in `solace-cli/` (cold and warm)? Can errors be mapped back to symbols reliably (`--message-format=json` spans)? Does `build.rs` or a proc macro running on each check need lockdown (bubblewrap)?\n5. **Store and writing.** How are items parsed (for example the `syn` crate vs the D-121 line scanner), and how are files written back: comment and formatting round-trip, item order, `rustfmt`? What in the store, `submit` and file writing is Gleam-specific today?\n\n### Deliverable\n\nA note answering 1–5, a recommended subset (or none), a rough size, a proposed decision, and a first slice of tasks for feature:ee70ab461cef2b9c. Read-only: no code changes.",
+  "closedTime": 1792253813,
+  "column": "complete",
+  "createdTime": 1792251150,
+  "dependsOn": [],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "d41626ab51473623",
+  "links": [],
+  "milestone": null,
+  "rank": 196.0,
+  "scope": [
+    "."
+  ],
+  "title": "Investigate Rust store, subset and checks"
+}

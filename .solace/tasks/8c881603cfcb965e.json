@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792215003,
+  "body": "The task viewer takes up too much vertical space: the collapse button repeats the title, and the title of the task is right below that. Don't need to show both.",
+  "closedTime": 1792176617,
+  "column": "complete",
+  "createdTime": 1792126668,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "8c881603cfcb965e",
+  "links": [],
+  "milestone": null,
+  "rank": 176.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Shrink the task viewer"
+}

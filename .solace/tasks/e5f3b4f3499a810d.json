@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793665577,
+  "body": "When an agent asks the human to widen a task's scope, the question names each project folder it wants added, exactly as the task's scope lists them (for example `solace-cli/components`). It also says in a few words what the agent would change there.\n\n### Why\nOn task:4736502dfcacdf06 the worker asked twice to change \"a part of Solace this task still can't change\" and \"the task page on the board\" without naming the project. Only after the human asked did it name **components**. Its answer buttons (\"Yes, add components\") also suggested that pressing one adds the project, which it doesn't.\n\n### Scope\n- Agent direction: a scope question always names the exact project folder or folders. This applies even in plain-words (Director) mode, because the human needs the name to answer.\n- The question tells the human the order of steps: first add the project in the task's Scope tab, then answer. No option's wording may suggest that pressing it adds the project.\n- Wherever the agent learns how to ask for another project (the agent reference's \"`task ask` to add it\" line, the `task ask` help, and the work and investigate briefs), say the same thing.\n- A test that the rule reaches the briefs.\n\n### Out of scope\nMaking an answer add the scope by itself (a structured scope request), having Solace check the question's wording, or a dedicated \"add scope\" button.",
+  "closedTime": 1793657865,
+  "column": "complete",
+  "createdTime": 1793636004,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e5f3b4f3499a810d",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 244.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: scope requests name the project"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183766,
+  "body": "The server can list a design's past versions and return to one without losing later ones.\n\n### Do\n\n- `GET /designs/{id}/versions` returns each version's number, time and source, newest first. A version's whole content can be read by its number.\n- `POST /designs/{id}/restore` with a version number saves that content as a new version, through the same save path as any other change. Later versions stay.\n- Restoring refuses a version that no longer passes validation, for example after a format change, and says so.\n- Add the routes to Spec 15.\n\n### Acceptance\n\n- Tests: three saves list as three versions; restoring version 1 gives version 4 with version 1's content, and versions 2 and 3 are still readable; an unknown version number is refused and changes nothing.\n\n### Left out\n\nNamed versions, comparing versions, branches, and any page.",
+  "closedTime": 1794014292,
+  "column": "complete",
+  "createdTime": 1793913873,
+  "dependsOn": [
+    "6bf990cec2871755"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "091f7027d62e571e",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 337.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: list and restore versions"
+}

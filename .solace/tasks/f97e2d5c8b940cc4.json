@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423232,
+  "body": "A Rust `extract` should finish a move using rustc's own suggested fixes, so it doesn't have to predict every rewrite in advance. Today `extract::rust.post_move_repair` only does this for missing trait imports (`imports.add_missing_trait_imports`). Any other new error rolls the whole move back.\n\n### Why\nIn task:1433afceee3ca3e7, about 6 moves were rolled back even though rustc's error output named the exact fix. Examples:\n- `consider importing crate::reach::flow::origins`, for a caller still using `reach::origins`.\n- `use crate::lockdown;`, missing from a new module.\n- `self::graph::direct_effects`, for a path that `extract` got wrong.\n\n### What to do\nAfter a move, read the new errors' suggestions and apply only the ones that leave nothing to choose:\n- **Missing import or path:** apply it only when rustc offers exactly one in-crate candidate.\n- **Private item a caller now needs:** raise it to `pub(crate)` at most. That's the same limit the refactor rules set (task:2414798176c466e4).\n\nThen check again. Repeat until it's clean, stopping after a few rounds or when a round fixes nothing. If errors remain, roll back exactly as today, and the reply shows the errors that are left.\n\nNothing is saved until the check is clean, so the rule that code with errors is not saved still holds.\n\n### Not in scope\n- Guessing between several candidates, or any suggestion that isn't an import, path or visibility fix.\n- Gleam `extract` and `merge`.\n- The other tech debt from task:1433afceee3ca3e7, such as moving one inline test or a module named like a parent function. Those stay in that task's notes.\n\n### Acceptance\n- A move whose callers use the old path, like `reach::origins` after moving `origins` to `reach::flow`, now succeeds and rewrites those callers.\n- A move into a new module that uses `crate::lockdown` without importing it succeeds, and the import is added.\n- A move where rustc offers two candidates is still rolled back, and the reply names the error.\n- `check --warnings` is clean; `rust-unit` and `rust-acceptance` pass.",
+  "closedTime": 1793339585,
+  "column": "complete",
+  "createdTime": 1793336936,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "f97e2d5c8b940cc4",
+  "links": [],
+  "milestone": null,
+  "rank": 206.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: compiler fixes finish a move"
+}

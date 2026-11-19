@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1793916049,
+  "body": "While the app stays open, what agents do must keep appearing without a restart or reload. Today it doesn't: \"Agent working\", \"Needs attention\" and toasts have stopped appearing, and a new question from an agent does not show on its task.\n\n**Known case:** on task:4ecf4f5061289cbf, run 70432a3336db22f6 asked a second question. The server recorded it and the run is `waiting`, but the human cannot see it on the open app. The human has not tried a restart, so whether one clears it is unknown.\n\n**Cause: not established.** Find it by reproducing the failure; the following is a cursory lead, not a prescription. All these signals come from the `/events` stream. `events` in `solace-cli/board/src/api.mjs` has an empty `onerror`, and a browser's EventSource closes for good on a non-200 reply. In `board::server.serve`, a `board.route` error on `/events` gets such a reply. The Strategy page and the task element have their own `events` bindings, not yet read. Also check whether the question is missing only live, or also when the task is opened afresh.\n\n**Done when**, with a page left open:\n- a new question appears on its task, and a toast is raised for it\n- \"Agent working\" appears when a run starts and goes when it ends\n- \"Needs attention\" appears when a task needs the human\n- all of the above still hold after the connection to the server is dropped or refused, and after the server restarts\n\n**Tests:** cover the failure found, at the level where it occurs.\n\nThis task adds no new user-interface elements.",
+  "closedTime": 1793839967,
+  "column": "complete",
+  "createdTime": 1793836692,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "3bc1a312756b9705",
+  "links": [],
+  "milestone": null,
+  "rank": 257.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Fix: pages stop showing live updates"
+}

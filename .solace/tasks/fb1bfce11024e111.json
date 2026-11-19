@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765932,
+  "body": "On the Features tab, move every feature whose state is `complete` or `canceled` into one `Closed` section appended after all milestone groups and the `No milestone` group.\n\n- A closed feature must not also appear under its milestone.\n- A feature with no milestone joins the same `Closed` section.\n- Closed cards sort by rank then id, matching the order used inside an open group, and keep their existing state, task-count, edit, delete and task-link behavior.\n- Show no `Closed` heading when there are no closed features.\n- Leave the Roadmap tab's grouping unchanged; it still shows features under their milestones.\n- Keep empty milestone groups as they are today.\n\n**Tests:** a complete feature leaves its milestone and appears once under `Closed`; canceled behaves the same; a milestone-less closed feature is included; mixed closed ordering by rank then id; no closed features means no section; all features closed still shows a usable page. Existing grouping and drag tests stay green. **Docs:** describe the `Closed` section in the Strategy README.",
+  "closedTime": 1792727456,
+  "column": "complete",
+  "createdTime": 1792709936,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "fb1bfce11024e111",
+  "links": [],
+  "milestone": null,
+  "rank": 111.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "features: closed records section"
+}

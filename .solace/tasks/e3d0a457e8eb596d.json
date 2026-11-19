@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928477,
+  "body": "Part of feature:3e8b5fe47bba41c4. Builds D-119 point 5 (the behavior, not the reference wording), follow-on (c) from task:e9ad81a4e3fb4689.\n\n**What changes:**\n\n- The batch loop in `main.rs` (the one that ends a reply with `N of M commands failed`): when a command that changes the project fails — `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `move` — the commands after it in the call do not run.\n- The reply ends `N of M commands failed: <commands>; skipped: <commands>`. A failed **read** does not stop the call (D-109 point 6).\n- `board.rs::partly_failed` reads that last line for the run log's step title; it must still parse with the new `; skipped: …` part, and the title should say something was skipped.\n- Covers both the CLI batch and the MCP path, if they are separate.\n\nWhy: a failed `write` followed by `run rust-unit` today runs the tests on the old code, up to the 120 s timeout, and the reply looks like a pass. This is the prerequisite for telling agents to put `write` + `run` in one call (follow-on task (d)).\n\n**Review tech debt carried from task:e9ad81a4e3fb4689:** D-119 point 5 and the Spec 3 §1 bullet cite D-109 for \"a failed read does not stop the call\", but D-109 point 6 only describes the summary line. Fix the citation in Spec 3 (and note it on the decision) while here.\n\n**Checks:** `rust-unit` (a failed write then a read and a run: the run is skipped; a failed read then a write: the write runs; the new last line; `partly_failed` with and without `skipped`); `rust-acceptance` with a failed `write` followed by `run`, extending `workspace_acceptance.py`'s batch tests.",
+  "closedTime": 1791854178,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "e3d0a457e8eb596d",
+  "links": [],
+  "milestone": null,
+  "rank": 105.0,
+  "scope": [
+    "."
+  ],
+  "title": "Batch stops after a failed change"
+}

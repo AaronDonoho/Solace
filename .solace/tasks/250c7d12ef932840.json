@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791685673,
+  "body": "Add a Gleam -> Javascript \"Settings\" page, like the other pages.\n",
+  "closedTime": 1791679007,
+  "column": "cancelled",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "250c7d12ef932840",
+  "links": [],
+  "milestone": null,
+  "rank": 53.0,
+  "scope": [
+    "."
+  ],
+  "title": "New page: Settings"
+}

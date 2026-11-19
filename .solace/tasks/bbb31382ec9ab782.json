@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792884705,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792869058,
+  "column": "complete",
+  "createdTime": 1792861727,
+  "dependsOn": [],
+  "feature": "77663b4d3edef315",
+  "home": ".",
+  "id": "bbb31382ec9ab782",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 271.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "techDebt": true,
+  "title": "Works out of the box: Tech Debt"
+}

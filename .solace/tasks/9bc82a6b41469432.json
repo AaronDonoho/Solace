@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035351,
+  "body": "A Rust `*** Update: <module>` patch is saved exactly as written: it never goes through rustfmt, unlike a symbol patch. Format it the way the other Rust patch paths are formatted.\n\n## Why\nThe investigation on task:632aecf9d9f05d58 found it: `drafts.rust_module_update_blocks` splits the patched file text and `drafts.push_module_blocks` pushes each changed item's text as written. `drafts.submit` then calls `submit_symbols_blocks(.., formatted = true)`, so `store.submit_items` skips rustfmt. A symbol patch (`drafts.rust_symbol_update_blocks`) is formatted because it calls `store::submit_items(.., false)`. So a module patch with off indentation or spacing is stored unformatted.\n\n## What changes\n- In `drafts.rust_module_update_blocks`, run the patched text (`after`) through `cargo::format_item(root, &after, None)` once, before `language::rust::split`, the way `store.submit_module` formats a new module's whole text. A rustfmt syntax error is reported through `store.rust_syntax_error`, as `submit_module` does, with line numbers in the module.\n- Nothing else changes: the header check, `rust_module_items` and `push_module_blocks` work on the formatted text.\n\n## Cautions\n- The stored text is already rustfmt's, so unchanged items should come out byte-identical and `push_module_blocks` should still push only the changed ones. Pin this with a test.\n- The header check compares the formatted header with the stored one. If rustfmt changes a stored header that is already formatted (for example by reordering `use` lines), say so in the summary rather than loosening the check.\n\n## Done when\n- A tests in `drafts::`: a module patch that adds or changes an item with wrong indentation or spacing saves rustfmt's text.\n- A test in `drafts::`: a module patch that changes one item pushes only that item's block.\n- A module patch with a syntax error is still refused, naming a line in the module.",
+  "closedTime": 1792984690,
+  "column": "complete",
+  "createdTime": 1792983363,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "9bc82a6b41469432",
+  "links": [],
+  "milestone": null,
+  "rank": 89.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: format Rust module patches"
+}

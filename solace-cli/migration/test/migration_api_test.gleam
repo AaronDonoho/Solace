@@ -35,6 +35,7 @@ pub fn migration_decoder_defaults_test() {
   assert value.report == None
   assert value.candidates == []
   assert value.copy == ""
+  assert value.reason == ""
   let assert Error(_) =
     json.parse("{\"top\":\"/work\"}", api.migration_decoder())
 }

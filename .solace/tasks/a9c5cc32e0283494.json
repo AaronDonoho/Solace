@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794876822,
+  "body": "A message to a design run can carry notes, and the agent receives exactly which elements each one means. This is the server side; the panel is task \"notes: add a note from the panel\".\n\n### Do\n\n- A human's message to a design run may carry notes. A note is a design ID, one or more element IDs, and text (feature:afd9fe8bae36c59c).\n- Refuse a note naming a missing design or an element that isn't in it, naming the element.\n- The agent gets each note with its message, once, with each element's type and its place in the tree (its parents), so it can find the element without vision.\n- A note is not kept on the design.\n- Record the note's form in a decision, and in the design run reference.\n\n### Acceptance\n\n- Tests: a message with notes reaches the agent with each element's type and parents, an unknown element is refused, and nothing is written to the design.\n\n### Left out\n\nThe panel, and notes from one agent to another.",
+  "closedTime": 1794843944,
+  "column": "complete",
+  "createdTime": 1794273228,
+  "dependsOn": [
+    "73718ff8c5f77922",
+    "3257af90db11da80"
+  ],
+  "feature": "afd9fe8bae36c59c",
+  "home": ".",
+  "id": "a9c5cc32e0283494",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 367.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "notes: deliver notes to the design agent"
+}

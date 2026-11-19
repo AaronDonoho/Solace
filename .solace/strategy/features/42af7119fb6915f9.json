@@ -1,0 +1,10 @@
+{
+  "body": "Follows feature:ee70ab461cef2b9c: once Rust can be held, read, changed, checked and locked down with the same commands as Gleam, move Solace's own crate (`solace-cli/`) into the store, so agents change it only through Solace.\n\n### Scope\n\n- A system setting to turn a language off on a machine even when its toolchain is installed.\n- Adopting `solace-cli/` as a Rust project; edits outside Solace then become reviewed work (D-58).\n\n### Not in scope\n\n- Type-accurate refs (rust-analyzer / SCIP), several-crate workspaces, proc-macro crates: `solace-cli/` needs none of them.\n- Rust `refs` and test reach: moved to feature:ee70ab461cef2b9c (task:d7aa4d5e523a065c).",
+  "colorSlot": 9,
+  "id": "42af7119fb6915f9",
+  "milestone": "8f4cf01d7d220348",
+  "rank": 2.0,
+  "startTime": 1792427276,
+  "state": "complete",
+  "title": "Rust: adopt Solace's own crate"
+}

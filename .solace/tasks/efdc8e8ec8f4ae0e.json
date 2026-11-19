@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690223,
+  "body": "Task A: finish the board components (project solace-cli/board)\n1. Make solace_board.register and solace_view.register return Result(Nil, lustre.Error), as migration.register does: drop the let assert and return lustre.register(...). Update their main() to let assert Ok(_) = register().\n2. Run the gleam tests and the js_tests command, rebuild with the bundle command, and add the WORK.md entry for step 4.\n3. Done when both functions return Result and all board tests pass.",
+  "closedTime": 1791217475,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "efdc8e8ec8f4ae0e",
+  "links": [],
+  "milestone": null,
+  "rank": 6.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Fix Register return result"
+}

@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1795105044,
+  "body": "Runs last in feature:bd067a7e2e2adcfc. Check thoroughly that sharing a project through git works as intended: a clone misses no file it needs, and nothing that should stay local gets committed.\n\nReport each finding as a note, with what's wrong and where. Change no code; each problem found becomes its own follow-up task.\n\n### Check\n\n1. **Nothing missing.** Each project listed in the root `solace.toml` has its `store.db` and `approved` committed. So do the root's strategy records (vision, personas, milestones, features) and every task, archived ones included.\n2. **Nothing private.** No committed file holds task notes, questions or answers, runs or run state, approval stamps, run logs, conversations, strategy runs, the task inbox or event log, or a local path such as a home folder. Check the files themselves as well as the ignore rules.\n3. **Nothing lost on this machine.** Once the change is in, existing tasks still have all their notes, questions, answers and runs.\n4. **A fresh clone works.** In a throwaway clone, or a copy made only from committed files:\n   - the board shows every project and every task, with no run status;\n   - the Strategy page shows the same records;\n   - there are no Unexpected Changes;\n   - the Migration tab shows its message.\n5. **Pulls arrive.** A task or strategy record changed by `git pull` reaches an open page without a restart.\n6. **The ignore block is current.** Setup replaces any older version of the root `.gitignore` block. This repo's root `.gitignore` still has the oldest one (see task:be65027e029a9189).\n7. **The docs match.** The README and Spec 15 describe what is and isn't committed.\n\n### For the worker\n\n- Useful checks: `git ls-files`, `git check-ignore -v`, and a search of committed files under `.solace/` for `notes`, `questions`, `runs`, `stamps` and `/home/`.\n- If git or a throwaway clone can't be used from a run, say which checks you couldn't make, rather than inferring them from the code.",
+  "closedTime": 1795066815,
+  "column": "complete",
+  "createdTime": 1795056674,
+  "dependsOn": [
+    "e6a2f30a4d50a3fd",
+    "f55d523127d933b5",
+    "cdfa77196b669adf",
+    "146032c74c41f96b"
+  ],
+  "feature": "bd067a7e2e2adcfc",
+  "home": ".",
+  "id": "5c7e159c3503cecf",
+  "links": [],
+  "milestone": null,
+  "rank": 393.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "share: final check before teammates clone"
+}

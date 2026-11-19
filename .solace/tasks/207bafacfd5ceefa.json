@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765932,
+  "body": "Replace the Roadmap milestone heading's feature total with progress in the form `2 / 3 features complete`.\n\n- The denominator counts the milestone's features that are not `canceled`.\n- The numerator counts those whose state is `complete`.\n- A canceled feature is in neither number.\n- Use `feature complete` when the denominator is 1 (`1 / 1 feature complete`); zero reads `0 / 0 features complete`.\n- Keep the count visible whether the milestone is collapsed or expanded. Leave the delete confirmation's raw feature and task counts unchanged.\n\n**Tests:** mixed states with canceled features excluded; all complete; none complete; one feature; zero features; the count appears in both collapsed and expanded headings. Existing roadmap grouping and heading tests stay green. **Docs:** update the Roadmap section of the Strategy README.",
+  "closedTime": 1792726732,
+  "column": "complete",
+  "createdTime": 1792709928,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "207bafacfd5ceefa",
+  "links": [],
+  "milestone": null,
+  "rank": 110.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "roadmap: milestone progress count"
+}

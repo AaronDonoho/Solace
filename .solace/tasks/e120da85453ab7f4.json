@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793037327,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793037217,
+  "column": "complete",
+  "createdTime": 1793036888,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e120da85453ab7f4",
+  "links": [],
+  "milestone": null,
+  "rank": 107.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "probe: Rust replies show timing and clean snippets: Tech Debt"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792978308,
+  "body": "Today the desktop app holds one workspace at a time. `Server` keeps a single sidecar (the background `solace serve` process) and port, and `show` reuses the single `board` window. Choosing another workspace on the start screen runs `open_project`, which stops the current server (unless one is already running for the new root) and points the same window at the new one. The aim is to have several workspaces open at the same time, each in its own window.\n\n## Wanted\n- Choosing a workspace on the start screen opens it in a **new** board window, titled with the workspace's folder name. Windows already open stay on their own workspaces, and their servers keep running.\n- Choosing a workspace that is already open focuses its window instead of opening a second one.\n- The app keeps one server and one window per workspace root, not a single slot. Each window keeps the port it shows, so the reload-on-same-port handling in `show`/`update_board` still works for each one.\n- Closing a workspace's window stops that workspace's server, unless a browser was opened on it. The last window closing still quits the app, as now. **Quit Solace** stops every server.\n- Tray: **Open board** shows the board windows (or the start screen when none is open). **Switch project** becomes **Open workspace**, which brings back the start screen.\n- Browser mode still opens the chosen workspace in the browser.\n\n## Acceptance\n- Open workspace A, then workspace B from the start screen. Both windows work side by side, each on its own workspace.\n- Choose A again: its existing window comes to the front.\n- Close B's window: A keeps working, and B's server stops.\n- Quit from the tray: no server is left running.\n- Tests cover the bookkeeping (which root has which server, port and window) wherever the code allows. Anything that could only be checked in the running app is named in the run.",
+  "closedTime": 1792977946,
+  "column": "complete",
+  "createdTime": 1792976904,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "6078dafc154956ec",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-app"
+  ],
+  "title": "app: several workspaces open at once"
+}

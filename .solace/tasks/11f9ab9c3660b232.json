@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972377,
+  "body": "The design list on the Design page doesn't update an expanded entry when a new version of that design arrives. The human has to reload to see it.\n\n## Asked for\n\n- The design list updates automatically when a new version arrives, including entries that are expanded.\n\n## Done when\n\n- An expanded design entry shows a new version as soon as it's saved, with no reload and without collapsing the entry.\n- A test covers a live update reaching an expanded entry.",
+  "closedTime": 1794938552,
+  "column": "complete",
+  "createdTime": 1794935370,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "11f9ab9c3660b232",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 29.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "design list: open entries refresh"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972383,
+  "body": "> Background:  task:91096b01c6786f30 made the chosen version reach every manifest and lock file, and it is complete. It did not cover the fixed file names in the desktop build recipe: those still say 0.1.0, so after a 0.1.1 build the release step cannot find the new bundles and the build fails.\n\nThis task:\nOn the Delivery page, choosing a new valid version and starting a build succeeds; the release that results records the built desktop files under that version's names. Setting 0.1.1 is the case that fails today.\n\nA version the page refuses, because it is not semver or already has a release, still starts no build and shows the reason.\n\nDone when: in Solace's own workspace, setting 0.1.1 and building finishes passed, and the release lists the desktop bundle files named for 0.1.1.",
+  "closedTime": 1794970329,
+  "column": "complete",
+  "createdTime": 1794964222,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "9666304ef2944e91",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 395,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "build: release finds chosen version"
+}

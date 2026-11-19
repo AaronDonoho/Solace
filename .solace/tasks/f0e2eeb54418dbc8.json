@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037324,
+  "body": "The investigation task:6d7d8a2d428cba97 found that Rust `probe` (from task:63c5cdaffb07c951) can't run in solace-cli at all. The probe builds a scratch copy of the crate under `target/solace-probe/crate/`. `rust_probe.copy_crate` leaves nested projects out of that copy, but the crate's `build.rs` reads `frontend/priv/app.js`, which sits in the nested `frontend/` project. So every probe stops with the `build.rs` panic before any probe code compiles.\n\n**Need**\n- In solace-cli, `probe` with `trace_report(\"x\")` prints its `dbg!` output, not the `build.rs` panic.\n- This works for any crate whose `build.rs` or `include_str!`/`include_bytes!` reads files beside the crate, including files in nested projects.\n- The probe still saves nothing: no project change, nothing in the store, `src/` untouched, and it still works in read-only runs.\n- An acceptance test uses a crate whose `build.rs` reads a file kept in a nested project. The existing test crates have no build script, which is why this was missed.\n\n**Left out**\n- Rewording a build-script failure so it says it came from the probe's copy. Once the copy has the files, this matters much less.\n- The checks the investigation couldn't reach (panic message, compile errors on the probe's lines, `--in`, second-run speed). Re-run task:6d7d8a2d428cba97 after this lands.\n\n**Cursory suggestion, not a prescription:** in the copy, link the folders left out (nested projects and other files beside the crate) back to the real ones, so paths relative to the crate still resolve without copying large files. The worker decides.",
+  "closedTime": 1793027725,
+  "column": "complete",
+  "createdTime": 1793026035,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f0e2eeb54418dbc8",
+  "links": [],
+  "milestone": null,
+  "rank": 98.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: Rust builds crates reading nearby files"
+}

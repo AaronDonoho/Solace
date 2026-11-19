@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791928478,
+  "body": "Part of feature:3e8b5fe47bba41c4. **Investigate first.** Weigh the options below, then recommend. Each kept option becomes its own follow-on task.\n\n**Evidence:** in task:e3d0a457e8eb596d, work run `eae92cef0e027b0e`, step 10 sent one `write` patch covering six files. One hunk in `specs/03-protocol.md` used `-A failed read does not stop the call (D-109).`, which is the end of line 191 and not the whole line. The reply was `E0108 … these lines weren't found`, nothing was written, and step 13 sent the whole ~200-line patch again with that one hunk fixed. Two things contributed:\n\n- The investigate note's plan described the edit as a swap inside a line (`\"(D-109)\" → \"(D-119 point 5)\"`), and the work run didn't read the spec before patching.\n- The tool gave no hint, and since the patch is all-or-nothing, one bad hunk meant resending every file.\n\n**Options to weigh:**\n\n1. **E0108 names the line it's inside.** In `drafts.rs::apply_hunks`, when a `-` or context line isn't found as a whole line but appears inside exactly one line (after trimming), quote that line and say patch lines are whole lines. This covers `submit` patches as well as `write`.\n2. **Reference points to `--replace`.** Add a line to `reference.txt`'s `write` entry: for a word or phrase inside a line, use `write <path> --replace` (`old`/`text`).\n3. **Investigator brief.** Tell the investigate run to write planned edits as whole lines, or as a `--replace` with `old`/`text`.\n4. **Cheaper resend.** Keep the patch all-or-nothing (Spec 14, D-104), but find a way to avoid resending the sections that matched. For example: the reply says which sections matched, and the reference says it's fine to fix only the bad section and send the rest again, or to split a large patch into one call per file. Check whether any of these weakens atomicity or the recording of changes.\n\n**Also measure:** how often E0108 comes up in recent work runs, and how much a resend costs in output tokens. Look in run logs for `write`/`submit` steps that failed with E0108 and were followed by a resend.\n\n**Output:** a findings note with a recommendation for each option (keep or drop, and why), plus the follow-on tasks with their checks.",
+  "closedTime": 1791855766,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "6bcfa028a88acf44",
+  "links": [],
+  "milestone": null,
+  "rank": 108.0,
+  "scope": [
+    "."
+  ],
+  "title": "write: recover cheaply from an unmatched hunk"
+}

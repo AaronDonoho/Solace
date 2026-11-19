@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231417,
+  "body": "When two items move together into the same target and one of them carries `use path::Thing;` while the other *is* an item named `Thing`, extract writes both into the target. Cargo rejects the duplicate name and the whole extract rolls back.\n\nCause: `extract::rust.carry_imports` seeds its taken-names set from `target_names(..., |_, s| s.module == target)`, so it only sees what is already in the target, not the items arriving with the move.\n\nFix: seed the names from the post-move view (`extract::rust.target_names_after_move`), so a carried import that clashes with a moved item is aliased and its mentions renamed, the same way a clash with a target-local name is handled today. This also covers `carry_test_imports`, which calls the same function.\n\nTest: `a.make` returns `std::collections::HashMap`, `b.HashMap` is a struct, and both move to a new module `w`. Assert the target has `use std::collections::HashMap as HashMap_2;` and `make` uses `HashMap_2`. It should fail (rollback) before the fix and pass after.",
+  "closedTime": 1793224221,
+  "column": "complete",
+  "createdTime": 1793221137,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c970ab48b3b62497",
+  "links": [],
+  "milestone": null,
+  "rank": 169.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: carried import vs moved name clash"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793312246,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793239599,
+  "column": "complete",
+  "createdTime": 1793237572,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "5d2c9aa32f8e78d3",
+  "links": [],
+  "milestone": null,
+  "rank": 187.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "models: show the latest Claude models: Tech Debt"
+}

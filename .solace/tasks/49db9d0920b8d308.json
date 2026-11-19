@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792868606,
+  "body": "The markdown editor's toolbar has 4px of outer padding, which leaves space above and around its buttons. Remove the toolbar's own padding so the tools sit against its top and sides; keep the 2px gap between tools and the buttons' existing box model unchanged.\n\nThis is `solace_task.editor_styles`, shared by every markdown editor, so the same gap leaves the task, feature and planning editors.\n\n**Test:** the shared editor style has no toolbar padding, while the inter-tool gap and small control height remain.\n\n**Leaves out:** changing the buttons' own 4px/10px padding or the 2px gap between tools. The components README describes the editor's tools but not the toolbar spacing, so it needs no change.",
+  "closedTime": 1792865174,
+  "column": "complete",
+  "createdTime": 1792731449,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/components",
+  "id": "49db9d0920b8d308",
+  "links": [],
+  "milestone": null,
+  "rank": 104.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "editor: remove toolbar padding"
+}

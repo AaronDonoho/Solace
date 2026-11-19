@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793423234,
+  "body": "In work run 81e9243b4ac911b0 on task:da49ea4b9938994d, moving one helper (`extract lockdown.limit --to lockdown::settings`, step 39) ran 1,338 of 1,407 tests, and moving `Ignores` (step 129) ran 1,351. A move doesn't change behavior, so almost none of those runs could have caught anything.\n\nThe code (`store_write.Store::test`, `reach.outside`, `reach.hash`) shows two likely causes:\n\n1. **The \"reaches another process\" rule is too broad.** `reach.outside` marks any Rust symbol whose *text* contains `std::process`, `std::net` or `Command::new` (comments and strings included), and every test that reaches such a symbol runs every time. In Solace, `lockdown.dispatch` reaches `lockdown.command`, so nearly every CLI test runs on every `test`.\n2. **A module header change invalidates the whole module.** `reach.hash` hashes the header of every module a test reaches. `extract` adds `use` lines to the parent's header, so every test that touches anything in `lockdown` counts as changed.\n\n**Wanted:** `test` (without `--all`) runs only tests whose reach actually changed, plus tests that failed or never ran. Tests that reach another process should still run when something they reach changes, but not on every run.\n\n**Done when:** a test shows that moving a helper between modules reruns only the tests that reach the moved code, and that a test reaching a process-spawning function is skipped when nothing it reaches changed.\n\n**Uncertain:** I didn't measure how much of the 1,338 each cause accounts for. The rule in point 1 may be a deliberate safety choice, in which case narrowing it is your call.",
+  "closedTime": 1793372712,
+  "column": "complete",
+  "createdTime": 1793341199,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "2e1aa076d45aad6e",
+  "links": [],
+  "milestone": null,
+  "rank": 212.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "test: stop running tests a change can't affect"
+}

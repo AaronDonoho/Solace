@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876820,
+  "body": "A work run is asked to end its summary with a `### Tech debt` section for bugs in a Solace step or tool and for steps that cost far more than they gave (D-212, `board::briefs.WORK_TECH_DEBT_ASK`, added in `board::briefs.work_role`). In a project Solace wraps, those items are filed as that project's Tech Debt task, but the project can't change Solace, so the task can't be acted on.\n\n**Goal:** only a run on Solace's own source is asked to report Solace step and tool faults as tech debt. A run on any other project is not asked, so its Tech Debt tasks hold only that project's own findings.\n\n**Acceptance criteria**\n- A work brief for a task in a project that isn't Solace's own source has no request to report step or tool faults as tech debt.\n- A work brief for a task in Solace's own source keeps the request exactly as now.\n- Review briefs and how a completed task files its tech debt are unchanged.\n- DECISIONS.md records the change as an amendment to D-212 point 1.\n\nOut of scope: sending faults found in other projects back to Solace's own project.",
+  "closedTime": 1794791150,
+  "column": "complete",
+  "createdTime": 1794790128,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "1b087b720be2db54",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 307.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: Solace tool faults only in Solace"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792977611,
+  "body": "Fix the task viewer's spacing and column widths, and make it change layout sooner.\n\n## 1. Model pick spacing\nThe model pick sits too far from the refresh (⟳) button. Today `.agent` in `solace_task.task_styles` has a 16px gap between columns, and `agent_pick` and `agent_choice` put `refresh_button` in that row. Put the button right beside the pick.\n\n## 2. Column widths and when the layout changes\n- **Horizontal, two columns**: the first column is about 35% too wide. Today the grid is `minmax(0,1fr) minmax(0,1fr)` under `@container (min-width:90rem)` in `solace_task.task_styles`.\n- **Changing layout**: the viewer should switch layouts about 35% sooner, going from horizontal with one column to horizontal with two columns, and then to vertical. Today the two-column grid starts at a 90rem wide viewer. The board puts the viewer on the side when the window's width is at least 1.4 times its height (`watch_side` in the board's `api.mjs`, `(min-aspect-ratio: 7/5)`), and otherwise below the board.\n\n## Done when\n- The refresh button and model pick sit together.\n- The first column is about 35% narrower than it is today.\n- Each layout change happens about 35% sooner than today.\n- `solace_task_test.a_wide_detail_shows_two_columns_test` and `solace_board_test.a_wide_window_puts_the_band_on_the_side_test` are updated to the new values.\n- The bundled `app.js` is rebuilt.",
+  "closedTime": 1792947638,
+  "column": "complete",
+  "createdTime": 1792944880,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "a902c13a6f97d93f",
+  "links": [],
+  "milestone": null,
+  "rank": 118.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend"
+  ],
+  "title": "task viewer: tighter model pick, earlier layouts"
+}

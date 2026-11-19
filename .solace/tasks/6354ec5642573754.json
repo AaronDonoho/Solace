@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792208843,
+  "body": "Solace should work out by itself which agents it can run, and only offer those.\n\n### What exists today\n\n- `board.rs::unavailable` checks only local things: the agent program is on `PATH`, a sign-in file or API key variable exists (`~/.codex/auth.json` / `OPENAI_API_KEY`, `~/.claude/.credentials.json` / `ANTHROPIC_API_KEY`), and an endpoint's `key_env` is set. On macOS, Claude is always counted as signed in, because its keychain isn't checked.\n- `GET /models` reports `available` and `reason`. The board greys out unavailable models, the Strategy panel shows `Name (unavailable: reason)`, and assigning one is refused with `E7011`.\n- A run that fails on a usage limit is marked as needing attention and isn't retried, but nothing is remembered about it. Example: after a Codex subscription ran out, GPT-6 Sol was still offered.\n\n### Work\n\n1. **Hide unavailable models** from the model pickers on the board (assign, reassign) and on the Strategy page. Under the list, add a short line, for example `2 more models unavailable`, that opens the reasons, so the human knows what to install or sign in to. If no model is available, show what to set up instead of an empty list (README's install steps).\n2. **Usage limits.** When a run fails on a usage or quota limit, mark that agent's sign-in as unavailable, with the reason `Codex usage limit reached (resets …)`. This covers every model on that sign-in; a model on its own `endpoint` or key isn't affected.\n   - If the agent's error says when the limit resets, the model comes back at that time. Otherwise it stays unavailable until a human clears it from the list (`try again`), or until a later run with that sign-in succeeds.\n   - Recognise the limit from the agent's own error. Collect the real Codex and Claude Code messages first, and keep them in a test fixture, not guessed strings.\n   - Store the mark where `/models` can read it after a restart.\n3. **Better detection**, still cheap and without a model call:\n   - Detect Claude Code's macOS keychain sign-in, if a read-only check exists (confirm the current CLI or `security` options first; don't prompt the user).\n   - Report a sign-in file that exists but whose credentials have expired as unavailable, if the file says so.\n   - Cache the result for a short time, so `/models` doesn't hit the filesystem or spawn processes on every request.\n4. **One table per agent kind.** Keep each agent's checks (program name, sign-in locations, key variables, limit messages) in one place, so supporting another harness (this feature's item 2) means adding an entry.\n\n### Checks\n\n- Unit tests for each detection rule (`board_tests.rs`, next to `unavailable_models_say_why`), including the usage-limit mark: it is set from a fixture error, lifts at the reset time, and is cleared by a successful run.\n- Board and Strategy client tests: unavailable models aren't offered, the disclosure lists the reasons, `try again` clears a limit, and the no-agents message appears.\n- An acceptance check: a fake agent that fails with a usage limit makes its sign-in's models unavailable in `/models`, with the reason. `/models` still lists every model, so the API stays complete and only the UI hides them.\n\nUpdate the Guide's Models section and README to match.",
+  "closedTime": 1792033561,
+  "column": "complete",
+  "createdTime": 1792032185,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "6354ec5642573754",
+  "links": [],
+  "milestone": null,
+  "rank": 145.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: detect available agents"
+}

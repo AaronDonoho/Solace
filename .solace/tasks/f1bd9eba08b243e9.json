@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794359898,
+  "body": "The design agent can propose creating or changing a design, working by element. The proposal waits for the human; nothing is saved here.\n\n### Do\n\n- Add a proposal command for design runs that takes operations on elements: add, remove, move, or change a property. Creating a new design is one form of it.\n- Apply the operations to a copy of the design and validate the result with the design rules. A proposal that fails is refused to the agent with the element named, so a human never sees one that can't be saved.\n- An operation on an element that no longer exists is refused.\n- A proposal stays open until it is answered, and the run waits on it, as a strategy proposal does (D-93). A run has at most one open proposal per design.\n- Record the operations in the format decision, since direct editing will reuse them (feature:c3bed08cc1bbbbb8).\n\n### Acceptance\n\n- Tests: each operation produces the expected design, an invalid result is refused and leaves the design unchanged, and an open proposal is returned by the run's read route.\n\n### Left out\n\nDrawing a proposal, and accepting or rejecting it.",
+  "closedTime": 1794283484,
+  "column": "complete",
+  "createdTime": 1793914509,
+  "dependsOn": [
+    "3257af90db11da80",
+    "6bf990cec2871755"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "f1bd9eba08b243e9",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 350.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "agent: propose a design change"
+}

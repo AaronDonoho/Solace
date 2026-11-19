@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793665580,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793657290,
+  "column": "complete",
+  "createdTime": 1793655372,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "07fe8f27e93c8774",
+  "links": [],
+  "milestone": null,
+  "rank": 4.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "app: works again after PC sleep"
+}

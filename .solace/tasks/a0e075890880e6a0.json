@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794876815,
+  "body": "The server side of feature:7adcac261eef1bfa: run a build from the recipes and report its progress. The page comes in a later task.\n\n1. **Decision first** in `DECISIONS.md`: what a build is, one at a time per root, and what is built (the working tree as it is for now; building from a recorded snapshot comes with package inspection).\n2. **Run.** `POST /builds` starts a build of every project's recipe in order (from the recipes task), or of named projects and the ones they depend on. Steps run one after another, each with the recipe's command and a timeout (the system `task_timeout` unless the step sets one). A second start while one runs is refused, with the running build named.\n3. **Cancel.** `POST /builds/{id}/cancel` stops the running step and its child processes, and marks the rest skipped.\n4. **Status.** Each build has an id, start/end time and a state (running, passed, failed, canceled); each step has waiting, running, passed, failed or skipped, its exit code and duration. `GET /builds/{id}` returns it, and the board's existing event stream (SSE) sends a change event as a step changes.\n5. **Logs.** Each step's output (stdout and stderr, interleaved, with a size cap that keeps the end) is kept with the build; `GET /builds/{id}/steps/{n}/log` reads it, and the stream sends new lines while it runs.\n6. **Failure summary.** A failed step gets a short summary: the step, the command, the exit code, and the first error lines (lines with `error`, from the end if none).\n7. Builds are kept in the root's store, so they survive a restart; a build running when the server stopped is marked failed (`interrupted`) on start.\n8. **Specs:** Spec 15 for the routes and events.\n9. **Tests:** a fixture project with passing, failing and slow steps: order, failure stops the build, cancel, the second-start refusal, log capping, the interrupted case. Run `rust-unit`, `rust-board-tests`, `rust-acceptance`.",
+  "closedTime": 1794868376,
+  "column": "complete",
+  "createdTime": 1791953342,
+  "dependsOn": [
+    "baab6475ff65b0b2"
+  ],
+  "feature": "7adcac261eef1bfa",
+  "home": ".",
+  "id": "a0e075890880e6a0",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 121.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "build: runner, status and logs API"
+}

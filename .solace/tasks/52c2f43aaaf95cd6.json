@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690225,
+  "body": "A toast should appear whenever an agent responds to a discussion.\nA toast should not appear when a discussion ends.",
+  "closedTime": 1791578480,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "52c2f43aaaf95cd6",
+  "links": [],
+  "milestone": null,
+  "rank": 23.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Discussion gets toasts"
+}

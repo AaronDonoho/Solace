@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793423233,
+  "body": "Found in work run 81e9243b4ac911b0 on task:da49ea4b9938994d (steps 29, 97, 113), and again in run fe31569cdc4c32bc (steps 11, 29, 33, 35, 51).\n\n**Problem:** `extract … --to lockdown::settings` (a new child module) leaves a private `use crate::lockdown::settings::x;` in the parent. Every caller outside the parent that writes `lockdown::x(…)` (in `board`, `extract::apply`, `recipe`, `skills`, `orientation`, `view::api`, `view::review`, `workspace` tests and others) then fails with E0603 *private function import*, so the whole move is refused. The same happens for `lockdown::paths`.\n\nA second form of it (run fe31569cdc4c32bc, step 51): when only the parent's tests use a moved item, the parent's import is written as `#[cfg(test)] use crate::lockdown::recovery::recover;`. Outside callers such as `board.revert`, `board.settle` and `board.recover_project` then fail with E0425 *cannot find function `recover` in module `lockdown`*.\n\nBecause of these refusals, the agent copied each blocked function into the child and left a wrapper in the parent that calls the copy (`tree_files`, `move_args`, `command`, `trim_output`, `passed`, `kill_group`, `wait_or_kill`, `recover`, `mark`).\n\n**Wanted:** after a move into a new or existing child module, every caller that reached an item through the old path still compiles, with no manual follow-up. The rules in task:2414798176c466e4 say outside callers should use `pub(crate) use` re-exports in the parent, so the parent's re-export should get the narrowest visibility its callers need (D-211 already does this for nested `mod` lines). It is gated by `#[cfg(test)]` only when every user is test code.\n\n**Done when:**\n- A test that moves a `pub` function used as `parent::f(…)` from another module into a new `parent::child` passes `check` with no edits.\n- The same works for a type (`Ignores` in step 97) and for a caller in a test container.\n- A moved item used by the parent's tests and by non-test code in another module gets an ungated re-export.\n- Re-exports stay private when only the parent uses the item.",
+  "closedTime": 1793371287,
+  "column": "complete",
+  "createdTime": 1793340919,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "7d16851b4baea53c",
+  "links": [],
+  "milestone": null,
+  "rank": 208.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: callers still reach moved items"
+}

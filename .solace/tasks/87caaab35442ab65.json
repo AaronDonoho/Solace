@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792464634,
+  "body": "`delete` works in a Rust store, with Gleam's command form and replies, so agents can remove items once task:7db8dd126a22c863 locks `.rs` files. It doesn't use the reference graph (task:d7aa4d5e523a065c), whose overestimate would refuse safe deletes.\n\n### Plan (from the earlier investigation)\n\n**Dispatch** (`main.rs`): add `\"delete\"` to the Rust arm beside `check | test | submit`, with the same E6013 when cargo is missing. `delete_all` calls a new `delete_rust` (in `rust_submit.rs`) when `ix.rust`.\n\n**Steps**, all in one `transaction`:\n1. Resolve each name with `resolve`. A container can be named too, through `rust_container`.\n2. Note what is broken beforehand.\n3. Retire each named symbol and its descendants.\n4. If a module has no live symbols and no child modules left, delete its row and remove its declaration: the `mod x;` line in the parent's header, or the parent's `mod x;` item (for example a `#[cfg(test)] #[path] mod tests;`). `crate` is never removed, and a test root has no line.\n5. Run `check_all`.\n\n**Refusal:** a new error (its symbol was not broken beforehand and is not being deleted) rolls everything back, and `transaction` rewrites the files.\n- One name gives Gleam's reply: `E5001 crate.two is still used by:\\n  crate.three`, listing each erroring symbol once. A header error is listed as `<module> imports`.\n- With several names cargo can't tell which name each error comes from: `E5001 nothing deleted.\\ncrate.a, crate.b are still used by:\\n  …`. This is the one wording that differs from Gleam's.\n\n**Success:** the same `Deleted X; module M retired.` lines and `broken_report` as Gleam.\n\n**Docs:** `reference.txt` \"Rust projects\": `delete` checks with cargo and refuses with E5001 (the `delete` row stays language-neutral). Add a D-168 point: how delete works without the graph, and the multi-name wording. `README.md` \"Current limitations\": the line naming `delete` and new modules as later tasks shrinks to whole-module `submit` and `refs`.\n\n**Tests** (gated on `cargo::installed()`): a new `store_delete_tests.rs`, wired like its neighbors: deleting an unused item; a used item gives E5001 naming the user, with the store and `src/lib.rs` unchanged; the last item removes the module, its file and its `mod` line; a container deletes its items; several names refused together. Verify with `rust-board-tests`, `rust-lockdown-tests`, the `--bins` unit command with `store::`, and `rust-acceptance`.\n\n### Done when\nIn a scratch Rust store: deleting an unused item works; a used item is refused with E5001 naming its user, with store and files unchanged; deleting the last item removes the module, its file and its `mod` line; deleting a container deletes its items; several names are refused together.",
+  "closedTime": 1792385815,
+  "column": "complete",
+  "createdTime": 1792368706,
+  "dependsOn": [
+    "e6a34c9df7823031"
+  ],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "87caaab35442ab65",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 232.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: delete checks with cargo"
+}

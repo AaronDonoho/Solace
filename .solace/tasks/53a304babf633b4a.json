@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1794183786,
+  "body": "Separate writing skills from choosing which roles get them (human's issue 6, 2026-11-01). Today `settings.skills_section` groups skills under each role, with per-role Add buttons, and the skill form also carries role checkboxes. Both are mixed into one confusing flow.\n\n### What changes\n- **Skills section**: one flat list of every skill, with Add, Edit and Delete. The form has only name, description and body, with no role checkboxes (`settings.skill_role_choice` leaves the form). Saving a new skill gives it no roles.\n- **Each agent role's card** (the one holding its model after task:747bf8c446ba332b) shows that role's skills, and lets the human tick or untick skills from the full list. Assigning saves straight away, the same way the model choice does, and changes only that skill's roles.\n- Editing a skill's text keeps its roles. Deleting a skill removes it from every role (as now).\n- A skill with no roles shows in the Skills list as \"Not used by any role\". Skill files with no `roles` key keep today's meaning in briefs; the list labels them \"All roles\" so the human isn't misled.\n- Keep the existing `/skills` routes if they can carry this; no new server behaviour unless one is needed.\n\n### Acceptance criteria\n- Writing or editing a skill never asks about roles.\n- A role's skills are chosen only in that role's card, and the choice survives reload.\n- A run's brief still gets exactly its role's skills (and the unscoped ones).\n- Focused tests: form without roles, assign/unassign from a role card, edit keeps roles, delete clears them.\n\n### Out of scope\nSkill files' format, per-task skills, uploading skills.",
+  "closedTime": 1794083043,
+  "column": "complete",
+  "createdTime": 1793584629,
+  "dependsOn": [
+    "e944022f849fda2c",
+    "747bf8c446ba332b"
+  ],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/settings",
+  "id": "53a304babf633b4a",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 269.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "skills: edit apart from role assignment"
+}

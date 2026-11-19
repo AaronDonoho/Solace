@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792557307,
+  "body": "`grep ponytail` matches only D-156 in `DECISIONS.md`. The prompts and briefs already state the practices without the name; the code comments are handled by task:2e1aed1bf659c105.\n\n1. Reword D-156's board-task parenthetical and its `Why:` sentence to describe the practices and their benefit without naming their source skill. Keep every rule in items 1–2 unchanged.\n2. Do not touch the prompts, briefs, specs or tests: they already contain the philosophy and no name.\n3. Leave the completed source task and its notes unchanged: they are the historical record, and rewriting them would lose provenance.\n\nDone when `grep pony` returns no match. No test applies; this changes no code.",
+  "closedTime": 1792509951,
+  "column": "complete",
+  "createdTime": 1792506252,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "7b28aba77f20eb06",
+  "links": [],
+  "milestone": null,
+  "rank": 239.0,
+  "scope": [
+    "."
+  ],
+  "title": "decisions: remove skill name from D-156"
+}

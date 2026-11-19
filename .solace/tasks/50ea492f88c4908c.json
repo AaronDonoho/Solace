@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056540,
+  "body": "Add an element type that stands in for a component placed inside a page, such as the task details component on the Board. It names the component and takes a size. The design doesn't redraw what's inside it. Today the design agent draws dashed boxes for this.\n\n## Done when\n\n- The type is in `design.ELEMENT_TYPES` and must name its component. It holds no children.\n- The Design page draws it showing the component's name, and it can be selected and given notes like any other element.\n- The design README, the format list from task:7aaef771b4b69ffe and a `DECISIONS.md` entry amending D-230 include it.\n\n## Open\n\n- Whether it should also be able to link to another design that draws the component in full. That's left out unless the human asks for it.",
+  "closedTime": 1795035317,
+  "column": "complete",
+  "createdTime": 1794865876,
+  "dependsOn": [
+    "7aaef771b4b69ffe"
+  ],
+  "feature": "5c9ad9a3006d1acc",
+  "home": "solace-cli",
+  "id": "50ea492f88c4908c",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 318.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "elements: embedded component stand-in"
+}

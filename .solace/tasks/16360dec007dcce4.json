@@ -1,0 +1,25 @@
+{
+  "archivedTime": 1794893338,
+  "body": "Reading a module (`view <module>`, with or without `--project`) can return thousands of lines on the big page modules (strategy, settings, design, delivery). Most of it is long constant values, like style text, printed in full. Agents only needed the module's short description and its list of items.\n\nThe discussion settled the direction. A follow-up investigation turns it into a full report that stands on its own: required behavior, acceptance, risks. No \"see earlier notes\".\n\n### Agreed direction\n\n1. **No new command or option.** `--header` stays as it is (`submit --imports` errors and `lockdown::paths.graph_hint` point to it). Agents keep using the normal read.\n2. **Long constants are shortened in outlines.** A long value shows only its first line plus a marker that more follows. Short constants stay whole. Reading the constant by name still shows all of it.\n3. **One oversized outline follows the reply size limit.** Today `fits` in `store_read.Store::view_with_header` always lets the first item through. When an outline is cut, the reply says how many items were left out and how to see them, like other trimmed replies.\n4. **Missing module descriptions are added** to the page modules named above (`delivery` has none). Adding them to the rest of the modules is a separate follow-up.\n5. **Tests and help text** (`src/reference/*.txt`) are updated in the same change.\n\n### For the investigation to settle\n\n- Whether Rust outlines have the same full-constant problem. If they do, treat Rust the same way.\n- What counts as a \"long\" constant, and where shortening belongs (`index.signature` / `language::gleam.signature` or the outline step). Other callers of the signature text must keep what they need.\n- How the `--bodies` fallback to outlines changes.\n- Point 3 changes a rule in D-14 and specs/03-protocol.md (`view` falls back to outlines, never cut further). The work run records the human's go-ahead as a new decision and updates the spec.\n\n### Risks already named\n\n- Tests on today's output: `store::read_tests.view_shows_module_header`, `view_header_shows_a_gleam_comment_and_import_once`, `view_header_keeps_a_rust_module_outline_nested`, plus the hint strings in `lockdown.tests::*` and `board::tests.a_cross_project_graph_hint_names_the_project`.\n- A cut outline might lead an agent to think an item is missing and write a duplicate. The \"left out\" count and pointer guard against this. A duplicate name is also caught on save.",
+  "closedTime": 1794892649,
+  "column": "complete",
+  "createdTime": 1794889435,
+  "dependsOn": [],
+  "feature": "5be8bc14e3676b85",
+  "home": ".",
+  "id": "16360dec007dcce4",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 383.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/delivery",
+    "solace-cli/design",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "reading: keep module outlines short"
+}

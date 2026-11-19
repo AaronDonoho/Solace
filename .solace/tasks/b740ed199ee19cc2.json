@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1791690202,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9).\n\nProject: `solace-cli/strategy`, maybe `solace-cli/components`. Needs \"Strategy run store and API\", \"Strategy: launching the agent and reading the graph\" and \"Strategy: proposals and approval\".\n\n- The docked panel and its context from the selection.\n- The transcript, message box, Approve/Reject proposals, run markers and the past-runs list.\n- Gleam tests and an `api.test.mjs` flow.\n- If the panel or the proposal display goes into `solace-cli/components`, add that project to this task's scope.",
+  "closedTime": 1791679025,
+  "column": "complete",
+  "dependsOn": [
+    "42994585a2a4b98e",
+    "4f0f816755b44428",
+    "b0f310d12726a880"
+  ],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "b740ed199ee19cc2",
+  "links": [],
+  "milestone": null,
+  "rank": 5.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: planning panel"
+}

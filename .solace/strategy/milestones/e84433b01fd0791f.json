@@ -1,0 +1,9 @@
+{
+  "body": "The Build tab of the Delivery page is where a supported imported project or workspace is built into a Linux deployable. This milestone is the minimum for that goal; everything else moved to the milestone that follows it. Deploy tab rollout takes these releases.\n\nSupported means Gleam projects, one-crate Rust packages, and JS alongside Gleam. Pure JS projects are left out. A deployable is something you can copy to a Linux machine and run, if that machine has any runtime it needs, such as Erlang.\n\nThis milestone is reached when:\n- **An imported project builds to a deployable**: each project has a recipe, declared or default, that names what it ships, and the order across projects is computed from them.\n- **Builds run from the Build tab**: no command line, with each step's status and log, and a failed step's summary.\n- **A passed build is a stored release**: its outputs are kept with checksum, size, source commit and log, in the output folder (`build-output` by default, with a read-only option), identified by the build's ID.\n- **Deployables are reachable**: each can be downloaded from the Build tab.\n- **Solace builds itself**: the Linux desktop bundles are built from the Build tab, proving the workspace case.\n- **Imported projects are proven**: small imported Gleam and Rust projects build, and their deployables run.\n- All linked features are complete.",
+  "id": "e84433b01fd0791f",
+  "rank": 1.0,
+  "request": "a31a03f6-b2d8-40ae-b480-d2b9616dbd59",
+  "state": "complete",
+  "targetDate": "2026-11-21",
+  "title": "[Delivery Page] Build tab rollout"
+}

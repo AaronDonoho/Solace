@@ -1,0 +1,10 @@
+{
+  "body": "An `extract <symbols…> --to <module> [--to-project <folder>]` command that moves symbols and keeps their identity and revision. It brings along private helpers that only the moved symbols use, rewrites every remaining reference and import, moves the tests that reach only moved code, and refuses a dependency cycle (E5002), naming the boundary uses. It runs as one transaction gated on the type-check and is undone by task revert/cancel.\n\nWhy: an agent extracting the components project rewrote references by hand and a submit failed. This turns dozens of hand edits into one command, so the agent is left with only the judgment call: where the component boundary goes.\n\nPlan source: task:a9d18cc6be1c2a2a (notes 15–17: the review, gap fixes and the final task plan).\n\nTasks, in build order:\n1. `extract` within one project (first)\n2. Submit hint pointing to `extract` (needs 1)\n3. `extract --to-project` (needs 1)\n4. Atomic cross-project extract (needs 3)\n5. JS FFI files and paths (needs 1, and 3 for the cross-project part)\n\nLater, not yet a task: reuse the pending-operation mechanism from task 4 for parallel work, e.g. agents claiming symbols before changing them.",
+  "colorSlot": 0,
+  "id": "068f9f57ce89d8b2",
+  "milestone": null,
+  "rank": 11.125,
+  "startTime": 1791780526,
+  "state": "complete",
+  "title": "`extract`: move symbols between modules and projects"
+}

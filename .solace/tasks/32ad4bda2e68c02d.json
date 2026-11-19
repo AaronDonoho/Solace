@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793159126,
+  "body": "Steps 1–2 of the refactor plan (task:fc9bf315f4eddc7a, notes 6 and 12): the baseline gate, then shared helpers. Public CLI behavior stays unchanged.\n\n1. **Baseline gate.** Rerun `check --warnings`, `rust-unit`, `rust-acceptance` and `spacing_parity` (the recorded results are stale). If one fails, fix it or quarantine it before going on.\n2. **Shared helpers.** Add `fsx`, `jsonx` and `project_paths`, move the helpers into them with `extract`, update every caller, and remove an old wrapper only once `refs` shows nothing calls it.\n   - `crate.write_atomic` vs `tasks.replace_file`/`tasks.replace_bytes`, and `crate.lock_file` vs `board.lock`, are **not** duplicates (D-207). Unifying them means picking one behavior and moving callers to it, and each caller must keep its current durability (sync-to-disk) and locking guarantees. Use `merge` only where signatures already match.\n   - The plan found no compiler-visible dead code. Delete only what this step replaces.\n\nNew tests go into `<module>_tests.rs` files (D-206). After each change, run `check --warnings`, `rust-unit` and the affected acceptance suite.",
+  "closedTime": 1793060402,
+  "column": "complete",
+  "createdTime": 1792211531,
+  "dependsOn": [
+    "fc9bf315f4eddc7a"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "32ad4bda2e68c02d",
+  "links": [],
+  "milestone": null,
+  "rank": 189.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Cleanup: baseline and shared helpers"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794856676,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794797555,
+  "column": "complete",
+  "createdTime": 1794797338,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "c9b55862935f6a0c",
+  "links": [],
+  "milestone": null,
+  "rank": 127.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "task view: hide more buttons while an agent runs"
+}

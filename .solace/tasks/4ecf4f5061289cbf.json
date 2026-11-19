@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794340347,
+  "body": "Split the Settings page into three tabs, in this order: **Agents**, **Appearance**, **Languages**. Nothing is added or removed from what the page can do; its existing sections move into the tabs.\n\n- **Agents:** Agent behavior, Role models, Models, Skills\n- **Appearance:** the Dark mode section\n- **Languages:** the Languages section\n\nA message explaining a refused change must still be seen whichever tab is showing.\n\nUpdate the settings README to match. The code is `settings.view` in `solace-cli/settings`; the Strategy page (`strategy.view`, `strategy.tabs`) already has tabs to follow.\n\n**Tests:** each tab shows its own sections and no others, and all three tabs are listed in order.",
+  "closedTime": 1793934424,
+  "column": "complete",
+  "createdTime": 1793834484,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/settings",
+  "id": "4ecf4f5061289cbf",
+  "links": [],
+  "milestone": null,
+  "rank": 271.0,
+  "scope": [
+    "solace-app",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "title": "settings: Agents, Appearance, Languages tabs"
+}

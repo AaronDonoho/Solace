@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792464629,
+  "body": "Measure what task:d41626ab51473623 could only estimate, before building anything.\n\n- Time `cargo check --all-targets --message-format=json` in `solace-cli/`: cold (fresh target folder), warm with no change, and warm after a one-function edit.\n- Time `cargo test` warm after the same edit.\n- Run `cargo fmt --check`: is the crate rustfmt-clean today?\n- Confirm the JSON gives a primary span (file, lines) for a deliberate type error and a borrow error.\n\nThe commands are root commands the human approves.\n\n### Done when\n\nA note with the times and findings. If warm `cargo check` is well over the 1–3 s estimate, say what that means for submit.",
+  "closedTime": 1792254459,
+  "column": "complete",
+  "createdTime": 1792252697,
+  "dependsOn": [],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "4f32c653e33b9caf",
+  "links": [],
+  "milestone": null,
+  "rank": 197.0,
+  "scope": [
+    "."
+  ],
+  "title": "Rust: measure check and test times"
+}

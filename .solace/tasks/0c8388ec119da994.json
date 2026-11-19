@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1792208843,
+  "body": "The model list comes from presets built into the binary (`src/default-models.toml`) plus `[[models]]` in the system configuration. When an agent program gains new models, for example a Claude Code update, Solace doesn't show them until it is rebuilt or the human edits the config. Solace should ask each agent which models it offers.\n\n### Per agent (confirm current options before building)\n\n- **Codex.** The app-server's `model/list` JSON-RPC call lists the models Codex can use, with their reasoning efforts. Use it for the list and for `efforts` in place of the fixed list in `board.rs::efforts`. Some entries are hidden: leave those out. A listed model isn't proof the account may use it; usage limits are handled in task:6354ec5642573754.\n- **Claude Code.** As far as we know there is no non-interactive model list (only a feature request for `claude model list`). Fallbacks, in order:\n  1. If the installed version has a list command, use it.\n  2. Offer Claude Code's aliases (`opus`, `sonnet`, `haiku`), which it maps to the latest model of each family, so a Claude Code update brings new models without a Solace change. Show the model a run actually used, from its log's start event, in the run and in the label once known.\n  3. With an `ANTHROPIC_API_KEY` sign-in, the provider's models endpoint can list exact ids. Solace still stores no key; it only uses the variable that is already set.\n\n### Behaviour\n\n- Discovered models merge with the presets and config. The config still wins for the same id, and presets remain the fallback when discovery fails or the program is missing.\n- Discovery runs at startup and then at most every few minutes (or on a `refresh` in the picker). It never blocks `/models`: it serves the last list and refreshes in the background.\n- A model that disappears from discovery stays assignable to tasks already using it, but isn't offered for new ones.\n- One discovery entry per agent kind, in the same per-agent table as availability (task:6354ec5642573754), so another harness only adds an entry.\n\n### Checks\n\n- Unit tests with recorded `model/list` output and Claude fallbacks: merge order, hidden entries left out, efforts taken from Codex, presets used when discovery fails.\n- An acceptance test with the fake agents: a model the fake Codex reports appears in `/models` without a config change.\n- Guide and README Models sections updated.",
+  "closedTime": 1792072226,
+  "column": "complete",
+  "createdTime": 1792032308,
+  "dependsOn": [
+    "6354ec5642573754"
+  ],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "0c8388ec119da994",
+  "links": [],
+  "milestone": null,
+  "rank": 146.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: discover each agent's models"
+}

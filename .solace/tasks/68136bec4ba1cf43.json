@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765931,
+  "body": "The Tasks tab pages at 25 (task:fa381a3d2079fb08); make the page size 10. Keep the existing filter-before-paging order, the reset to page 1 when a filter changes, the Prev/Next disabled states, the `page N of M, T tasks` count, and a selected task's details across page changes.\n\n**Tests:** paging for 0, 1, 10, 11, 25 and 26 matching tasks; first and last page controls; a filter change returns to page 1; a live update that shrinks the list never leaves an empty page.",
+  "closedTime": 1792723344,
+  "column": "complete",
+  "createdTime": 1792707987,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "68136bec4ba1cf43",
+  "links": [],
+  "milestone": null,
+  "rank": 103.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: page ten at a time"
+}

@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793035351,
+  "body": "When a patch's hunk for **code** (`submit`, a `*** Update:` of a symbol or module) doesn't match only because of leading spaces, apply it anyway instead of refusing with E0108. File patches (`write`) stay strict, as D-142 says.\n\n## Why\nIn run 00acbe40d2cf4d4d on task:3517183e01f63016, one line written with 12 leading spaces instead of 16 (step 30) started a loop of about 30 failed draft repairs (steps 31–94). Agents often get indentation wrong by a few spaces. For code, Solace formats the result after the check anyway, so leading space in a patch carries no meaning.\n\n## What changes\n- `drafts.apply_hunks` gets a third matching level, used only for code targets (`at_end` false): compare lines with leading and trailing space ignored. Use it only when the exact and trailing-space levels find nothing, **and only when it matches in exactly one place**. When it matches in several places, keep today's E0108 with its leading-space hint.\n- When that level matches, context and `-` lines keep the **target's** own text, not the patch's. `+` lines are shifted by the difference between the target's indentation and the patch's (taken from the first matched line), so they land at the right depth.\n- The save reply adds one line saying a hunk was matched through indentation, so the agent learns without being refused.\n\n## Cautions\n- This amends D-142 point 1 for code only. Record it as a new decision. D-142's concern (a quoted line silently re-indented) doesn't arise, because quoted lines keep the target's text.\n- Check whether Gleam code is formatted after `submit` the way Rust is with rustfmt. If it isn't, say so in the summary and leave Gleam on the strict rule.\n- Existing tests that expect E0108 for indentation on code (for example in `drafts.tests::patch_refusals_name_the_problem` and `drafts.tests::patch_matching_ignores_trailing_space_and_unified_headers`) change to expect a match. Say which ones you changed.\n\n## Done when\n- A code hunk off by a few leading spaces applies. Its `+` lines land at the target's depth, and the reply notes the loose match. Both are pinned by tests in `drafts::`.\n- A hunk that only matches loosely in two places is still refused.\n- A `write` file patch off by leading spaces is still refused (D-142).\n- `src/reference.txt` says that code hunks forgive indentation and file hunks don't, keeping the D-143 layout.",
+  "closedTime": 1792989825,
+  "column": "complete",
+  "createdTime": 1792982682,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "632aecf9d9f05d58",
+  "links": [],
+  "milestone": null,
+  "rank": 87.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "submit: code hunks match through indentation"
+}

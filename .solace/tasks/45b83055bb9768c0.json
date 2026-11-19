@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056536,
+  "body": "When a work run proposes a decision (`task decision`, or `write DECISIONS.md`), the board can't read the task any more: its card is hidden with the notice \"Can't read task …\". This happened on task:76554b1e77976ad7.\n\nCause: the question it adds carries `settings: {decision: {title, body}}`, but the task question decoder (`solace_task.question_decoder` in solace-cli/components) accepts only `settings: {base, proposed}`, so the whole task fails to decode.\n\nFix: a task with a decision proposal reads and shows its card again. The proposal shows as a question with its text and its Approve and Reject options, and answering it records or drops the entry as the server already does (`board::settings.apply_settings`).\n\nAcceptance:\n- A task holding a decision proposal question shows on the board and in its details, with no \"Can't read task\" notice.\n- Approving it from the board adds the entry to `DECISIONS.md`; rejecting it adds nothing.\n- A test decodes a task with such a question.\n- Rebuild the bundled pages that use the shared task component.",
+  "closedTime": 1794963858,
+  "column": "complete",
+  "createdTime": 1794962331,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli/components",
+  "id": "45b83055bb9768c0",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 130.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend"
+  ],
+  "title": "board: show decision proposals on tasks"
+}

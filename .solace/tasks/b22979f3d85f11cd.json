@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792215209,
+  "body": "Remove the up/down buttons from features.\nPut a drag handle at the left side of the feature which allows rearranging.\nWhile dragging, other features should move dynamically as if to preview the feature's potential new placement.",
+  "closedTime": 1792214389,
+  "column": "complete",
+  "createdTime": 1792126121,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "b22979f3d85f11cd",
+  "links": [],
+  "milestone": null,
+  "rank": 98.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Draggable Features"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056555,
+  "body": "Solace plays a sound when an agent finishes, and a different sound when a task needs attention. A new **Notifications** tab on the Settings page turns each one off.\n\n- **Finished:** a work run on a task ends without needing the human.\n- **Needs attention:** the cases the board already marks as needing attention: a question, a failed run, or a discussion waiting on the human. Only this sound plays for such a run, not both.\n- The sounds play on whichever page is open.\n- **Settings → Notifications:** one setting for each sound, both on by default. A change takes effect at once and is kept after a reload.\n\nOut of scope: Strategy and Design page runs, system (desktop) notifications, and choosing volume or the sounds themselves.\n\n**Tests:** each case picks its sound; a turned-off sound doesn't play; the tab lists both settings.",
+  "closedTime": 1794789795,
+  "column": "complete",
+  "createdTime": 1794787927,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "2c3d43389107a7c1",
+  "links": [],
+  "milestone": null,
+  "rank": 177.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "title": "notifications: sounds and settings tab"
+}

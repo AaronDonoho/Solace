@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690242,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9).\n\nFiles: `tasks.rs`, `board.rs`. Scope: `.`.\n\n- The run store and the §4 requests.\n- `{strategyRun}` events and the replay.\n- Unit tests in `tasks::tests`.\n- An acceptance test for start, the `E7003` refusal for a second run on the same context, notes, end and the events.",
+  "closedTime": 1791662048,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "42994585a2a4b98e",
+  "links": [],
+  "milestone": null,
+  "rank": 63.0,
+  "scope": [
+    "."
+  ],
+  "title": "Strategy run store and API"
+}

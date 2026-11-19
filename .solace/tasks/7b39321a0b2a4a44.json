@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056543,
+  "body": "A human drags an element on a UI/UX design to a new place: earlier or later among its siblings, or into another container.\n\n### Do\n\n- Dropping an element saves one move operation through task:f90a4ae01bdae411. An element's position is its place in its parent's list (D-230).\n- A move the rules refuse, such as a screen below the top level, is not saved, and the element goes back.\n\nAsk the human how the drop place is shown while dragging.\n\n### Acceptance\n\n- Tests: reordering and moving into another container save the expected operation, and a refused move restores the design.\n- A browser check of a drag; say in the task note if it has to be manual.\n- Update the README.\n\n### Left out\n\nDragging new components in from a palette, and the Architecture tab.",
+  "closedTime": 1794978695,
+  "column": "complete",
+  "createdTime": 1794273298,
+  "dependsOn": [
+    "cc33d4301e06e612"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "7b39321a0b2a4a44",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 18.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "edit: move an element by dragging"
+}

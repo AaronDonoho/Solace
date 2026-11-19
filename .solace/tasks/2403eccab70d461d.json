@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690226,
+  "body": "Summary\nI read through the D-77 task store: tasks.rs, the task paths in board.rs (adopt_tasks, needs_lock, guard, change, message, task_command, supervise, finish, Events), lockdown::recover, outside::absorb and the board client (api.mjs, solace_board.live / start). The design holds up overall: one writer thread, and project locks are always taken in the same order. But I found ways to lose edits, apply stale edits, leave the board out of step with the store, and stall it. They are listed by severity. Nothing was changed, and no tests were run (this run is read-only and run is refused).\n\nMedium: board out of sync with the store; snapshot plus compaction for the board.\nThe board's state comes only from the event log (start opens /events with no Last-Event-ID; live folds the replay; no GET /tasks). Any task file written without a matching event is never shown, or shown out of date, even after a reload:\nadopt_tasks writes with write_atomic and logs nothing. After migration the board shows tasks only from the old per-project board_events, in their old shape (with changes, without home). A task with no old event doesn't appear at all.\nwrite() renames the file and then calls log(). If the log insert fails (busy after 10 s) or the process crashes between the two, the file has changed but there is no event. The client also gets an error for a change that was applied, and may retry it, duplicating a note or action.\nFix: load from a snapshot (GET /tasks plus the log position read *before* the files), or at server start log every task whose file differs from its last logged copy. Make adopt_tasks log each task it moves.\n\nReplay cost grows without bound, so the board loads more slowly over time. Every write logs the *whole* task: notes, reports, discussion turns, each verification, review_tests, conversation updates. Nothing compacts events.db or board_events. Each page load replays everything from seq 0. For every task event, Events::read opens a new SQLite connection to every project's store.db, then next_task opens events.db and runs PRAGMA + CREATE TABLE. The board shows nothing until ready. Fix: compact to the latest event per task (this needs a task column), or start from a snapshot as in item 7. Keep one connection per stream.\nUnclear after a project is removed and added again. members_changed starts a new lane at the latest event, and the shared task log has already passed that project's earlier task events. I couldn't confirm whether the {projects} event makes the client reload that lane. Worth a test.",
+  "closedTime": 1791425364,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "2403eccab70d461d",
+  "links": [],
+  "milestone": null,
+  "rank": 36.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Task Store debt: out of sync"
+}

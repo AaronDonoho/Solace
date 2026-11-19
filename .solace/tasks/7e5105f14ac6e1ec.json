@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793665641,
+  "body": "Define the canonical agent roles used by Solace and their meaning.\n\n### Scope\n- Establish stable role identifiers and plain-language descriptions for Strategist, Investigator, Worker, Reviewer, and Coordinator.\n- Coordinator is a new role to be expanded upon in future tasks.\n- Put the role definition in the typed contracts/domain API so settings and the board use one source of truth.\n- Add focused tests for the role set and serialization.\n\n### Acceptance criteria\n- The role list and identifiers are documented in one canonical definition.\n- Settings and board code can consume the definition without duplicating role names.\n- A role has a clear purpose and is distinguishable from its assigned model.\n- The role set is covered by tests and any specification change follows the decision process.\n\n### Out of scope\nChoosing models, settings controls, model defaults for runs, Autorun behavior, and Agent Roles UI layout.",
+  "closedTime": 1793508292,
+  "column": "complete",
+  "createdTime": 1792729943,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": ".",
+  "id": "7e5105f14ac6e1ec",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 266,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/contracts"
+  ],
+  "title": "Agent roles: define roles"
+}

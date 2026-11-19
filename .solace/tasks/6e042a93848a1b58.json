@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056540,
+  "body": "Before planning or changing anything, strategy, investigate and work runs check the task/subject against the project's decisions, the vision, the task's feature, and open tasks. If something contradicts the task/subject, they ask before going on. Today the investigate brief says only \"answer what it asks, or … plan it\".\n\n### Behaviour\n\n- A contradiction becomes a `task ask` that names both sides in the human's terms. For example: \"This task removes the Backlog column, but an earlier decision keeps Backlog for planning.\" The options include going ahead (the agent then proposes an updated decision), changing the task, or dropping it.\n- The **asking** setting never suppresses this question.\n- If no conflict is found, the run's report says what it checked, in one line.\n\n### Checks\n\nA fake-agent or bench case: a task that contradicts a logged decision ends in a question, not in changes.",
+  "closedTime": 1794975498,
+  "column": "complete",
+  "createdTime": 1792092158,
+  "dependsOn": [
+    "dde97daa88bd4d76"
+  ],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "6e042a93848a1b58",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 161,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: push back on contradicting tasks"
+}

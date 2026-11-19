@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876817,
+  "body": "The run for task:21241abf8e6ac8a7 started in the plain root project, and its first `Next` call named `mcp.tool_schema` and `board.work_role` instead of any Store code. Both come from `store_read.Store::named`: it only finds names written `module.name`, so a task that names `Store` bare is invisible to `board.start_project` and to the session ranking.\n\nTreat a backticked bare identifier as a name when it resolves to exactly one symbol. That should choose the project that holds the named code and boost those symbols in `session start --task`. Common words and ambiguous bare names must not count, and the existing `module.name` behavior stays.\n\nTests:\n- a task scoped to `.` and `solace-cli` whose body says `Store` starts in `solace-cli`;\n- its first call names a Store symbol;\n- a bare word matching several symbols neither chooses a project nor outranks named code.\n\nFor investigation to answer: is this actually a good idea to implement?",
+  "closedTime": 1794792375,
+  "column": "complete",
+  "createdTime": 1793164050,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "680737d1b136f8b5",
+  "links": [],
+  "milestone": null,
+  "rank": 149,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: start from the task's code"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792541971,
+  "body": "When the task is viewed, a link to the feature should be on the task as the first line of the Details. \nThe next line of Details should be a list of task dependencies and tasks that depend on this task. ",
+  "closedTime": 1792250601,
+  "column": "complete",
+  "createdTime": 1792212663,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "7045f1b9d850894d",
+  "links": [],
+  "milestone": null,
+  "rank": 95,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "Show feature and dependencies in task viewer"
+}

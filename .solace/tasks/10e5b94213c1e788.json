@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792731878,
+  "body": "Part 1 of same-project Rust `extract` (D-185): the scoped resolver the command (task:4375a3b1075dced2) calls to rewrite references. Rust `extract` stays refused after this task; the work is tested on its own in `language::rust_refs`. Follow the plan in note 16.\n\n**Problem.** `language::rust_refs` is built for test reach and matches too much on purpose: `scan` gives only a line per mention, a field access counts as a path, there are no local bindings, and `Refs::path` falls back to any crate item with the same last name. That must stay as it is for `graph`, but cannot drive rewriting.\n\n**Do.**\n- Mention spans: `scan` records each mention's byte range; add a field mention (`x.make`, no call). `graph` reach does not change.\n- Lexical scopes: exclude `let` bindings (from the end of the pattern to the end of the block), closure, `match`, `if let`/`while let`/`for` and parameter bindings (including destructured), local `fn`/`const`/`static`/type declarations, struct-literal field names, and macros.\n- `Refs::resolve_exact`: paths only, one target, no fallback or leaf match, so `vendor::make` and `std::collections::HashMap` resolve to nothing. It says how the name was reached (own item, `use` binding with its local name, or qualified/`self::`/`super::`/`crate::` path).\n- `rewrite_sites` and `use_sites`: every unshadowed mention of an item, and every `use` tree site including aliases and group members.\n- Add new symbols before `mod tests` and submit in small patches. No unused imports or dead items: helpers the command does not call yet are reached by tests; `check --warnings` stays clean.\n\n**Tests.** A local, field, method call and closure sharing an item's name give no site; a `match` binding and destructured parameter give none; `vendor::make` and `std::collections::HashMap` don't resolve to crate items; a real call before a shadowing `let`, and after an inner block that shadowed it, give sites; an import-bound name and an `as` alias are reported; `graph` reach and the existing `rust_refs` tests are unchanged.\n\n**Out of scope.** The command, transaction, errors, D-185 and docs (task:4375a3b1075dced2); impls and test modules; import carrying; namespaces.",
+  "closedTime": 1792611709,
+  "column": "complete",
+  "createdTime": 1792596458,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "10e5b94213c1e788",
+  "links": [],
+  "milestone": null,
+  "rank": 28.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: Rust resolver on rust_refs"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793423237,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793417793,
+  "column": "complete",
+  "createdTime": 1793408462,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "1794d43148cea6f8",
+  "links": [],
+  "milestone": null,
+  "rank": 316.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Root project refactor and cleanup"
+}

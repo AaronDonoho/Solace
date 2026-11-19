@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183766,
+  "body": "Agents change a design only through a proposal the human accepts, so no run may write a design file directly. Files in the repo are watched by default, so without this an agent could skip the visual check.\n\n### Do\n\n- Refuse `write`, `remove`, `move` and file patches on the designs folder, for every run kind, in `lockdown`. The refusal says that designs change through the design agent. A work run can't propose a settings-style change to one either.\n- Agents can still read these files.\n- Update Spec 14 §1, and record this in a decision.\n\n### Acceptance\n\n- Tests: each of the four write paths is refused in a work run, a batched file patch with one design file changes nothing, and `read` still works.\n\n### Left out\n\nThe design agent's own proposal path, and changes made outside Solace. A hand edit of a design file on disk isn't handled here.",
+  "closedTime": 1794029110,
+  "column": "complete",
+  "createdTime": 1793913880,
+  "dependsOn": [
+    "ac6ed25bd94c0d4a"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "0af5a7fe711b8a3a",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 338.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: agents can't write designs"
+}

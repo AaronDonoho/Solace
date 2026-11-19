@@ -1,0 +1,8 @@
+{
+  "body": "What follows the first Linux deployable from the Build tab: the work set aside from the Build tab rollout milestone so it could stay at the minimum.\n\n- What a build may reach: its permissions and network access.\n- One approved version across every manifest.\n- Turning a failed build into a task.\n- Release notes, release history and package inspection.\n- Cross-platform targets.",
+  "id": "f8b1014c90da26f9",
+  "rank": 8.0,
+  "state": "proposed",
+  "targetDate": null,
+  "title": "[Delivery Page] Build tab: after the first deployable"
+}

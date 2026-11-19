@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791690215,
+  "body": "Dark mode is broken in the board after creating the Migration page.",
+  "closedTime": 1791352939,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "a767b854f96fe21a",
+  "links": [],
+  "milestone": null,
+  "rank": 16.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/frontend",
+    "solace-cli/migration"
+  ],
+  "title": "Dark mode is broken"
+}

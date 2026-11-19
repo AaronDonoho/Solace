@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690201,
+  "body": "The human saw the task \"Improve Scope UI\" (870eeceae1519605) stuck on \"Agent investigating\" with no buttons. The server's record was fine: column `complete`, all 8 runs `ended`, no attention. The page's own copy of the task was wrong, so this is a client bug. It is a bug even though that task is done.\n\n## What is known\n- The status label is computed in the browser (`solace_task.status`, used by `status_badge` and the detail meta). It says \"Agent investigating\" only when the page's copy has a run of kind `investigate` that is not `ended`. The task's last investigate run ended long before the task was completed.\n- Buttons come from the task's column in the workflow (`AU` in the bundle). A column that is final, or not in the workflow, gives no buttons. So the copy shows column `complete` together with an old, unended investigate run: a mixed state, not merely an old one.\n- The task is stored in `solace-cli/board` and its scope also includes `.` (D-61), so it is drawn in two lanes. The Gleam tests do not cover that case for the open detail.\n- Not known: which page (the board or the Strategy Tasks tab) showed it, which lane it was opened from, whether a reload fixed it, and whether the server restarted while the page was open. Ask the human before spending time on guesses.\n\n## Suspects, none confirmed\n1. `solace_task.live` drops a message unless its `project` equals the element's `dir`. The board's and Strategy's `for_detail` also require the event's project to equal the selected card's home. A mismatch drops the event silently with no refetch.\n2. Messages that arrive before `ready`, or for a project that is not listed yet, wait in `replay`.\n3. `tasks.rs` `log()` only prints an error when an event append fails. A reconnecting stream (`Events::new` with a `Last-Event-ID`) sends no snapshot, so a lost event is never recovered without a reload.\n4. In `solace_task.update`, the `Changed` and `live` handlers merge the new task with the old one (`changes` is kept). Check that nothing else keeps stale parts, such as runs.\n\n## Work\n1. Reproduce it first with a failing test. In `solace_task_test`, hand a hosted `<solace-task>` a task with a running investigate run and then the same task as `complete` with the run `ended`. Do this for a task whose scope has two projects and whose detail was opened from the non-home lane. Add the same case to the board and Strategy tests (`Live` then `hand`).\n2. Fix the cause the test finds.\n3. Make the detail recover on its own: when an event is dropped, or the event stream reconnects, refetch the task (`GET /tasks/{id}`) so a lost event cannot leave it stale.\n4. A completed task's detail must show its true status and no live agent label.\n\n## Done when\n- The new tests fail before the fix and pass after.\n- `test --all` passes.\n- The board, Strategy and frontend bundles are rebuilt (`run bundle` in each; `build` only compiles Gleam). Note that the task \"Improve Scope UI\" was completed with a stale board bundle, so check `priv/app.js` contains the change.\n- Say whether the guards in `live` / `for_detail` were the cause, so the human knows.",
+  "closedTime": 1791685658,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "2df9ba4529ae1344",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Fix: a task's detail shows a stale agent status and no buttons"
+}

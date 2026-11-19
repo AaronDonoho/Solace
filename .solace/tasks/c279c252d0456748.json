@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690206,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nA list of features grouped by target milestone, using the existing `GET/POST/PATCH/DELETE /features` endpoints and the `{feature}` and `{removedFeature}` events.\n\n- Create and edit title, body (Markdown), state and target milestone.\n- Reorder by `rank` within a group.\n- Delete after a confirmation that says links get cleared.\n- Show each feature's tasks, with a \"new task for this feature\" action: `POST /tasks`, then `PATCH` `feature`.\n\nNo server work is needed.\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1791644560,
+  "column": "complete",
+  "dependsOn": [
+    "54bca89035fdb606"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "c279c252d0456748",
+  "links": [],
+  "milestone": null,
+  "rank": 58,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: Features tab [planning only]"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792541971,
+  "body": "Instead of removing the existing elements and then rendering their replacements, load and prepare the new elements offscreen, then switch to them once they're ready.\n\nThe best approach depends on what is causing the flash, but there are several common solutions.\nCommon approaches\n\n1. Double buffering (best for replacing entire sections)\nKeep the existing content visible while rendering the replacement in a second container. Once the new content is ready, swap visibility between the two.\nUseful for: dashboards, lists, search results, panels, and page sections.\n\n2. Hidden pre-rendering\nCreate the new elements in a container that's hidden from view, wait until they're ready, and then reveal them. Keep the old elements visible until that moment.\nUseful for: content that needs DOM construction, image loading, or layout calculation.\n\n3. Preloading assets\nLoad images, fonts, and other resources before displaying the new content. This prevents blank images, font swaps, and layout shifts, although it won't fix a gap caused by removing the DOM itself.\nUseful for: image galleries, dynamic cards, and custom fonts.\n\n4. Atomic DOM replacement\nBuild the new nodes in a DocumentFragment or detached element, then replace the old section in a single DOM operation. This minimizes the visible intermediate state without requiring two complete copies to remain mounted.\nUseful for: vanilla JavaScript interfaces and simple DOM updates.",
+  "closedTime": 1792216126,
+  "column": "complete",
+  "createdTime": 1792214685,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/components",
+  "id": "a0064b47e0aa822b",
+  "links": [],
+  "milestone": null,
+  "rank": 15.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "Stage new content"
+}

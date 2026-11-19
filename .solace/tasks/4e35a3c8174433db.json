@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793665575,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793658929,
+  "column": "complete",
+  "createdTime": 1793657865,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "4e35a3c8174433db",
+  "links": [],
+  "milestone": null,
+  "rank": 254.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "briefs: scope requests name the project"
+}

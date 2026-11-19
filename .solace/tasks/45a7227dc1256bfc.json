@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312245,
+  "body": "`lockdown.command` returns a `run`/`build` command's output as the program wrote it. Cargo's own replies already go through `diagnostics.strip_ansi`, but named commands don't. In run 9d47034f122fa14c of task:56ecdeaa0356d0db, `run cargo-fmt-check` returned a long rustfmt diff where every changed line was wrapped in terminal colour codes (`\\u001b[31m … \\u001b(B\\u001b[m`). That roughly doubled the size of a reply that was already large, and it came right before the agent's context was compacted.\n\nChange: pass the output of `lockdown.command` through `diagnostics.strip_ansi` before `condense` and `trim_output`, so the size budget is spent on text the agent can read.\n\nCheck: a test where a command prints ANSI-coloured lines, and the reply contains the plain text with no escape sequences.\n\n2 questions before proceeding: What's the true scope of this and similar waste-trimming actions? And is this a safe change that won't have negative unforeseen consequences?",
+  "closedTime": 1793231923,
+  "column": "complete",
+  "createdTime": 1793230879,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "45a7227dc1256bfc",
+  "links": [],
+  "milestone": null,
+  "rank": 179,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "run: strip colour codes from command output"
+}

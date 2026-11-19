@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791858550,
+  "body": "Dim a card on the board while any task in its `dependsOn` is **unfinished**. A dependency is unfinished when it is not in a final column of its workflow right now. Complete and cancelled both count as finished. `closedTime` is not the test, because it is never cleared, so a reopened dependency would still look finished.\n\n- Dimming is visual only. The card can still be opened, dragged and assigned.\n- The card's tooltip (or a short line on the card) says \"Waiting on\" and the titles of the unfinished dependencies.\n- A dependency can be in another project (the server checks `dependsOn` across the root, D-87). On a workspace or project board, the board still has to learn those tasks' columns and titles. Find out what the board's data already covers before adding a request.\n- Tasks saved before D-87 have no `dependsOn`; read it as `[]`.\n- The card updates live when a dependency moves column, or when its own `dependsOn` changes from Strategy.\n- Update the board README and add tests: no dependencies, an unfinished one, a finished one, a cancelled one, a reopened one, and one in another project.",
+  "closedTime": 1791758003,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "29f4838ffb0cb0d0",
+  "home": "solace-cli/board",
+  "id": "f542b7bc9f03a60e",
+  "links": [],
+  "milestone": null,
+  "rank": 25.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Board: dim cards with unfinished dependencies"
+}

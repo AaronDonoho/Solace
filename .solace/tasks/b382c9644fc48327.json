@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793665639,
+  "body": "The model picker for each role on the Settings page shows extra text after each model's name: the model id in brackets and, when the model can't start, the reason (for example \"Command Code (deepseek) — No key yet; add one in Settings\"). It should show only the model's name, as the task page's model picker does.\n\n### Scope\n- Each option in the role model picker shows just the model's name.\n- The list of models offered, the \"None (choose on each task)\" choice, and the fallback for a saved model that isn't set up here stay as they are.\n- The Models section higher on the page keeps showing ids and reasons; only the picker changes.\n- Update any test that expects the old option wording.\n\n### Pointers\n- `settings.model_option_label` (settings) builds the extra text; `settings.model_options` uses it. The task page uses `solace_task.agent_option`, which returns the label alone.\n- Test to check: `settings_test.role_models_load_save_and_fall_back_test`.",
+  "closedTime": 1793637025,
+  "column": "complete",
+  "createdTime": 1793636721,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/settings",
+  "id": "b382c9644fc48327",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 270.0,
+  "scope": [
+    "solace-cli/settings"
+  ],
+  "title": "settings: role model picker shows names only"
+}

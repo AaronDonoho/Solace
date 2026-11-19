@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792009415,
+  "body": "The Strategy Tasks tab should show when each task was created. Tasks don't record this today: a task has `closedTime` and `archivedTime` (D-87), but `board.rs::new_task` sets no creation time.\n\n**Server (root project)**\n- `board.rs::new_task` sets `createdTime` (seconds, like `closedTime`). It is set once and never changes, including on restore, a move between projects or an edit.\n- Older tasks get it when they load, in the same place as the D-87 back-fill in `board.rs`. Use the earliest of: the first note's time, the first run's start, or else the file's modified time.\n- `strategy.rs` passes `createdTime` along with `closedTime` in a task's brief. `specs/15-board-api.md` lists the field.\n- This is a new field on the task record, so it needs a short DECISIONS.md entry.\n\n**Strategy page**\n- The Tasks tab gets a **Created** column, shown as a date in the same format as the closed column.\n- The default sort stays as it is (closed tasks newest first, then open ones by title). Sorting by any column is the next task.\n- Update the Tasks tab section of the strategy README.\n\n**Tests:** `tasks.rs`/`board_tests.rs`:\n- a new task gets `createdTime`;\n- an old task takes its first note's time, else its first run's start, else the file's time;\n- a move or restore keeps it.\n\nStrategy view test: the Created cell renders. `board_acceptance.py`: a created task has an integer `createdTime`.",
+  "closedTime": 1791957264,
+  "column": "complete",
+  "createdTime": 1791955825,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "f25e5b1f0d3e1069",
+  "links": [],
+  "milestone": null,
+  "rank": 129.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: created time column"
+}

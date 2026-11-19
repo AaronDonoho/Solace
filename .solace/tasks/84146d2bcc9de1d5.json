@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037325,
+  "body": "Found by task:6d7d8a2d428cba97 (note 3). Rust `probe` points agents at lines they can't find.\n\n**Need**\n- A compile error in the probe's text is reported against the probe's own line numbers: the probe's first statement is `probe, line 1`, not line 7 (today the count starts at the generated `mod solace_probe` wrapper).\n- Panic locations and `dbg!` prefixes don't name the scratch file's line (`src/main.rs:4664:9`); they name the probe's line, or leave the location out.\n- No scratch-file gutter line numbers (`4664`) appear in the reply.\n- A compiler note that points outside the probe's text (e.g. `the function probe_code is defined here`) names that project symbol (`rust_probe.probe_code`), not `at probe, line 7`.\n\n**Left out**\n- Any change to how Gleam `probe` reports locations.\n\n**Cursory suggestion, not a prescription:** the mapping probably belongs where `rust_probe.report` turns `cargo::diagnostics` into text, using the probe's known offset inside the generated module. The worker decides.",
+  "closedTime": 1793030462,
+  "column": "complete",
+  "createdTime": 1793029240,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "84146d2bcc9de1d5",
+  "links": [],
+  "milestone": null,
+  "rank": 101.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: Rust locations name the probe's lines"
+}

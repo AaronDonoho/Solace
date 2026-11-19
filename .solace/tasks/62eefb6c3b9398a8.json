@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792215002,
+  "body": "Give each feature a button to Start the feature (puts it into active)\nthe button should disapppear when the feature is not in proposed or planned",
+  "closedTime": 1792212176,
+  "column": "complete",
+  "createdTime": 1792126558,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": ".",
+  "id": "62eefb6c3b9398a8",
+  "links": [],
+  "milestone": null,
+  "rank": 175.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Start feature button"
+}

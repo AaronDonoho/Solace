@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794972382,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794959955,
+  "column": "cancelled",
+  "createdTime": 1794959305,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": ".",
+  "id": "d385432a35f8e64c",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 386.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Built-in quality practices: Tech Debt"
+}

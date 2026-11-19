@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056537,
+  "body": "cargo tauri build\n        Info Looking up installed tauri packages to check mismatched versions...\n        Warn The bundle identifier \"dev.solace.app\" set in `\"tauri.conf.json\" identifier` ends with `.app`. This is not recommended because it conflicts with the application bundle extension on macOS.\n     Running beforeBuildCommand `cd \"$(git rev-parse --show-toplevel)\" && (cd solace-cli/frontend && bun install --frozen-lockfile && gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser) && cargo build --release --manifest-path solace-cli/Cargo.toml && sh solace-app/scripts/sidecar.sh`\nbun install v1.2.23 (cf136713)\n\nChecked 24 installs across 25 packages (no changes) [1.00ms]\n  Compiling components\n  Compiling migration\n  Compiling settings\n  Compiling solace_board\n  Compiling strategy\nwarning: Unused function argument\n     ┌─ /home/aaron/Documents/Projects/solace/solace-cli/strategy/src/strategy.gleam:2611:33\n     │\n2611 │     runs: list.map(row.runs, fn(run) {\n     │                                 ^^^ This argument is never used\n\nHint: You can ignore it with an underscore: `_run`.\n\nerror: Incorrect arity\n     ┌─ /home/aaron/Documents/Projects/solace/solace-cli/strategy/src/strategy.gleam:2612:7\n     │\n2612 │ ╭       solace_task.Run(\n2613 │ │         id: \"\",\n2614 │ │         kind: run.0,\n2615 │ │         state: run.1,\n     · │\n2622 │ │         used: \"\",\n2623 │ │       )\n     │ ╰───────^ Expected 11 arguments, got 10\n\nThis call accepts these additional labelled arguments:\n\n  - failed\n\n       Error beforeBuildCommand `cd \"$(git rev-parse --show-toplevel)\" && (cd solace-cli/frontend && bun install --frozen-lockfile && gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser) && cargo build --release --manifest-path solace-cli/Cargo.toml && sh solace-app/scripts/sidecar.sh` failed with exit code 1",
+  "closedTime": 1793568261,
+  "column": "complete",
+  "createdTime": 1793568021,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "6eb14cff530b8243",
+  "links": [],
+  "milestone": null,
+  "rank": 117.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "address build failures"
+}

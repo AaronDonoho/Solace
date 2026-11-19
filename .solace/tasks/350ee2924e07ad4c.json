@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792208845,
+  "body": "In task:c0795803428e089d the investigate run said \"agents can't edit `gleam.toml`\" and planned for the human to add a dependency line to it. The work run then asked the human to edit the file. In Solace humans never edit files or run commands. Also, the claim was wrong: the same work run then ran `write gleam.toml` itself (step 5), and it worked.\n\n## Cause\n- `reference.txt`'s file-tier line ends \"`read`, `write`, `move`, `remove` (not gleam.toml)\". It means only that `gleam.toml` can't be moved or removed, but it reads as though `gleam.toml` can't be written either.\n- Nothing tells agents that the human never edits files. The reference's opening line (\"ask with `task ask`, or say so\") and the read-only-project line in `main.rs` leave room to hand an edit back to the human.\n\n## Change\n1. **Reference, file tiers:** state plainly that `gleam.toml` is changed with `write` (validated, and recorded with the task like any watched file), and that it can't be moved or removed.\n2. **Reference, opening paragraph and the `task ask` line:** the human never edits files or runs commands. A needed change is made in one of three ways:\n   - the agent makes it itself with `submit` or `write`\n   - a settings file (`solace.toml`, `AGENTS.md`, `.gitignore`): `write` with `reason`, and the human approves the diff (D-38)\n   - a project outside the task's scope: `task ask` for the human to add the project to the scope\n   \n   A question never asks the human to change a file.\n3. **Investigate (read-only) runs:** their brief says a plan assigns every file change to the worker, as an edit or a settings proposal, and never to the human.\n4. A short decision in `DECISIONS.md`, amending D-38.\n\n**Tests:** rust-unit tests check that the reference and the investigate brief contain the new wording and no longer say `(not gleam.toml)`. The reference layout check (D-143) and `help <command>` sections still pass. An acceptance test checks that `write gleam.toml` in a work run succeeds directly, with no question.",
+  "closedTime": 1792186095,
+  "column": "complete",
+  "createdTime": 1792180541,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "350ee2924e07ad4c",
+  "links": [],
+  "milestone": null,
+  "rank": 178.0,
+  "scope": [
+    "."
+  ],
+  "title": "agents: never ask the human to edit files"
+}

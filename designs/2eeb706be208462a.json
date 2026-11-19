@@ -1,0 +1,1335 @@
+{
+  "elements": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "rn-menu-workspace",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Workspace",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-strategy",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Strategy",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-delivery",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Delivery",
+                "variant": "body",
+                "width": "hug"
+              },
+              "style": {
+                "fill": "text",
+                "padding": "sm",
+                "text_color": "on_primary"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-design",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Design",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-board",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Board",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-contracts",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Contracts",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-knowledgebase",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Knowledgebase",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            },
+            {
+              "id": "rn-menu-settings",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Settings",
+                "variant": "body",
+                "width": "hug"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "rn-menu",
+          "properties": {
+            "align": "center",
+            "gap": "sm",
+            "height": "hug",
+            "justify": "start",
+            "padding": "md",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "style": {
+            "fill": "surface"
+          },
+          "type": "row"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "rn-row-020-version",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "0.2.0",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-row-020-date",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Nov 14, 2026 · newest",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "style": {
+                                "text_color": "muted"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "rn-row-020-name",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "rn-row-020-ask",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Ask for notes",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "rn-row-020",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "sm",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "style": {
+                        "fill": "#e8eef7"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "rn-row-010-version",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "0.1.0",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-row-010-date",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Oct 2, 2026",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "style": {
+                                "text_color": "muted"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "rn-row-010-name",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "rn-row-010-ask",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Ask for notes",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "rn-row-010",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "sm",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "rn-row-009-version",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "0.0.9",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-row-009-date",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Sep 18, 2026",
+                                "variant": "small",
+                                "width": "fill"
+                              },
+                              "style": {
+                                "text_color": "muted"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "rn-row-009-name",
+                          "properties": {
+                            "align": "start",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "id": "rn-row-009-ask",
+                          "properties": {
+                            "height": "hug",
+                            "label": "Ask for notes",
+                            "variant": "ghost",
+                            "width": "hug"
+                          },
+                          "type": "button"
+                        }
+                      ],
+                      "id": "rn-row-009",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "sm",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    }
+                  ],
+                  "id": "rn-list",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "xs",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": {
+                      "fixed": 360
+                    }
+                  },
+                  "type": "column"
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "id": "rn-detail-title",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "level": 3,
+                            "text": "Release 0.2.0",
+                            "width": "fill"
+                          },
+                          "type": "heading"
+                        },
+                        {
+                          "id": "rn-detail-state",
+                          "properties": {
+                            "align": "right",
+                            "height": "hug",
+                            "text": "DRAFT · NOT APPROVED",
+                            "variant": "small",
+                            "width": "hug"
+                          },
+                          "style": {
+                            "text_color": "primary"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "rn-detail-head",
+                      "properties": {
+                        "align": "center",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "between",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "row"
+                    },
+                    {
+                      "id": "rn-detail-meta",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "Built Nov 14, 2026 · 3 artifacts",
+                        "variant": "muted",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "rn-artifact-appimage-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "Solace_0.2.0_amd64.AppImage",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-artifact-appimage-size",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "68.2 MB",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-artifact-appimage-get",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Download",
+                                "variant": "ghost",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            }
+                          ],
+                          "id": "rn-artifact-appimage",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "rn-artifact-deb-name",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "text": "solace_0.2.0_amd64.deb",
+                                "variant": "body",
+                                "width": "fill"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-artifact-deb-size",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "12.4 MB",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "type": "text"
+                            },
+                            {
+                              "id": "rn-artifact-deb-get",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Download",
+                                "variant": "ghost",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            }
+                          ],
+                          "id": "rn-artifact-deb",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "rn-artifact-open-button",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Open folder",
+                                "variant": "secondary",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            }
+                          ],
+                          "id": "rn-artifact-open",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "id": "rn-artifacts-platform",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "text": "Browser: Download saves a copy. Desktop app: Open folder shows the release's files.",
+                            "variant": "muted",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        }
+                      ],
+                      "id": "rn-artifacts",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "xs",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "none",
+                        "variant": "plain",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "id": "rn-notes-title",
+                              "properties": {
+                                "align": "left",
+                                "height": "hug",
+                                "level": 3,
+                                "text": "Release notes",
+                                "width": "fill"
+                              },
+                              "type": "heading"
+                            },
+                            {
+                              "id": "rn-notes-state",
+                              "properties": {
+                                "align": "right",
+                                "height": "hug",
+                                "text": "Draft · not approved",
+                                "variant": "small",
+                                "width": "hug"
+                              },
+                              "style": {
+                                "text_color": "muted"
+                              },
+                              "type": "text"
+                            }
+                          ],
+                          "id": "rn-notes-head",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "between",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "id": "rn-notes-summary",
+                          "properties": {
+                            "align": "left",
+                            "height": "hug",
+                            "text": "Drafted from work completed after release 0.1.0. Edit it yourself, approve it to store it with the release, or reject it.",
+                            "variant": "muted",
+                            "width": "fill"
+                          },
+                          "type": "text"
+                        },
+                        {
+                          "children": [
+                            {
+                              "id": "rn-notes-edit",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Edit",
+                                "variant": "secondary",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            },
+                            {
+                              "id": "rn-notes-reject",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Reject",
+                                "variant": "ghost",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            },
+                            {
+                              "id": "rn-notes-approve",
+                              "properties": {
+                                "height": "hug",
+                                "label": "Approve",
+                                "variant": "primary",
+                                "width": "hug"
+                              },
+                              "type": "button"
+                            }
+                          ],
+                          "id": "rn-notes-actions",
+                          "properties": {
+                            "align": "center",
+                            "gap": "sm",
+                            "height": "hug",
+                            "justify": "end",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "row"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "rn-notes-build-title",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "level": 3,
+                                    "text": "Build tab",
+                                    "width": "fill"
+                                  },
+                                  "type": "heading"
+                                },
+                                {
+                                  "id": "rn-notes-build-state",
+                                  "properties": {
+                                    "align": "right",
+                                    "height": "hug",
+                                    "text": "Feature complete",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "rn-notes-build-head",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "between",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "children": [
+                                {
+                                  "id": "rn-notes-build-entry-1-text",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "List every release, newest first",
+                                    "variant": "body",
+                                    "width": "fill"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "rn-notes-build-entry-1-link",
+                                  "properties": {
+                                    "height": "hug",
+                                    "label": "Open task",
+                                    "variant": "ghost",
+                                    "width": "hug"
+                                  },
+                                  "type": "button"
+                                }
+                              ],
+                              "id": "rn-notes-build-entry-1",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "between",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "children": [
+                                {
+                                  "id": "rn-notes-build-entry-2-text",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "Draft release notes on request",
+                                    "variant": "body",
+                                    "width": "fill"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "rn-notes-build-entry-2-link",
+                                  "properties": {
+                                    "height": "hug",
+                                    "label": "Open task",
+                                    "variant": "ghost",
+                                    "width": "hug"
+                                  },
+                                  "type": "button"
+                                }
+                              ],
+                              "id": "rn-notes-build-entry-2",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "between",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            }
+                          ],
+                          "id": "rn-notes-build",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "id": "rn-notes-other-title",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "level": 3,
+                                    "text": "Other work",
+                                    "width": "fill"
+                                  },
+                                  "type": "heading"
+                                },
+                                {
+                                  "id": "rn-notes-other-state",
+                                  "properties": {
+                                    "align": "right",
+                                    "height": "hug",
+                                    "text": "No feature",
+                                    "variant": "small",
+                                    "width": "hug"
+                                  },
+                                  "style": {
+                                    "text_color": "muted"
+                                  },
+                                  "type": "text"
+                                }
+                              ],
+                              "id": "rn-notes-other-head",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "between",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            },
+                            {
+                              "children": [
+                                {
+                                  "id": "rn-notes-other-entry-text",
+                                  "properties": {
+                                    "align": "left",
+                                    "height": "hug",
+                                    "text": "Decision: a build writes one version to every manifest",
+                                    "variant": "body",
+                                    "width": "fill"
+                                  },
+                                  "type": "text"
+                                },
+                                {
+                                  "id": "rn-notes-other-entry-link",
+                                  "properties": {
+                                    "height": "hug",
+                                    "label": "Open task",
+                                    "variant": "ghost",
+                                    "width": "hug"
+                                  },
+                                  "type": "button"
+                                }
+                              ],
+                              "id": "rn-notes-other-entry",
+                              "properties": {
+                                "align": "center",
+                                "gap": "sm",
+                                "height": "hug",
+                                "justify": "between",
+                                "padding": "none",
+                                "variant": "plain",
+                                "width": "fill"
+                              },
+                              "type": "row"
+                            }
+                          ],
+                          "id": "rn-notes-other",
+                          "properties": {
+                            "align": "stretch",
+                            "gap": "xs",
+                            "height": "hug",
+                            "justify": "start",
+                            "padding": "none",
+                            "variant": "plain",
+                            "width": "fill"
+                          },
+                          "type": "column"
+                        }
+                      ],
+                      "id": "rn-notes",
+                      "properties": {
+                        "align": "stretch",
+                        "gap": "sm",
+                        "height": "hug",
+                        "justify": "start",
+                        "padding": "md",
+                        "variant": "card",
+                        "width": "fill"
+                      },
+                      "type": "column"
+                    }
+                  ],
+                  "id": "rn-detail",
+                  "properties": {
+                    "align": "stretch",
+                    "gap": "md",
+                    "height": "hug",
+                    "justify": "start",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "column"
+                }
+              ],
+              "id": "rn-body",
+              "properties": {
+                "align": "stretch",
+                "gap": "lg",
+                "height": "hug",
+                "justify": "start",
+                "padding": "none",
+                "variant": "plain",
+                "width": "fill"
+              },
+              "type": "row"
+            }
+          ],
+          "id": "rn-panel",
+          "properties": {
+            "align": "stretch",
+            "gap": "md",
+            "height": "hug",
+            "justify": "start",
+            "padding": "lg",
+            "variant": "card",
+            "width": "fill"
+          },
+          "type": "column"
+        }
+      ],
+      "id": "release-notes-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "lg",
+        "height": "fill",
+        "justify": "start",
+        "padding": "xl",
+        "width": "fill"
+      },
+      "type": "screen"
+    },
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "id": "rn-states-title",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "level": 2,
+                "text": "Release notes: agent states",
+                "width": "fill"
+              },
+              "type": "heading"
+            },
+            {
+              "id": "rn-states-subtitle",
+              "properties": {
+                "align": "left",
+                "height": "hug",
+                "text": "Where the drafting status, review controls and failure appear.",
+                "variant": "muted",
+                "width": "fill"
+              },
+              "type": "text"
+            }
+          ],
+          "id": "rn-states-intro",
+          "properties": {
+            "align": "start",
+            "gap": "xs",
+            "height": "hug",
+            "justify": "start",
+            "padding": "none",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "type": "column"
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "id": "rn-state-working-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 3,
+                    "text": "While drafting",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "rn-state-working-version",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "0.2.0",
+                        "variant": "body",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "rn-state-working-list-status",
+                      "properties": {
+                        "align": "right",
+                        "height": "hug",
+                        "text": "Drafting notes…",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "primary"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "rn-state-working-row",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "rn-state-working-list-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "In the release list, this replaces Ask for notes until the draft is ready.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "rn-state-working-detail-title",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Release notes",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "id": "rn-state-working-detail-status",
+                      "properties": {
+                        "align": "right",
+                        "height": "hug",
+                        "text": "Agent working · 1 min",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "primary"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "rn-state-working-detail-head",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "rn-state-working-detail-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "The notes card shows the same status with the release.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "rn-state-working",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "hug",
+                "justify": "start",
+                "padding": "md",
+                "variant": "card",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "id": "rn-state-failed-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 3,
+                    "text": "If drafting fails",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "rn-state-failed-version",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "0.2.0",
+                        "variant": "body",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "rn-state-failed-ask",
+                      "properties": {
+                        "height": "hug",
+                        "label": "Ask for notes",
+                        "variant": "ghost",
+                        "width": "hug"
+                      },
+                      "type": "button"
+                    }
+                  ],
+                  "id": "rn-state-failed-row",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "rn-state-failed-row-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "The release row returns to Ask for notes.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "rn-state-failed-detail-title",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "level": 3,
+                        "text": "Release notes",
+                        "width": "fill"
+                      },
+                      "type": "heading"
+                    },
+                    {
+                      "id": "rn-state-failed-status",
+                      "properties": {
+                        "align": "right",
+                        "height": "hug",
+                        "text": "Draft failed",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "#a12a2a"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "rn-state-failed-detail-head",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "rn-state-failed-message",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Couldn't draft notes: the agent stopped before finishing.",
+                    "variant": "body",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "rn-state-failed-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "The failure shows in the notes card; the release and its files are unchanged.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "rn-state-failed",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "hug",
+                "justify": "start",
+                "padding": "md",
+                "variant": "card",
+                "width": "fill"
+              },
+              "type": "column"
+            },
+            {
+              "children": [
+                {
+                  "id": "rn-state-approved-title",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "level": 3,
+                    "text": "After approval",
+                    "width": "fill"
+                  },
+                  "type": "heading"
+                },
+                {
+                  "children": [
+                    {
+                      "id": "rn-state-approved-version",
+                      "properties": {
+                        "align": "left",
+                        "height": "hug",
+                        "text": "0.2.0",
+                        "variant": "body",
+                        "width": "fill"
+                      },
+                      "type": "text"
+                    },
+                    {
+                      "id": "rn-state-approved-status",
+                      "properties": {
+                        "align": "right",
+                        "height": "hug",
+                        "text": "Notes stored",
+                        "variant": "small",
+                        "width": "hug"
+                      },
+                      "style": {
+                        "text_color": "primary"
+                      },
+                      "type": "text"
+                    }
+                  ],
+                  "id": "rn-state-approved-row",
+                  "properties": {
+                    "align": "center",
+                    "gap": "sm",
+                    "height": "hug",
+                    "justify": "between",
+                    "padding": "none",
+                    "variant": "plain",
+                    "width": "fill"
+                  },
+                  "type": "row"
+                },
+                {
+                  "id": "rn-state-approved-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Approved notes are stored with the release and stay after a restart.",
+                    "variant": "body",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                },
+                {
+                  "id": "rn-state-rejected-note",
+                  "properties": {
+                    "align": "left",
+                    "height": "hug",
+                    "text": "Reject discards the draft and stores nothing.",
+                    "variant": "muted",
+                    "width": "fill"
+                  },
+                  "type": "text"
+                }
+              ],
+              "id": "rn-state-approved",
+              "properties": {
+                "align": "stretch",
+                "gap": "sm",
+                "height": "hug",
+                "justify": "start",
+                "padding": "md",
+                "variant": "card",
+                "width": "fill"
+              },
+              "type": "column"
+            }
+          ],
+          "id": "rn-states-row",
+          "properties": {
+            "align": "stretch",
+            "gap": "lg",
+            "height": "hug",
+            "justify": "start",
+            "padding": "none",
+            "variant": "plain",
+            "width": "fill"
+          },
+          "type": "row"
+        }
+      ],
+      "id": "release-notes-states-screen",
+      "properties": {
+        "align": "stretch",
+        "gap": "lg",
+        "height": "fill",
+        "justify": "start",
+        "padding": "xl",
+        "width": "fill"
+      },
+      "type": "screen"
+    }
+  ],
+  "id": "2eeb706be208462a",
+  "schemaVersion": 1,
+  "tab": "ui",
+  "title": "Delivery: release notes"
+}

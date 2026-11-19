@@ -1,0 +1,8 @@
+{
+  "body": "Work that keeps agents aligned with the human's direction and the project's standards.\n\nThis milestone covers:\n- **Personas**: who the software serves, carried into agent briefs.\n- **Agent roles**: which agent takes each kind of work.\n- **Autorun**: how much work proceeds without human intervention.\n- **Built-in quality practices**: the engineering habits Solace expects agents to follow.\n\nReached when all linked features are complete.",
+  "id": "63a4809d1d3362ba",
+  "rank": 6.0,
+  "state": "active",
+  "targetDate": "2026-11-18",
+  "title": "Agent Alignment"
+}

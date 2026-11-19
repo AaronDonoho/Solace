@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "A build runs from a recorded copy of the source in a separate folder, with locked dependencies, not on the working tree as it is. D-246 point 1 left this to package inspection, so propose the decision change it needs.\n\n- The release records which copy it was built from.\n- Changes the human makes while a build runs don't reach that build.\n- A file the build needs but the copy lacks fails the build, naming the file.\n\nDone when: Solace's own workspace builds and passes from a recorded copy, and a file edited during the build doesn't change its outputs.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979637,
+  "dependsOn": [],
+  "feature": "334355678da937ab",
+  "home": ".",
+  "id": "58d49588e9fbc20b",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 389.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "inspection: build from a recorded copy"
+}

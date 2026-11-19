@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794864194,
+  "body": "**Question:** solace-cli has grown large, so most tasks have to change it, and that slows development down. Should it be split into several smaller projects, and how?\n\n**Answer in a note:**\n- which parts could become their own projects, what each would hold, and what depends on what\n- whether the split would really let tasks work in different projects, judged against the kinds of tasks recently done\n- what the split costs and risks, and what in Solace would have to change to support it\n- a recommendation: split now, later, or not at all. If now, propose the projects and the order to move them in.\n\nNo code changes.\n\n---\nRelated: task:f54a8d4394a0cc36 (a separate copy per task) and task:ac0f2632b6f0798f (merging stores by symbol) look at the same slowdown from other angles. Say how a split compares with them.",
+  "closedTime": 1794847337,
+  "column": "cancelled",
+  "createdTime": 1794846867,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "45644c98f54d8aa0",
+  "links": [],
+  "milestone": null,
+  "rank": 377.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate splitting solace-cli into projects"
+}

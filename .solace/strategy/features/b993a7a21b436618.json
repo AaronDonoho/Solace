@@ -1,0 +1,10 @@
+{
+  "body": "The Architecture tab shows a design as a diagram of how the software is structured. A human can read it there and an agent can read it while working. Depends on feature:9d778f6e03dea799 for the page and records, and is built after the UI/UX tab and the design agent.\n\n## Asked for\n\n- Architecture is one of the Design page's two tabs.\n- Be flexible: Solace will support many types of diagrams. A flow diagram is a basic form, and sequence diagrams and others will come too.\n- Eventually it supports drag and drop and WYSIWYG editing (feature: direct editing).\n- The human would consider the same Elmish, Lustre approach for architecture diagrams as for UI/UX.\n\n## From the other agent's plan (direction, not gospel)\n\n- Nodes and edges, each with a stable ID.\n- Drawn with the contract view's graph layout.\n\n## Decided\n\n- Nodes and edges are elements: each has a permanent ID, and an agent can name exactly which one it means.\n- A node is not limited to a fixed list of things it can represent.\n- A design is data, not code, and is reference material; see the milestone.\n- There is no text editor. A diagram is created and changed by the design agent until direct editing exists.\n\n## Suggested (cursory, not prescriptive)\n\n- Each diagram names its type, so a new type can arrive without changing the format.\n- Reuse the Contracts page's graph layout rather than adding a second one. It uses dagre, in `solace-cli/contracts/src/layout.mjs`, as FFI to that app (D-85). It suits flow diagrams; a sequence diagram will need its own drawing.\n\n## Open\n\n- Whether the tab shows only agent-drawn designs, or can start from the code Solace already knows. Nothing in the conversation asked for the second, so it is left out unless the human wants it.\n\n## Not in this feature\n\nFlow diagrams come first; sequence diagrams and other types are later tasks. Drag and drop, direct editing and notes are their own features.",
+  "colorSlot": 26,
+  "id": "b993a7a21b436618",
+  "milestone": "583db3463f7dda5e",
+  "rank": 2.0,
+  "startTime": 1794273025,
+  "state": "complete",
+  "title": "design: Architecture tab"
+}

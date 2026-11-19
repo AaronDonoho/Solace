@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794981027,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794979920,
+  "column": "complete",
+  "createdTime": 1794799317,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c4b2c5efb9d89caa",
+  "links": [],
+  "milestone": null,
+  "rank": 310.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "editors: Ctrl+Enter sends or saves"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972394,
+  "body": "Today the Show/Hide changes button only appears on a waiting proposal, and Preview doesn't appear on every design version.\n\n## Asked for\n\n- Every design version after the first has the Show/Hide changes button, which marks what changed compared with the version before it.\n- Every design version has the other controls, such as Preview.\n\n## Done when\n\n- Viewing any version after the first offers Show/Hide changes, marking added, removed, changed and moved elements compared with the previous version.\n- The first version has no Show/Hide changes button.\n- Preview is offered on every version of a UI/UX design.\n\n## Calls made\n\n- Preview stays on the UI/UX tab only. Architecture diagrams have no screens to click through.",
+  "closedTime": 1794958219,
+  "column": "complete",
+  "createdTime": 1794935453,
+  "dependsOn": [
+    "eb6e95d5ebc6d7db"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "7b31afce816b3585",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 33.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "design versions: preview and changes on each"
+}

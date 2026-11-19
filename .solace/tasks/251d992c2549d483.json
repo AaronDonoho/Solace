@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793482473,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793481964,
+  "column": "complete",
+  "createdTime": 1793479388,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "251d992c2549d483",
+  "links": [],
+  "milestone": null,
+  "rank": 229.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "models: latest outranks hard-coded presets"
+}

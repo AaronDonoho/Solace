@@ -1325,8 +1325,9 @@ class Board(unittest.TestCase):
                 self.assertEqual((x['home'],x['scope']),('sub',['sub']),'re-homed to the first project of its scope, keeping only the projects')
                 break
         saved=json.loads(pb.read_text())
+        local=json.loads((self.root/'.solace/tasks/local'/(b['id']+'.json')).read_text())
         self.assertEqual(saved['scope'],['sub'],'the saved scope keeps only the projects')
-        self.assertTrue(any('Moved from `gone` to `sub`' in n['text'] and 'Dropped `gone`' in n['text'] for n in saved['notes']),'the note names the folder it dropped')
+        self.assertTrue(any('Moved from `gone` to `sub`' in n['text'] and 'Dropped `gone`' in n['text'] for n in local['notes']),'the note names the folder it dropped')
 
     def test_a_saved_noProject_mark_streams_unmarked(self):  # D-160
         # The mark comes from the home on each load: a saved one streams nothing.

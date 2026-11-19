@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690214,
+  "body": "As a solace app user,\nI want my last position and state in each page to be remembered,\nso that my in-progress work is waiting for me when i switch pages.",
+  "closedTime": 1791571715,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "3210d41d8e55da41",
+  "links": [],
+  "milestone": null,
+  "rank": 4.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Remember state"
+}

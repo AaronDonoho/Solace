@@ -308,6 +308,18 @@ pub(crate) fn log(top: &Path, project: &str, data: &Value) -> bool {
         eprintln!("the task log did not take a change: {e}");
         return false;
     }
+    if let Some(fields) = data.as_object() {
+        for (key, value) in fields {
+            remember(top, key, value);
+            match key.as_str() {
+                "milestone" => remember(top, "milestones", &json!(records(top, "milestones"))),
+                "feature" => remember(top, "features", &json!(records(top, "features"))),
+                "removedMilestone" => remember(top, "milestones", &json!(records(top, "milestones"))),
+                "removedFeature" => remember(top, "features", &json!(records(top, "features"))),
+                _ => {}
+            }
+        }
+    }
     if let Err(e) = prune_event_log(&db) {
         eprintln!("the task log did not prune: {}", e.0);
     }
@@ -334,7 +346,7 @@ fn write_task(top: &Path, t: &Value, feature: Option<&Value>) -> Result<(String,
         }
     }
     let path = store_dir(top).join(format!("{id}.json"));
-    let was: Option<Value> = jsonx::read_opt(&path);
+    let was: Option<Value> = read_task(top, &path).ok();
     // A feature follows its tasks (D-128): only a new task, a moved one or a
     // changed link can change it. It is worked out with this save in place, so
     // a save that makes its own feature active again is planned before the
@@ -358,8 +370,13 @@ fn write_task(top: &Path, t: &Value, feature: Option<&Value>) -> Result<(String,
             }
         }
     }
-    batch_replace(&store_dir(top).join(format!("{id}.json")), &t)?;
+    let (shared, local) = crate::board::task_model::split(&t);
+    // The local part goes first, so a page that reads between the two writes
+    // still finds the conversation; the batch journals both.
+    batch_replace(&crate::board::task_model::local_path(&path), &local)?;
+    batch_replace(&path, &shared)?;
     let home = t["home"].as_str().unwrap_or(".").to_string();
+    remember_written(top, &id, &path, &home);
     Ok((home, t, changed))
 }
 
@@ -858,4 +875,156 @@ pub(crate) fn rehome(top: &Path, t: &Value) -> Result<Value, Failure> {
 /// Whether a found feature is one whose tasks the board shows (D-128).
 pub(crate) fn feature_shows(f: &Value) -> bool {
     matches!(f["state"].as_str(), Some("active" | "complete"))
+}
+
+/// Announces `current` under `key` to open pages when it differs from `seen`,
+/// and keeps `seen` up to date. The first read announces too, so a change
+/// between a page's load and the watcher's start is not missed. A notice that
+/// cannot be written leaves `seen` unchanged, so a later check tries again.
+pub(crate) fn announce(top: &Path, key: &str, current: Value, seen: &mut Option<Value>) {
+    if announced(top, key).as_ref() == Some(&current) {
+        *seen = Some(current);
+        return;
+    }
+    if seen.as_ref() == Some(&current) {
+        return;
+    }
+    if log(top, "", &json!({ (key): current.clone() })) {
+        *seen = Some(current);
+    }
+}
+
+/// Announces a kind of record as a root event when it differs from `seen`.
+pub(crate) fn announce_records(top: &Path, kind: &str, seen: &mut Option<Value>) {
+    announce(top, kind, json!(records(top, kind)), seen);
+}
+
+/// The latest value each event key was given, per root. The watcher uses it
+/// to skip announcing what Solace already logged.
+static ANNOUNCED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<(PathBuf, String), Value>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn remember(top: &Path, key: &str, value: &Value) {
+    ANNOUNCED.lock().unwrap().insert((top.to_path_buf(), key.to_string()), value.clone());
+}
+
+fn announced(top: &Path, key: &str) -> Option<Value> {
+    ANNOUNCED.lock().unwrap().get(&(top.to_path_buf(), key.to_string())).cloned()
+}
+
+/// Splits task files an older build wrote with their local fields, so the
+/// root's shared files hold no notes, questions or runs when it commits them.
+pub(crate) fn split_legacy(top: &Path) -> Result<(), Failure> {
+    let dir = store_dir(top);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut legacy = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let p = entry?.path();
+        if p.extension().is_some_and(|x| x == "json") && jsonx::read_opt(&p).is_some_and(|t| crate::board::task_model::has_local_fields(&t))
+        {
+            legacy.push(p);
+        }
+    }
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    let batch = batch(top)?;
+    for path in legacy {
+        let merged = match crate::board::task_model::read_parts(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                batch_rollback(batch);
+                return Err(e);
+            }
+        };
+        let (shared, local) = crate::board::task_model::split(&merged);
+        let written = batch_replace(&path, &shared).and_then(|()| batch_replace(&crate::board::task_model::local_path(&path), &local));
+        if let Err(e) = written {
+            batch_rollback(batch);
+            return Err(e);
+        }
+    }
+    batch_commit(batch)
+}
+
+/// Announces the root's shared task files changed outside Solace, such as by
+/// `git pull`, under each task's home. `seen` holds each file's stamp from the
+/// last check, so an unchanged file is not read again; the first check only
+/// records them.
+pub(crate) fn announce_tasks(top: &Path, seen: &mut Option<Value>) {
+    let Ok(entries) = fs::read_dir(store_dir(top)) else {
+        *seen = Some(json!({}));
+        return;
+    };
+    let first = seen.is_none();
+    let before = seen.take().and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    let mut stamps = serde_json::Map::new();
+    let mut present = std::collections::HashSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        present.insert(name.to_string());
+        let Ok(meta) = entry.metadata() else { continue };
+        let stamp = file_stamp(&meta);
+        let id = name.strip_suffix(".json").unwrap_or(name);
+        if first {
+            // The first check only records the files. It reads just each home,
+            // so a file deleted before the next check is announced under it.
+            let home = jsonx::read_opt(&path).and_then(|t| t["home"].as_str().map(String::from)).unwrap_or_else(|| ".".to_string());
+            stamps.insert(name.to_string(), json!({"stamp": stamp, "home": home}));
+            continue;
+        }
+        if before.get(name).is_some_and(|s| s["stamp"] == json!(stamp)) {
+            stamps.insert(name.to_string(), before[name].clone());
+            continue;
+        }
+        if let Some(home) = written_here(top, id, &stamp) {
+            stamps.insert(name.to_string(), json!({"stamp": stamp, "home": home}));
+            continue;
+        }
+        let Ok(t) = read_task(top, &path) else { continue };
+        let home = t["home"].as_str().unwrap_or(".").to_string();
+        if log(top, &home, &json!({"task": t})) {
+            stamps.insert(name.to_string(), json!({"stamp": stamp, "home": home}));
+        }
+    }
+    for (name, state) in &before {
+        if present.contains(name) {
+            continue;
+        }
+        let Some(id) = name.strip_suffix(".json") else { continue };
+        if !log(top, state["home"].as_str().unwrap_or("."), &json!({"removed": id})) {
+            stamps.insert(name.clone(), state.clone());
+        }
+    }
+    *seen = Some(Value::Object(stamps));
+}
+
+fn file_stamp(meta: &fs::Metadata) -> String {
+    let nanos = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    format!("{nanos}:{}", meta.len())
+}
+
+/// The stamp and home of each shared file the server wrote, so the watcher does
+/// not announce the server's own writes again.
+static WRITTEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<(PathBuf, String), (String, String)>>> =
+    std::sync::LazyLock::new(|| Default::default());
+
+fn remember_written(top: &Path, id: &str, path: &Path, home: &str) {
+    if let Ok(meta) = fs::metadata(path) {
+        WRITTEN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((top.to_path_buf(), id.to_string()), (file_stamp(&meta), home.to_string()));
+    }
+}
+
+fn written_here(top: &Path, id: &str, stamp: &str) -> Option<String> {
+    let written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+    written.get(&(top.to_path_buf(), id.to_string())).filter(|(s, _)| s == stamp).map(|(_, home)| home.clone())
 }

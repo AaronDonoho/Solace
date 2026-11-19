@@ -1,0 +1,10 @@
+{
+  "body": "Review feedback is the human's review. D-183 recovers a clean review's final assessment when no `task note` reached the task. A follow-up review of task:e0b160d8f9bd75c6 found five forms that still lose or misplace that feedback:\n\n1. `Recorded.` is replied before the server applies the note; a server that stops or refuses it leaves the review failed, and a later note only lands on an ended run.\n2. A batched `task note` reply starts with the batch header, so the `Recorded` guard misses it; with the timing above, the fallback can add a second agent note.\n3. The final message must start with an exact label; a preamble, a heading or bold variant, trailing text, or a split reply loses the assessment.\n4. Any transcript `error` blocks recovery, even on a clean exit; it is not known whether Codex logs transient notices this way.\n5. A queued note (`Recorded; it reaches the board…`) is treated as recorded even when no server runs.\n\nThe feature makes the note's outcome true, lets one feedback note finish a review however it arrives, reads the whole final reply, and settles whether a clean exit can survive a transient error. Nonzero exit, timeout, kill, quota, and a missing or unreadable log still fail by design; a refused note, a failed MCP call that reached the transcript, and a missing note with a valid label are already recovered.",
+  "colorSlot": 19,
+  "id": "081a981351f3e658",
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 2.75,
+  "startTime": 1793422598,
+  "state": "complete",
+  "title": "Review Feedback Reliability"
+}

@@ -1,0 +1,10 @@
+{
+  "body": "Tasks already record `dependsOn` (D-87), and Strategy's Roadmap tab shows and edits it. Nothing else uses it yet. This feature makes dependencies visible outside Strategy. Nothing is enforced: D-82 keeps the `blocked` column for that later.\n\n- **Done** means the dependency is in a final column right now, and **cancelled counts as done**. A dependency that is reopened becomes unfinished again.\n- **Board:** a card is dimmed while any of its dependencies is unfinished. This is only a visual hint.\n- **Task details:** dependencies are listed as task links (D-98). The details only show them; Strategy still edits them.\n- **Agents:** a run's task context names the unfinished dependencies, so the agent knows about them.",
+  "colorSlot": 1,
+  "id": "29f4838ffb0cb0d0",
+  "milestone": null,
+  "rank": 12,
+  "startTime": 1791780542,
+  "state": "complete",
+  "title": "Task dependencies on the board, in task details and for agents"
+}

@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1795056543,
+  "body": "Direct editing works on the Architecture tab: a human changes a selected node's or edge's properties, such as a label, the same way as on UI/UX.\n\n### Do\n\n- With one node or edge selected (task:5ab649615065109e), the human changes the properties its type holds, saved through task:f90a4ae01bdae411, using the same controls as task:cc33d4301e06e612.\n- Node positions come from the automatic layout, so there is nothing to drag into place.\n\n### Acceptance\n\n- Tests: changing a node's label and an edge's label saves the expected operation, and a refusal leaves the diagram as saved.\n- Update the README.\n\n### Left out\n\nAdding, removing and reconnecting nodes and edges by hand, and other diagram types.",
+  "closedTime": 1794979443,
+  "column": "complete",
+  "createdTime": 1794273306,
+  "dependsOn": [
+    "cc33d4301e06e612",
+    "5ab649615065109e"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "1f6be568936867ce",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 19.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "edit: change diagram nodes and edges"
+}

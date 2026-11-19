@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690226,
+  "body": "Blocked should not be a column.\nBlocked should be displayed on the task's card.\nEnumerate cases that cause block, and how they're distinct from those that are non-blocking but waiting on a human's response.",
+  "closedTime": 1791501178,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "14ecaf421b308db8",
+  "links": [],
+  "milestone": null,
+  "rank": 40.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Remove Blocked column"
+}

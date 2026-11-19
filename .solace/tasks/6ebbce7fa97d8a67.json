@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793665635,
+  "body": "The human set role models on the Settings page, but the model pickers don't start on them. The human suspects Settings isn't saving.\n\n### Scope\n- Reproduce first. Set a role model in Settings, reload Settings, and check that the choice is still shown. Then open a task in Planning, Assigned and Review, and the Strategy page, and check each picker.\n- Fix whatever breaks: saving, reading back, or the pickers.\n- Add a test that fails on the old behaviour.\n\n### Leads (from a read of the code, not confirmed)\n- Saving looks right on paper: `settings.update` (`ChooseRoleModel`) POSTs to `/role-models`, `board::setup.save_role_model` writes `role_models.<role>.default` to the machine-wide config, and `board::setup.role_models` reads it back from the same `config_path()`.\n- `solace_task.role_models_chosen` picks the default only if the model is `available`. Otherwise it picks nothing. Settings lists every set-up model, so a model that can't start right now would save fine but show nothing in the picker.\n- `solace_task.main_role` gives a role only for the Planning, Assigned and Review columns (`board::task_model.main_action`). The Strategy page uses the `strategist` role (`strategy.choose_plan_model`).\n- The task page re-reads role models on connect and on each task refresh (`solace_task.refresh`). Check that a change made in Settings reaches an already-open task.\n\n### Out of scope\nFalling back to another model when the default can't start.",
+  "closedTime": 1793638515,
+  "column": "complete",
+  "createdTime": 1793636612,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli",
+  "id": "6ebbce7fa97d8a67",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 245.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/settings",
+    "solace-cli/strategy"
+  ],
+  "title": "role models: defaults not picked up"
+}

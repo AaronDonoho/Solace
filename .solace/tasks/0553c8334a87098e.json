@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977612,
+  "body": "Markdown tables (GitHub style) show as plain text with pipes today: the shared renderer, `markdown` in `task_api.mjs`, only knows code blocks, headings, quotes, lists, code, bold, images and links. It draws every task description, note, question, answer, run message, proposal and Strategy record body, so fixing it there fixes them all.\n\n## Wanted\n- A header row, a separator row (`| --- | :---: |`) and body rows render as an HTML `<table>` with `<thead>` and `<tbody>`.\n- Leading and trailing pipes are optional; `:---`, `:---:` and `---:` set left, centre and right alignment.\n- Cells take the same inline markdown as a paragraph (code, bold, links, record links), still escaped first; an escaped pipe `\\|` and a pipe inside a code span stay in the cell.\n- Rows shorter than the header get empty cells; extra cells are dropped.\n- Lines that look like a table but have no valid separator row stay a paragraph, as now.\n- Styles in `solace_task.task_styles` for `.md table`: cell borders and padding in the page's colours, and a wide table scrolls sideways rather than widening the panel.\n\n## Tests\nCases in `task_api.test.mjs`: a plain table, alignment, inline markdown and escaped pipes in cells, ragged rows, and a non-table that stays a paragraph.",
+  "closedTime": 1792977292,
+  "column": "complete",
+  "createdTime": 1792976772,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "0553c8334a87098e",
+  "links": [],
+  "milestone": null,
+  "rank": 119.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "markdown: render tables"
+}

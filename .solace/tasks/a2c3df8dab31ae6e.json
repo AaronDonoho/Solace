@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972380,
+  "body": "Humans have no way to rename or delete a design.\n\n## Asked for\n\n- A human can rename a design.\n- A human can delete a design.\n- Deleting a design must not cause problems anywhere that refers to it.\n\n## Done when\n\n- Renaming changes the design's title everywhere it's shown, and its versions are kept.\n- Deleting removes the design and all its versions from the list.\n- After a delete, nothing that referred to it breaks: task briefs that link it (D-252), notes that pointed at its elements (D-245, which keep the design's title), an open design run, and other designs' version history and changes view. Each is covered by a test.\n- Spec 15 and DECISIONS.md cover rename and delete.\n\n## Calls made\n\n- Restore stays. Restore goes back to an earlier version of a design you keep. Delete removes the whole design. They do different jobs, so there's still one way to do each.\n\n## Open (ask the human)\n\n- Whether delete asks for confirmation first, and whether a deleted design can be brought back.\n- Where the rename and delete controls go.",
+  "closedTime": 1794941704,
+  "column": "complete",
+  "createdTime": 1794935490,
+  "dependsOn": [],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli",
+  "id": "a2c3df8dab31ae6e",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 389.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "designs: rename and delete"
+}

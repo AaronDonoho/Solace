@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793665641,
+  "body": "Remove the source labels that task:4736502dfcacdf06 added to the model picker: \"Your choice\" for a human pick and \"<role> default\" (for example \"Worker default\") for the role's default. Nobody asked for either, and they were a regression.\n\n### Scope\n- The picker shows no label saying where the chosen model came from.\n- Both pickers lose it: the task page's and the Strategy page's.\n- Picking a model still works as it does now: the role's default is preselected, and a manual pick still resets on the next task.\n- Update the tests that expect the wording.\n\n### Pointers\n- `solace_task.model_source_label` (components) makes both labels. It is used by `solace_task.agent_pick` and by `plan.agent_choice` (strategy); it can likely be removed along with its call sites.\n- Tests: `solace_task_test.manual_model_choice_resets_on_the_next_task_test`, `solace_task_test.refetched_column_change_follows_the_new_roles_default_test`.",
+  "closedTime": 1793636730,
+  "column": "complete",
+  "createdTime": 1793635918,
+  "dependsOn": [],
+  "feature": "9a9d3f7bd153e158",
+  "home": "solace-cli/components",
+  "id": "1e0ad5c3561383e9",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 121.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "model picker: drop source labels"
+}

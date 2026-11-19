@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792036273,
+  "body": "The human agreed in task:6c746fe1f9058f87 (note 18): **undoing a task leaves alone any folder that existed before the task**, even an empty one.\n\n## Problem\n\nWhen `board.rs::restore` puts back a `file:` entry whose before-state is \"no file\", it deletes the file and then calls `outside::remove_empty_dirs`, which removes every parent folder left empty. If a folder existed, empty, before the task and the task put a file in it, undo deletes that folder too.\n\n## Change\n\n- When Solace records a file's before-state for a task (the `file:` entries of the undo record), it also records **which of that file's parent folders already existed**, up to `src/` or `test/`.\n- `restore` removes only folders the task created: it stops at the first folder recorded as existing before.\n- **Old records** with no folder entries behave as they do today (every folder left empty is removed).\n- This changes the format of the saved before-state, so record it as a decision in DECISIONS.md (amending the D-103 behaviour where undo removes the folders a carried file made).\n\n## Tests\n\n- In `board_tests.rs`, next to the D-103 test for folders a carried file made: a task writes a file into a folder that already existed, empty; revert removes the file and keeps the folder.\n- A folder the task created is still removed on revert.\n- An old undo record without folder entries is restored as before.",
+  "closedTime": 1792011603,
+  "column": "complete",
+  "createdTime": 1791949699,
+  "dependsOn": [],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "04734c547b95785e",
+  "links": [],
+  "milestone": null,
+  "rank": 119.0,
+  "scope": [
+    "."
+  ],
+  "title": "undo: keep folders that existed before"
+}

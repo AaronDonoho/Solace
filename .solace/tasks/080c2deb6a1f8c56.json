@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876819,
+  "body": "When an agent exits cleanly (exit status 0) without reporting it was done, the failure message should say that plainly: the agent ended its run without finishing it. Today it reads *\"agent exited without finishing (exit status: 0):\"* followed by whatever warning came last (e.g. the model metadata warning), which reads as if the warning caused it.\n\nThe message names that the agent stopped without reporting done, followed by the agent's last words when there are any, not a warning.\n\nFor agents: in `board::runs.handle_exit`, on a successful exit prefer `last_words` over `exit_error`; keep `exit_error` for crashes (non-zero exit). Relates to task:abd93c8db0f5ca60.",
+  "closedTime": 1794364016,
+  "column": "complete",
+  "createdTime": 1794325391,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "080c2deb6a1f8c56",
+  "links": [],
+  "milestone": null,
+  "rank": 300.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "runs: say the agent stopped early"
+}

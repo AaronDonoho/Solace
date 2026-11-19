@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792765931,
+  "body": "The selected task currently renders below the table and scrolls away (task:812bda5e156af79a did this for the Board). Give the Tasks tab the same bottom-band pattern: a collapsible pane pinned at the page bottom; collapsed shows the selected task's title and a toggle; expanded shows the full `<solace-task>`; the table takes the remaining height and scrolls; selecting another task updates the pane and expands it; no selection means no band.\n\nReuse the Board's markup and CSS pattern where practical, but leave out its side placement, resize grip, Copy ID control and stored per-window size. This is only the bottom collapsible band.\n\n**Tests:** collapsed and expanded views; no selection; selecting after collapsing; the selected task still survives paging.",
+  "closedTime": 1792726237,
+  "column": "complete",
+  "createdTime": 1792707994,
+  "dependsOn": [],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "fdcadc58d9156a49",
+  "links": [],
+  "milestone": null,
+  "rank": 104.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "tasks: collapsible selected pane"
+}

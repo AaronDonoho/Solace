@@ -26,6 +26,7 @@ pub type MigrationReport {
 pub type Migration {
   Migration(
     state: String,
+    reason: String,
     top: String,
     original: String,
     copy: String,
@@ -75,6 +76,7 @@ pub fn migration_decoder() -> decode.Decoder(Migration) {
     decode.success(MigrationReport(checked_at, current, checks, warnings))
   }
   use state <- decode.field("state", decode.string)
+  use reason <- decode.optional_field("reason", "", nullable_text)
   use top <- decode.field("top", decode.string)
   use original <- decode.optional_field("original", "", nullable_text)
   use copy <- decode.optional_field("copy", "", nullable_text)
@@ -95,6 +97,7 @@ pub fn migration_decoder() -> decode.Decoder(Migration) {
   use undo <- decode.optional_field("undo", False, decode.bool)
   decode.success(Migration(
     state,
+    reason,
     top,
     original,
     copy,

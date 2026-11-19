@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "A build records what it read from the machine, beyond its own copy of the source:\n\n- environment variables,\n- files outside the project,\n- tools found on `PATH`.\n\nThe record is kept with the release. Tool versions are already recorded (D-247), so they aren't repeated.\n\nIf some of this can't be recorded reliably, say what can't and why, and propose the decision rather than guessing.\n\nDone when: a build that reads an environment variable, a file outside the project and a tool on `PATH` has all three in its release record.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979642,
+  "dependsOn": [
+    "58d49588e9fbc20b"
+  ],
+  "feature": "334355678da937ab",
+  "home": "solace-cli",
+  "id": "f69df7bd242e32f6",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 405.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "inspection: record what a build read"
+}

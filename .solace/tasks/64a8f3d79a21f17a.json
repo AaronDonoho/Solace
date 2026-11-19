@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792719169,
+  "body": "A task with a feature always has that feature's milestone. Only a task with no feature has a milestone of its own. This amends D-87 point 2 (\"after that the two can differ\") and Spec 15 §1. Record the change as a new decision.\n\n- **Server (`tasks.rs`).** Changing a feature's milestone moves all of its tasks to that milestone, including closed and archived ones. Giving a task a feature sets the task's milestone to the feature's. A `PATCH` that sets the milestone on a task that has a feature is refused with a clear message. Removing a task's feature keeps the milestone it had. Tasks saved before this change take their feature's milestone when loaded. For example, the Rust store tasks currently show no milestone even though their feature is in Native Rust (Subset) Support.\n- **Roadmap.** A feature now appears only under its own milestone, so the README's \"and those with a task in it\" rule goes.\n- Add tests for each of these rules.\n\nLeft out: a control for setting a task's milestone by hand. There isn't one today.",
+  "closedTime": 1792708227,
+  "column": "complete",
+  "createdTime": 1792253562,
+  "dependsOn": [],
+  "feature": "cb03260b259b3c5c",
+  "home": ".",
+  "id": "64a8f3d79a21f17a",
+  "links": [],
+  "milestone": null,
+  "rank": 208.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "tasks inherit their feature's milestone"
+}

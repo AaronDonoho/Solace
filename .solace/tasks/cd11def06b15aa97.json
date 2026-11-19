@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792284194,
+  "body": "Saves one turn per work run: `submit`, `test` and `task done` safely in one call.\n\nAgents can already batch these three, but `task done` runs even when the test fails. D-119 point 5 only stops a call at a failed *change*, and `test` isn't a change.\n\n**New rule:** in a call, `task done` is skipped when an earlier `test` in that call:\n1. fails, or\n2. passes but lists a symbol changed in this task as reached by no test.\n\nThe skipped `task done` is named in the reply the way D-119 names skipped commands, with the reason (failed test, or which symbols no test reaches). The agent then fixes the problem and sends `task done` again with an updated summary.\n\n**Known limits:**\n- The summary is written before the test result is known. A failed first try loses nothing, because `task done` is skipped. A pass that needs a caveat gets none, so the reference should say: if the result may need a caveat, send `task done` separately.\n- A passing test doesn't mean the task is done. The reference asks the agent to check what `test` lists as reached by no test, and point 2 keeps that check when the commands are batched.\n\n**Done when:** a call with a failing test, or with a changed symbol no test reaches, doesn't finish the task and says why; a clean pass finishes it. Tests cover all three cases. The rule changes how commands behave, so record it as a decision (amending D-119 point 5) and update spec 3 §1 and the reference.",
+  "closedTime": 1792211595,
+  "column": "complete",
+  "createdTime": 1792202469,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "cd11def06b15aa97",
+  "links": [],
+  "milestone": null,
+  "rank": 183.0,
+  "scope": [
+    "."
+  ],
+  "title": "batch: task done waits for a passing test"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794972378,
+  "body": "Each release has one version, approved by the human and written to every manifest.\n\n- **Find the version files:** in each project, `Cargo.toml` `[package] version`, `gleam.toml` `version`, `package.json` `version`, and `tauri.conf.json` `version`. The Build tab shows them, and flags any that disagree.\n- **Propose the next version.** Before a build, the Build tab offers patch, minor and major from the last release's version (semver), and the human picks one or types one. A version that already has a release is refused.\n- **Write it.** When the build starts, the chosen version is written to every version file with line edits that keep formatting and comments. The change is recorded like any other, so it can be reviewed and undone. A failed or canceled build leaves the files as they were before it.\n- The release record (`release.json`) and the output folder use the version from then on.\n\n**Tests:** each file kind is read and written with formatting kept; disagreement is flagged; a duplicate version is refused; a failed build restores the files.",
+  "closedTime": 1794895548,
+  "column": "complete",
+  "createdTime": 1791953375,
+  "dependsOn": [
+    "0e5af8f4b249b58e"
+  ],
+  "feature": "420d08a86f2b840f",
+  "home": ".",
+  "id": "311f185a4d180f07",
+  "links": [],
+  "milestone": "e84433b01fd0791f",
+  "rank": 125,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "artifacts: one version across manifests"
+}

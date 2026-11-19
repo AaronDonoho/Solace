@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792208844,
+  "body": "Codex names its default (`defaultReasoningEffort` in `model/list`, kept as the model's `effort` by `agents.rs::codex_page`). The models endpoint names only which effort levels a Claude model supports, never its default, so the Claude presets, the aliases and the discovered ids carry no `effort`: the pick's first option reads \"Default\" and `board.rs::spawn_agent` passes no `--effort`, leaving the effort to Claude Code.\n\n- Give every native model an `effort`: the effort its agent reports, else `medium` when the model offers it, else the middle of the efforts it offers. Custom runners (`run` argv) take none, and a `[[models]]` entry's own `effort` still wins.\n- A run with no chosen effort then passes the model's `effort`, so a run's recorded effort is never blank, and the pick's first option reads \"Default (medium)\" — `solace_task.agent_pick` already shows the model's `effort` in that option, so no client change.\n- Spec 15 §6 and the README's Models section say the default comes from the agent, and `medium` stands behind it.",
+  "closedTime": 1792188953,
+  "column": "complete",
+  "createdTime": 1792126457,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "69367add7b89aa6b",
+  "links": [],
+  "milestone": null,
+  "rank": 174.0,
+  "scope": [
+    "."
+  ],
+  "title": "agents: a default effort for every model"
+}

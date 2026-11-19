@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793035352,
+  "body": "In work run 331b5da061b27bd2 on task:96e452af906351e1, `delete` removed `drafts.tests::cleanup_development_draft`, the last test in `mod tests`. That left two blank lines before the module's closing `}`, and `cargo-fmt-check` flagged `src/drafts.rs`. The next run tried `*** Update: drafts.tests` to remove them. It got E0108 \"a new `mod` block goes through `submit --new <module>`…\", which doesn't fit: the agent wasn't adding a module. It found `format drafts` on its own, and that fixed the file, though it reported \"changed none; added none\".\n\nThe same leftover (blank lines just before a closing `}`) shows in `cargo-fmt-check` for `board/prerequisites.rs`, `extract/rust/tests.rs`, `language/rust_refs.rs`, `strategy.rs` and `language/rust.rs`. So this probably isn't a one-off. That's inferred from the diffs, not reproduced: confirm it with the test below first.\n\n## Change\n1. `rust_submit.Store::delete_rust`: deleting the last item in an inline `mod { … }` leaves no extra blank lines before its closing `}`. Today `rust_fix_endings` keeps the file's ending; it should do the same for an inline module's ending.\n2. `store.block_note`, when the block names a module that already exists: say that layout (blank lines, indentation) is fixed with `format <module>`, and that code changes go item by item. Leave the `submit --new` wording for a new module only.\n\n## Done when\n- A test deletes the last test in an inline `mod tests` and finds no blank line before the module's `}`.\n- A test sends `*** Update: <module>.tests` for an existing inline module and gets the refusal that names `format <module>`.\n\nOut of scope: running `format` on the five files above, and changing `format`'s \"changed none\" report.",
+  "closedTime": 1792990249,
+  "column": "complete",
+  "createdTime": 1792989064,
+  "dependsOn": [],
+  "feature": "1bf75f597496363d",
+  "home": "solace-cli",
+  "id": "89c8e7708393f25e",
+  "links": [],
+  "milestone": null,
+  "rank": 91.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "delete: no blank lines left in a Rust mod"
+}

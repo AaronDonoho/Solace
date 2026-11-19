@@ -1,0 +1,10 @@
+{
+  "body": "Make the Roadmap tab easier to use for planning by milestone:\n\n- milestones sorted by due date, with no Up/Down buttons\n- a task always takes its feature's milestone\n- features are added to a milestone from the milestone's editor\n- milestones start collapsed and expand to show their details and features",
+  "colorSlot": 13,
+  "id": "cb03260b259b3c5c",
+  "milestone": null,
+  "rank": 13.0,
+  "startTime": 1792695876,
+  "state": "complete",
+  "title": "Roadmap: milestone usability"
+}

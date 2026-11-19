@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159109,
+  "body": "Seen in run 0442c97d6b8bf128 on task:be36c1d67353660d (steps 76–77). `*** Add: extract::rust::tests::an_inline_test_carries_a_crate_root_module`, written with `::` instead of `.` before the name, quietly created a new module `extract::rust::tests::an_inline_test_…` with the test function inside it. The worker only saw unrelated \"cannot find `ready` / `Scratch` / `CARGO`\" errors and had to work out what had happened.\n\n- When an `*** Add:` header would create a new module whose only item has the same name as that module, refuse before type-checking and suggest `*** Add: <parent module>.<name>` (here `extract::rust::tests.an_inline_test_carries_a_crate_root_module`).\n- Adding a real new module (a different name, or several items) is unchanged.\n\nCheck: a unit test where `*** Add: m::f` with a body of just `fn f() {}` is refused with the dotted suggestion, and `*** Add: m::helpers` with `fn f() {}` still creates the module.",
+  "closedTime": 1793139670,
+  "column": "complete",
+  "createdTime": 1793137468,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b698ab876bedb577",
+  "links": [],
+  "milestone": null,
+  "rank": 131.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: refuse Add that wraps an item in its own module"
+}

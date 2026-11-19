@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972381,
+  "body": "On task:0e5af8f4b249b58e, the human answered an agent's question (where the output-folder setting lives) with \"Separate releases section…\". The agent got a different answer instead: a sentence about canceling builds. The human's own text was saved as a plain note (note 4).\n\nFind out how this happened and whether it can happen again, then report the cause and propose the fix as a task.\n\n### What is known\n\n- Run 8cf8f021e0f69946, question `fe98b20328bf655b`. The stored answer is \"Even after the fix, `cancel` can return before a step whose state check already passed…\". The run log's `task ask` step (step 12) already returns that answer.\n- That sentence is exactly the part the human pasted into a discussion on task:914c007b1a9bc574 about 2.5 hours earlier (the discussion note, run 831629bd78788766), without its first line \"okay so we need to address this:\". The cause could be a stale paste, or the app sending text other than what the editor showed. Both are open.\n- The task view's Notes and Questions editors share one text and one saved draft per task (`solace_task.answer_question` and `solace_task.add_note` both send `model.text`; drafts in `draft_save(\"note-text\", task id)`). Recent changes touched this: task:9070ff2673da25c6 (Notes editor open while a question waits) and task:5d7e86330e121d9b (Ctrl+Enter sends).\n\n### Check\n\n- Whether the text sent as an answer can differ from the text shown in the editor: after switching tasks, after a reload with a saved draft, with both editors open, or with Ctrl+Enter.\n- Whether the server can attach an answer to the wrong question or task (the question answer route and how a waiting run receives it).\n- What else, if anything, the logs and stored records show about when the answer arrived.\n\nIf the cause can't be pinned down, say what was ruled out and what was not.",
+  "closedTime": 1794887771,
+  "column": "cancelled",
+  "createdTime": 1794886991,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "34ad3b9637948aad",
+  "links": [],
+  "milestone": null,
+  "rank": 320.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "Investigate wrong answers reaching questions"
+}

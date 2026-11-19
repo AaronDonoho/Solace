@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1791690208,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nThis needs design and a decision before work starts. Points to settle:\n\n- **Where the run lives.** Every run today belongs to a task, and agents can't write strategy records.\n- **Proposed shape.** A root-level, read-only \"strategy\" run, discuss-like, started from the page. It can read every project, to understand the product. New agent commands (`strategy feature|milestone|task|vision`) send proposals through the inbox (`drain`/`apply` in `tasks.rs`), and a human accepts or rejects them on the page.\n- **Rust work.** Launching runs (`board.rs`), message kinds (`tasks.rs`), commands and `reference.txt` (`main.rs`).\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1791660805,
+  "column": "complete",
+  "dependsOn": [
+    "4e94f3278c3ee7c1",
+    "c279c252d0456748",
+    "c7a32f6f99ec41fd"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "dd7d2be783532449",
+  "links": [],
+  "milestone": null,
+  "rank": 60.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: agent collaboration (design first)"
+}

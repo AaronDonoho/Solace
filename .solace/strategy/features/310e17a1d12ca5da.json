@@ -1,0 +1,10 @@
+{
+  "body": "A **Personas** tab on the Strategy page, between Vision and Features, to create and describe personas: who the software is for (or who works on it), what they want and what they fear. Agents get the personas in their briefs.\n\nA persona has:\n- **Name**\n- **Objectives**: What does this persona want to accomplish?\n- **Tools**: What capabilities, resources, or means can the persona use to pursue their objectives?\n- **Concerns**: What risks, constraints, trade-offs, or undesirable outcomes matter to this persona?\n- **Other**: Additional context that helps explain this persona's perspective, reasoning, or behavior.\n\nThe questions above are the placeholder text of each field.\n\nModelled on the vision (D-91): kept by the task server, edited on the Strategy page, carried in briefs.",
+  "colorSlot": 21,
+  "id": "310e17a1d12ca5da",
+  "milestone": "63a4809d1d3362ba",
+  "rank": 1.0,
+  "startTime": 1793481898,
+  "state": "complete",
+  "title": "Personas"
+}

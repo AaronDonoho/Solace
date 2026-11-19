@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794359911,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794340268,
+  "column": "complete",
+  "createdTime": 1794327164,
+  "dependsOn": [],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "a287396a8b9b4ecf",
+  "links": [],
+  "milestone": null,
+  "rank": 373.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "techDebt": true,
+  "title": "build: bundles never go stale: Tech Debt"
+}

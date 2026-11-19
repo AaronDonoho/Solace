@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791834450,
+  "body": "A proposal that edits a task, feature or milestone now shows every field the agent sent (`solace_task.proposal_view`), so a one-line body fix shows the whole body again and the human can't see what moved.\n\n**Server (`tasks.rs::proposal`):** when the proposal edits a record (`id` given), record the record's current value of each proposed field in the proposal as `before` (field → value), the same way the vision's `base` is kept. A field whose proposed value equals its current one is dropped from what is shown (keep it in `fields`, so Approve applies the same request). The question's `text` that the agent sees can stay as it is.\n\n**Display (`solace_task.proposal_view`):**\n- Edit: list only the changed fields. Short fields (title, feature, milestone, state, targetDate, dependsOn, rank) show `old → new`, records by title through `name`. The body shows as a diff: unchanged paragraphs collapsed, removed lines struck and added lines marked (a line diff is enough), with a toggle to see the new body rendered as Markdown.\n- If nothing changes, say so (\"No change\").\n- Create and vision proposals show as now; a vision proposal may use the same body diff against the current vision.\n- A proposal saved before this (no `before`) shows as now.\n\n**Tests:** a Rust test that an edit proposal carries `before`; Gleam tests that unchanged fields are hidden, that a short field shows old → new, and that the body diff marks added and removed lines.",
+  "closedTime": 1791833719,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": "b74a151f65c05ebc",
+  "home": ".",
+  "id": "1df4a6d8bd4454e8",
+  "links": [],
+  "milestone": null,
+  "rank": 92.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "plan: proposals show only what changes"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "An agent reviews a release's inspection, meaning what the build read and the package check, and reports the risks in plain language. For example: \"reads `SOLACE_CONFIG` but nothing sets it in the package\".\n\n- The human sees the report with the release on the Build tab.\n- The human can file a task from any finding.\n\nDone when: a release whose build read something its package doesn't carry gets a report naming that risk in plain words, and a task can be filed from that finding.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979652,
+  "dependsOn": [
+    "f69df7bd242e32f6",
+    "f8a8fa654669415a"
+  ],
+  "feature": "334355678da937ab",
+  "home": "solace-cli",
+  "id": "9d6e56b13978a6a1",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 407.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "inspection: agent risk report"
+}

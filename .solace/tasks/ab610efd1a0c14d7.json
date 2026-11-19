@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539260,
+  "body": "`task_session` returns `plain_session` when the starting project is plain, even when another project in the task holds symbols. The observed root task (scope `.` and `solace-cli`) starts in `.`, so its brief lists no Rust symbols and no `RUST_BRIEF`.\n\n1. Build the task's other-project list before the plain check. Return `plain_session` only when no project in the task's scope has symbols.\n2. Build `Modules` from every included project, each group headed by its folder; add `RUST_BRIEF` when any included project is Rust.\n3. Keep the symbol packet's `(<folder>)` markers and the `inspect <name> --project <folder>` hint.\n4. Tests: a task scoped `.` + `solace-cli` starts in `.` and its brief lists `solace-cli`'s Rust modules and symbols and the Rust brief; a task with only plain projects still gets `plain_session`; a Gleam project with a Rust sibling includes both.\n\nChecks: `rust-unit`, `rust-board-tests`, `rust-acceptance`.",
+  "closedTime": 1792468386,
+  "column": "complete",
+  "createdTime": 1792466675,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "ab610efd1a0c14d7",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 4.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "session: include every task project"
+}

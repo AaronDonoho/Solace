@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312247,
+  "body": "The worker on task:21241abf8e6ac8a7 filed this as tech debt in note 4. A successful `extract` reply lists every test that stays, which is often hundreds of lines about code the task never touched. That buries the moved symbols and makes the agent read everything again.\n\n### Change\n\n- List what moved by name, as it does now.\n- Give the tests that stay as a count.\n- Name a staying test only when it's useful: when it reaches both moved and staying code, so its references were rewritten (D-208).\n\n### Done when\n\n- An extract test checks the shorter reply.\n- `changing.txt` matches the new reply if it shows one.\n- `rust-unit` passes.",
+  "closedTime": 1793300065,
+  "column": "complete",
+  "createdTime": 1793256607,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "11432a0c96b8a460",
+  "links": [],
+  "milestone": null,
+  "rank": 193.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: shorter reply on staying tests"
+}

@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794359903,
+  "body": "A human sees a proposal drawn before deciding: the design as it would be, with what changes highlighted.\n\n### Do\n\n- While a proposal is open, draw the proposed design through the same renderer as a saved one, on the design's own tab.\n- Highlight added, removed, changed and moved elements. Removed elements stay visible so the human can see what would go.\n- Work out what changed by comparing the proposal with the current design by element ID.\n- A proposal to create a new design draws the whole design as added.\n- Show the proposal's answer buttons in the panel, as on Strategy, without making them work yet if that keeps this task small.\n\nAsk the human how the highlights should look, and how to see the design as it stands now while a proposal is open.\n\n### Acceptance\n\n- Tests: each of the four change kinds is marked on the right element, and an element that didn't change isn't marked.\n- A browser check of a proposal with all four kinds; say in the task note if it has to be manual.\n\n### Left out\n\nAccepting or rejecting, which is the next task.",
+  "closedTime": 1794343726,
+  "column": "complete",
+  "createdTime": 1793914516,
+  "dependsOn": [
+    "f1bd9eba08b243e9",
+    "16e74dc0a596d71f"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": "solace-cli/design",
+  "id": "149943de0d4deccf",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 6.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "agent: draw a proposal's changes"
+}

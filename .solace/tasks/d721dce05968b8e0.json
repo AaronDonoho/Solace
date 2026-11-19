@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793159109,
+  "body": "Seen in run 0442c97d6b8bf128 on task:be36c1d67353660d. At step 76, `submit --project solace-cli` failed and said `Draft 73c7f0acd69c0d39 retained`. At step 78, `drafts drop 73c7f0acd69c0d39` came back with `E0106 draft not found in this task/session`.\n\nA likely cause, not confirmed: the `drafts drop` was sent **without** `--project solace-cli`, so it probably looked in the root project's store, while the draft lives in `solace-cli`'s store. `drafts.drop_owned` deletes by id and owner within one store and gives the same E0106 whichever reason applies.\n\nFind out:\n- whether the missing `--project` is the cause, or whether the draft really was gone (for example, used up by the failed submit, or owned by a different session id);\n- if it's the project, whether E0106 should name the project the draft is in, or `drafts drop <id>` should find it in any project of the task.\n\nReport the cause and the smallest fix as a note. No code change in this task.",
+  "closedTime": 1793138963,
+  "column": "complete",
+  "createdTime": 1793137484,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "d721dce05968b8e0",
+  "links": [],
+  "milestone": null,
+  "rank": 134.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Investigate drafts drop not finding a retained draft"
+}

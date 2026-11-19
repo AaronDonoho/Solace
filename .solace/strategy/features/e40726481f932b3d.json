@@ -1,0 +1,10 @@
+{
+  "body": "A build produces packages for Linux, macOS and Windows, as the project declares.\n\n- A recipe declares its target platforms (e.g. Linux `deb`/`appimage`, macOS `dmg`/`app`, Windows `msi`), each with the steps that differ.\n- For now, builds run only on the local PC. Solace builds on each of the three platforms, and a build makes the targets that PC can make.\n- Each target shows as its own step on the Build tab; one release holds every target's artifacts, versioned together.\n- Package inspection runs on every target's package.\n\nNot in this feature: remote machines or CI services that build targets the local PC can't.\n\nUncertain: some packages may only be made on their own platform (likely macOS packages only on a Mac). Open: how a target the local PC can't make shows on the Build tab.\n\nDepends on: build: recipes in solace.toml, build: artifacts and versions (both complete).",
+  "colorSlot": null,
+  "id": "e40726481f932b3d",
+  "milestone": "f8b1014c90da26f9",
+  "rank": 4.0,
+  "startTime": null,
+  "state": "proposed",
+  "title": "build: cross-platform targets"
+}

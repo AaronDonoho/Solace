@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791834447,
+  "body": "Why: reviewers often find minor, non-blocking issues. Today these sit only in the reviewed task's notes, so later tasks in the same feature never see them, and they pile up as hidden tech debt. Example: the review of task:d6ac4f3600093a97 (note 4) had findings 1–6, two of which matter to task:26888110ffda582a. Origin: a strategy run on task:26888110ffda582a, where the human agreed this is bookkeeping, not a plan change.\n\n**1. Decision first.** Add a decision at the end of `DECISIONS.md` with the next free number (likely D-104; check). It amends D-93 point 4: Solace may create and append to a feature's Tech Debt task without a proposal, because this records findings and schedules no work. Update Spec 15 (review brief, run briefs, events) to match.\n\n**2. Reviewers list follow-ups in a set form.** The review brief asks for a `### Follow-ups` section in the review note, one item per bullet, each a single finding with its location. No new command: the review still ends with `task note`.\n\n**3. Solace files them.** When a review run ends on a task that has a feature, and its note has a non-empty `### Follow-ups`:\n- Find the feature's Tech Debt task: one task per feature, marked as such (a field or kind, not by title), titled `<feature title>: Tech Debt`.\n- If it doesn't exist, create it in `backlog` with the feature linked and the scope of the reviewed task.\n- Append one `solace` note per follow-up, linking the source (`task:<id>` and the review run).\n- A task with no feature keeps its findings in its own note only, as now.\n- If the Tech Debt task is complete or archived, a new follow-up brings it back to `backlog`.\n\n**4. Workers are told.** Work, investigate and discuss briefs on a task in a feature that has a Tech Debt task with open items get one line: `Feature tech debt: task:<id>, N open items; fix any your change touches and list them under ### Tech debt resolved`. Not the items themselves, to keep briefs small. Leave it out of the Tech Debt task's own brief, and give that task's brief its open items in full.\n\n**5. Resolving items.** When a work run's summary has `### Tech debt resolved` naming items (by note number), Solace marks those notes resolved on the Tech Debt task and names the resolving task. N counts unresolved items. The human can also mark an item resolved or dismissed on the board.\n\n**6. Board and Strategy.** The Tech Debt task shows its open count on its card and under its feature on the Strategy page.\n\n**Open questions for the worker to raise, not decide:** whether discuss runs and work runs (the worker's \"known limits\") can also add follow-ups; how an item is shown as resolved (a note flag vs. a reply note).\n\n**Tests:** unit tests for parsing `### Follow-ups` and `### Tech debt resolved`. Acceptance, with the fake agent:\n- A review with follow-ups creates the Tech Debt task once, and a second review appends to it.\n- A later work brief in the feature carries the pointer line.\n- A resolved list marks the items and lowers the count.\n- A review with no feature changes nothing.\n\n**Checks:** `rust-unit`, `rust-acceptance`, plus the board and strategy JS and Gleam tests for the card count.",
+  "closedTime": 1791779954,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "49e4550bf1d3d103",
+  "links": [],
+  "milestone": null,
+  "rank": 80.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Review follow-ups go to the feature's Tech Debt task, and workers are told about it"
+}

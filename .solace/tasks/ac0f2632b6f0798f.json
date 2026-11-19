@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Find out how Solace could merge two copies of `store.db` symbol by symbol, for feature:08df236ce13570c0. Write findings and a proposed task breakdown as notes; change no code.\n\n### Questions\n\n- **Common ancestor:** where does the base store come from? Git gives a merge driver the base, ours and theirs files. Is that enough, or does the store need its own history, such as per-symbol versions?\n- **Merge unit:** which rows merge by ID? Consider symbols, module headers and imports, field and type references, and the module layout. Which data is local and should never merge?\n- **Conflicts:** what counts as a conflict? For example, both sides edit one symbol, one side deletes a symbol the other edits, or both sides add the same name. How would the human resolve each in the app, and how is the result type-checked?\n- **Git hook-up:** how does a `.gitattributes` merge driver for `store.db` call Solace? What happens on a PC without Solace, and on rebase and cherry-pick?\n- **Sources and approvals:** how do the written source files and `.solace/approved` stay consistent with the merged store?\n- **Today's path:** confirm that taking one side of `store.db` and reading the merged sources back in works for Rust and Gleam, and list what it loses.\n\n### Left out\n\n- Merging task, run and strategy data.\n- Solace keeping its own full history beyond what a merge needs.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1792527560,
+  "dependsOn": [],
+  "feature": "08df236ce13570c0",
+  "home": "solace-cli",
+  "id": "ac0f2632b6f0798f",
+  "links": [],
+  "milestone": null,
+  "rank": 23.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Investigate merging stores by symbol"
+}

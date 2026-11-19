@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792208844,
+  "body": "`/models` lists Claude Code twice over: `agents.rs::claude_aliases` adds `claude-opus`, `claude-sonnet`, `claude-haiku` and `claude-fable` on top of the exact ids the list already has (the presets in `default-models.toml`, plus the ids the models endpoint lists when `ANTHROPIC_API_KEY` is set), so Opus shows as both `Claude Code · Opus (latest)` and `Claude Code · Opus 5.5`.\n\n- `board.rs::models` serves one entry per family: the family's live exact model (preset or discovered); the alias only when the family has no live exact one. Codex's answer is exact ids already, so its entries are unchanged.\n- Family: the models endpoint's `line` for a discovered model (`opus`, `sonnet`, `haiku`, `fable`); the alias's family word inside the id for a preset (`opus` in `claude-opus-5-5`).\n- The alias stays in `system()[\"models\"]`, so a task naming `claude-opus` still starts: `board.rs::model` resolves from there, not from the pick's list.\n- `board_acceptance.py` expects `claude-opus` in `/models`; the fixture follows the new rule.",
+  "closedTime": 1792186827,
+  "column": "complete",
+  "createdTime": 1792126173,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "338ca6caa31143a8",
+  "links": [],
+  "milestone": null,
+  "rank": 172.0,
+  "scope": [
+    "."
+  ],
+  "title": "agents: one pick entry per model family"
+}

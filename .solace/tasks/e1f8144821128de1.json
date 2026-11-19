@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793312246,
+  "body": "Both runs on task:21241abf8e6ac8a7 had to guess how `extract` behaves. The investigator listed it under *Not checked*. The worker spent about 20 steps reading `extract::rust` code (`plan_test_module`, `move_tests`, `test_covered`, `destination`, `rust_created`) to learn what the reference should have told it. The `extract` entry in `src/reference/changing.txt` is mostly about Gleam. Its Rust part is four lines, and `src/reference/rust.txt` has no extract section at all.\n\n### What the reference must answer (each question came up in those runs)\n\n1. **New target module:** `--to <module>` for a module that doesn't exist creates it. Say where its file goes, what header it gets, and where its `mod` line is added.\n2. **Where moved tests go:** they go into the target's existing `tests` module if it has one. Otherwise they go into a new `<target>::tests` in `<target>_tests.rs`. If that file already exists, the extract is refused (E1001). The task hit this case: `store_read_tests.rs` already holds `store::read_tests`. Say what to do about it.\n3. **Which tests count as \"reaching only moved code\":** a test whose local helper (such as a `sample()` fixture) calls staying code stays where it is. In practice most tests stay, and a short example should show why.\n4. **Which helpers come along:** a private helper (free function or method) used only by the moved code moves with it. One that staying code also uses stays, and calls to it keep working. Say which items get raised to `pub(crate)` and how far (D-205, D-211). The doc doesn't mention visibility at all today.\n5. **Naming:** `Store::method` resolves without a module, but a short name like `has_column` can be ambiguous (E1002). Show the `crate.` form.\n6. **A whole test module moved:** it keeps its own name (for example `store_read::read_tests`), not `tests`.\n7. **One worked Rust example**, like the Gleam one that's already there: a few methods and a helper going to a new module, and the reply that comes back.\n\n### Done when\n\n- Every statement is checked against the code or a test, not inferred. Anything that turns out to behave badly gets filed as tech debt, not documented as a feature.\n- `tests/reference_layout.py` passes, and the Gleam `extract` text keeps its meaning.\n- The text stays short. Details that only matter to Rust go in `rust.txt`, and `changing.txt` points there. (That split is only a suggestion.)",
+  "closedTime": 1793306809,
+  "column": "complete",
+  "createdTime": 1793255101,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "e1f8144821128de1",
+  "links": [],
+  "milestone": null,
+  "rank": 190.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "docs: explain how Rust extract works"
+}

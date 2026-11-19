@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791690260,
+  "body": "Include a button to remove completed/canceled tasks from board.\nThe tasks are not deleted; they will still be displayed in the archive.",
+  "closedTime": 1791690259,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "399a97660fe6863a",
+  "links": [],
+  "milestone": null,
+  "rank": 8,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "Remove completed tasks from board"
+}

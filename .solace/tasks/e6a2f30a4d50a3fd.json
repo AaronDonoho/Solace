@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795105044,
+  "body": "Split from task:040fefdf07a5aeab.\n\nWhen there is nothing to migrate, the Migration tab is blank. It should show a short message saying there is nothing to migrate here, and why, for example because the folder already uses Solace or has no projects that still need migrating.\n\n### For the worker\n\n- `GET /migration` answers `state: \"none\"`, and `migration.migration_view` has no branch for it, so it falls through to `_ -> h.text(\"\")`.\n- The CLI already has wording for this case (`migrate.text`: \"Nothing to migrate here.\"). Keep the screen consistent with it.\n- If the reason isn't in the reply today, add it to the reply rather than guessing on the page.\n\n**Tests:** a Gleam view test that `state: \"none\"` renders the message; a migrate acceptance check that a set-up root answers `none` with its reason.",
+  "closedTime": 1795062451,
+  "column": "complete",
+  "createdTime": 1795055148,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": "solace-cli/migration",
+  "id": "e6a2f30a4d50a3fd",
+  "links": [],
+  "milestone": null,
+  "rank": 3.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/migration"
+  ],
+  "title": "migration: message when nothing to migrate"
+}

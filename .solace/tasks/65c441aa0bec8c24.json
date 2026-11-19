@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792598369,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792507010,
+  "column": "complete",
+  "createdTime": 1792466690,
+  "dependsOn": [],
+  "feature": "42af7119fb6915f9",
+  "home": ".",
+  "id": "65c441aa0bec8c24",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 238.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Rust: adopt Solace's own crate: Tech Debt"
+}

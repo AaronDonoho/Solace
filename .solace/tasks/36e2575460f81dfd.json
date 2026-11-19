@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793983855,
+  "body": "When a completed task has tech debt to file, Solace adds it to the feature's Tech Debt task only if nobody has started that task. Otherwise it creates a new Tech Debt task.\n\n### What changes\n- A Tech Debt task can take new findings only if it is not in a final column and has no investigate, work or review run, finished or still running.\n- If no such task exists, Solace creates a new one, the same way it does today when none is open.\n- A feature can therefore have more than one open Tech Debt task at once.\n\n### Why\nToday any Tech Debt task not in a final column can take findings, even one already investigated, worked or reviewed. An agent can miss findings added after its run started, and they can be closed unread. This happened on task:76e5df161bd8741e: three findings were added after its first investigation had ended.\n\n### Acceptance criteria\n- Completing a task with tech debt, when the feature's open Tech Debt task has an investigate, work or review run of any state, creates a new Tech Debt task and leaves the started one unchanged.\n- When the feature's open Tech Debt task has no run, findings still go onto it.\n- The note on the completed task names the Tech Debt task that actually received the findings.\n- Focused tests cover each run kind, a run still in progress, and the unstarted case, through the task action that completes a task.\n\n### For the agent\nThe choice is made in `board::reviews.tech_debt`, in its `found` lookup. Update its doc comment and `board::reviews::tests.completing_a_task_files_its_reviews_tech_debt` if needed. This amends D-112 point 3: record a decision saying so, and update the matching Spec 15 entry, the one that says findings go to the feature's open Tech Debt task.\n\n### Out of scope\nTech Debt task titles, findings already filed, and tasks with no feature, which already get a new Tech Debt task each time.",
+  "closedTime": 1793982115,
+  "column": "complete",
+  "createdTime": 1793980685,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "36e2575460f81dfd",
+  "links": [],
+  "milestone": null,
+  "rank": 355.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "tech debt: never file on started tasks"
+}

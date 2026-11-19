@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794359897,
+  "body": "Solace gains a sixth agent role, Designer, so a human can give the design agent its own model and skills in Settings like any other role. The UI/UX tasks come first, as the human asked, which is why this task waits for them.\n\n### Do\n\n- Add `designer` to the one role definition (`board::roles.ROLES`), with its name, purpose and a new `design` run kind (D-220).\n- It shows in Settings with a model choice and skills, like the others, and skills assigned to it reach its brief.\n- Amend D-220 point 1, which says Solace has five roles, and update Spec 15 where it lists them.\n\n### Acceptance\n\n- Tests: `the_role_set_is_the_five_canonical_roles` is renamed and covers six, `each_run_kind_belongs_to_exactly_one_role` covers the new run kind, and a saved Designer model survives a reload.\n\n### Left out\n\nStarting a design run, and its briefing.",
+  "closedTime": 1794273880,
+  "column": "complete",
+  "createdTime": 1793914470,
+  "dependsOn": [
+    "00f44f061eff28a6",
+    "b3464bbfdd4cbc60",
+    "39a121c2e809140b"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "60bffec682b071e1",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 347.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/settings"
+  ],
+  "title": "agent: Designer role"
+}

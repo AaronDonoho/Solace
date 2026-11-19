@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793482474,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793482410,
+  "column": "complete",
+  "createdTime": 1793481721,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b2089108fccd8935",
+  "links": [],
+  "milestone": null,
+  "rank": 230.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "techDebt": true,
+  "title": "briefs: fixed reference first, for caching"
+}

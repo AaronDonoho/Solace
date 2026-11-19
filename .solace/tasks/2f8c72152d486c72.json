@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794183760,
+  "body": "Opening the tech-debt task filed from task:e0ec72f5ff2c41ee shows only \"Invalid API response\" instead of the task's title, description and three notes. It should open like any other task.\n\nThe task was filed from a task that had no list of projects it may change. The filing stored that missing list as an empty value, and the detail panel only reads a list, so it rejects the whole task. Store the task's home as its list when the source has none, and let the detail panel read an empty value as no projects so tasks already filed this way open too.\n\nCheck: the task filed from task:e0ec72f5ff2c41ee opens with its three notes; a task whose project list is empty opens; the filing covers a source task with no project list.",
+  "closedTime": 1794019595,
+  "column": "complete",
+  "createdTime": 1794011663,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "2f8c72152d486c72",
+  "links": [],
+  "milestone": null,
+  "rank": 288.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "task detail: open tasks with no projects"
+}

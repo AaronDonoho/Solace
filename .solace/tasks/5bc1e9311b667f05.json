@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792539261,
+  "body": "`src/reference.txt`'s Rust section is one dense paragraph of history (decision numbers, \"as Gleam's does\") that a weak model can't act on. In run `a348af56b1f15298` the agent guessed names (`rust_submit.Store::resolve_module` for a method whose `impl` lives in `crate`, `store::submit_tests.rust_project` for a helper in `testing`), and grepped `.rs` paths that `grep` doesn't search.\n\nRewrite it as a short list in the same shape as the Gleam command list, with one worked example per line:\n\n1. **Names**: `<module>.<item>`, `<module>.<Type>::<method>` where the module is the one holding the `impl`, not the type's; inline `mod tests` items as `<module>::tests.<name>`; `crate` for the crate root. Say that `view <module>` lists the real names, and that E1001's \"Similar names\" is the fix.\n2. **Adding**: a fn, a method, a test in an inline `mod tests`, a new module: the one command for each.\n3. **Searching**: Rust source is symbol-held, so `find` searches it and `grep` does not; `grep` is for other files.\n4. **Not available for Rust**: `probe`, `extract`, `merge`, `format`, and what to do instead (a test via `test <name>`; `submit` + `delete`; items are formatted on submit).\n5. Move decision numbers and sandbox/fetch details below the list, or to the human docs; the agent list keeps only what it acts on.\n6. Test: the reference contains each example name form and the \"not available\" line.\n\nChecks: `rust-unit`.\n\nLeft out: per-project examples generated from the store (see the session brief task).",
+  "closedTime": 1792473444,
+  "column": "complete",
+  "createdTime": 1792468922,
+  "dependsOn": [
+    "5dd9fdbced2454f8"
+  ],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "5bc1e9311b667f05",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 9.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "reference: a Rust section agents can follow"
+}

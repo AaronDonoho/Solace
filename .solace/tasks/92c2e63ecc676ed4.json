@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690238,
+  "body": "Context: Read D-77 (points 3–5) and Spec 15 §28. Cite D-17, D-18 and D-61 point 4 as amended by D-77. Part A (computed changes_of) is done. Part 1 of Lock (agent_guard) is done.\n\nGoal: human task actions lock only when they change code. Per D-77 point 5 (clarified): \"moving into a final column\" means undoing or settling a task's in-progress changes, and \"cancel without undo\" means cancelling a task that never had changes.\n\nNote from Part 1 of Lock:\ntasks::api still takes the scope locks for every human change. needs_lock, the retry inside op, the set_scope question, the README note on inbox/, and the D-77 point 5 wording are all still to do.\n\nSteps:\n\nAdd board::needs_lock(root, parts, body) -> Result<bool>. It reads the task and workflow with no lock. It returns true for:\nPOST /tasks/{tid}/actions where the action has revert = true or to is a final column, and changes_of is non-empty or some scope store has board_before rows for the task;\nPOST /tasks/{tid}/questions/{qid}, when the question has settings and the answer is Approve. Confirm which project locks apply_settings needs.\nEverything else returns false: create, PATCH, notes, stop, pause/resume, discuss, starts, scope, and plain answers.\n\ntasks::api (tasks.rs ~219): call board::guard only when needs_lock is true. Remove the ponytail comment.\nRace: inside op, run the check again before change. If a lock is needed but not held, return a private retry result, and api takes guard and runs it again. On the second attempt, keep the lock whatever the result, so the retry is bounded. op must never take a flock, because record_verification calls tasks::update while holding a project lock and that would deadlock.\nset_scope (E7013): decide whether to lock the projects being *removed* from scope, which closes the paused-run gap. Otherwise document the gap.\nUpdate the board::api comment (~1352). README: with no server, a CLI run's notes wait in inbox/ until the next serve. Fix the D-77 point 5 wording.\nTests:\n\nUnit test for needs_lock:\nfalse for stop, note, create, and cancel with no changes;\ntrue for cancel after record, and for Approve on a settings question.\nAcceptance: slow self-timed as in Task 1. After the marker appears, POST /tasks create, a note, and stop each finish in under 1 s.\nRun rust-acceptance, rust-board-tests and rust-lockdown-tests.\n\nThe double create, the inbox restart and the /events reconnect tests already exist (board_acceptance.py lines 774, 786 and 758).\n\nLines may have changed since this report was written.",
+  "closedTime": 1791421603,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "92c2e63ecc676ed4",
+  "links": [],
+  "milestone": null,
+  "rank": 33.0,
+  "scope": [
+    "."
+  ],
+  "title": "Task Store: Locks, part 2"
+}

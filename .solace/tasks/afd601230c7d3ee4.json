@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056536,
+  "body": "The Strategy page's Tasks tab search (`strategy.searched`, called from `strategy.keeps`) only filters: it keeps a task when every query word is in its title or body, or the query is its id. The tasks it keeps stay in the default order (`strategy.sorted`), so a task whose title matches can end up below others that only mention the words in their body.\n\n1. **Rank while searching.** When the search box has text and no column heading has been clicked, `strategy.visible` orders the matching tasks in this order:\n   1. the query is the task's id (bare or as `task:<id>`), or the whole query appears in the title as typed (ignoring case);\n   2. every query word is in the title;\n   3. the rest (at least one word matched only in the body).\n   Within each group, the default order stays.\n2. **Headings still win.** A clicked heading sorts as it does now. An empty search goes back to the default order.\n3. **Tests** in `strategy_test.gleam`: a task with the words in its title comes before an older or newer one that has them only in its body; a whole-phrase title match comes before a title that has the words apart; a clicked heading overrides the ranking. Run the strategy project's tests.",
+  "closedTime": 1792902278,
+  "column": "complete",
+  "createdTime": 1792901309,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "afd601230c7d3ee4",
+  "links": [],
+  "milestone": null,
+  "rank": 116.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Tasks tab: rank search by best match"
+}

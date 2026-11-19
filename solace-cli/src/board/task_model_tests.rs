@@ -125,13 +125,12 @@ fn a_homeless_task_is_rehomed_to_the_first_project_of_its_scope() {
     let root = homeless_root_2();
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert_eq!((t["home"].as_str(), t["scope"].clone(), t["noProject"].is_null()), (Some("sub"), json!(["sub"]), true), "{t}");
-    let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
-    assert!(
-        saved.contains(r#""home": "sub""#)
-            && saved.contains("Moved from `web` to `sub`")
-            && saved.contains("Dropped `web` from its projects"),
-        "{saved}"
-    );
+    let path = store_dir(&root).join("t1.json");
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(r#""home": "sub""#), "{saved}");
+    let loaded = read_task(&root, &path).unwrap();
+    let notes = loaded["notes"].to_string();
+    assert!(notes.contains("Moved from `web` to `sub`") && notes.contains("Dropped `web` from its projects"), "{loaded}");
     assert!(root.join("sub/.solace/board/t1").is_dir(), "its folder moved to the new home");
     assert!(!root.join(".solace/board/t1").exists(), "and left the root");
     assert_eq!(task(&root.join("sub"), "t1").unwrap()["home"], "sub", "it opens from its new home");
@@ -168,8 +167,9 @@ fn a_task_with_no_project_in_its_scope_goes_to_the_root() {
         .unwrap();
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert_eq!((t["home"].as_str(), t["scope"].clone()), (Some("."), json!(["."])), "{t}");
-    let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
-    assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
+    let path = store_dir(&root).join("t1.json");
+    let loaded = read_task(&root, &path).unwrap();
+    assert!(loaded["notes"].to_string().contains("Moved from `web` to `.`"), "{loaded}");
 }
 
 /// D-160: the mark comes from the home on each load, so a `noProject` saved by
@@ -225,7 +225,8 @@ fn a_change_on_a_homeless_task_saves_no_mark() {
     assert_eq!(t["home"], ".", "the load re-homes it to the root");
     let saved = fs::read_to_string(&path).unwrap();
     assert!(!saved.contains("noProject"), "{saved}");
-    assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
+    let loaded = read_task(&root, &path).unwrap();
+    assert!(loaded["notes"].to_string().contains("Moved from `web` to `.`"), "{loaded}");
 }
 
 /// The model pick follows the role of the action a column starts with:
@@ -342,5 +343,100 @@ fn an_answered_decision_proposal_wakes_its_discussion() {
     message(&w, &mut t, &json!({"kind":"agent","task":"t1","run":"r1","command":"note","text":"Noted."})).unwrap();
     continue_answered(&mut t);
     assert_eq!(t["runs"][0]["state"], "waiting", "a discussion waiting for a note stays waiting");
+}
+
+#[test]
+fn a_task_keeps_its_local_fields_out_of_the_shared_file() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let mut t = new_task("Shared", "", &json!("backlog"), 1.);
+    note(&mut t, "human", None, "private");
+    t["questions"] = json!([{"id":"q1","text":"Which?"}]);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"ended"}]);
+    t["stamps"] = json!({"approved":{"by":"human","time":1}});
+    t["attention"] = json!({"reason":"needs a human","time":1});
+    let id = t["id"].as_str().unwrap().to_string();
+    crate::tasks::put(&p.store, &t).unwrap();
+    let path = store_dir(&p.root).join(format!("{id}.json"));
+    let shared: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for key in ["notes", "questions", "runs", "stamps", "attention", "model", "effort", "paused_from", "finished", "settleFailed"] {
+        assert!(shared.get(key).is_none(), "{key} in {shared}");
+    }
+    let loaded = read_task(&p.root, &path).unwrap();
+    assert_eq!(loaded["notes"][0]["text"], "private");
+    assert_eq!(loaded["questions"][0]["id"], "q1");
+    assert_eq!(loaded["runs"][0]["id"], "r1");
+    assert_eq!(loaded["stamps"]["approved"]["by"], "human");
+    assert_eq!(loaded["attention"]["reason"], "needs a human");
+}
+
+#[test]
+fn a_shared_task_alone_loads_with_empty_conversations_and_can_be_edited() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let path = store_dir(&p.root).join("t1.json");
+    fs::create_dir_all(store_dir(&p.root)).unwrap();
+    let shared = json!({
+        "id":"t1","title":"From a clone","body":"","column":"backlog","rank":1.0,
+        "links":[],"scope":["."],"home":".","feature":null,"milestone":null,
+        "dependsOn":[],"createdTime":1,"closedTime":null,"archivedTime":null,"techDebt":false
+    });
+    fs::write(&path, shared.to_string()).unwrap();
+    let t = read_task(&p.root, &path).unwrap();
+    assert_eq!(t["notes"], json!([]));
+    assert_eq!(t["questions"], json!([]));
+    assert_eq!(t["runs"], json!([]));
+    assert_eq!(t["stamps"], json!({}));
+    for key in ["model", "effort", "paused_from", "attention", "finished", "settleFailed"] {
+        assert!(t[key].is_null(), "{key} in {t}");
+    }
+    crate::tasks::store::update(&p.root, "t1", |t| {
+        t["title"] = json!("Edited");
+        Ok(())
+    })
+    .unwrap();
+    let again = read_task(&p.root, &path).unwrap();
+    assert_eq!(again["title"], "Edited");
+}
+
+#[test]
+fn adopting_an_old_task_splits_its_local_fields() {
+    let root = testing::Scratch::new().with(&[(
+        ".solace/board/t1.json",
+        concat!(
+            r#"{"id":"t1","column":"backlog","#,
+            r#""notes":[{"author":"human","text":"private"}],"#,
+            r#""questions":[{"id":"q1"}],"runs":[{"id":"r1","state":"ended"}],"#,
+            r#""stamps":{"approved":{"by":"human"}},"attention":{"reason":"needs a human"}}"#,
+        ),
+    )]);
+    adopt_tasks(&root, &root).unwrap();
+    let path = store_dir(&root).join("t1.json");
+    let shared: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(shared.as_object().unwrap().keys().all(|k| SHARED_FIELDS.contains(&k.as_str())), "{shared}");
+    let local: Value = serde_json::from_slice(&fs::read(local_path(&path)).unwrap()).unwrap();
+    assert_eq!(local["notes"][0]["text"], "private");
+    assert_eq!(local["runs"][0]["id"], "r1");
+    let loaded = read_task(&root, &path).unwrap();
+    assert_eq!(loaded["notes"][0]["text"], "private");
+    assert_eq!(loaded["questions"][0]["id"], "q1");
+    assert_eq!(loaded["runs"][0]["id"], "r1");
+    assert_eq!(loaded["stamps"]["approved"]["by"], "human");
+    assert_eq!(loaded["attention"]["reason"], "needs a human");
+}
+
+/// Workflow events go to the local log, tagged with the project they belong to.
+#[test]
+fn a_workflow_event_goes_to_the_local_log_under_its_project() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let w = flow(&p.root).unwrap();
+    event(&p.store, json!({"workflow": w})).unwrap();
+    let db = crate::tasks::events(&top).unwrap();
+    let (project, data): (String, String) =
+        db.query_row("SELECT project,data FROM events ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(project, ".");
+    assert_eq!(serde_json::from_str::<Value>(&data).unwrap()["workflow"], w);
+    let old: i64 =
+        p.store.db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='board_events'", [], |r| r.get(0)).unwrap();
+    assert_eq!(old, 0, "the shared store still has a board event table");
 }
 

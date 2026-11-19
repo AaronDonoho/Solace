@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792009430,
+  "body": "Today the only way to create a task is the small form at the end of a feature on the Features tab (`features.task_form`), which always links the task to that feature and takes only a title. The human wants to add a task of their own from the Tasks tab.\n\n- A **New task** button above the Tasks tab's filters opens a form there: a title, the description in the shared editor (Markdown, with the same formatting tools as the feature form), a project select in a workspace (defaulting to the root's own project; no picker with a single project), and optional feature and milestone selects with \"(none)\".\n- **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then one `PATCH {base}/tasks/{id}` with the feature and milestone picked, if any, through the same `Link`/`Patched` path the inline row links use. `request` is chosen when the form opens and kept until a create succeeds, so a retry makes one task. One create at a time.\n- Each step reports in the form: a refused create keeps the draft (\"Couldn't create the task: …\"); a refused link says \"The task was created without its feature/milestone: …\". **Cancel** closes the form.\n- On success the form closes and the new task opens below the list as a row click does.\n- The feature's own new-task form on the Features tab stays.\n- Update the Tasks tab section of the strategy README.\n\n**Tests:** strategy tests for the form (blank title disables Create, request id kept across a refused create, link PATCH sent only when a feature or milestone is picked, form closes and task opens on success); `api.test.mjs` for the POST-then-PATCH sequence.",
+  "closedTime": 1791957507,
+  "column": "complete",
+  "createdTime": 1791955684,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/strategy",
+  "id": "79ae276e5a8efc5d",
+  "links": [],
+  "milestone": null,
+  "rank": 95.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "ui: New task on the Tasks tab"
+}

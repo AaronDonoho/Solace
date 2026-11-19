@@ -1,0 +1,24 @@
+{
+  "archivedTime": 1794967955,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794965478,
+  "column": "complete",
+  "createdTime": 1794956711,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a4ad9ce44ae86975",
+  "links": [],
+  "milestone": null,
+  "rank": 393.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/design",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "planning panel: one End button"
+}

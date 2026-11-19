@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159111,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793146031,
+  "column": "complete",
+  "createdTime": 1793143622,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "80422e126e301edf",
+  "links": [],
+  "milestone": null,
+  "rank": 140.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "probe: --from a Rust test: Tech Debt"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795056535,
+  "body": "On a board task's **Notes** tab, while a discussion is underway or a question is waiting for an answer, the note editor is already open. The plus (Add note) button isn't shown, so there is nothing to press first.\n\nAt other times the Notes tab works as it does now.\n\n---\nFor the agent: `solace_task.notes_view` (solace-cli/components) shows `add_note_button` or the composer depending on `model.writing`, which only `WriteNote` sets. A discussion is underway when a run with kind `discuss` hasn't ended (`state != \"ended\"`). A question is waiting when `first_unanswered` finds one. The Questions tab already opens its answer editor for a waiting question; leave it as it is. Keep the saved note draft and focus behaviour of `write_note`.",
+  "closedTime": 1794857978,
+  "column": "complete",
+  "createdTime": 1794846558,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "9070ff2673da25c6",
+  "links": [],
+  "milestone": null,
+  "rank": 128.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "task view: note editor open during a discussion"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690235,
+  "body": "When replying to tasks, Agents should be guided to:\n- Format their messages in markdown\n- Deliver their message with the body separated into relevant sections \n- Provide small titles/headings over each section\n- Explain why they're asking for something when asking a question\n- Reviews should include a flag for \"Looks good\"  \"Needs work\" assessment",
+  "closedTime": 1791221924,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "f50a5c87cd060ef4",
+  "links": [],
+  "milestone": null,
+  "rank": 4,
+  "scope": [
+    "."
+  ],
+  "title": "Improve Agent task responses"
+}

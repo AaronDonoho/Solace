@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1791690202,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nDecision: the board's task detail is extracted into a shared component, `<solace-task>`, in the Gleam project `solace-cli/components` (JavaScript target). Done before the Tasks tab.\n\n- **Project `solace-cli/components`.** Gleam, JavaScript target, depending on `lustre` and `gleam_json`.\n- **What moves out of `solace_board` into it.**\n  - The types `Task`, `Note`, `Question`, `Run`, `Entry`, `Link`, `Change`, with their decoders.\n  - `detail`, `details_view`, `notes_view`, `questions_view`, `run_view`, `entry_view`, `composer`, `editor`, `agent_choice`, `scope_view`, `actions`, `status`, `change_groups`, `settings_diff`.\n  - The detail's part of `api.mjs`: markdown, images, `wrap`/`block`, and requests.\n  - The model fields that belong to one open task: `text`, `title`, `body`, `rank`, `editing`, `tab`, `previews`, `acting`, `watching`, `entries`, `poll`, `review_summary`, `models`, `model`, `effort`, `error`.\n- **The component.** `<solace-task base=\"…\" task=\"<id>\" workspace>` loads its task with `GET /tasks/{id}`, follows `/events` for `{task}` with that id, and handles its own actions, notes, answers, transcript polling and image uploads.\n- **Inputs from the host.** The workflow comes from `GET /workflow`, under the task's base. The model list comes from `GET /models`. The project list for the Scope tab comes from `GET /projects`.\n- **Outputs to the host.** Custom events: `task-moved` (the task left its home project; today's `follow_move`) and `notice`. The board's notices stay with the board.\n- **Board changes.** The board keeps lanes, cards, creating tasks, projects and notices. Its `detail` becomes `<solace-task>` for the selected card. The board, the shell and Strategy all depend on `components` by path. The board's tests for moved functions (`actions`, `status`, `settings_diff`, `change_groups`, `acting_text`, `author`, the decoders) move with them.\n- **Risks.**\n  - The board and the component both open an event stream. Either accept two streams, or let the host pass `{task}` events down by property. Decide when building it.\n  - Saved browser keys (`solace-board-agent`, `solace-board-effort`) and the find bar's shadow-root search must still work inside a nested shadow root.",
+  "closedTime": 1791603456,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "2d8964fa294263de",
+  "links": [],
+  "milestone": null,
+  "rank": 55.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Extract task detail into <solace-task> (components)"
+}

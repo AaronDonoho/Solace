@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792125214,
+  "body": "Follow-up to task:899399b18fbb2f39. The tool description's \"never one read per call\" didn't change behaviour: agents still send about one command per call (run 27's 82 commands in 11 calls shows they can batch). Put the guidance where a small model reads it: last in the first reply, and next to the mistake.\n\n### 1. Session start ends with a \"how to work\" line\n\n`main.rs::session_end` puts the reference last, so its batching advice is far from where the model plans its first reads. Add one line at the very end of every session start reply (Gleam, plain-file and `--task` sessions):\n\n- With `--task` and ranked symbols: name a ready-to-send first call built from the top few ranked names, e.g. `Next: read what the change needs in one call, one command per line: inspect a.f b.g c.h --context`.\n- Otherwise: the same line with the reference's example names.\n- Plain-file projects: the example uses `read`/`grep` lines.\n- Not in Strategy runs (they get the Strategy section, not the workflow), unless it reads naturally there too.\n\n### 2. A hint after a single-read call\n\nIn `main.rs::batch` (or the MCP loop that calls it), when a call held exactly one command, that command is a read (`READS`), and it succeeded, append one line to the reply:\n\n`Hint: put independent reads in one call, one per line.`\n\n- Only from the **second single-read call in a row**, so a lone follow-up read isn't nagged; the count lives in the MCP loop and resets on any multi-command call.\n- Never on a failed call, so the `N of M commands failed` last line that `board.rs::partly_failed` parses is unchanged.\n- The run log keeps the hint as part of the reply; it isn't a failure.\n\n### Tests and record\n\n- Unit tests: session start ends with the line (with and without `--task`); the hint appears on the second single read in a row, not the first, not after a batch, not on a failure or a change.\n- `DECISIONS.md`: a new entry for both rules; update `specs/03-protocol.md` and the reference if they describe the reply.\n- Run `rust-unit`, `rust-board-tests`, `rust-acceptance`.\n\nThe human measures the effect with a bench run afterwards; the summary should name which numbers to compare (commands per call first, then tokens and calls per run).",
+  "closedTime": 1792124645,
+  "column": "complete",
+  "createdTime": 1792121685,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "7c069e379d1826da",
+  "links": [],
+  "milestone": null,
+  "rank": 169.0,
+  "scope": [
+    "."
+  ],
+  "title": "batching: guidance at session start and after single reads"
+}

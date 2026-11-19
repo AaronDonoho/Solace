@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793423237,
+  "body": "Steps 8–10 of the refactor plan (task:fc9bf315f4eddc7a, notes 6 and 12). This is part 3 of 4 of the module splits.\n\n- **`extract`:** split into `plan`, `ffi`, `deps` and `apply`. Move `ahead` to `transactions::ahead`. Keep `merge` as the merge operation, reusing `extract::plan` and `extract::deps`. Also split `extract::rust` into submodules for extract planning, import rewriting, test-file placement and Rust `merge`.\n- **`view`:** split graph construction, review scratch runs and HTTP routing (`graph`, `review`, `api`).\n- **`reach`:** split data-flow and taint analysis from suite selection and report formatting (`flow`, `suites`).\n\nAll three still have inline `mod tests`, so move code out of them first.\n\nThe rules for every split task are in task:2414798176c466e4.",
+  "closedTime": 1793336901,
+  "column": "complete",
+  "createdTime": 1793057971,
+  "dependsOn": [
+    "21241abf8e6ac8a7"
+  ],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "1433afceee3ca3e7",
+  "links": [],
+  "milestone": null,
+  "rank": 293.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Refactor: split extract, view, reach"
+}

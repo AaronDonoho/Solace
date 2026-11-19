@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1795105047,
+  "body": "Follow-up from task:5c7e159c3503cecf (its note 10). Each project's committed code store (`.solace/store.db`) holds a board event log, and older Solace builds wrote whole task copies there, notes and questions included. That breaks this feature's promise to commit tasks without their conversations or run details.\n\n### Do\n\n- Write and read board events in the local, ignored events file (`.solace/tasks/events.db`) instead of the shared store.\n- The first time a project upgrades, empty the old event table in its shared store once.\n\n### Done when\n\n- A freshly upgraded project's committed store holds no board events.\n- The board still gets live updates.\n\n### Out of scope\n\n- The store's other run tables (work records, rejected changes, who-changed-what, undo records).\n- Cleaning notes already in past git commits.\n\n### For the worker\n\n- Writer: `board::task_model.event` (callers `board::task_model.recover_project`, `board::server.serve`). Readers: `board::server.Events` (`snapshot`, `members_changed`, `next`). Table created in `store_core.LATER_TABLES`.\n- `tasks::store.events` already has a project column and task events.",
+  "closedTime": 1795102406,
+  "column": "complete",
+  "createdTime": 1795066775,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": "solace-cli",
+  "id": "7cc765b01bb7fac6",
+  "links": [],
+  "milestone": null,
+  "rank": 423.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "share: keep board events out of the shared store"
+}

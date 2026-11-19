@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793231414,
+  "body": "Moving a crate-root item can break the code that stays. In task:21241abf8e6ac8a7, extracting `Store::root` would remove `use std::env;` from the crate root, but `board`, `lockdown`, `migrate`, `reads` and `view` use `env` through the crate root. `sha256` lost `use sha2::Digest`; moved `COMMAND_DB` stayed private while callers were rewritten to import it; and some modules got a duplicate `Duration` import.\n\nKeep the project compiling when a move leaves code behind:\n- do not remove a crate-root import while staying code still reaches it;\n- carry the trait imports the moved code uses;\n- raise a moved item's visibility when its new callers need it, and no further;\n- merge imports instead of duplicating them.\n\nTests:\n- move `Store::root` out while `board` and `lockdown` still use `env`;\n- move `sha256` and keep `Digest` in scope;\n- move `COMMAND_DB` and let its rewritten callers reach it;\n- move a helper using `Duration` into a module that already imports it.\n\nThis is the same area as task:d12423a0d703bec3, so do it after that task.",
+  "closedTime": 1793223884,
+  "column": "complete",
+  "createdTime": 1793164202,
+  "dependsOn": [
+    "d12423a0d703bec3"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "0345657ffbdf7c73",
+  "links": [],
+  "milestone": null,
+  "rank": 151.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "extract: keep staying code compiling"
+}

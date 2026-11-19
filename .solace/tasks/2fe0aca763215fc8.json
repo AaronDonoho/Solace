@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1792977609,
+  "body": "A new task proposed without a feature gets a third button, **Approve to Planning**, beside **Approve** and **Reject**. It creates the task in Planning, so it's on the board right away, instead of in Backlog.\n\n## Today\n- An approved task with no feature is created in Backlog (`tasks.apply_proposal`, `tasks.build`; see `tasks.tests::an_approved_proposal_creates_the_record`).\n- A task with a feature follows its feature: it's planned if the feature is active (D-134).\n- The buttons are the question's `options`, set when the proposal is sent (`board::strategy.strategy_command`) and drawn by `solace_task.proposal_view`.\n\n## Change\n- The proposal question for a **new task with no `feature`** offers `Approve`, `Approve to Planning` and `Reject`. Other proposals, and edits, keep `Approve` and `Reject`.\n- With `Approve to Planning`, the task is created in `planning` of its home project, or the workflow's first column if it has none (D-132). Otherwise it's the same as Approve, with the same refusals. The answer recorded is `Approved and applied: created task:<id> (Planning)`.\n- `Approve` still creates the task in Backlog.\n\n## Done when\n- `tasks::tests` cover both buttons and the options offered.\n- The proposal view test shows three buttons for such a proposal.\n- Spec 15 §6 and D-93, or a new decision, describe it.\n- The bundled `app.js` is rebuilt.\n\nOut of scope: a column picker, and the same button on edits or for tasks with a feature.",
+  "closedTime": 1792950737,
+  "column": "complete",
+  "createdTime": 1792945324,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "2fe0aca763215fc8",
+  "links": [],
+  "milestone": null,
+  "rank": 68.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/frontend"
+  ],
+  "title": "proposals: approve a task into Planning"
+}

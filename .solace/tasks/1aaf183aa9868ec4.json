@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793231414,
+  "body": "`view <module>` lists an outline but not the module comment or imports. `read` refuses a source file held as symbols, and `view <module> --bodies` dumps the whole file, so learning a module's imports can cost a large read. In task:21241abf8e6ac8a7 the worker needed three turns to discover a moved test file's header this way.\n\nShow a module's comment and imports in `view <module>`, or add `view <module> --header` or `--imports`. Keep `--bodies` behavior unchanged, and do not dump function bodies just to show the header.\n\nTests:\n- a module with a comment and imports shows both without its bodies;\n- an ordinary outline is unchanged;\n- a missing module still reports an unknown name.",
+  "closedTime": 1793197201,
+  "column": "complete",
+  "createdTime": 1793164207,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "1aaf183aa9868ec4",
+  "links": [],
+  "milestone": null,
+  "rank": 152.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "view: show a module's imports"
+}

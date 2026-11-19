@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1791924907,
+  "body": "Part of the `extract` feature. Split out of task:96249ceddc889684 (point 3, dependent projects), and needs it done first.\n\nFor each project whose `gleam.toml` depends on the source and that the task covers:\n\n- **Rewrite references** to moved symbols (`board.Task` → `solace_task.Task`, imports included) with the same rewrite (`Plan::rewrite` in `extract.rs`). `Plan` already reads module headers from a `headers` map, so the work is a symbol lookup across stores (old module and name → new module).\n- **Add the destination dependency** to its `gleam.toml` if missing (`add_dependency` + `lockdown::change_file`), and include that file in the dependent's snapshot.\n- **Store handling:** open its store in `run_options` with the shared connection, lock it (pass it in `also` to `board::agent_guard`), mark it, snapshot it, run it in its own transaction, and commit it with its undo rows before the source.\n- **Type-check** it after the destination and the source.\n- **Reply** with references rewritten per project and `Dependency added: web, front -> components`.\n\nA dependent project the task does not cover is still refused, naming its uses.\n\n**Tests:**\n- Acceptance (`workspace_acceptance.py`): a dependent project in scope is rewritten and gains the dependency, `check` passes; cancel restores its store and its `gleam.toml`.\n\n**Checks:** `rust-unit`, `rust-acceptance`.",
+  "closedTime": 1791819822,
+  "column": "complete",
+  "dependsOn": [
+    "96249ceddc889684"
+  ],
+  "feature": "068f9f57ce89d8b2",
+  "home": ".",
+  "id": "4e7afa39dcbc3f9a",
+  "links": [],
+  "milestone": null,
+  "rank": 90.0,
+  "scope": [
+    "."
+  ],
+  "title": "extract --to-project: rewrite covered dependent projects"
+}

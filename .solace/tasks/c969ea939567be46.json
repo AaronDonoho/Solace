@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690238,
+  "body": "The Acceptance tests are slow; how can they be made faster? how can they run in parallel?",
+  "closedTime": 1791429386,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "c969ea939567be46",
+  "links": [],
+  "milestone": null,
+  "rank": 32.0,
+  "scope": [
+    "."
+  ],
+  "title": "Speed up acceptance tests"
+}

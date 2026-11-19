@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791834446,
+  "body": "Each feature gets a color; cycle through 16 colors. the cycle should be in rainbow order, skipping 4 colors so they're easy to tell apart. Cards are currently color-coded by status, that will have to go.",
+  "closedTime": 1791814479,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "7370275af2c987bf",
+  "links": [],
+  "milestone": null,
+  "rank": 7.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Tasks are color-coded by feature"
+}

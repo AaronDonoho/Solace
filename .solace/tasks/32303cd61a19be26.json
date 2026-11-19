@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793423237,
+  "body": "Part of splitting task:3254586664024306. From its notes 6–7; the original notes stay on the parent record. These concern the size and untested entry point of `cli`.\n\n- **Split `cli` (note 6).** `cli` is still large, and the long functions `cli.run_inner`, `cli.run_options` and `cli.batch` were moved over unchanged. Split routing, batching (`batch`, `read_hint`, `panic_reply`, `failed_copy`) and project scoping (`scoped`, `Within`, `read_project*`, `other_projects`, `module_elsewhere`, `path_dependencies`) into submodules. Check: `view cli` lists only the facade entry points, and `rust-unit` passes.\n- **Test `main` (note 7).** No test reaches `crate.main` or `cli.main`, as `test --all` reports. Move the body of `cli.main` (the `--option`/`--old`/`mcp --budget` parsing and the exit-code mapping) into a function that takes `args` and returns `(String, i32)`, and test it. `--budget x` should give exit code 2, and a failing command should give exit code 1. Then `main` only prints the output and exits with the code. Check: `test --all` no longer reports `cli.main` as unreached.",
+  "closedTime": 1793254496,
+  "column": "complete",
+  "createdTime": 1793135905,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "32303cd61a19be26",
+  "links": [],
+  "milestone": null,
+  "rank": 307.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Refactor: split CLI and test main"
+}

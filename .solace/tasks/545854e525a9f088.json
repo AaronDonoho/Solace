@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159125,
+  "body": "A Rust trait impl's stored name has spaces in it: `crate.<Failure as From<rusqlite::Error>>`. Every command line is split on whitespace (`crate.batch` uses `split_whitespace`), so no command can name one.\n\nIn run 9f6696d0464e5adc on task:2414798176c466e4, the agent hit this twice:\n\n- Step 25: quoting the name failed, because the quote marks stayed part of the words.\n- Step 27: escaping the spaces with `\\` failed the same way.\n\nThe `E1001` reply's \"Similar names\" even suggested the exact names the agent couldn't type. As a result, `Failure`'s two `From` impls could not be viewed or extracted, which D-205 point 2 says must be possible.\n\n### Done when\n\n- `view`, `inspect`, `refs`, `extract` and `delete` all accept a trait impl, and a method inside one (`<Failure as From<std::io::Error>>::from`), in some form an agent can type.\n- Every reply that prints a trait impl's name, such as outlines and \"Similar names\", prints it in that same form.\n- `reference.txt` documents the form once.\n- A unit test names a trait impl and one of its methods through a batch line.",
+  "closedTime": 1793078514,
+  "column": "complete",
+  "createdTime": 1793074812,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "545854e525a9f088",
+  "links": [],
+  "milestone": null,
+  "rank": 121.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "commands: name Rust trait impls"
+}

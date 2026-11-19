@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690214,
+  "body": "build.rs still rebuilds only the board bundle. frontend/priv/app.js is checked in, so include_bytes! compiles. When the frontend source changes, someone has to rebuild that bundle by hand. Rebuilding it from build.rs would need the frontend's solace.toml\n\nAdd a new build & bundle command in frontend, consistent with the one in the board project.\nThen have the main solace project refer to that command when building.",
+  "closedTime": 1791345370,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "66a7a62ee678528b",
+  "links": [],
+  "milestone": null,
+  "rank": 3.0,
+  "scope": [
+    ".",
+    "solace-cli/frontend"
+  ],
+  "title": "Add command to build"
+}

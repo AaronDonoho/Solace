@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792208844,
+  "body": "`agents.rs::merge_from` appends the model a run used to every model's label, so a configured model shows what an older run used: `Local: Strata Swift · swift-iq2_xs` after the config's `model` became `swift-iq3_xxs`. The stamp exists for aliases, whose `model` is a family word.\n\n- Stamp only an alias entry, one whose `model` is `opus`, `sonnet`, `haiku` or `fable`; a model with its own `model` (preset, discovered id, configured endpoint) shows that.\n- `board.rs::models` serves each model's `model` string; `<solace-task>`'s `Agent` decodes it and the pick shows it under the label, so a config edit shows on the next poll (`board.rs::system` reads `config.toml` every request).\n- `record_used` keeps recording what a run used: the run line still names it, and an alias's label follows it.",
+  "closedTime": 1792188497,
+  "column": "complete",
+  "createdTime": 1792126180,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": ".",
+  "id": "a32ddb751e31d66e",
+  "links": [],
+  "milestone": null,
+  "rank": 173.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "agents: a model's label names its own model"
+}

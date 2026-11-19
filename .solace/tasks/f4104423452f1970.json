@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792009426,
+  "body": "Since the task detail area was made collapsible, there are some things to adjust.\nMove the swimlanes up; there is a large gap between the column names and the menu bar, plus the swimlanes extend upward past the columns.\nThe collapsible detail area should be adjustable in height; make it clear this is possible by giving it a little resize handle.\n",
+  "closedTime": 1791940030,
+  "column": "complete",
+  "createdTime": 1791938254,
+  "dependsOn": [],
+  "feature": "5561308bebd3bc9d",
+  "home": "solace-cli/board",
+  "id": "f4104423452f1970",
+  "links": [],
+  "milestone": null,
+  "rank": 28,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "ui: Collapsible detail cleanup"
+}

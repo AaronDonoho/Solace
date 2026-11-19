@@ -1,0 +1,10 @@
+{
+  "body": "The Rust crate at `solace-cli/src` has grown large: `main.rs` 5302 lines, `board.rs` 4532, `lockdown.rs` 3196, `tasks.rs` 2810, `extract.rs` 2474, with tests in a few big files (`board_tests.rs` 1937, Python acceptance files). This feature works out how to refactor and clean the crate, then does it, so the code stays maintainable as Solace grows.\n\n### Goals\n\n- A written refactor plan before any change.\n- Oversized modules split into focused ones; duplication collapsed; dead code removed.\n- Public CLI behavior unchanged; tests stay green at every step.\n- Agents get better direction so future work stays maintainable.",
+  "colorSlot": 11,
+  "id": "eac0a07056630703",
+  "milestone": null,
+  "rank": 11.0,
+  "startTime": 1792527637,
+  "state": "complete",
+  "title": "Root project refactor and cleanup"
+}

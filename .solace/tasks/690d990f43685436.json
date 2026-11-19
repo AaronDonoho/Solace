@@ -1,0 +1,23 @@
+{
+  "archivedTime": 1793916050,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793856732,
+  "column": "complete",
+  "createdTime": 1793854533,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "690d990f43685436",
+  "links": [],
+  "milestone": null,
+  "rank": 265.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "techDebt": true,
+  "title": "Fix: pages stop showing live updates"
+}

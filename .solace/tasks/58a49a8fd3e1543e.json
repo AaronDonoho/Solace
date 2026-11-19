@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539266,
+  "body": "The test runs are getting slow. `run rust-unit tests::` takes 40.3s for 610 tests, and `run rust-acceptance` takes 23.0s (review run `a2e030b8e527d781` on task:97dd1c17a1bddaa5). We need to measure where the time goes before optimizing.\n\n### Change\n\n1. **Remove the 8-worker cap.** `tests/run_parallel.py` should default to the CPU count. `SOLACE_ACCEPTANCE_JOBS` still overrides it.\n2. **Measure the unit run.** Time each top-level test module (`board::`, `store::`, `rust_submit::`, …) with `rust-unit <module>::`. Report the five slowest modules, and say whether their time goes to `cargo check`, `rustfmt` or something else in the submit tests.\n3. **Fix the biggest measured cause, and only that one.** If it is rustfmt, cache `cargo::format_item` output in the process, keyed by text, opening, edition and config. If it is `cargo check`, propose the fix in the summary instead of building it.\n4. **Report before and after times** for both runs in the summary.\n\n### Not in scope\n\n- `cargo nextest`. It is a new tool that every PC would need, which goes against the vision's \"frictionless on other PCs\".\n- Splitting or rewriting acceptance tests.\n- Agents already run filtered `rust-unit <module>::` while they iterate, so that needs no change.",
+  "closedTime": 1792513242,
+  "column": "complete",
+  "createdTime": 1792509493,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": "solace-cli",
+  "id": "58a49a8fd3e1543e",
+  "links": [],
+  "milestone": null,
+  "rank": 18.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tests: faster unit and acceptance runs"
+}

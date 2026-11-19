@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "The Build tab shows past builds, not just the newest release.\n\n- A list of builds: version, date, status, and the source commit each was built from.\n- Choosing a passed build shows its release: its artifacts (download, open folder), its release notes and its build log.\n\nDone when: every build kept in the store appears in the list, and any past release's artifacts, notes and log can be reached from it.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979627,
+  "dependsOn": [
+    "c432a1456017ec9c"
+  ],
+  "feature": "a7f49e5036236ae5",
+  "home": "solace-cli",
+  "id": "484b88ac1eed5264",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 403.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery"
+  ],
+  "title": "history: list past builds and releases"
+}

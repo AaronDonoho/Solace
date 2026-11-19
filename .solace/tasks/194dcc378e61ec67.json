@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "A recipe declares its target platforms (e.g. Linux `deb`/`appimage`, macOS `dmg`/`app`, Windows `msi`), each with the steps that differ.\n\n- Each target shows as its own step on the Build tab.\n- One release holds every target's artifacts, all under one version.\n- A build makes only the targets the local PC can make. The others don't fail the build.\n- Solace's own desktop recipe declares Linux, macOS and Windows targets.\n\nDone when: on Linux, Solace's own build shows its targets as separate steps and passes, and the release holds the Linux bundles.",
+  "closedTime": null,
+  "column": "backlog",
+  "createdTime": 1794979657,
+  "dependsOn": [],
+  "feature": "e40726481f932b3d",
+  "home": ".",
+  "id": "194dcc378e61ec67",
+  "links": [],
+  "milestone": "f8b1014c90da26f9",
+  "rank": 390.0,
+  "scope": [
+    ".",
+    "solace-app",
+    "solace-cli"
+  ],
+  "title": "targets: declare platforms in a recipe"
+}

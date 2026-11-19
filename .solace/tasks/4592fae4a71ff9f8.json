@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791951681,
+  "body": "Currently, collapsed text is highlighted by the UI's find tool. Do not highlight collapsed text.",
+  "closedTime": 1791908606,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "4592fae4a71ff9f8",
+  "links": [],
+  "milestone": null,
+  "rank": 10.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Find should not highlight collapsed text"
+}

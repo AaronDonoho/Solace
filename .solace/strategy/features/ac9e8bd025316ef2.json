@@ -1,0 +1,10 @@
+{
+  "body": "Each project declares how it is built, so the Build page can run any Gleam, Rust or JS project, not just Solace.\n\n- A project's `solace.toml` names its build steps (commands), their outputs (artifact paths) and the projects it builds after (e.g. `frontend` after `board`, as `solace-cli/build.rs` orders them today).\n- Builds on the existing `[commands] build-release` entry rather than replacing it.\n- Gleam, Rust and JS projects get a default recipe when they declare none.\n- The recipe can be viewed and edited from Settings; an agent can propose one for a project that has none, for the human to approve.\n\nDone when: every project under the Solace root has a recipe (declared or default), and the order across projects is computed from them.",
+  "colorSlot": 29,
+  "id": "ac9e8bd025316ef2",
+  "milestone": "e84433b01fd0791f",
+  "rank": 1.0,
+  "startTime": 1794843633,
+  "state": "complete",
+  "title": "build: recipes in solace.toml"
+}

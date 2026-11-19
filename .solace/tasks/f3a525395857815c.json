@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690202,
+  "body": "Follow-up to **Strategy: planning panel** (b740ed199ee19cc2). The panel lives in `src/plan.gleam` (view and `styles`); the page grid that places it is in `src/strategy.gleam`.\n\n- **Full height, pinned.** Below the header, the page fills the viewport. The panel runs from under the tab bar to the bottom of the window whatever its content, and stays put while the tab content scrolls. Its body scrolls inside it. Today it is `align-self:start; max-height:calc(100dvh - 56px)`, so it ends where its content ends.\n- **No scroll chaining.** Scrolling inside the panel never scrolls the page, even at the top or bottom of the panel's scroll (`overscroll-behavior: contain` on the panel's scroll container, or the equivalent).\n- **Resizable width.** You change the width by dragging the panel's left edge. Keep it between about 280px and 60% of the window. The handle is reachable with the keyboard (focusable separator, with arrow keys changing the width) and announces itself as a separator. The chosen width is remembered across reloads, like the page's other remembered UI state. Hide/Show still collapses it.\n- **Context label.** Replace \"On the whole page\" / \"On task *X*\" with \"Planning Context: Whole Project\" / \"Planning Context: task *X*\" (same pattern for feature and milestone).\n- **Narrow screens** (≤900px) keep today's stacked layout, with no resize handle.\n- Update the README's \"Planning panel\" section. Update `test/api.test.mjs`, which checks the old label, and add tests for the label and the stored width.",
+  "closedTime": 1791685634,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/strategy",
+  "id": "f3a525395857815c",
+  "links": [],
+  "milestone": null,
+  "rank": 6.0,
+  "scope": [
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: planning panel fills the height, resizes and keeps its scroll"
+}

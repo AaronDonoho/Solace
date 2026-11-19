@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791737027,
+  "body": "Desired tab order: Migration, Strategy, Board, Contracts",
+  "closedTime": 1791731359,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "c380810d54c7c471",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Re-order the tabs"
+}

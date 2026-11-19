@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "**Question:** should agents' `build` remake the outputs their change made stale, and should `task done` refuse while one is stale?\n\n**Proposed design (from task:4ea2064f16119df8):**\n- `build` builds the task's projects, then runs only the steps the task's changed files make stale (via the declared inputs), not the whole plan. E.g. a Settings change also remakes `app.js`.\n- `task done` is refused with \"run `build`\" if an output affected by the task is stale. Only affected outputs, not the whole repo.\n- A review that finds a stale bundle rebuilds and retries, but keeps a finding that `task done` missed it.\n\n**Answer in a note:** whether `run bundle` (added by task:4ea2064f16119df8) already removes enough of the pain, how a step may write output outside the task's scope, and a recommendation. If yes, propose the work task. No code changes.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1792291903,
+  "dependsOn": [
+    "4cf396f7259e3fc2",
+    "6f0e0c1ab314710e"
+  ],
+  "feature": "bd81ac86d19c335b",
+  "home": ".",
+  "id": "f2b453a82a7a565e",
+  "links": [],
+  "milestone": null,
+  "rank": 219.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate dependency-driven build and task done check"
+}

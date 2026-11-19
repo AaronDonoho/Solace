@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792464636,
+  "body": "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792422979,
+  "column": "complete",
+  "createdTime": 1792384226,
+  "dependsOn": [],
+  "feature": "ee70ab461cef2b9c",
+  "home": ".",
+  "id": "c6bc31387dd5fedd",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 234.0,
+  "scope": [
+    "."
+  ],
+  "techDebt": true,
+  "title": "Rust symbol store and lockdown: Tech Debt"
+}

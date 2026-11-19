@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793037326,
+  "body": "`probe --in <module>` refuses with `E0101 a project module is named solace_probe` whenever the module's source *text* contains `mod solace_probe`, even inside a string or comment. In solace-cli this blocks `probe --in rust_probe`, because one of `rust_probe`'s own tests has that text in a string (found by task:6d7d8a2d428cba97).\n\n`rust_probe.prepare` already checks the module index for a real module named `solace_probe`; the extra text match is what trips.\n\n**Acceptance**\n- In solace-cli, `probe --in rust_probe` with `probe_code(\"1 + 1\")` prints its `dbg!` value.\n- A module that really declares `mod solace_probe` is still refused with E0101.\n- A string or comment mentioning `mod solace_probe` doesn't cause a refusal.",
+  "closedTime": 1793036035,
+  "column": "complete",
+  "createdTime": 1793035657,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "443dac2ea749d575",
+  "links": [],
+  "milestone": null,
+  "rank": 105.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: --in refuses only a real solace_probe module"
+}

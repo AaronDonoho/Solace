@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1794876818,
+  "body": "Some agent programs print warnings that don't affect the run, such as Codex's *\"Model metadata for `<model>` not found. Defaulting to fallback metadata…\"*. Solace currently treats such a warning as the run's error and shows it in the task's notes and as the failure reason.\n\nSolace keeps a short list of known harmless warnings and doesn't show them in task notes or as a run's failure reason. The first entry is Codex's missing model metadata warning. They stay in the run's raw log.\n\nFor agents: `board::runs.exit_error` picks the last `error` entry from the transcript, so a warning wins over the agent's last words. Filter the listed warnings out there (and anywhere else transcript errors reach notes).",
+  "closedTime": 1794359916,
+  "column": "complete",
+  "createdTime": 1794325385,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "abd93c8db0f5ca60",
+  "links": [],
+  "milestone": null,
+  "rank": 299.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "runs: hide harmless agent warnings"
+}

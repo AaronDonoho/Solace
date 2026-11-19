@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159127,
+  "body": "Found in task:2414798176c466e4, run af333848436847ab, steps 92 and 94.\n\n1. **A `#[cfg(test)]` helper outside the tests is treated as a test.** `crate.with_root` is a `#[cfg(test)] pub(crate) fn` at the crate root, used by tests in `board`, `drafts`, `lockdown`, `mcp` and the crate. When it moved to `cli`, it went into the private `cli::tests` module, and every caller was rewritten to `crate::cli::tests::with_root`. That broke 21 sites. A `#[cfg(test)]` item outside a `mod tests` should move as an ordinary item. Only test containers and `#[test]` functions belong in `<module>_tests.rs` (D-206).\n2. **Items declared inside `thread_local!` can't be named.** `UNTESTED` and `TEST_ROOT` are declared inside the crate root's `thread_local!` blocks. `view crate.UNTESTED` replies *unknown name*, the outline shows only `thread_local!`, and moved code that uses `UNTESTED` (`cli.batch`, `cli.reset_after_panic`) was left with no import. As a minimum, moved code that uses such an item must get a path to it. Whether each `thread_local!` item becomes its own symbol is the worker's call; say which in the outcome.\n\n### Done when\n\n- A unit test moves a `#[cfg(test)]` helper that tests in other modules use. It lands as an ordinary item, and its callers type-check.\n- A unit test moves a function that uses an item declared in `thread_local!`, and the result type-checks.\n- `check --warnings`, `rust-unit` and the extract acceptance suite pass.",
+  "closedTime": 1793121975,
+  "column": "complete",
+  "createdTime": 1793119375,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "32bfcf2d794cc3da",
+  "links": [],
+  "milestone": null,
+  "rank": 299.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: test-only helpers and thread_local items"
+}

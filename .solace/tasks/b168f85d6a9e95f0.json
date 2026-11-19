@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793983852,
+  "body": "An Unexpected Changes task must never be empty. When an outside change can't be read into symbols (any language), the task should still hold the change, so it can be reviewed and acted on. Decision from the human: such a change can't be kept as it stands, because all changes go through Solace.\n\n### When this applies\n\nA file `outside.read_in` or `outside.absorb` reports as unreadable: it can't be parsed, breaks the D-158 subset, defines a name twice, isn't UTF-8, or has an invalid Gleam module name.\n\n### What it should do\n\n- With no work run going, the task records the whole file's before state (what Solace last wrote) and after state, so its review shows the difference as a file change. The existing `file:` state in `board::reviews.restore` may serve for this; that is a cursory suggestion.\n- **Cancel** restores the file to what Solace last wrote and clears its unreadable mark.\n- **Complete** is refused while the task holds a file that can't be read in, and the refusal says why and what to do: cancel, or have an agent rewrite the code so Solace can read it.\n- An agent working on the task can fix the file. Once a later edit to it can be read in, it is read in as usual: the task shows symbol changes in place of the file change, and Complete works again.\n- The task's note names only what is still true, so repeated saves of the file don't pile up notes that repeat each other.\n\n### Docs\n\nAmends D-58 and Spec 15 §4 (Unreadable files, and U2), which today say such a file is only named in a note. Record the amendment and add tests: unreadable edit shows a file change, Complete refused, Cancel restores, fixed file read in and Complete works.\n\n### Not in scope\n\n- Unreadable files during a work run: they stay a note on that run's task, as now.\n- Files that aren't graph files (D-58 point 5).\n- Any new user-interface element; the task's existing review and buttons are used.",
+  "closedTime": 1793928355,
+  "column": "complete",
+  "createdTime": 1793839100,
+  "dependsOn": [
+    "6a334321b4f01d92"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b168f85d6a9e95f0",
+  "links": [],
+  "milestone": null,
+  "rank": 260.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "outside: reviewable unreadable changes"
+}

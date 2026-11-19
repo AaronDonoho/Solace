@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1791690226,
+  "body": "Summary\nI read through the D-77 task store: tasks.rs, the task paths in board.rs (adopt_tasks, needs_lock, guard, change, message, task_command, supervise, finish, Events), lockdown::recover, outside::absorb and the board client (api.mjs, solace_board.live / start). The design holds up overall: one writer thread, and project locks are always taken in the same order. But I found ways to lose edits, apply stale edits, leave the board out of step with the store, and stall it. They are listed by severity. Nothing was changed, and no tests were run (this run is read-only and run is refused).\n\nMedium: locks and waits held too long\napplied() gives up after 10 s even while the server is alive. That only needs a slow op on the single server thread:\na revert/cancel (board::change → action runs undo and review_state inside the op);\napply_settings;\na create, which scans every task (and reads solace.toml once per task in read_task);\na backlog of inbox messages.\nThen:\n\ntask ask / a settings proposal returns QUEUED (\"…when solace serve runs\", which is wrong here) and the agent carries on working without the answer. Nothing in agent_guard stops it while the run is waiting.\ndeliver() ignores the timeout. It waits those 10 s while outside::absorb holds the project lock, and a timed-out create can be sent again on the next command, making duplicate \"Unexpected Changes\" tasks.\nFix: only stop waiting when !serving(); for ask, go straight to wait_reply, which already handles the server stopping. Move heavy undo/settle work out of the op, or accept that and say so.\n\nCancel/complete while a work run is live waits for the agent's whole current command, which can be minutes for run or test --all, because needs_lock returns true and the HTTP request blocks. This is what D-77 point 5 intends, but the UI shows no \"waiting for the agent's command\" state.",
+  "closedTime": 1791426425,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "a98a0a3c62935595",
+  "links": [],
+  "milestone": null,
+  "rank": 37.0,
+  "scope": [
+    ".",
+    "solace-cli/board"
+  ],
+  "title": "Task Store debt: held locks"
+}

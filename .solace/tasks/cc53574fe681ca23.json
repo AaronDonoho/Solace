@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183767,
+  "body": "The design format can describe a UI/UX design: screens, and the row and column containers that lay them out. This adds rules only; nothing is drawn yet.\n\n### Do\n\nAdd to the validator's element table (task:c7b617fbc8184707):\n\n- A UI design holds one or more **screens**, each a tree of elements.\n- **Row** and **column** containers, with direction, gap, padding, align and justify.\n- Every element has a size for each axis: fill, hug or fixed. Fixed takes a number.\n- A child's position comes from its parent, so an element has no position of its own.\n- Values come from closed lists. No CSS in the format: agents read and write it without knowing CSS.\n\nRecord the additions in the format decision.\n\n### Acceptance\n\n- Tests: a valid screen with nested rows and columns passes; an unknown align value, a fixed size with no number, and a position on an element are each refused, naming the element.\n\n### Left out\n\nGrid and stack containers, sticky, scroll and overflow. They are new types that don't change the format, so they can arrive when a real screen needs one.",
+  "closedTime": 1793979093,
+  "column": "complete",
+  "createdTime": 1793914404,
+  "dependsOn": [
+    "c7b617fbc8184707"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "cc53574fe681ca23",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 341.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "ui: screen and layout rules"
+}

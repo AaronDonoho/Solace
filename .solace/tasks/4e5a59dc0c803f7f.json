@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793159127,
+  "body": "Found in task:2414798176c466e4, run 9f6696d0464e5adc, step 19. A failed `extract` returned a 115,111-character reply. Most of it came from `group_errors` (`diagnostics.group_errors`), which lists every site of every shared cause. For example, `` `0` is private on `Failure` (115 places) `` printed all 115 `at …` lines. A reply that size floods a weaker model's context and hides the one line that matters: the fix.\n\n- For each grouped cause, list only the first few sites (for example 5). Then add one line like `… and 110 more in board, drafts, lockdown`, naming the modules.\n- Keep the cause line and its fix exactly as they are now.\n\n### Done when\n\n- A unit test with one cause at many sites shows the cap and the `… more` line.\n- The existing `grouped_privacy_errors_name_the_fix_once` test still passes.\n- `check --warnings` and `rust-unit` pass.",
+  "closedTime": 1793123351,
+  "column": "complete",
+  "createdTime": 1793119301,
+  "dependsOn": [],
+  "feature": "eac0a07056630703",
+  "home": ".",
+  "id": "4e5a59dc0c803f7f",
+  "links": [],
+  "milestone": null,
+  "rank": 297.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "errors: cap grouped site lists"
+}

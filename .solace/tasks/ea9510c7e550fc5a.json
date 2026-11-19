@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1792977621,
+  "body": "Make planning runs cheaper when they read worker runs and look up worker commands.\n\n## 1. A step read doesn't repeat the run\n`strategy show run <task> <run> <steps>` repeats the whole run header with every request: the `reads` symbol list, and each question with its full settings `base` and `proposed` text. In run dbff066ccf7c1e27 that was about 15,000 tokens per call, for steps of a few hundred. When steps are asked for, the reply should give only a one-line run header (id, kind, model, outcome) and the steps. The full header stays in the reply that has no step list.\n\n## 2. List only the failed steps\nAdd `strategy show run <task> <run> --failed`. It gives one line per failed tool step: its number, the head of its command, and the first line of its error, such as `E0108 …` or `E6002 …`. The one-line step list today shows only \"(failed)\" and a cut title.\n\n## 3. Worker docs for planners\n- `help <command>` in a strategy run refuses worker commands: `help submit` gives \"No command `submit`\". It should show the command's reference section, marked as a worker command a strategy run can't run.\n- The `help` reply's command list is malformed: `strategy, feature, milestone>, all], milestone, files, read, --tail`. Fix how it's built.\n- The strategy brief says `grep` has \"no options, regex or path filter\". But `grep` takes `--in <path>` and `--context n`, and says so itself. Make the brief match.\n\n## Done when\n- `board::tests.strategy_show_run_outlines_and_picks_steps`, or a new test, covers 1 and 2.\n- `help` and the brief are pinned by tests.\n- Spec 15 §6 (strategy run) is updated.\n\nOut of scope: finding text inside symbol-held source with `grep`, which uses `find` today, and a larger match cap for `grep`.",
+  "closedTime": 1792949339,
+  "column": "complete",
+  "createdTime": 1792945315,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "ea9510c7e550fc5a",
+  "links": [],
+  "milestone": null,
+  "rank": 67.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "strategy runs: cheaper run reads, worker docs"
+}

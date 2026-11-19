@@ -1,0 +1,11 @@
+{
+  "body": "1. Buttons on tasks should have labels defined rather than displaying literal action names; same for the board's column names and anywhere else this happens in the project.\n2. Text areas should fill their containers' width by default.\n3. Visual alignment of elements.\n4. Consistency in labeling:\n5. Replace many select boxes with sliders, toggles, or other more appropriate options.\n6. Change color of select boxes and other inputs: it's a drab yellowish-brown in dark mode and doesn't fit the theme.\n7. Feature view should not show body of feature or its tasks unless the feature is focused; instead display its task count; example: 1 / 7 final.\n8. Tasks Tab in Strategy page needs to be paginated\n9. On the board, selecting an already selected task (or double-clicking) should scroll the page to its detail\n10. Remove redundant headings (\"Features\" tab has a heading that says \"Features\" right below the tab)\n11. Board's Task detail area is collapsible and sticks to the bottom of the page.\n12. Remove Task creation from the board - only allowed in Strategy page\n13. Setting for preferring panels on the left or right side of the screen (plan panel, etc)",
+  "colorSlot": 4,
+  "id": "5561308bebd3bc9d",
+  "milestone": null,
+  "rank": 4.0625,
+  "request": "2fb548ed-6975-414d-8faa-45fb05a80ccb",
+  "startTime": 1791910029,
+  "state": "complete",
+  "title": "General UI Polish"
+}

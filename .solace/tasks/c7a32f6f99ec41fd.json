@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791690207,
+  "body": "Part of **New page: Strategy** (72986e081ef982d9). Every page piece is Gleam compiled to JavaScript; server pieces are Rust (`tasks.rs`, `board.rs`). Nothing compiles to BEAM.\n\nMilestones in `rank` order (`/milestones` API), each holding its features (by target, plus features of its tasks, per D-87 point 2) and their tasks.\n\n- Create and edit title, body, `targetDate` and state, and reorder.\n- Move a feature to another milestone.\n- Show `dependsOn` between tasks, and edit it, with E7024/E7025 shown.\n\nNo server work is needed.\n\n**Scope:** `solace-cli/strategy` is not in the root `solace.toml` yet. A human adds it, then it is added to this task's scope.\n",
+  "closedTime": 1791659521,
+  "column": "complete",
+  "dependsOn": [
+    "54bca89035fdb606"
+  ],
+  "feature": null,
+  "home": ".",
+  "id": "c7a32f6f99ec41fd",
+  "links": [],
+  "milestone": null,
+  "rank": 59.0,
+  "scope": [
+    ".",
+    "solace-cli/strategy"
+  ],
+  "title": "Strategy: Roadmap tab"
+}

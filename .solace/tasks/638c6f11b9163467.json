@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794876828,
+  "body": "A human drags out a region on an open design, and it becomes the IDs of the elements inside it, as decided in feature:afd9fe8bae36c59c.\n\n### Do\n\n- Outside preview, dragging across the canvas selects the elements inside the region, using the same selection as task:ab14673c99699681.\n- Work out which elements are inside from their drawn positions, by computation.\n\nAsk the human what counts when an element is only partly inside the region, and whether an element is selected when all of its children are.\n\n### Acceptance\n\n- Tests for the rule that decides which elements are inside, including partly inside and nested elements.\n- A browser check that a drag selects the expected elements; say in the task note if it has to be manual.\n- Update the README.\n\n### Left out\n\nThe Architecture tab, and sending a note.",
+  "closedTime": 1794855418,
+  "column": "complete",
+  "createdTime": 1794273220,
+  "dependsOn": [
+    "ab14673c99699681"
+  ],
+  "feature": "afd9fe8bae36c59c",
+  "home": "solace-cli/design",
+  "id": "638c6f11b9163467",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 13.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "notes: select a region"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056539,
+  "body": "Add the naming guidance below to generated work briefs, following task:65a103e60528001a so its generic clear-name rule is replaced rather than duplicated. Keep the section compact enough for weaker models to follow and include it in a brief golden test.\n\n# Naming\n\nNames are codebase vocabulary, not local descriptions. Every name tells readers whether two things are the same concept or different ones, so it must tell the truth.\n\nScale effort to scope: local variables need little thought; exported types, modules, APIs, and schemas need the rules below.\n\n## Rules\n\n- **Same concept, same name.** Search for the concept and its synonyms in code, tests, and docs before naming. Reuse established terms and patterns; existing usage beats style preferences.\n- **Different concept, different name.** Don't reuse a name for something that differs from what it already means. Don't introduce a new name (`UserRecord` beside `User`) unless it marks a real domain distinction.\n- **New concepts take domain words.** Use terms from the user's request, spec, or domain rather than inventing terminology.\n- **Name what it is, not its history or implementation.** Prefer `getSession()` over `getUserFromRedisCache()`. Don't use `V2`, `new`, `improved`, `legacy`, or task-derived names as substitutes for meaningful names; use them only when the distinction is itself part of the concept or interface.\n- **Simplest unambiguous name.** Longer is not more precise. Avoid `Manager` or `Processor` when a meaningful term exists.\n\n## Existing names\n\nIf the codebase has competing terms, first check whether they mark a real distinction. If not, follow the nearest established usage rather than introducing another synonym.\n\nDon't rename unless the existing name is misleading or the task requires it. When you rename, update code, tests, and docs together. Renaming public or persisted names (API fields, schema columns, config keys, serialized names, event names) is a breaking change; treat it as one.\n\nIn your summary, note any new terms you introduced and inconsistencies you found.\n\n### Left out\n\nNo automated naming checks, rename enforcement, or duplicate copy in review briefs; this task only gives work agents the guidance.",
+  "closedTime": 1794977071,
+  "column": "complete",
+  "createdTime": 1792559802,
+  "dependsOn": [
+    "65a103e60528001a"
+  ],
+  "feature": "09e09be4b9fddd05",
+  "home": "solace-cli",
+  "id": "4923035911968227",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 27.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "briefs: naming discipline"
+}

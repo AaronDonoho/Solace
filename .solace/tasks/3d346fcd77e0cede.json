@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794972379,
+  "body": "Agents get one written way to turn a UI/UX design into Lustre, so building from a design introduces few translation errors (feature:2fbf4ee3c8e49977).\n\n### Do\n\n- Add a reference section that maps each element type, property, size, token, variant and style override in the design format (D-230, D-235, D-237) to Lustre. Base it on what `render` already does, so the guide and the page's drawing agree.\n- Say that a design is reference material: the agent writes ordinary code, and can keep or adapt the project's existing UI.\n- Make it reachable through `help`, and from the task-run reference.\n- It is for Lustre projects; say so.\n\n### Acceptance\n\n- A test that every element type and property in the element table is named in the guide, so a new one can't be added without it.\n\n### Left out\n\nArchitecture diagrams, projects that don't use Lustre, and generating code.",
+  "closedTime": 1794933027,
+  "column": "complete",
+  "createdTime": 1794273257,
+  "dependsOn": [],
+  "feature": "2fbf4ee3c8e49977",
+  "home": "solace-cli",
+  "id": "3d346fcd77e0cede",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 298.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "from design: Lustre translation guide"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1794353897,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794340810,
+  "column": "complete",
+  "createdTime": 1793922413,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "8f77390664cd65b6",
+  "links": [],
+  "milestone": null,
+  "rank": 7.0,
+  "scope": null,
+  "techDebt": true,
+  "title": "Unexpected Changes"
+}

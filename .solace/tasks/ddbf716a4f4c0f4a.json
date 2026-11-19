@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792539262,
+  "body": "The over-dedented item in task:97dd1c17a1bddaa5 (`tests.a_plain_refusal_omits_a_project_without_code`) was submitted, and so went through rustfmt, but it is still wrong. Its `assert!` string is longer than `max_width = 140`, and when a macro call can't fit, rustfmt leaves it exactly as written, with no error. A `format` command can't fix that case either (task:de40fa1ed5320332), so the agent has to be told.\n\n### Change\n\n- After rustfmt formats a Rust item (in `submit` or `format`), any line still longer than the project's `max_width` (rustfmt's default is 100) makes the reply name that item and its line numbers. The reply says that rustfmt left those lines as written, so the agent should check their indentation or split the long literal.\n- The change is still saved, since it is a warning and not a refusal.\n\n### Tests\n\n- An item with an over-long `assert!` string gets the warning, and the warning names the item and the line.\n- An item that fits gets no warning.",
+  "closedTime": 1792521236,
+  "column": "complete",
+  "createdTime": 1792509484,
+  "dependsOn": [],
+  "feature": "83d06e9ff942c067",
+  "home": "solace-cli",
+  "id": "ddbf716a4f4c0f4a",
+  "links": [],
+  "milestone": "8f4cf01d7d220348",
+  "rank": 17.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: name lines rustfmt left alone"
+}

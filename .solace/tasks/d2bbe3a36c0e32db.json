@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Find out whether Solace should prove contracts with a proof assistant or refinement-type checker, and how that would fit the symbol store. This is research: change no code. Write findings as notes and propose a decision or follow-up tasks.\n\n### Context\n\nPROPOSAL.md §8.1–8.2 promises evidence levels and says contracts, refined types, arithmetic bounds and state-machine rules are proven where feasible, using an SMT solver. specs/04-language-core.md plans run-time contract checks and leaves more compile-time checks to Phase 2; no proof check exists today. The vision says every change is type-checked, but does not choose a proof method.\n\n### Questions\n\n- **What to prove:** which claims are worth proving rather than testing or checking at run time? Where does an SMT solver become too weak or too expensive?\n- **Candidates:** how would Lean 4, Liquid Haskell, F* or another proof assistant or refinement checker fit a store of permanent symbol IDs and generated source files? What is checked, when, and by which tool? Compare the human review cost and what a reviewer would see.\n- **Evidence:** how would Solace record “proven”, the assumptions behind it, and the symbol revision it covers? How would a proof be kept fresh and trustworthy?\n- **Smallest experiment:** what is the smallest end-to-end proof of one non-trivial contract on one stored symbol, with its evidence recorded? What would it not cover?\n- **Fit with today:** is the SMT-first direction in §8.2 still the right first step, or would a proof assistant give more for the same effort?\n\n### Deliverable\n\nA note that compares the options, recommends a first step, and proposes a decision. No implementation.\n\n### Left out\n\n- Choosing a proof language or changing the language.\n- Changing specs, the store, or submit checks.\n- A feature or milestone; this starts as a standalone investigation.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1792957240,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "d2bbe3a36c0e32db",
+  "links": [],
+  "milestone": null,
+  "rank": 280.0,
+  "scope": [
+    "."
+  ],
+  "title": "Investigate proofs for Solace contracts"
+}

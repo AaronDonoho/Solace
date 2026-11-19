@@ -1,0 +1,22 @@
+{
+  "archivedTime": 1794340340,
+  "body": "One element can differ from its component's normal look, using a small closed set of properties.\n\n### Do\n\n- Add overrides to the validator's table: fill, border, text color, size and padding.\n- Each takes a theme token or a literal value, and literal values are validated by kind, such as a color or a number.\n- The renderer applies an override on top of the component and its variant.\n- No free-form style text: anything outside this set is refused.\n\n### Acceptance\n\n- Tests: each override draws with a token and with a literal, an override beats the variant, a badly formed literal is refused, and an unknown property is refused, naming the element.\n\n### Left out\n\nOther style properties, and \"promote to token\" for literal values.",
+  "closedTime": 1794184338,
+  "column": "complete",
+  "createdTime": 1793914448,
+  "dependsOn": [
+    "4f894eee05d2e46d"
+  ],
+  "feature": "7c9cdfad16609a44",
+  "home": ".",
+  "id": "00f44f061eff28a6",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 345.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/design"
+  ],
+  "title": "ui: per-element styling"
+}

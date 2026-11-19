@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794972380,
+  "body": "Review the work done on task:dde97daa88bd4d76 (a decision log in every project). It was completed without a review.\n\nCheck the finished work against that task's body and the human's notes on it (permission to edit, where the log lives, where it shows in the app), and report what's missing or wrong as findings on this task.",
+  "closedTime": 1794965279,
+  "column": "complete",
+  "createdTime": 1794959398,
+  "dependsOn": [],
+  "feature": "09e09be4b9fddd05",
+  "home": ".",
+  "id": "76554b1e77976ad7",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 387.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/strategy"
+  ],
+  "title": "decisions: review the decision log work"
+}

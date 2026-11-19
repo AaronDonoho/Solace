@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1792978306,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1792977845,
+  "column": "complete",
+  "createdTime": 1792977460,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "5cba81c4567ab371",
+  "links": [],
+  "milestone": null,
+  "rank": 84.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "techDebt": true,
+  "title": "Fix: started feature's tasks not on board: Tech Debt"
+}

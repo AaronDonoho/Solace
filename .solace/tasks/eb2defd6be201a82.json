@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793482473,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793463235,
+  "column": "complete",
+  "createdTime": 1793462866,
+  "dependsOn": [],
+  "feature": "7501294d75307a42",
+  "home": "solace-cli",
+  "id": "eb2defd6be201a82",
+  "links": [],
+  "milestone": null,
+  "rank": 228.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Improved Agent Integration"
+}

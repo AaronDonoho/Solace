@@ -1,0 +1,27 @@
+{
+  "archivedTime": 1792765928,
+  "body": "Run the `layout_audit` command against `/strategy` on all four tabs in light and dark before and after the change, save the screenshots, and put both measurement sets and the folder names in the run's notes.\n\nFix horizontal and vertical alignment across the Strategy page only: filters and their labels; table headings, cells, actions and pager; feature and form cards; milestone headings; the planning panel; and the new selected-task band. Created and Closed each show their date and time on separate lines so those columns can be narrower, with their timestamp sorting unchanged. A milestone's feature count currently touches its due date: give the count a clear gap and align the heading's state, date and count consistently. Use the shared spacing and control tokens in `solace_task`; do not add one-off values.\n\n**Tests:** view/style tests for the milestone heading spacing, the stacked Created/Closed values and any shared alignment rules; the before/after `layout_audit` run; existing Strategy view tests stay green. No alignment changes to Board, Settings or task-detail pages except where a shared token must change.",
+  "closedTime": 1792732169,
+  "column": "complete",
+  "createdTime": 1792708025,
+  "dependsOn": [
+    "68136bec4ba1cf43",
+    "fdcadc58d9156a49",
+    "73fa3e1e8e4a8a9e",
+    "e36e92b5a154dbb2",
+    "97659639c8ac4bbf"
+  ],
+  "feature": "c84dfec066f79321",
+  "home": "solace-cli/strategy",
+  "id": "1828143f80eeec93",
+  "links": [],
+  "milestone": null,
+  "rank": 106.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "ui: Strategy alignment follow-up"
+}

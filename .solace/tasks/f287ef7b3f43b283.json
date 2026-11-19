@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1793916050,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793915802,
+  "column": "complete",
+  "createdTime": 1793898743,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "f287ef7b3f43b283",
+  "links": [],
+  "milestone": null,
+  "rank": 269.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "outside: read in Rust changes"
+}

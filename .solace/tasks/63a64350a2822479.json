@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793507414,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1793483657,
+  "column": "complete",
+  "createdTime": 1793483496,
+  "dependsOn": [],
+  "feature": "310e17a1d12ca5da",
+  "home": "solace-cli",
+  "id": "63a64350a2822479",
+  "links": [],
+  "milestone": "63a4809d1d3362ba",
+  "rank": 231.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "techDebt": true,
+  "title": "Personas"
+}

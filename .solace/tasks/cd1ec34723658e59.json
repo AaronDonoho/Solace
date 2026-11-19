@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791834448,
+  "body": "Please fix:\n**Assessment: Looks good**\n\nThe change does what the task and the human's answers asked for:\n\n- **The order is right.** Colors follow when each feature first became `active` (`startTime`, set by the server and never cleared), with ties broken by id. Each step moves 5 places along a 16-color rainbow, which skips 4 colors and uses all 16 before one repeats.\n- **The status stripe is gone.** The `.card:has(.working|.stamp|.attention|.hazard)` rule was removed. The status badge, attention text, stamp and hazard mark still show status.\n- **The server change matches D-113 and Spec 15.**\n  - `mark_start` runs on both create (`composed`) and edit (`edited`).\n  - `check_fields` and the edit field list never copy `startTime` from a request, so clients can't set it. The Rust test checks this.\n  - Features saved before the change get a value through `stored` when they are read, and it is saved the next time the feature is written.\n\n#### Findings\n\nNone of these block the task.\n\n1. **Deleting a feature changes other features' colors.** `feature_colors` numbers the started features one after another, so deleting one moves every later feature to a new color. The board test checks this on purpose (\"a removed feature frees its place\"). D-113's reason says colors \"don't shift when features are reordered\". That's true for reordering, but not for deletion, and D-113 doesn't mention it. Canceled and complete features keep their places, which is good. Consider either adding a sentence on deletion to D-113 point 2, or accepting it as it is.\n2. **Old features get an estimated start time.** A feature saved before this change that is already active or complete takes its file's modification time, which is when it was last edited, not when it started. D-113 and Spec 15 both document this, so it's acceptable. The old features' colors may not match the order they really started in.\n3. **Color is the only sign of a card's feature.** Nothing on the card names its feature (no `title` or screen-reader text), so people who can't tell the colors apart get nothing. The investigation listed this as optional. A cheap fix would be a feature name in the card's `title`, or a visually hidden label.\n4. **Some colors are hard to see on the light theme.** The yellows (`#e0b000`, `#cbbf00`) and probably `#f08c00` have less than about 3:1 contrast against a white background. That is below the WCAG 1.4.11 minimum for an 8px stripe that carries meaning. I estimated these values and didn't measure them.\n5. **Minor points:**\n   - `solace_task_test.styles_inherit_the_hosts_colours_test` still says \"colours\" in its name, though it is in scope for the new American English rule.\n   - `solace_board.knows` now tries to parse each live message as a feature event (up to 3 JSON parses) before checking its lane. That's cheap, but it is extra work on every message.\n   - On the Strategy Features tab, the inline `border-left` correctly overrides `.feature`'s 1px border.",
+  "closedTime": 1791816081,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "cd1ec34723658e59",
+  "links": [],
+  "milestone": null,
+  "rank": 89.0,
+  "scope": [
+    ".",
+    "solace-cli/board",
+    "solace-cli/components",
+    "solace-cli/strategy"
+  ],
+  "title": "Clean up"
+}

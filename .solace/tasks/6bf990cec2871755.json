@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794183766,
+  "body": "The server can create and change a design, and each change saves a version, so no earlier state is lost. Agents and the page use this later; this task adds only the server's internal path, with no route an agent can call.\n\n### Do\n\n- Add one server function that validates a design and writes it. A design that fails validation is not saved and the file stays as it was.\n- Each save appends a version: the whole design, its time, and who it came from (a human or a design run).\n- Versions live in Solace's own data, as a cursory suggestion under `.solace/design/`, written only by the task server. The current design stays in the repo.\n- Writes are atomic, so a crash leaves the previous design whole.\n- Saving identical content adds no version.\n\n### Acceptance\n\n- Tests: creating a design saves version 1; a change saves version 2 and keeps version 1; an invalid design changes nothing on disk; an identical save adds nothing.\n\n### Left out\n\nRestoring, reading versions, and any page. History doesn't travel with a clone for now, because `.solace/` isn't committed; feature:9d778f6e03dea799 leaves that open.",
+  "closedTime": 1793978465,
+  "column": "complete",
+  "createdTime": 1793913867,
+  "dependsOn": [
+    "ac6ed25bd94c0d4a"
+  ],
+  "feature": "9d778f6e03dea799",
+  "home": ".",
+  "id": "6bf990cec2871755",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 336.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "design: save with a version"
+}

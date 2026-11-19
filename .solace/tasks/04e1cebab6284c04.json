@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1794340359,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1794010739,
+  "column": "cancelled",
+  "createdTime": 1794010734,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "04e1cebab6284c04",
+  "links": [],
+  "milestone": null,
+  "rank": 360.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "tech debt: never file on started tasks"
+}

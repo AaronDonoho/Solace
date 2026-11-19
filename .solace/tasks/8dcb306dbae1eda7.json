@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1793231415,
+  "body": "A Rust probe or test may use any crate the project already depends on, at the version in its `Cargo.lock`, built offline from the copy D-176 already fetched. Nothing is downloaded during a probe or test run.\n\n**Expected**\n- A probe in a crate that depends on `sha2` can write `use sha2::{Digest, Sha256}; Sha256::digest(b\"x\")` and it runs.\n- A probe or test naming a crate the project doesn't depend on is refused with a plain message, e.g. \"`foo` isn't a dependency of this project; add it to `Cargo.toml` first.\" — not cargo's raw offline error.\n- A probe can't add a dependency. Adding one stays a `Cargo.toml` change the human approves (D-158 point 4, D-176).\n\n**Where it is today**\n`rust_probe.run` copies the crate to `target/solace-probe/crate` and `rust_probe.probe_argv` runs `cargo test --offline` there. Because the copy keeps the crate's `Cargo.toml`, existing dependencies may already resolve, so start by reproducing the reported `sha2` failure. The cause could be the sandbox not seeing cargo's download cache, a missing `Cargo.lock` in the copy, or a dependency that was never fetched. Fix it where it actually fails.\n\n**Done when**\n- Tests cover: a probe using an existing dependency runs, and a probe naming an unknown crate gets the message above.\n- A decision records the rule.",
+  "closedTime": 1793207045,
+  "column": "complete",
+  "createdTime": 1793197007,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8dcb306dbae1eda7",
+  "links": [],
+  "milestone": null,
+  "rank": 154.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "probe: use the project's own crates"
+}

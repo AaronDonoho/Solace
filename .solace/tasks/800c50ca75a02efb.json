@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792705647,
+  "body": "Seen in the latest work run on task:10e5b94213c1e788 (steps 37–80). After a submit added `Refs::path_exact`, `resolve_exact` and `use_targets` and `mention_spans` to `language::rust_refs`, `check` passed and `view` listed them. But the next `submit` reported them private or missing (the compiler lines matched the old file), and `format language::rust_refs` refused with E0102 \"the module text leaves out: …\". The agent worked around it by deleting symbols, re-adding them as free functions and resubmitting the whole module.\n\n**Find and fix the cause.** Reproduce with a Rust module: add methods to an existing `impl` and a free function by submit, then submit a symbol that uses them, then `format <module>`. Find where the store, the projected module text and the submit-time type check disagree, and make them use one projection.\n\n**Rules.**\n- A submit type-checks against the same text that `check`, `format` and `view --bodies` show.\n- If the store and the module text still differ, `format` and `submit` say which symbols differ and name one repair command. They never leave the agent to rewrite the module.\n\n**Tests.** A unit test that reproduces the sequence above and fails today; a test that the drift message names the symbols and the repair command.\n\n**Left out:** Gleam, unless the reproduction shows the same fault there.",
+  "closedTime": 1792614309,
+  "column": "complete",
+  "createdTime": 1792608158,
+  "dependsOn": [],
+  "feature": "2985e05d2e799ef8",
+  "home": "solace-cli",
+  "id": "800c50ca75a02efb",
+  "links": [],
+  "milestone": null,
+  "rank": 31.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: stale module text after a save"
+}

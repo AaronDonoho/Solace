@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1795056545,
+  "body": "A human turns edit mode on and off on the Design page, as asked in feature:c3bed08cc1bbbbb8. Today the panel's Edit tab is always available (D-259); there is no edit mode yet.\n\n### Asked for\n\n- A human can toggle edit mode on and off.\n- Exiting edit mode with unsaved edits asks the human to save them. With no unsaved edits, it exits without asking.\n\n### Do\n\n- The prompt uses Solace's in-app confirmation, not the browser's.\n- Saving from the prompt saves the waiting edits as one version, as Save does (D-259 point 1). If the save is refused, the server's message shows and the waiting edits stay (D-259 point 3).\n\nAsk the human:\n- What turns edit mode on and off, and what can't be done outside it (for example, changing an element's properties).\n- Which choices the prompt offers besides Save (Discard, staying in edit mode, or keeping the edits waiting for later as D-259 point 2 allows).\n- Whether switching designs or tabs, or leaving the page, counts as exiting edit mode.\n\n### Acceptance\n\n- Tests: exiting with unsaved edits prompts; exiting with none doesn't; saving from the prompt saves one version; a refused save keeps the edits.\n- If the human's answers change D-259, propose an update to it.\n- Update the README.\n\n### Left out\n\nDragging to resize or move, and the Architecture tab.",
+  "closedTime": 1794977117,
+  "column": "complete",
+  "createdTime": 1794976312,
+  "dependsOn": [
+    "cc33d4301e06e612"
+  ],
+  "feature": "c3bed08cc1bbbbb8",
+  "home": "solace-cli/design",
+  "id": "3536a0b11795e185",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 37.0,
+  "scope": [
+    "solace-cli/design"
+  ],
+  "title": "edit: toggle edit mode"
+}

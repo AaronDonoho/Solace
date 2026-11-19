@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793916048,
+  "body": "The recovery guard in `board.recoverable_review` rejects a clean review when the transcript has any `error` entry. That includes a Codex `error` event and a Claude `result` with `is_error`. Codex may log transient notices, such as a stream reconnect, as `error`; it is not known whether real logs do. A clean exit with a valid assessment would then fail a good review.\n\nInvestigate real Codex and Claude logs from this project's runs (and, if needed, a stream reconnect) and record what each `error` entry means. With evidence, propose a decision amending D-183's 'no transcript error' condition: for example, ignore an error that the run recovered from and that precedes the final assessment, or block only an error after the last message. If the evidence shows no transient error, make no code change and close the task with the finding.\n\nAny code change needs unit tests for an error before the assessment with a clean exit (recovered) and an error after it (still fails), plus an error with a nonzero exit (still fails). Acceptance with a Codex or Claude log containing a transient error and a valid assessment. Run `rust-board-tests`, `rust-acceptance`, `test --all`, `check --warnings`.\n\nBy design and unchanged: nonzero exit, timeout, kill, quota, and a missing or unreadable log fail; a refused note and a failed MCP call that reached the transcript are already recovered.",
+  "closedTime": 1793651169,
+  "column": "complete",
+  "createdTime": 1792598467,
+  "dependsOn": [
+    "c37402e3a3615730"
+  ],
+  "feature": "081a981351f3e658",
+  "home": ".",
+  "id": "4e12ca0193a0bd19",
+  "links": [],
+  "milestone": "ef20b1d7f60b21cc",
+  "rank": 250.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "Investigate: transient review log errors"
+}

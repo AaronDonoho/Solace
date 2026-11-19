@@ -1,0 +1,20 @@
+{
+  "archivedTime": 1791904598,
+  "body": "Task links should display the title of the task.\nFeature and Milestone links should behave as task links do.",
+  "closedTime": 1791903164,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "3e62ab6d1113d1d3",
+  "links": [],
+  "milestone": null,
+  "rank": 11.0,
+  "scope": [
+    ".",
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/strategy"
+  ],
+  "title": "Task, Feature, and Milestone Links"
+}

@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690235,
+  "body": "Reviewing agents seem to always review everything, even if nothing changed since the last review.",
+  "closedTime": 1791223746,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "85acf089245a5581",
+  "links": [],
+  "milestone": null,
+  "rank": 7.0,
+  "scope": [
+    "."
+  ],
+  "title": "Improve review context"
+}

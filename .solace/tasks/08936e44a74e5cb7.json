@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1792036277,
+  "body": "A run's brief (`board.rs::continuation_brief` → `board.rs::brief`) holds the task, its notes, its unfinished dependencies (D-110) and the vision (D-91), but **nothing from the task's feature**: no title, no body, no milestone, no sibling tasks. Only a review's tech-debt ask (`TECH_DEBT_ASK`, D-112) mentions that a feature exists, and it doesn't name it. Work agents can't look it up either, because `strategy show` only works in Strategy runs. Constraints written on the feature (for example Agent Tooling Efficiency's \"without a shell\" and its baseline) never reach the agent doing the work.\n\n### Investigate first: what is worth the context\n\nThe investigation decides which of the candidates below are worth what they cost in context, and for which run kinds. Its report states the choice and the reasons, so the work run builds only that.\n\n- **Measure.** Look at the current features' body sizes and task counts, and what each candidate would add to a brief in bytes. Compare that with today's brief sizes on a few recent runs.\n- **Judge.** Look at past work and review runs on tasks that have a feature (their run logs and notes). Find where knowing the feature would have changed what the agent did: duplicated a sibling's work, missed a constraint, or asked something the feature already answers.\n- **Candidates:**\n  1. Feature title and full body, cut at a cap like `VISION_CAP` with a \"(cut short; the whole feature is on the Strategy page)\" line.\n  2. The feature's milestone title.\n  3. The feature's other tasks, one line each (id, title, column), leaving out archived and canceled ones. Or only the unfinished ones, or none.\n  4. The tech-debt ask naming the feature.\n  5. Run kinds: work, investigate, discuss, and review (which today gets no vision), plus `session start --task`.\n  6. Alternatives to inlining: a short section, or a read-only command for work runs that shows the feature on demand.\n\n### Then the work\n\n1. **Decision record** amending D-91/D-110 and Spec 15 §6 with what was chosen. Like D-110, this is task data, outside D-102 point 5's 3,600-byte reference cap.\n2. **A Feature section** in the brief, after the task and before the vision, holding the chosen parts. A task with no feature gets no section.\n3. **Tests:**\n   - `board_tests.rs` units: the section with and without a feature, the cap, and sibling filtering if kept.\n   - A `board_acceptance.py` case: a run's prompt names its feature.\n   - Run `rust-board-tests` and `rust-acceptance`.",
+  "closedTime": 1792028266,
+  "column": "complete",
+  "createdTime": 1791990418,
+  "dependsOn": [],
+  "feature": "3e8b5fe47bba41c4",
+  "home": ".",
+  "id": "08936e44a74e5cb7",
+  "links": [],
+  "milestone": null,
+  "rank": 138.0,
+  "scope": [
+    "."
+  ],
+  "title": "brief: the task's feature"
+}

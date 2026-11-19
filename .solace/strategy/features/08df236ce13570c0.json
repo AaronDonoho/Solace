@@ -1,0 +1,10 @@
+{
+  "body": "Solace merges its own store symbol by symbol, instead of relying on git to merge text files.\n\n### Why\n\n`store.db` is the source of truth, but git can only take one side of it whole. Today the committed source files act as the merge path: git merges the text, then Solace reads it back into the store. That gives new permanent IDs to symbols the other branch added, and their task records point at the old IDs.\n\n### Direction\n\n- Merge two stores by symbol ID. Symbols changed on only one side merge automatically. A symbol changed on both sides is a conflict the human resolves in the app, and the result is type-checked like any other change.\n- Keep permanent IDs and task change records from both sides.\n- Run as a git merge driver for `store.db`, so `git merge` and `git pull` call it.\n- Later: Solace keeps its own history, with git as transport only.\n\n### Not decided\n\n- Whether source files leave git once this works (see task:b16c07b5108ea9ec).\n- Merging task, run and strategy data.",
+  "colorSlot": null,
+  "id": "08df236ce13570c0",
+  "milestone": null,
+  "rank": 15.0,
+  "startTime": null,
+  "state": "proposed",
+  "title": "Symbol-level merge and versioning"
+}

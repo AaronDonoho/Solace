@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793582407,
+  "body": "The one documented way to create a module is a patch `*** Add: <module>` (D-141), and D-171 says it creates a nested Rust module like `submit --new a::b::c` does. It doesn't.\n\nA work run on task:7e5105f14ac6e1ec sent a patch with `*** Add: board::roles` (a new module under the existing `board`, which lives in `src/board.rs` with children in `src/board/`) plus edits to other symbols. `submit` refused it with `E1003 unknown module: board::roles` and kept a draft. The agent then spent about 30 steps reading Solace's submit code, and switched to `submit --new`.\n\n### What we know\n- The patch is turned into blocks named `board::roles.Role`, `board::roles.ROLES`, … (seen in the kept draft). Those blocks then go through the existing-module path (`rust_submit.Store::rust_target`), which reports the module as unknown.\n- `store::submit_tests.a_patch_add_creates_a_module_after_the_headers_last_mod_line` covers a new top-level module. No test was found for a module nested under an existing one.\n- The root cause is not confirmed.\n\n### Scope\n- `*** Add: <parent>::<new>` in a patch creates the module under an existing parent (file and `mod` line as D-171 point 1 describes), in the same transaction as the patch's other sections.\n- A test for the nested case, with a parent that has its own folder of children, like `board`.\n\n### Acceptance criteria\n- A patch like that run's (a new nested module plus updates and adds elsewhere) saves in one submit.\n- An Add that must still be refused (for example, a missing parent) says what is wrong, not just \"unknown module\".\n\n### Out of scope\nRemoving or demoting `submit --new` and `submit <module>` (that would change D-141), help-text cleanup, and Gleam.",
+  "closedTime": 1793509812,
+  "column": "complete",
+  "createdTime": 1793508390,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "97c4f3d4596f89a9",
+  "links": [],
+  "milestone": null,
+  "rank": 233.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "submit: patch Add creates a nested Rust module"
+}

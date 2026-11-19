@@ -1,0 +1,18 @@
+{
+  "archivedTime": 1793916049,
+  "body": "A probe's code can run for far too long. On task:3bc1a312756b9705 a reviewer's Rust probe read a healthy live stream in a loop that could never finish, and it could only stop at the 10-minute limit.\n\nIn both languages the limit is one number covering compile and run together: 10 minutes in Rust, 120 seconds in Gleam. That means the time a probe's own code gets depends on how long compiling took, and the Rust limit can't be lowered without cutting off slow compiles.\n\n**Done when, in both Rust and Gleam:**\n- A probe's own code gets at most 120 seconds to run.\n- Compiling keeps its language's limit from today (Rust 10 minutes, Gleam 120 seconds), and compile time does not use up the 120 seconds.\n- When the run limit is reached, the probe is stopped and everything it started is stopped with it. The reply says it ran out of run time, names the limit and includes the output so far, so the agent can see how far it got.\n- `help probe` states the limit.\n\nThis applies to every agent role, because all of them use the same `probe`.\n\n**Cursory suggestion, not a prescription:** build first under the compile limit, then run under the 120-second limit. Compiler errors must still be reported as they are today, and a Gleam probe's temporary file must still be removed in every case.\n\n**Tests, for each language:** a probe that never ends is stopped at the limit and its earlier output is returned; a compile error is still reported. Make the limit short in the test, so the test doesn't take 120 seconds.\n\nThis task adds no new user-interface elements.",
+  "closedTime": 1793896461,
+  "column": "complete",
+  "createdTime": 1793839722,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "ef4425cff040f752",
+  "links": [],
+  "milestone": null,
+  "rank": 261.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "probe: limit run time in Rust and Gleam"
+}

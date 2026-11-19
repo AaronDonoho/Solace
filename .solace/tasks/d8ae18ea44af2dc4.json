@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690224,
+  "body": "Markdown display not always working properly on the board, notably in the Notes section. i see the markdown symbol literals, so they're not being applied.",
+  "closedTime": 1791258509,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "d8ae18ea44af2dc4",
+  "links": [],
+  "milestone": null,
+  "rank": 11.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "Fix Broken Markdown Display"
+}

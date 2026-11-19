@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1794876820,
+  "body": "A task's run, as watched on the board, shows its current context size and token use at the bottom of the run's activity. The count updates after every message, whether the run is still going, finished, failed or was stopped.\n\nToday `board::runs.transcript` adds usage lines in among the activity. For Claude Code there is a live \"Context … so far\" line, and totals come only from the final `result` event. For Codex usage comes only at each `turn.completed`. When an agent reports usage less often than once per message, the count updates as often as the agent reports it.\n\nOut of scope: the Strategy and Design planning panel.\n\n**Tests:** the bottom line follows the latest message's usage, for both agents; a run that failed before its totals keeps its last count.",
+  "closedTime": 1794788602,
+  "column": "complete",
+  "createdTime": 1794788045,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "eef151c4b446c6ca",
+  "links": [],
+  "milestone": null,
+  "rank": 306.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/components"
+  ],
+  "title": "runs: live token use at the bottom"
+}

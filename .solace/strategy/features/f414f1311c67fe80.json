@@ -1,0 +1,10 @@
+{
+  "body": "The Migration page becomes the **Workspace** page, at `/workspace`. It holds everything about the board's projects: which projects are on the board, adding and removing them, creating a new project, and migrating existing code. The board then only shows tasks.\n\n## Why\nThe board's header has a **Projects** button whose panel (`solace_board.projects_view`) manages the project list and creates projects. That isn't task work, and it splits project management between the board and the Migration page.\n\n## Scope\n- Rename the **Migration** menu tab and page to **Workspace**, at `/workspace`. `/migrate` keeps working by sending the browser on to `/workspace`. The JSON APIs (`/migration`, `/projects`) are unchanged. `/projects` can't be a page address because the API already uses it.\n- Move the whole projects panel onto the Workspace page: the project list with **Remove**, **Add** for a project found already set up, the **New project** form, and migration for a project that isn't set up.\n- Remove the **Projects** button and its panel from the board.\n- Update the wording that names the Migration page: the guide, READMEs, Spec 15 and Spec 17, and error messages that say \"Migrate this project\" where they point to the page.\n\nNot in scope: multi-project orchestration (milestone Multi-Project Support).",
+  "colorSlot": 7,
+  "id": "f414f1311c67fe80",
+  "milestone": null,
+  "rank": 11.25,
+  "startTime": 1792176801,
+  "state": "complete",
+  "title": "Workspace page"
+}

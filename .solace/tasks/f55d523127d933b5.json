@@ -1,0 +1,19 @@
+{
+  "archivedTime": 1795105045,
+  "body": "Split from task:040fefdf07a5aeab.\n\nA project the workspace lists but whose code store is missing (for example, a clone where that store was never committed) is left off the board with no explanation. Instead, the board should still show it and say that its store is missing.\n\nHow it looks, and whether it offers a way to fix it, is open: ask the human.\n\n### For the worker\n\n- `Board::projects` drops listed members with no `.solace/store.db`.\n- Since D-179 and D-191, every project's `store.db` is committed, so this case should be rare. First check `git ls-files '*.solace/store.db'` against the 13 entries in the root `solace.toml` `projects` list, and note any listed project whose store isn't committed.\n- Don't open or create an empty store for such a project.\n\n**Tests:** a workspace acceptance check that a listed project with no store is reported on the board, not hidden, and gets no store created.",
+  "closedTime": 1795063662,
+  "column": "complete",
+  "createdTime": 1795055268,
+  "dependsOn": [],
+  "feature": "bd067a7e2e2adcfc",
+  "home": "solace-cli",
+  "id": "f55d523127d933b5",
+  "links": [],
+  "milestone": null,
+  "rank": 420.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board"
+  ],
+  "title": "board: show listed projects missing their store"
+}

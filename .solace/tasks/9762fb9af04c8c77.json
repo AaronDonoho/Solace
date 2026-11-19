@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1793159125,
+  "body": "This follows task:9c12aa66b1c5c9b1. Both bugs below were found in run 9f6696d0464e5adc on task:2414798176c466e4.\n\n1. **`extract` raises visibility it doesn't need to.** A private item is already visible to its own module and every module below it. When moved code in a child module uses a private item that stays in a parent, `extract` must leave that item private. The run shows it didn't:\n   - Step 49 raised `crate.unique`, `crate.error_cause` and `crate.group_errors` to `pub(crate)` for code moved into `diagnostics`.\n   - Step 111 raised `crate.usage` for code moved into `cli`.\n   \n   Only raise what actually becomes unreachable, as D-205 point 4 intends.\n2. **The `Now pub(crate):` line names moved items by their old path.** In step 49 it listed `crate.broken_report` and `crate.place`, which had just moved to `diagnostics`, mixed in with items that stayed. The agent read this as `error_cause` and `group_errors` having moved too, and spent steps 50–55 on that mistake. Name each item where it lives after the move.\n\n### Done when\n\n- A unit test moves code from a crate root into a child module whose moved code uses a private item that stays in the root. The staying item keeps its visibility.\n- A unit test checks that the reply names a raised item that moved by its new path.\n- `check --warnings`, `rust-unit` and the extract acceptance suite pass.",
+  "closedTime": 1793079016,
+  "column": "complete",
+  "createdTime": 1793074990,
+  "dependsOn": [
+    "9c12aa66b1c5c9b1"
+  ],
+  "feature": "eac0a07056630703",
+  "home": "solace-cli",
+  "id": "9762fb9af04c8c77",
+  "links": [],
+  "milestone": null,
+  "rank": 122.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "extract: no needless pub(crate)"
+}

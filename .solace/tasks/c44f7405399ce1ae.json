@@ -1,0 +1,17 @@
+{
+  "archivedTime": 1791690215,
+  "body": "#### Discussion\n\n**Human:**\n\ni believe there's a regression, maybe or may not be related to this task, wherein hovering a scroll bar will cause scrolling to the top of the page.\n\n**Agent (claude-opus-5-5):**\n\n#### Findings\n\nThis task probably isn't the cause.\n\n- **This task's scroll code runs only on a click.** `reveal_task` in `src/api.mjs` is the only scrolling this task added. It runs only from `Open`, the \"Show task\" button, and it scrolls `.detail` into view. It doesn't scroll to the top. Nothing hooks it to hover or mouse events.\n- **The only \"jump to top\" code is in the frontend shell, which is uncommitted.** `frontend.update` calls `enter_scroll` (`frontend/src/page_scroll.mjs`) when the route moves to a different page. That function calls `window.scrollTo(x, y)` with the saved scroll, or `[0, 0]` if the page has none saved. So if something sends a `RouteChanged` that `page_of` treats as a page switch, you'd land at the top.\n- I couldn't find anything that turns a scrollbar hover into a route change. I'm only reading code, so I can't reproduce it.\n\n#### Question\n\nCan you narrow it down?\n\n- Which scrollbar is it: the page's own, or one inside the board (a lane, the detail panel)?\n- Which page are you on, and does the URL or hash change when it jumps?\n- Does it still happen after you reload with the frontend's uncommitted changes stashed?\n\nIf the URL changes, look at the route/`page_of` logic. If it doesn't, look at the Ctrl+F find code in `shell.mjs` (`scrollBy` around line 102–116). Either fix belongs in the **frontend** project, which this task doesn't cover, so it should be its own task.",
+  "closedTime": 1791577317,
+  "column": "complete",
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/frontend",
+  "id": "c44f7405399ce1ae",
+  "links": [],
+  "milestone": null,
+  "rank": 7.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Fix scroll to top"
+}

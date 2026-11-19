@@ -1,0 +1,21 @@
+{
+  "archivedTime": 1794359897,
+  "body": "A design agent can be started with its own briefing. Design work is not task work, so a run belongs to the workspace, not to a task or the board.\n\n### Do\n\n- Add design runs that start, wait for a human's next message, and end, following strategy runs (D-93). Share that machinery rather than copying it. A cursory suggestion: generalize `board::strategy` and the `/strategy/runs` routes, or add `/design/runs` over the same code.\n- A run uses the Designer role's model and skills.\n- Its brief says what the Designer does, and includes the vision, the personas and recent decision titles. It says that a design is reference material, that the element is the primitive, and that changes reach a design only through a proposal the human accepts. Keep it short enough for weaker models.\n- Say whether a run belongs to one design or can move between several, by asking the human; feature:aff58e018ae80474 leaves this open.\n- Record this in a decision, and update Spec 15 §6.\n\n### Acceptance\n\n- Tests: a run starts, waits, takes a message and ends; the brief holds the vision, personas and role text; and a design run never appears on the board or as a strategy run.\n\n### Left out\n\nThe agent's commands, the panel and proposals.",
+  "closedTime": 1794278677,
+  "column": "complete",
+  "createdTime": 1793914478,
+  "dependsOn": [
+    "60bffec682b071e1"
+  ],
+  "feature": "aff58e018ae80474",
+  "home": ".",
+  "id": "73718ff8c5f77922",
+  "links": [],
+  "milestone": "583db3463f7dda5e",
+  "rank": 348.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "agent: design run and briefing"
+}
