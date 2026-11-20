@@ -54,3 +54,36 @@ export function follow_theme() {
   following = true;
   subscribe(theme_key, apply_theme);
 }
+
+// The font size scales the whole page (D-261): every `index.html` zooms its
+// root by `--font-scale`, read before first paint from the same key.
+export function apply_font_scale(scale) {
+  globalThis.document?.documentElement?.style?.setProperty?.('--font-scale', String(scale));
+}
+// Whether the page is in the desktop app's webview.
+export function desktop_app() {
+  return Boolean(globalThis.__TAURI__);
+}
+// How far the wheel turns, in pixels, for one step: a wheel notch is 50 to
+// 100, so a touchpad pinch or smooth scrolling, sending many small turns,
+// steps once per notch's worth.
+const notch = 50;
+const line = 40;
+// Ctrl + mouse wheel in the desktop app calls `handler(true)` for up and
+// `handler(false)` for down; the page takes the wheel, so the webview doesn't
+// zoom as well. A browser keeps its own zoom. Once per page.
+let wheeling = false;
+export function on_ctrl_wheel(handler) {
+  if (wheeling || !desktop_app()) return;
+  wheeling = true;
+  let turned = 0;
+  globalThis.window?.addEventListener?.('wheel', e => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const delta = e.deltaMode === 1 ? e.deltaY * line : e.deltaY;
+    turned = Math.sign(turned) === -Math.sign(delta) ? delta : turned + delta;
+    if (Math.abs(turned) < notch) return;
+    handler(turned < 0);
+    turned = 0;
+  }, { passive: false, capture: true });
+}

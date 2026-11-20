@@ -1674,3 +1674,9 @@ Amends D-228 point 1 and D-151 point 1.
 
 Why: Investigations, answers and reviews in the notes name the code a run needs. A title can name something else entirely: a Tech Debt task without a feature is titled after the task that filed it. The cost is small, since session start already reads the whole codebase.
 
+## D-261 Font size scales the whole page
+(human, board task "appearance: adjustable font size", 2026-11-18)
+The Appearance tab's Font size scales each page as a whole, the way a zoom does: text, controls, spacing and the menu bar all grow by the chosen size divided by the 15px default. Pages keep their fixed pixel sizes, and nothing is converted to relative units. The sizes are 12, 13, 14, 15 (default), 16, 18, 20, 24, 28, 32 and 36px. In the desktop app, Ctrl + mouse wheel steps through them.
+
+Why: every page fixes its text sizes in pixels, so changing a base size would leave most text unchanged; scaling the page reaches every page without rewriting each project's styles.
+

@@ -4766,3 +4766,40 @@ pub fn a_question_and_a_discussion_open_their_own_editors_test() {
   let #(questions, _) = task.update(model, task.Tab("questions"))
   body(questions) |> string.contains("id=\"note-text\"") |> should.be_true
 }
+
+/// The first pick removes the placeholder; each model's option keeps its
+/// key, so the browser's selection stays on the model picked.
+pub fn a_first_pick_keeps_each_model_option_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+    )
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\"],\"final\":false,\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\"}}"
+  let #(model, _) =
+    task.update(model, task.WorkflowLoaded(model.generation, workflow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"\",\"backup\":\"\"}]",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]",
+      ),
+    )
+  let before = html(model)
+  assert model.model == ""
+  assert string.contains(before, "Select a model")
+  let #(picked, _) = task.update(model, task.AgentSelected("b"))
+  let after = html(picked)
+  assert !string.contains(after, "Select a model")
+  assert string.contains(before, "data-lustre-key=\"a\"")
+  assert string.contains(before, "data-lustre-key=\"b\"")
+  assert string.contains(after, "data-lustre-key=\"a\"")
+  assert string.contains(after, "data-lustre-key=\"b\" selected")
+}

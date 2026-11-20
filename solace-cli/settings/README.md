@@ -41,6 +41,22 @@ calls `settings.set_theme`, which sets the attribute, stores the value and
 publishes it. `settings.register()` makes the page follow a theme chosen in
 another window.
 
+## Font size
+
+Key `solace-font-size` (`settings.font_size_key`): a size in pixels from
+`settings.font_sizes`, or unset for `settings.default_font_size`, 15. The size
+scales the whole page (D-261): every page's `index.html` sets `--font-scale`
+(size / 15) on `document.documentElement` before first paint and zooms the root
+by it, so a viewport height a page uses is divided by `--font-scale`. The
+Appearance tab's Font size dropdown and Reset to default call
+`settings.set_font_size`. `settings.register()` makes the page follow a size
+chosen in another window and, in the desktop app (`window.__TAURI__`), step it
+with Ctrl + mouse wheel, one step per notch's worth of turning, so a touchpad
+pinch doesn't jump several sizes; the page takes that wheel, so the webview
+doesn't zoom as well. The dropdown's tooltip names the hotkey on every page,
+in the desktop app and a browser alike. A stored size
+the dropdown doesn't offer is drawn as the default.
+
 ## Languages
 
 The Languages tab lists Gleam and Rust under `Enabled programming languages`

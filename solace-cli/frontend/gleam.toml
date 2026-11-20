@@ -1,6 +1,9 @@
 name = "frontend"
-version = "0.1.3"
+version = "0.1.6"
 target = "javascript"
+
+[javascript]
+runtime = "bun"
 
 [dependencies]
 gleam_stdlib = ">= 1.0.0 and < 2.0.0"

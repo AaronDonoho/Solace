@@ -436,25 +436,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
     _, models ->
       html.div([attribute.class("filters agent-choice")], [
         solace_task.refresh_button(p.on_try_again, p.refreshing),
-        html.select(
-          [
-            attribute.value(p.model),
-            attribute.attribute("aria-label", solace_task.ui_label("model")),
-            event.on_input(p.on_model),
-          ],
-          list.append(
-            solace_task.placeholder_option(
-              solace_task.ui_label("pick_model"),
-              p.model,
-            ),
-            list.map(models, fn(m) {
-              html.option(
-                [attribute.value(m.id), attribute.selected(m.id == p.model)],
-                solace_task.agent_option(m),
-              )
-            }),
-          ),
-        ),
+        solace_task.model_select(p.model, models, p.on_model),
         case list.find(models, fn(m) { m.id == p.model }) {
           Ok(m) if m.efforts != [] ->
             solace_task.effort_pick(
@@ -951,7 +933,11 @@ fn frame(
                 html.div(
                   [
                     attribute.class("plan-body"),
+                    // Focusable, so a click in the conversation brings its
+                    // keys here rather than to the page.
+                    attribute.tabindex(-1),
                     event.on("scroll", scrolled(p)),
+                    event.on("keydown", selects_conversation(p)),
                   ],
                   body(base, settings, p),
                 ),
@@ -1015,3 +1001,14 @@ fn tab_bar(tabs: List(Tab(msg))) -> Element(msg) {
       )
   }
 }
+
+/// Ctrl or Cmd+A in the conversation selects only its text. The selection is
+/// the browser's, so no message is sent.
+fn selects_conversation(p: Panel(msg)) -> decode.Decoder(msg) {
+  use event <- decode.then(decode.dynamic)
+  select_conversation(event)
+  decode.failure(p.on_newest, "a key the browser handles")
+}
+
+@external(javascript, "./plan_api.mjs", "select_conversation")
+fn select_conversation(event: dynamic.Dynamic) -> Nil
