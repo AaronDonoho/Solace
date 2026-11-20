@@ -90,6 +90,12 @@ stored choice (`solace-theme`) before first paint and holds every page's dark
 colours; registering Settings makes the shell follow a theme chosen in another
 window.
 
+The font size is chosen on Settings → Appearance and scales the whole page
+(D-261). `index.html` sets `--font-scale` from `solace-font-size` before first
+paint and zooms the root by it; a viewport height it sets is divided by
+`--font-scale`. Registering Settings makes the shell follow a size chosen in
+another window and, in the desktop app, step it with Ctrl + mouse wheel.
+
 The Settings page also turns Gleam and Rust on or off for the whole computer
 (D-22); a project of a language turned off shows that on the Workspace page,
 while reads still work and changes, checks and tests are refused.
@@ -142,6 +148,9 @@ After server integration, check menu navigation and back/forward, direct
 loading of each page, and component cleanup when switching apps in a browser.
 On Settings, check that Dark mode switches every page, survives a reload, and
 that a change in a second tab reaches the first.
+In the desktop app, check that Ctrl + mouse wheel steps Font size one size at a
+time, stops at 12 and 36, moves the dropdown with it, and that the webview
+doesn't zoom as well.
 
 Find in page (D-86) needs a DOM, so check it by hand, in a browser and in the
 app (`cargo tauri dev` and the AppImage): Ctrl+F opens the bar, also from a

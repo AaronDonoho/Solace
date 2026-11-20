@@ -1691,3 +1691,9 @@ Amends D-179 point 1 and D-191, deliberately changing the block D-191 pins.
 
 Why: the vision, personas, milestones and features are the team's direction and belong in the project, while strategy runs are conversations that can hold private data. Tasks and current designs are shared for the same reason: a clone needs them, while their conversations and local run state stay private. Committing the records avoids an import/export step that would drift.
 
+## D-262 Font size scales the whole page
+(human, board task "appearance: adjustable font size", 2026-11-18)
+The Appearance tab's Font size scales each page as a whole, the way a zoom does: text, controls, spacing and the menu bar all grow by the chosen size divided by the 15px default. Pages keep their fixed pixel sizes, and nothing is converted to relative units. The sizes are 12, 13, 14, 15 (default), 16, 18, 20, 24, 28, 32 and 36px. In the desktop app, Ctrl + mouse wheel steps through them.
+
+Why: every page fixes its text sizes in pixels, so changing a base size would leave most text unchanged; scaling the page reaches every page without rewriting each project's styles.
+
