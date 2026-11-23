@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "solace-app"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "libc",
  "serde_json",

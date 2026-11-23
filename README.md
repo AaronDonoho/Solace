@@ -38,10 +38,12 @@ Start from a machine with nothing but a terminal. Linux and macOS are supported 
 
 The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam and Erlang, Gleam projects can't build or run; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`. Rust projects also need Rust and Cargo; step 3 lists them.
 
+Gleam and Erlang need no install step on macOS and Linux: the app's **Install** button downloads Solace's own copies into `~/.local/share/solace/tools`, checks each against its checksum, and Solace uses only those, whatever else is installed. It needs `curl` and `tar`.
+
 | Tool | What it's for | Version |
 | --- | --- | --- |
-| Gleam | formats, checks, tests and builds your projects | 1.18.1 or newer |
-| Erlang/OTP | runs Gleam projects | 29 or newer |
+| Gleam | formats, checks, tests and builds your projects | 1.19.2, installed by the app |
+| Erlang/OTP | runs Gleam projects | 29.1.2, installed by the app |
 | An agent | Codex CLI or Claude Code; does the work you assign | current |
 | bubblewrap | makes a migration's original folder read-only to Solace's commands, and runs Rust commands without network access, writing only `target/` and `Cargo.lock` (Linux) | current |
 | Git | keeps your project's history and lets you switch branches | current |
@@ -50,7 +52,7 @@ The app checks for these tools when it opens and shows this same list, with the 
 
 ```sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install gleam erlang git
+brew install git
 brew install codex   # or: curl -fsSL https://claude.ai/install.sh | bash
 ```
 
@@ -58,16 +60,7 @@ brew install codex   # or: curl -fsSL https://claude.ai/install.sh | bash
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential curl libssl-dev libncurses-dev m4 bubblewrap git
-# Gleam isn't in apt. Download the x86_64-unknown-linux-musl (or aarch64-unknown-linux-musl)
-# archive from https://github.com/gleam-lang/gleam/releases, then:
-tar xf gleam-*-unknown-linux-musl.tar.gz && sudo install -m 755 gleam /usr/local/bin/gleam
-# Ubuntu's and Debian's erlang package can be older than OTP 29. Build OTP 29:
-cd /tmp
-curl -LO https://github.com/erlang/otp/releases/download/OTP-29.0/otp_src_29.0.tar.gz
-tar xf otp_src_29.0.tar.gz && cd otp_src_29.0
-./configure --prefix=/usr/local && make && sudo make install
-cd -
+sudo apt install -y bubblewrap git
 # Then install one agent:
 curl -fsSL https://claude.ai/install.sh | bash
 ```
@@ -77,19 +70,19 @@ For Codex instead, download a release binary from [the Codex releases page](http
 **Arch Linux:**
 
 ```sh
-sudo pacman -S --needed gleam erlang bubblewrap git
+sudo pacman -S --needed bubblewrap git
 # Then install one agent:
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 For Codex instead, download a release binary from [the Codex releases page](https://github.com/openai/codex/releases).
 
-Other systems: install [Gleam](https://gleam.run/install/), [Erlang](https://www.erlang.org/downloads), [Git](https://git-scm.com/downloads), [bubblewrap](https://github.com/containers/bubblewrap) and one agent from step 2.
+Other systems: install [Git](https://git-scm.com/downloads), [bubblewrap](https://github.com/containers/bubblewrap) and one agent from step 2. Where Solace has no Gleam or Erlang download, install [Gleam](https://gleam.run/install/) and [Erlang](https://www.erlang.org/downloads) too.
 
 Open a new terminal so the tools are on your `PATH`, then check them:
 
 ```sh
-gleam --version && erl -noshell -eval 'io:format("OTP ~s~n",[erlang:system_info(otp_release)]),halt().' && git --version
+git --version
 ```
 
 On Linux, `bwrap --version` should print a version too. Each should print a version. If one says "command not found", its installer printed a line to add to your shell profile; follow it and open a new terminal.
@@ -105,18 +98,19 @@ Agent runs use those services and may cost money. You can install and look aroun
 
 ### 3. What builds Solace
 
-Solace itself is built with Rust, its web clients are compiled by Gleam and bundled by Bun, and the bundled SQLite needs a C compiler. You only need these to build it; a release install does not.
+Solace itself is built with Rust, its web clients are compiled by Gleam and bundled by Bun, and the bundled SQLite needs a C compiler. You only need these to build it; a release install does not. Building needs a Gleam of your own, since the app that installs Solace's copy isn't built yet.
 
 | Tool | What it's for | Tested version |
 | --- | --- | --- |
 | Rust and Cargo | builds Solace | 1.98.1 |
+| Gleam | compiles the web clients | 1.19.2 |
 | Bun | bundles the board's and the frontend's web clients | 1.2.23 |
 | A C compiler | builds the bundled SQLite | system |
 
 **macOS** (Homebrew's compiler tools cover the C compiler):
 
 ```sh
-brew install rustup bun
+brew install rustup bun gleam
 rustup default stable
 ```
 
@@ -126,16 +120,19 @@ rustup default stable
 sudo apt install -y build-essential curl unzip
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 curl -fsSL https://bun.sh/install | bash
+# Gleam isn't in apt. Download the x86_64-unknown-linux-musl (or aarch64-unknown-linux-musl)
+# archive from https://github.com/gleam-lang/gleam/releases, then:
+tar xf gleam-*-unknown-linux-musl.tar.gz && sudo install -m 755 gleam /usr/local/bin/gleam
 ```
 
 **Arch Linux:**
 
 ```sh
-sudo pacman -S --needed base-devel rustup bun
+sudo pacman -S --needed base-devel rustup bun gleam
 rustup default stable
 ```
 
-Other systems: install [Rust](https://rustup.rs), [Bun](https://bun.sh) and a C compiler.
+Other systems: install [Rust](https://rustup.rs), [Gleam](https://gleam.run/install/), [Bun](https://bun.sh) and a C compiler.
 
 ### 4. Get the code
 

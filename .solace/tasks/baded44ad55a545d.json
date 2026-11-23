@@ -1,0 +1,23 @@
+{
+  "archivedTime": null,
+  "body": "Six projects still run their Gleam tests with Node. This PC has Node 18, and their tests crash there with `CustomEvent is not defined`. Switch them to Bun, the same way components, frontend and settings were already switched.\n\n**Change:** add this to `gleam.toml` in board, migration, contracts, strategy, design and delivery:\n\n```toml\n[javascript]\nruntime = \"bun\"\n```\n\nThe human approves each settings change. Their `solace.toml` `js_tests` commands already use Bun and don't change.\n\n**Done when:** `test --all` runs each of the six projects' Gleam tests, and none of them fails with `CustomEvent is not defined`.\n\nNot included: the tool check that stops with one line when a tool is missing (D-263). It's already in task:17e4173ddad002c8.",
+  "closedTime": 1795221671,
+  "column": "complete",
+  "createdTime": 1795221435,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "baded44ad55a545d",
+  "links": [],
+  "milestone": null,
+  "rank": 182.0,
+  "scope": [
+    "solace-cli/board",
+    "solace-cli/contracts",
+    "solace-cli/delivery",
+    "solace-cli/design",
+    "solace-cli/migration",
+    "solace-cli/strategy"
+  ],
+  "title": "tests: run Gleam's JavaScript tests with Bun"
+}

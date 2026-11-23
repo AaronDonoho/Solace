@@ -50,6 +50,7 @@ fn outside_edits_are_read_in_and_reviewed() {
     board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"plan"})).unwrap();
     let refused = board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"assign","model":"x"})).unwrap_err();
     assert!(refused.0.starts_with("E7012"), "{}", refused.0);
+    assert!(refused.0.contains(&format!("(task:{tid})")), "{}", refused.0);
     board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
     assert_eq!(file(&s), APP);
     assert!(text(&s, "three").is_none());
@@ -2521,4 +2522,19 @@ fn a_root_ignore_that_still_hides_the_store_is_flagged() {
     fs::write(&root, format!("{}*.db\n!**/.solace/store.db\n", crate::outside_share::STORE_IGNORE)).unwrap();
     let fixed = crate::outside::absorb(&s, Mode::Notice).unwrap();
     assert!(!fixed.contains("still ignores store.db"), "{fixed}");
+}
+
+/// The board's watcher checks every project each second: with nothing
+/// changed, the check reads no symbols, and an edit is still read in after.
+#[test]
+fn an_unchanged_project_is_checked_without_its_symbols() {
+    let s = app();
+    assert_eq!(crate::outside::absorb(&s, Mode::Notice).unwrap(), "");
+    s.db.execute_batch("ALTER TABLE symbols RENAME TO symbols_away").unwrap();
+    let unchanged = crate::outside::absorb(&s, Mode::Notice);
+    s.db.execute_batch("ALTER TABLE symbols_away RENAME TO symbols").unwrap();
+    assert_eq!(unchanged.unwrap(), "");
+    fs::write(s.root.join("src/app.gleam"), APP.replace("  1", "  4")).unwrap();
+    assert_eq!(crate::outside::absorb(&s, Mode::Command).unwrap(), "");
+    assert_eq!(text(&s, "one").as_deref(), Some("pub fn one() -> Int {\n  4\n}"));
 }

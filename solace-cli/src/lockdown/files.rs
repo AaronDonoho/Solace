@@ -330,6 +330,9 @@ fn file_change(
         if in_skills(v, name) {
             return error("E6002", name, "skills are the humans' house rules: `read` them; agents can't change them");
         }
+        if name == crate::system_reviews::FILE {
+            return crate::system_reviews::refusal(name);
+        }
         return error(
             "E6002",
             name,
@@ -629,6 +632,9 @@ fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
     }
     if name == "gleam.toml" {
         return error("E6002", name, "gleam.toml can't be moved");
+    }
+    if name == crate::system_reviews::FILE {
+        return crate::system_reviews::refusal(name);
     }
     match tier(root, v, name, Some(b"")).as_str() {
         "graph" => match crate::Store::peek(root) {

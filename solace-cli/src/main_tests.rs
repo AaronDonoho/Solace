@@ -1949,7 +1949,7 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 
 #[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "6bafc4e5433bf9df78301a735cece907a2ccbfa32d665b2f9d049e6188e69ebc");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "4bf124aecf69637c7bfac15fdeed7ec83bcdc2b3c964920e8ec4e70283cafeae");
 }
 
 #[test]

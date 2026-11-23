@@ -203,6 +203,26 @@ test('registering Settings shows only a size the dropdown offers', async () => {
   } finally { browser.restore(); }
 });
 
+test('in the desktop app a saved or cleared setting is also kept by the app; a browser keeps it alone', () => {
+  const browser = fakeBrowser();
+  const calls = [];
+  try {
+    store.save('solace-font-size', '20');
+    expect(calls).toEqual([]);
+    globalThis.__TAURI__ = { core: { invoke: (command, args) => { calls.push([command, args]); return Promise.resolve(); } } };
+    store.save('solace-font-size', '24');
+    store.set_theme('');
+    expect(calls).toEqual([
+      ['save_setting', { key: 'solace-font-size', value: '24' }],
+      ['save_setting', { key: 'solace-theme', value: '' }],
+    ]);
+    expect(browser.stored.get('solace-font-size')).toBe('24');
+    globalThis.__TAURI__ = { core: { invoke: () => Promise.reject(new Error('refused')) } };
+    expect(() => store.save('solace-theme', 'dark')).not.toThrow();
+    expect(browser.stored.get('solace-theme')).toBe('dark');
+  } finally { delete globalThis.__TAURI__; browser.restore(); }
+});
+
 test('the skills link scrolls the page\'s own Skills section into view', () => {
   const calls = [];
   const root = {

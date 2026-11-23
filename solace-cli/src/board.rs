@@ -16,6 +16,7 @@ mod builds;
 
 use serde_json::Value;
 use std::env;
+pub(crate) use crate::board::prerequisites::version;
 pub(super) use crate::board::runs::after;
 #[cfg(test)] pub(crate) use crate::board::task_model::valid_id;
 pub(super) use crate::board::task_model::task;
@@ -51,7 +52,6 @@ pub(super) use crate::board::task_model::open;
 #[cfg(test)] pub(super) use crate::board::task_model::store_dir;
 #[cfg(test)] pub(crate) use crate::board::setup::parse_system;
 pub(super) use crate::board::runs::context;
-pub(super) use crate::board::runs::strategy_context;
 pub(crate) use strategy::{design_command, design_guard};
 pub(super) fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "task", message)

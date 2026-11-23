@@ -55,8 +55,6 @@ pub fn propose_settings(
     if base == proposed {
         return Ok(format!("{file} is unchanged.\n"));
     }
-    let t = task(&s.root, tid)?;
-    let w = flow(&s.root)?;
     let top = scope::top(&s.root);
     let dir = scope::dir(&top, project);
     // The file's path from the root folder, so a board of several projects says which one.
@@ -65,17 +63,7 @@ pub fn propose_settings(
     let why = reason.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("\n\n{r}")).unwrap_or_default();
     let question = json!({"id":unique_id(),"text":format!("Change {name}{why}"),"options":["Approve","Reject"],
         "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}});
-    let m = json!({"kind":"settings","task":tid,"run":rid,"question":question});
-    message(&w, &mut t.clone(), &m)?;
-    let sent = tasks::send(&top, m)?;
-    drop(guard);
-    if !tasks::applied(&top, &sent) {
-        return Ok(format!("{}\n", tasks::QUEUED));
-    }
-    if tasks::rejected(&top, &sent) {
-        return err("E7001", REJECTED);
-    }
-    wait_reply(s, tid, rid)
+    ask_approval(s, tid, rid, question, guard)
 }
 
 /// Applies an approved settings question from task `title`, unless the file changed since.
@@ -144,8 +132,6 @@ pub(crate) fn apply_settings(root: &Path, title: &str, q: &mut Value) -> Result<
 /// human approves it, with its number chosen then.
 pub fn propose_decision(s: &Store, tid: &str, rid: &str, text: &str, reason: Option<&str>, guard: Vec<fs::File>) -> Out {
     let entry = crate::decisions::entry(text)?;
-    let t = task(&s.root, tid)?;
-    let w = flow(&s.root)?;
     let top = scope::top(&s.root);
     let base = entry.edit.map(|n| crate::decisions::current(&top, n)).transpose()?;
     let why = reason.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("\n\n{r}")).unwrap_or_default();
@@ -161,6 +147,15 @@ pub fn propose_decision(s: &Store, tid: &str, rid: &str, text: &str, reason: Opt
         "options": ["Approve", "Reject"],
         "settings": {"decision": {"title": entry.title, "body": entry.body, "edit": entry.edit, "base": base}},
     });
+    ask_approval(s, tid, rid, question, guard)
+}
+
+/// Puts `question`, a proposal with Approve and Reject, to the human for run
+/// `rid` of task `tid`: the human's answer, or that it waits in the queue.
+fn ask_approval(s: &Store, tid: &str, rid: &str, question: Value, guard: Vec<fs::File>) -> Out {
+    let t = task(&s.root, tid)?;
+    let w = flow(&s.root)?;
+    let top = scope::top(&s.root);
     let m = json!({"kind":"settings","task":tid,"run":rid,"question":question});
     message(&w, &mut t.clone(), &m)?;
     let sent = tasks::send(&top, m)?;
@@ -171,5 +166,61 @@ pub fn propose_decision(s: &Store, tid: &str, rid: &str, text: &str, reason: Opt
     if tasks::rejected(&top, &sent) {
         return err("E7001", REJECTED);
     }
-    wait_reply(s, tid, rid)
+    wait_reply(s, tid, rid, crate::board::delivery::wait_limit())
+}
+
+/// A run's `task propose`: the task `text` (its fields as a JSON object) would
+/// create, checked now and created in Planning only when a human approves it
+/// (D-93 point 4). Without a `scope` it goes in the project of task `tid`. A
+/// `blocking` one also makes task `tid` depend on it.
+pub fn propose_task(s: &Store, tid: &str, rid: &str, text: &str, blocking: bool, guard: Vec<fs::File>) -> Out {
+    let top = scope::top(&s.root);
+    let mut fields = crate::tasks::strategy::proposal_fields("task", false, text)?;
+    if fields.get("scope").is_none() {
+        fields["scope"] = json!([scope::dir(&top, &s.root)]);
+    }
+    let proposed = task_for(&top, tid, rid, &fields, blocking)?;
+    let blocks = if blocking { "\n\nApproving also makes this task depend on it." } else { "" };
+    let question = json!({
+        "id": unique_id(),
+        "text": format!("Create task \"{}\"{blocks}", proposed["title"].as_str().unwrap_or("")),
+        "options": ["Approve", "Reject"],
+        "settings": {"task": {"fields": fields, "blocking": blocking, "run": rid}},
+    });
+    ask_approval(s, tid, rid, question, guard)
+}
+
+/// The task run `rid` of task `tid` proposes, built and checked against the
+/// tasks as they are now, writing nothing. One that blocks task `tid` must not
+/// depend on it.
+fn task_for(top: &Path, tid: &str, rid: &str, fields: &Value, blocking: bool) -> Result<Value, Failure> {
+    let origin = format!("Created by run {rid} of task:{tid}");
+    let t = crate::tasks::strategy::proposed_task(top, &origin, fields, crate::board::task_model::Column::Planning)?;
+    let deps: Vec<String> = t["dependsOn"].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect();
+    if blocking && crate::board::task_model::reaches(&crate::board::task_model::dependency_graph(top)?, deps, tid) {
+        return err("E7025", "these dependencies would make a cycle");
+    }
+    Ok(t)
+}
+
+/// Creates the task an approved `task propose` names, in Planning, unless it
+/// is refused now, and records the answer on `q`. The new task's id when it
+/// blocks task `tid`, for `tid` to depend on.
+pub(crate) fn approve_task(root: &Path, tid: &str, q: &mut Value) -> Option<String> {
+    let p = q["settings"]["task"].clone();
+    let blocking = p["blocking"] == true;
+    let top = scope::top(root);
+    let created = task_for(&top, tid, p["run"].as_str().unwrap_or(""), &p["fields"], blocking)
+        .and_then(|t| crate::tasks::store::write(&top, &t).map(|()| t));
+    match created {
+        Ok(t) => {
+            let id = t["id"].as_str().unwrap_or("").to_string();
+            q["answer"] = json!(format!("Approved and created task:{id} (Planning)"));
+            blocking.then_some(id)
+        }
+        Err(e) => {
+            q["answer"] = json!(format!("Not applied: {}", e.0));
+            None
+        }
+    }
 }

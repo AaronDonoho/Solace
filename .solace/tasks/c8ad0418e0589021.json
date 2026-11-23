@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795338164,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "c8ad0418e0589021",
+  "links": [],
+  "milestone": null,
+  "rank": 9.0,
+  "scope": [
+    "solace-app",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "desktop app: remember window size and settings"
+}

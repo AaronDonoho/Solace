@@ -12,3 +12,16 @@ export function load_setup(receive) {
 export function recheck_setup(receive) {
   setInterval(receive, 30000);
 }
+
+// Solace installs one of its own tools (D-264); the reply is the fresh
+// checklist, or the error that says why it didn't install.
+export function install_tool(tool, receive) {
+  fetch('/setup/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tool }),
+  })
+    .then((response) => response.text())
+    .then(receive)
+    .catch((error) => receive(JSON.stringify({ message: String(error) })));
+}

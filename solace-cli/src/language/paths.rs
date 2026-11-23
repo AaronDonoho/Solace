@@ -52,3 +52,9 @@ pub(crate) fn with_path<T>(dirs: &[PathBuf], f: impl FnOnce() -> T) -> T {
     PATH_OVERRIDE.with(|p| *p.borrow_mut() = old);
     out
 }
+
+/// Whether a test stands in fixed folders for `PATH`.
+#[cfg(test)]
+pub(crate) fn standing_in() -> bool {
+    PATH_OVERRIDE.with(|p| p.borrow().is_some())
+}

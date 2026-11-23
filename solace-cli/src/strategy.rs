@@ -978,3 +978,13 @@ pub(super) fn notes_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn F
         _ => usage("notes draft, with the release notes as Markdown in `text`"),
     }
 }
+
+/// Launches system review run `rid`'s agent on its own thread.
+pub(super) fn start_system_review(top: PathBuf, rid: String) {
+    start_workspace_agent(top, rid, crate::system_reviews::brief);
+}
+
+/// Waits until system review run `rid`'s agent may act, taking no project lock.
+pub(super) fn system_review_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    run_guard(top, rid, a, "review")
+}

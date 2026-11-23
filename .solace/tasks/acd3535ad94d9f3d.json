@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "In the agent panel, pressing Ctrl+A selects all the text in the whole app. It should select only the conversation's text.\n\nThe agent panel (`plan_panel`) is shared by the Strategy page and the Design page's Agent tab, so the change applies to both.\n\nThe message box is unchanged: Ctrl+A there still selects only what's typed in it.",
+  "closedTime": 1795075536,
+  "column": "complete",
+  "createdTime": 1795073536,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "acd3535ad94d9f3d",
+  "links": [],
+  "milestone": null,
+  "rank": 3.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "agent panel: Ctrl+A selects only the conversation"
+}

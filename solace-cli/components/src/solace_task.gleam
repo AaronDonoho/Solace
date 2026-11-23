@@ -1086,7 +1086,10 @@ fn question_decoder() -> decode.Decoder(Question) {
     "settings",
     None,
     decode.optional(
-      decode.one_of(settings_file_decoder(), [decision_decoder()]),
+      decode.one_of(settings_file_decoder(), [
+        decision_decoder(),
+        task_entry_decoder(),
+      ]),
     ),
   )
   decode.success(Question(id, text, options, answer, settings))
@@ -1379,7 +1382,7 @@ pub fn view(model: Model) -> Element(Msg) {
     // leave a gap above the details.
     case model.error {
       "" -> h.text("")
-      error -> h.p([a.role("alert")], [h.text(error)])
+      error -> h.div([a.role("alert")], [md(model.base, error)])
     },
     case model.task {
       None -> h.text("")
@@ -1647,6 +1650,10 @@ fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
           "Reject with the editor's text",
         )
         Some(DecisionEntry(_, _)) -> #([], "Reject with the editor's text")
+        Some(TaskEntry(fields)) -> #(
+          [fields_view(model.base, fields, fn(_, _) { "" })],
+          "Reject with the editor's text",
+        )
         None -> #([], ui_label("answer"))
       }
       let free_text = case q.settings {
@@ -1934,12 +1941,7 @@ pub fn proposal_decoder() -> decode.Decoder(Proposal) {
   }
   use kind <- decode.field("kind", decode.string)
   use id <- text("id")
-  use fields <- decode.optional_field(
-    "fields",
-    [],
-    decode.dict(decode.string, field_text())
-      |> decode.map(fn(d) { list.sort(dict.to_list(d), field_order) }),
-  )
+  use fields <- decode.optional_field("fields", [], field_list())
   use base <- text("base")
   use reopens <- decode.optional_field(
     "reopens",
@@ -2050,20 +2052,7 @@ pub fn proposal_view(
         Ok(text) -> [md(base, text)]
         Error(_) -> []
       }
-    False, _, _ -> [
-      h.dl(
-        [],
-        list.flat_map(p.fields, fn(f) {
-          [
-            h.dt([], [h.text(f.0)]),
-            h.dd([], case f.0 {
-              "body" -> [md(base, f.1)]
-              _ -> short_value(f.0, f.1, name)
-            }),
-          ]
-        }),
-      ),
-    ]
+    False, _, _ -> [fields_view(base, p.fields, name)]
     True, [], _ -> [h.p([a.class("nochange")], [h.text("No change")])]
     True, fields, _ ->
       case p.kind {
@@ -4782,6 +4771,8 @@ pub type QuestionSettings {
   SettingsFile(base: String, proposed: String)
   /// A decision's title and entry body.
   DecisionEntry(title: String, body: String)
+  /// A task to create: its fields as text, the title first.
+  TaskEntry(fields: List(#(String, String)))
 }
 
 fn settings_file_decoder() -> decode.Decoder(QuestionSettings) {
@@ -4840,5 +4831,37 @@ pub fn model_select(
         )
       }),
     ),
+  )
+}
+
+fn task_entry_decoder() -> decode.Decoder(QuestionSettings) {
+  use fields <- decode.subfield(["task", "fields"], field_list())
+  decode.success(TaskEntry(fields))
+}
+
+/// A proposal's fields, each value as text, the title first.
+fn field_list() -> decode.Decoder(List(#(String, String))) {
+  decode.dict(decode.string, field_text())
+  |> decode.map(fn(d) { list.sort(dict.to_list(d), field_order) })
+}
+
+/// A proposed record's fields, the body as Markdown and each record id as a
+/// link titled by `name`.
+fn fields_view(
+  base: String,
+  fields: List(#(String, String)),
+  name: fn(String, String) -> String,
+) -> Element(msg) {
+  h.dl(
+    [],
+    list.flat_map(fields, fn(f) {
+      [
+        h.dt([], [h.text(f.0)]),
+        h.dd([], case f.0 {
+          "body" -> [md(base, f.1)]
+          _ -> short_value(f.0, f.1, name)
+        }),
+      ]
+    }),
   )
 }

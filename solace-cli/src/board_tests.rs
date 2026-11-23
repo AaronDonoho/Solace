@@ -3380,6 +3380,7 @@ fn a_work_brief_lists_recent_decisions_and_how_to_propose() {
         assert!(brief.contains("`read DECISIONS.md --lines a..b`"), "{kind}: {brief}");
         assert!(brief.contains("what the product does or refuses to do"), "{kind}: {brief}");
         assert!(brief.contains("Not a decision: anything the code or tests already show"), "{kind}: {brief}");
+        assert!(brief.contains("`task propose`") && brief.contains("`--blocking`"), "every run kind may propose a task: {kind}: {brief}");
         if kind == "review" {
             assert!(brief.contains("A review can't propose one") && !brief.contains("`task decision`"), "{brief}");
         } else {
@@ -3669,4 +3670,222 @@ fn a_prune_for_one_project_does_not_snapshot_a_quiet_one() {
         text.push_str(std::str::from_utf8(&buf[..n]).unwrap());
     }
     assert!(!text.contains("data: {\"tasks\""), "a quiet project was rebuilt from the files: {text}");
+}
+
+/// D-58: Assign, refused while Unexpected Changes tasks are open, names
+/// each one as a `task:<id>` reference, which the board shows as a link.
+#[test]
+fn an_assign_refusal_names_each_unexpected_changes_task() {
+    let root = testing::Scratch::new()
+        .with(&[("gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n"), ("src/app.gleam", "pub fn f() -> Int {\n  1\n}\n")]);
+    crate::import(&root).unwrap();
+    let s = open(&root).unwrap();
+    let mut ids = vec![];
+    for title in ["First", "Second"] {
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": title})).unwrap();
+        t["unexpected"] = json!(true);
+        t["column"] = json!("needs_review");
+        tasks::put(&s, &t).unwrap();
+        ids.push(t["id"].as_str().unwrap().to_string());
+    }
+    let other = api(&s.root, "POST", "/tasks", json!({"title": "Other"})).unwrap();
+    let oid = other["id"].as_str().unwrap();
+    api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action": "plan"})).unwrap();
+    let refused = api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action": "assign", "model": "x"})).unwrap_err().0;
+    assert!(refused.starts_with("E7012"), "{refused}");
+    for id in &ids {
+        assert!(refused.contains(&format!("task:{id}")), "{refused}");
+    }
+}
+
+/// Run `r1` of `kind` on a new task proposes the task `fields` give with
+/// `args`, and the board applies it: the project, the task's id and the
+/// proposal's question id.
+fn task_proposal(kind: &str, args: &[&str], fields: Value) -> (testing::Project, String, String) {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Login"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id": "r1", "kind": kind, "state": "running"}]);
+    tasks::put(&s, &t).unwrap();
+    let text = fields.to_string();
+    let out = task_command(&s, &tid, "r1", args, &mut || Ok(text.clone()), &[], vec![]).unwrap();
+    assert_eq!(out, format!("{}\n", tasks::QUEUED));
+    tasks::drain(&s.root);
+    let qid = task(&s.root, &tid).unwrap()["questions"][0]["id"].as_str().unwrap().to_string();
+    (p, tid, qid)
+}
+
+/// The human answers proposal `qid` of task `tid`: the answer it records.
+fn answer_task_proposal(root: &Path, tid: &str, qid: &str, option: &str) -> String {
+    api(root, "POST", &format!("/tasks/{tid}/questions/{qid}"), json!({"option": option})).unwrap();
+    let t = task(root, tid).unwrap();
+    t["questions"][0]["answer"].as_str().unwrap().to_string()
+}
+
+/// An approved `task propose` creates its task in Planning, with its fields
+/// and a note naming the task and run that proposed it; the proposing task's
+/// dependencies stay as they were.
+#[test]
+fn a_proposed_task_is_created_in_planning_on_approval() {
+    let (p, tid, qid) = task_proposal("work", &["task", "propose"], json!({"title": "Retry logins", "body": "Retry twice."}));
+    assert_eq!(all_tasks(&p.root).unwrap().len(), 1, "nothing is created before approval");
+    let said = answer_task_proposal(&p.root, &tid, &qid, "Approve");
+    let id =
+        said.strip_prefix("Approved and created task:").and_then(|s| s.strip_suffix(" (Planning)")).unwrap_or_else(|| panic!("{said}"));
+    let created = task(&p.root, id).unwrap();
+    assert_eq!(created["column"], "planning");
+    assert_eq!(created["title"], "Retry logins");
+    assert_eq!(created["body"], "Retry twice.");
+    let origin = created["notes"][0]["text"].as_str().unwrap();
+    assert_eq!(created["notes"][0]["author"], "solace");
+    assert_eq!(origin, format!("Created by run r1 of task:{tid}"));
+    assert!(task(&p.root, &tid).unwrap()["dependsOn"].as_array().is_none_or(|d| d.is_empty()));
+}
+
+/// Approving a `--blocking` proposal also makes the proposing task depend on
+/// the new one, so the new task's dependents name it, done or not.
+#[test]
+fn an_approved_blocking_task_is_needed_by_the_task_that_proposed_it() {
+    let (p, tid, qid) = task_proposal("investigate", &["task", "propose", "--blocking"], json!({"title": "Fix sessions"}));
+    let said = answer_task_proposal(&p.root, &tid, &qid, "Approve");
+    let id =
+        said.strip_prefix("Approved and created task:").and_then(|s| s.strip_suffix(" (Planning)")).unwrap_or_else(|| panic!("{said}"));
+    assert_eq!(task(&p.root, &tid).unwrap()["dependsOn"], json!([id]));
+    let needed_by = crate::tasks::api::dependents(&p.root, id).unwrap();
+    assert_eq!(needed_by["tasks"], json!([{"id": tid, "title": "Login", "column": task(&p.root, &tid).unwrap()["column"]}]));
+}
+
+/// A rejected `task propose`, blocking or not, creates no task and leaves the
+/// proposing task's dependencies alone.
+#[test]
+fn a_rejected_task_proposal_changes_nothing() {
+    let (p, tid, qid) = task_proposal("work", &["task", "propose", "--blocking"], json!({"title": "Fix sessions"}));
+    let before = task(&p.root, &tid).unwrap()["dependsOn"].clone();
+    assert_eq!(answer_task_proposal(&p.root, &tid, &qid, "Reject"), "Reject");
+    assert_eq!(all_tasks(&p.root).unwrap().len(), 1);
+    assert_eq!(task(&p.root, &tid).unwrap()["dependsOn"], before);
+}
+
+/// A review may propose a task, as no other proposal it may make, and asking
+/// leaves the task in its column, on a board where asking moves a work run's task.
+#[test]
+fn a_review_proposes_a_task_without_leaving_review() {
+    for (kind, column) in [("review", "review"), ("work", "todo")] {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", ASKED_TO_TODO)]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Login"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["column"] = json!("review");
+        t["runs"] = json!([{"id": "r1", "kind": kind, "state": "running"}]);
+        tasks::put(&s, &t).unwrap();
+        let text = json!({"title": "Fix sessions"}).to_string();
+        let out = task_command(&s, &tid, "r1", &["task", "propose"], &mut || Ok(text.clone()), &[], vec![]).unwrap();
+        assert_eq!(out, format!("{}\n", tasks::QUEUED));
+        tasks::drain(&s.root);
+        let t = task(&s.root, &tid).unwrap();
+        assert_eq!(t["column"], column, "{kind}");
+        assert_eq!(t["questions"][0]["options"], json!(["Approve", "Reject"]));
+    }
+}
+
+/// A proposal with a field a task doesn't take, or a scope that isn't a
+/// project, is refused when it is sent: the human is asked nothing.
+#[test]
+fn a_bad_task_proposal_is_refused_before_asking() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Login"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+    tasks::put(&s, &t).unwrap();
+    for fields in [json!({"title": "Fix", "colour": "red"}), json!({"title": "Fix", "scope": ["nowhere"]})] {
+        let text = fields.to_string();
+        let e = task_command(&s, &tid, "r1", &["task", "propose"], &mut || Ok(text.clone()), &[], vec![]).unwrap_err();
+        assert!(e.0.starts_with("E7001"), "{fields}: {}", e.0);
+    }
+    tasks::drain(&s.root);
+    assert!(task(&s.root, &tid).unwrap()["questions"].as_array().is_none_or(|q| q.is_empty()));
+    assert_eq!(all_tasks(&p.root).unwrap().len(), 1);
+}
+
+/// An agent exits once `task done` returns, so the board has ended its run by then.
+#[test]
+fn a_done_is_recorded_only_after_the_board_applies_it() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+    tasks::put(&s, &t).unwrap();
+    let server = fake_server(&s.root, |top, _| {
+        std::thread::sleep(Duration::from_millis(200));
+        tasks::drain(top)
+    });
+    server.recv_timeout(Duration::from_secs(5)).unwrap();
+    let out = task_command(&s, &tid, "r1", &["task", "done", "done"], &mut || Ok(String::new()), &[], vec![]).unwrap();
+    assert_eq!(out, "Recorded.\n");
+    assert_eq!(task(&s.root, &tid).unwrap()["runs"][0]["state"], "ended");
+}
+
+/// An answer that came after a work run's wait reached its limit reaches the
+/// `task wait` that follows; with nothing awaited, `task wait` is refused.
+#[test]
+fn a_work_runs_task_wait_returns_an_answer_given_after_its_wait() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Login"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+    tasks::put(&s, &t).unwrap();
+    let wait = |s: &Store| task_command(s, &tid, "r1", &["task", "wait"], &mut || Ok(String::new()), &[], vec![]);
+    assert!(wait(&s).unwrap_err().0.contains("an answer the human hasn't given yet"));
+    let reply = json!({"questions":[{"id":"q1","text":"Create task \"Later\"","answer":"Reject"}],"text":null});
+    t["runs"][0]["reply"] = reply.clone();
+    tasks::put(&s, &t).unwrap();
+    assert_eq!(wait(&s).unwrap(), format!("{reply}\n"));
+}
+
+/// A wait for an answer, and a command held while the run waits, each return at
+/// their limit naming `task wait`, so no later call is left behind them.
+#[test]
+fn a_wait_for_an_answer_returns_at_its_limit() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Ask"})).unwrap();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"waiting"}]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let _server = fsx::try_lock_file(&store_dir(&s.root).join("server.lock")).unwrap().unwrap();
+    let out = crate::board::runs::wait_reply(&s, &tid, "r1", Duration::from_millis(200)).unwrap();
+    assert_eq!(out, crate::board::delivery::ANSWER_WAIT_AGAIN);
+    let held = crate::board::runs::agent_guard_within(&s.root, &tid, "r1", &["view", "app"], &[], || Duration::from_millis(200));
+    assert!(held.unwrap_err().0.contains("call `task wait` to keep waiting"));
+}
+
+/// A workflow whose `asked` event moves the task to its first column.
+const ASKED_TO_TODO: &str = concat!(
+    "[board]\nevents = { asked = \"todo\", finished = \"done\" }\n",
+    "[[board.columns]]\nid = \"todo\"\n",
+    "[[board.columns]]\nid = \"review\"\n",
+    "[[board.columns]]\nid = \"done\"\nfinal = true\n",
+    "[board.actions]\n",
+);
+
+/// An approval whose proposing task can't be saved creates no task, so
+/// approving again once it can creates exactly one.
+#[test]
+fn an_approval_that_cannot_save_its_task_creates_none() {
+    let (p, tid, qid) = task_proposal("work", &["task", "propose"], json!({"title": "Fix sessions"}));
+    let local = crate::board::task_model::local_path(&store_dir(&scope::top(&p.root)).join(format!("{tid}.json")));
+    // The save writes beside its file first, so a folder there makes it fail.
+    let part = local.with_file_name(format!("{tid}.json.tmp"));
+    std::fs::create_dir_all(&part).unwrap();
+    assert!(api(&p.root, "POST", &format!("/tasks/{tid}/questions/{qid}"), json!({"option": "Approve"})).is_err());
+    assert_eq!(all_tasks(&p.root).unwrap().len(), 1);
+    assert!(task(&p.root, &tid).unwrap()["questions"][0]["answer"].is_null());
+    std::fs::remove_dir(&part).unwrap();
+    let said = answer_task_proposal(&p.root, &tid, &qid, "Approve");
+    assert!(said.starts_with("Approved and created task:"), "{said}");
+    assert_eq!(all_tasks(&p.root).unwrap().len(), 2);
 }

@@ -163,23 +163,11 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
 /// with terminal color codes removed, within `budget`, `condense`d for a
 /// `run` or `build` reply (D-111).
 pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool, sandbox: bool) -> Out {
-    use std::os::unix::process::CommandExt;
-    let mut cmd = prepared(root, argv, sandbox)?;
-    let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
-    let out = fs::File::create(&log)?;
-    let mut child = cmd.process_group(0).stdout(out.try_clone()?).stderr(out).spawn()?;
-    let start = Instant::now();
-    let result = match wait_or_kill(&mut child, Duration::from_secs(timeout))? {
-        Some(status) => Ok(format!("exit code: {} ({:.1}s)\n", status.code().unwrap_or(-1), start.elapsed().as_secs_f64())),
-        None => error("E6012", &argv[0], format!("timed out after {timeout}s")),
-    };
-    let output = diagnostics::strip_ansi(&fs::read_to_string(&log)?);
-    fs::remove_file(log)?;
+    let (status, secs, output) = captured(root, argv, timeout, sandbox)?;
     let output = if condensed { condense(&output) } else { output };
-    match result {
-        Ok(prefix) => Ok(prefix.clone() + &trim_output(&output, budget.saturating_sub(prefix.len()))),
-        Err(Failure(message, code)) => Err(Failure(message + &trim_output(&output, budget), code)),
-    }
+    let Some(status) = status else { return timed_out(&argv[0], timeout, &trim_output(&output, budget)) };
+    let prefix = format!("exit code: {} ({secs:.1}s)\n", status.code().unwrap_or(-1));
+    Ok(prefix.clone() + &trim_output(&output, budget.saturating_sub(prefix.len())))
 }
 
 /// Starts `argv` in `root` in the background, without waiting: the same
@@ -306,3 +294,30 @@ fn wait_or_kill_bounded(
 }
 
 const CUT_NOTE: &[u8] = b"\n[probe output cut short]\n";
+
+/// Runs `argv` in `root` as `command` does: its exit status, or `None` when
+/// it ran past `timeout` and was stopped, its seconds, and its whole output
+/// with terminal color codes removed.
+pub(crate) fn captured(
+    root: &Path,
+    argv: &[String],
+    timeout: u64,
+    sandbox: bool,
+) -> Result<(Option<std::process::ExitStatus>, f64, String), Failure> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = prepared(root, argv, sandbox)?;
+    let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
+    let out = fs::File::create(&log)?;
+    let mut child = cmd.process_group(0).stdout(out.try_clone()?).stderr(out).spawn()?;
+    let start = Instant::now();
+    let status = wait_or_kill(&mut child, Duration::from_secs(timeout))?;
+    let secs = start.elapsed().as_secs_f64();
+    let output = diagnostics::strip_ansi(&fs::read_to_string(&log)?);
+    fs::remove_file(log)?;
+    Ok((status, secs, output))
+}
+
+/// The refusal of a command stopped at its time limit, followed by `output`.
+pub(crate) fn timed_out<T>(program: &str, timeout: u64, output: &str) -> Result<T, Failure> {
+    error("E6012", program, format!("timed out after {timeout}s")).map_err(|Failure(message, code)| Failure(message + output, code))
+}

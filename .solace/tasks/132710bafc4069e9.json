@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795050679,
+  "column": "complete",
+  "createdTime": 1795050465,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "132710bafc4069e9",
+  "links": [],
+  "milestone": null,
+  "rank": 2.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "model pick: first choice shows the wrong model"
+}

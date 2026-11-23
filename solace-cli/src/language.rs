@@ -259,11 +259,20 @@ pub fn enabled(id: &str) -> Result<bool, Failure> {
     language_enabled(id)
 }
 
-/// The path a tool name resolves to on `PATH`; a test can put fixed folders in
-/// its place (`language::paths`). `Store::tool` uses it, falling back to the
-/// bare name when it finds nothing.
+/// The path a tool name resolves to: Solace's own copy for Gleam's and
+/// Erlang's programs (D-264), else the program on `PATH`; a test can put fixed
+/// folders in its place (`language::paths`), standing in for Solace's copies
+/// too unless it moved them. `Store::tool` uses it, falling back to the bare
+/// name when it finds nothing.
 pub(crate) fn tool_path(program: &str) -> Option<std::path::PathBuf> {
-    paths::search_path(program)
+    #[cfg(test)]
+    if paths::standing_in() && !crate::tools::folder_overridden() {
+        return paths::search_path(program);
+    }
+    match crate::tools::program_folder(program) {
+        Some(_) => crate::tools::program(program),
+        None => paths::search_path(program),
+    }
 }
 
 #[cfg(test)]

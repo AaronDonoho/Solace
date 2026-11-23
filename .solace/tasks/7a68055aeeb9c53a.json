@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "`workspace_acceptance.Root.test_opening_a_cloned_rust_project_fetches_again` fails: `check` runs cargo in the sandbox, cargo tries to refresh a git checkout under `cargo_home/git/checkouts`, and fails with `Read-only file system (os error 30)` because `migrate.cargo_sandbox_args` binds `cargo_home/git` read-only. It failed in the investigation of task:52901612e796bca4 and again in a later `run rust-acceptance`. Find whether D-264's sandbox changes caused it, and fix it so the fetch happens outside the sandbox or is allowed to write there, without widening what the sandbox can write.\n\nCheck: `run rust-acceptance` passes with this test not listed as FAIL.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795326085,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "7a68055aeeb9c53a",
+  "links": [],
+  "milestone": null,
+  "rank": 440.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "Opening a cloned Rust project can fetch its git dependencies again in the sandbox"
+}

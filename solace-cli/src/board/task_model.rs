@@ -85,10 +85,12 @@ pub(super) fn homeless(top: &Path, home: &str) -> bool {
 /// scope `["."]` when the root is a project. None when the root is no project:
 /// the task keeps no project. None while a run of the task is live: the agent
 /// works from the task's folder, and the load must not move it out from under
-/// the run (as `set_scope` says for a home change).
-pub(crate) fn rehome_to(members: &[String], t: &Value) -> Option<(String, Vec<String>)> {
+/// the run (as `set_scope` says for a home change). None while the home still
+/// holds a Solace store: a project taken off the board keeps its tasks until it
+/// is added back (D-160 point 6).
+pub(crate) fn rehome_to(top: &Path, members: &[String], t: &Value) -> Option<(String, Vec<String>)> {
     let home = t["home"].as_str().unwrap_or(".");
-    if members.iter().any(|m| m == home) || active(t) {
+    if members.iter().any(|m| m == home) || active(t) || workspace::has_store(&scope::path(top, home)) {
         return None;
     }
     let kept: Vec<String> = scope::of(t, home).into_iter().filter(|d| members.iter().any(|m| m == d.as_str())).collect();
@@ -102,7 +104,7 @@ pub(crate) fn rehome_to(members: &[String], t: &Value) -> Option<(String, Vec<St
 /// A task whose home is no project is re-homed and saved (D-160); any other comes back as it is.
 fn rehome_task(top: &Path, t: Value) -> Result<Value, Failure> {
     match workspace::members(top) {
-        Ok(ms) if rehome_to(&ms, &t).is_some() => crate::tasks::rehome(top, &t),
+        Ok(ms) if rehome_to(top, &ms, &t).is_some() => crate::tasks::rehome(top, &t),
         _ => Ok(t),
     }
 }
@@ -134,7 +136,7 @@ pub(crate) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
                     // A re-home that fails (a folder that can't move) is logged and
                     // leaves the task as it was, marked: one task must not hide the listing.
                     let mut t = match &members {
-                        Ok(ms) if rehome_to(ms, &t).is_some() => match crate::tasks::rehome(top, &t) {
+                        Ok(ms) if rehome_to(top, ms, &t).is_some() => match crate::tasks::rehome(top, &t) {
                             Ok(moved) => moved,
                             Err(e) => {
                                 eprintln!("re-homing task {}: {}", t["id"].as_str().unwrap_or(""), e.0);
@@ -788,12 +790,18 @@ fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Resul
             return err("E7005", format!("another task has a work run{place}"));
         }
         // Code changed outside Solace waits for a human before agents build on it (D-58).
-        if others.iter().any(|t| t["unexpected"] == true && column(w, t)["final"] != true) {
+        let unreviewed: Vec<String> = others
+            .iter()
+            .filter(|t| t["unexpected"] == true && column(w, t)["final"] != true)
+            .map(|t| format!("task:{}", t["id"].as_str().unwrap_or("")))
+            .collect();
+        if !unreviewed.is_empty() {
             return err(
                 "E7012",
                 format!(
-                    "complete or cancel the {} task{place} first: it holds code changed outside Solace that no one has reviewed",
-                    outside::TITLE
+                    "complete or cancel the {} task{place} first ({}): it holds code changed outside Solace that no one has reviewed",
+                    outside::TITLE,
+                    unreviewed.join(", ")
                 ),
             );
         }
@@ -921,13 +929,7 @@ pub(crate) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), F
         }
     }
     let me = t["id"].as_str().unwrap_or("").to_string();
-    let mut graph: HashMap<String, Vec<String>> = all_tasks(top)?
-        .iter()
-        .map(|o| {
-            let deps = o["dependsOn"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
-            (o["id"].as_str().unwrap_or("").to_string(), deps)
-        })
-        .collect();
+    let mut graph = dependency_graph(top)?;
     for d in &ids {
         if *d == me || !graph.contains_key(d) {
             return err("E7024", format!("a task can depend only on another existing task; {d} is not one"));
@@ -935,14 +937,8 @@ pub(crate) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), F
     }
     graph.insert(me.clone(), ids.clone());
     // A cycle is a path from one of the new dependencies back to this task.
-    let (mut todo, mut seen) = (ids.clone(), HashSet::new());
-    while let Some(id) = todo.pop() {
-        if id == me {
-            return err("E7025", "these dependencies would make a cycle");
-        }
-        if seen.insert(id.clone()) {
-            todo.extend(graph.get(&id).cloned().unwrap_or_default());
-        }
+    if reaches(&graph, ids.clone(), &me) {
+        return err("E7025", "these dependencies would make a cycle");
     }
     t["dependsOn"] = json!(ids);
     Ok(())
@@ -1022,8 +1018,16 @@ pub(crate) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                         return err("E7001", "option is not offered");
                     }
                     q["answer"] = json!(answer);
-                    if !q["settings"].is_null() && answer == "Approve" {
+                    let mut blocked_by = None;
+                    if q["settings"].get("task").is_some() && answer == "Approve" {
+                        blocked_by = crate::board::settings::approve_task(root, tid, q);
+                    } else if !q["settings"].is_null() && answer == "Approve" {
                         apply_settings(root, &title, q)?;
+                    }
+                    if let Some(id) = blocked_by {
+                        let mut deps = t["dependsOn"].as_array().cloned().unwrap_or_default();
+                        deps.push(json!(id));
+                        t["dependsOn"] = json!(deps);
                     }
                     continue_answered(&mut t);
                 }
@@ -1472,7 +1476,10 @@ pub(crate) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 t["runs"][i]["awaits_answer"] = json!(true);
             }
             hold(t, "an agent proposed a settings change");
-            on_event(w, t, "asked")?;
+            // A review moves no task by asking.
+            if t["runs"][i]["kind"] != "review" {
+                on_event(w, t, "asked")?;
+            }
         }
         // A changes message from before D-77 point 4: the board_touches rows are the
         // source, so applying one adds nothing. One left in an old inbox is ignored.
@@ -1728,4 +1735,29 @@ fn older(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a < b,
         _ => false,
     }
+}
+
+/// Each task's `dependsOn`, by task id, across every project.
+pub(crate) fn dependency_graph(top: &Path) -> Result<HashMap<String, Vec<String>>, Failure> {
+    Ok(all_tasks(top)?
+        .iter()
+        .map(|o| {
+            let deps = o["dependsOn"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+            (o["id"].as_str().unwrap_or("").to_string(), deps)
+        })
+        .collect())
+}
+
+/// Whether following `dependsOn` in `graph` from the tasks `from` reaches task `to`.
+pub(crate) fn reaches(graph: &HashMap<String, Vec<String>>, from: Vec<String>, to: &str) -> bool {
+    let (mut todo, mut seen) = (from, HashSet::new());
+    while let Some(id) = todo.pop() {
+        if id == to {
+            return true;
+        }
+        if seen.insert(id.clone()) {
+            todo.extend(graph.get(&id).cloned().unwrap_or_default());
+        }
+    }
+    false
 }

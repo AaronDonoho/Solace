@@ -36,6 +36,13 @@ marked `allowed_in_reviews = true`.
                                 line, what was decided, and a `Why:` line, or
                                 `## D-<n> <title>` to change that record; the
                                 human approves it, and only then is it applied
+  task propose [--blocking]     propose a new task for work that belongs
+                                elsewhere: its fields as a JSON object (`title`,
+                                `body`, `scope`, `feature`, `milestone`,
+                                `dependsOn`); every run kind, reviews too. The
+                                human approves it, and only then is it created,
+                                in Planning; `--blocking` also makes this task
+                                depend on it
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task.
                                 A work run is refused while a draft holds unsaved

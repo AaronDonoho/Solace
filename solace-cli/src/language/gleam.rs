@@ -616,7 +616,9 @@ pub fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Resul
 pub fn format(source: &str) -> Result<String, Failure> {
     // Formatting stdin needs no project folder; a fixed child folder keeps a
     // process-wide `Within` from moving the formatter's working directory.
-    let mut child = Command::new("gleam")
+    let mut cmd = Command::new(crate::tools::program("gleam").unwrap_or_else(|| "gleam".into()));
+    crate::tools::put_on_path(&mut cmd);
+    let mut child = cmd
         .args(["format", "--stdin"])
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())

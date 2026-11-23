@@ -74,13 +74,15 @@ pub(super) fn tick(root: &Path, held: &mut Option<fs::File>, queue: &mpsc::Recei
     if held.is_none() && root.join(".solace").is_dir() {
         *held = fs::create_dir_all(store_dir(root)).ok().and_then(|_| fsx::try_lock_file(&server_lock(root)).ok().flatten());
     }
-    drain(root);
+    between_operations(|| drain(root));
     if let Ok(job) = queue.recv_timeout(Duration::from_millis(50)) {
         // Messages sent before this job was queued (an agent's `done` just
         // before it exits) are applied first, so they keep their order.
-        drain(root);
-        // A failed operation fails its request, not the server.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        between_operations(|| {
+            drain(root);
+            // A failed operation fails its request, not the server.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        });
     }
 }
 
@@ -352,6 +354,9 @@ pub(crate) fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
     if m["kind"] == "strategy_resume" {
         return Ok(None);
     }
+    if m["kind"] == "system_review_findings" {
+        return crate::system_reviews::finish(top, m["run"].as_str().unwrap_or(""), &m["findings"]).map(|_| None);
+    }
     // A strategy run's agent (D-93): its reply or proposal waits for the human,
     // whose next note or answer sets the run going again.
     if let Some(kind @ ("strategy_note" | "strategy_propose")) = m["kind"].as_str() {
@@ -519,4 +524,14 @@ pub enum Answering {
     Busy,
     /// No task server runs for the root, or its thread has gone.
     No,
+}
+
+/// Held while the task server applies its inbox or runs an operation.
+static APPLYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `f` while the task server applies nothing, so what `f` reads of the
+/// root's files is never a change half made. `f` must not wait on the server.
+pub(crate) fn between_operations<R>(f: impl FnOnce() -> R) -> R {
+    let _applying = APPLYING.lock().unwrap_or_else(|e| e.into_inner());
+    f()
 }

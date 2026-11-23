@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Solace system review</title>
+<script>
+// The saved choice, else the system's, before first paint so there is no flash.
+try { document.documentElement.dataset.theme = localStorage.getItem('solace-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch { document.documentElement.dataset.theme = 'light'; }
+</script>
+<style>
+html{background:#f7f6f0;color-scheme:light}
+body{font:16px "IBM Plex Sans",system-ui,sans-serif;margin:0}
+html[data-theme=dark]{background:#1f2136;color-scheme:dark}
+/* Dark tokens, as the shell gives `/system-review`. The light ones live with the component's styles. */
+html[data-theme=dark] :is(solace-system-review){--sheet:#1f2136;--paper:#292c4c;--ink:#e8eaf8;--soft:#aab0d8;--line:#3b3f7a;--edge:#4a4fa3;--focus:#8fb4ff;--well:#181a2f;--hover:#353a68;--code:#181a2f;--ok-text:#6fd88a;--warn-text:#f0a860;--revision:#ff5a66;--shadow:#00000066}
+</style></head><body><solace-system-review></solace-system-review><script type="module">import { main } from "./build/dev/javascript/sysreview/sysreview.mjs"; main();</script></body></html>

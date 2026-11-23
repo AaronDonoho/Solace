@@ -157,14 +157,30 @@ fn a_reference_section_write_checks_the_summary_against_the_joined_sections() {
     assert!(e.contains("E6003") && e.contains("no entry in \"Commands in full\" for `impact`"), "{e}");
 }
 
-/// `[sandbox] read` is a list of non-empty paths, and no other sandbox key is
-/// accepted (D-158 point 4).
+/// `[sandbox] read` is a list of non-empty paths, and no sandbox key but
+/// `read` and `write` is accepted (D-158 point 4).
 #[cfg(test)]
 #[test]
 fn sandbox_read_is_a_list_of_paths() {
     assert!(parse_settings("[sandbox]\nread = [\"../fixtures\"]\n").is_ok());
-    for bad in ["[sandbox]\nread = \"../fixtures\"\n", "[sandbox]\nread = [\"\"]\n", "[sandbox]\nwrite = []\n"] {
+    for bad in ["[sandbox]\nread = \"../fixtures\"\n", "[sandbox]\nread = [\"\"]\n", "[sandbox]\nexec = []\n"] {
         assert!(parse_settings(bad).is_err(), "{bad}");
     }
+}
+
+/// `[sandbox] write` names folders inside the project, never the project
+/// itself or a folder above or outside it (D-158 point 4).
+#[test]
+fn sandbox_write_names_folders_inside_the_project() {
+    for good in ["[sandbox]\nwrite = [\"gen\"]\n", "[sandbox]\nwrite = [\"./gen/schemas\"]\n", "[sandbox]\nwrite = []\n"] {
+        assert!(parse_settings(good).is_ok(), "{good}");
+    }
+    for bad in ["\"\"", "\".\"", "\"./\"", "\"/abs\"", "\"../x\"", "\"gen/../../x\""] {
+        let text = format!("[sandbox]\nwrite = [{bad}]\n");
+        assert!(parse_settings(&text).is_err(), "{text}");
+    }
+    let e = parse_settings("[sandbox]\nwrite = [\"../x\"]\n").unwrap_err();
+    assert!(e.0.contains("sandbox.write: `../x` is not a folder inside the project"), "{}", e.0);
+    assert!(parse_settings("[sandbox]\nwrite = \"gen\"\n").is_err());
 }
 

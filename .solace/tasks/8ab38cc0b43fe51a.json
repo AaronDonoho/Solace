@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795223346,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/settings",
+  "id": "8ab38cc0b43fe51a",
+  "links": [],
+  "milestone": null,
+  "rank": 277.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "app tests: declared build folder and readable failure"
+}

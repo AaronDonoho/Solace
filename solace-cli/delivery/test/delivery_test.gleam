@@ -347,3 +347,32 @@ pub fn approved_notes_show_with_the_release_test() {
   assert !string.contains(page, "notes-edit")
   assert !string.contains(page, "Approve")
 }
+
+/// A missed scheduled review shows above the tabs until it is read on System Review or answered.
+pub fn a_missed_review_shows_until_read_test() {
+  let live = delivery.Model(..delivery.initial(), caught_up: True)
+  let unread =
+    "{\"missedReviews\":[{\"schedule\":\"a\",\"kinds\":[\"security\"],\"repeat\":\"weekly\",\"due\":1795424400,\"read\":false}]}"
+  let #(heard, _) = delivery.update(live, delivery.Live(unread))
+  let page = html(heard)
+  let assert [banner, _] = string.split(page, "role=\"tablist\"")
+  assert string.contains(banner, "Weekly security review was due ")
+  assert string.contains(banner, "Run now")
+  assert string.contains(banner, "Skip")
+  let #(read, _) =
+    delivery.update(
+      heard,
+      delivery.Live(string.replace(unread, "\"read\":false", "\"read\":true")),
+    )
+  assert !string.contains(html(read), "class=\"missed-reviews\"")
+  let #(refused, _) =
+    delivery.update(
+      heard,
+      delivery.MissedAnswered(
+        "{\"message\":\"E7023 no missed review for schedule a\"}",
+      ),
+    )
+  assert string.contains(html(refused), "no missed review for schedule a")
+  let #(answered, _) = delivery.update(refused, delivery.MissedAnswered("[]"))
+  assert !string.contains(html(answered), "class=\"missed-reviews\"")
+}

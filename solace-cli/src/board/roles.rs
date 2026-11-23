@@ -39,7 +39,7 @@ pub(crate) const ROLES: [Role; 6] = [
         id: "reviewer",
         name: "Reviewer",
         purpose: "Reviews a task's changes and reports what needs work, without changing the project.",
-        runs: &["review"],
+        runs: &["review", SYSTEM_REVIEW_RUN],
     },
     Role {
         id: "coordinator",
@@ -95,6 +95,7 @@ mod tests {
             ("new_work", "worker"),
             ("notes", "worker"),
             ("review", "reviewer"),
+            (SYSTEM_REVIEW_RUN, "reviewer"),
             (DESIGN_RUN, "designer"),
         ];
         for (kind, id) in expected {
@@ -146,3 +147,7 @@ pub(crate) const DESIGN_RUN: &str = "design";
 
 /// The notes run kind: notes runs record it and map back through `for_run`.
 pub(crate) const NOTES_RUN: &str = "notes";
+
+/// The system review run kind (D-265): a review of the whole project, which
+/// records it and maps back through `for_run`.
+pub(crate) const SYSTEM_REVIEW_RUN: &str = "system_review";

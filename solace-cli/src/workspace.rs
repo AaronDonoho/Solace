@@ -17,7 +17,7 @@ fn invalid<T>(why: impl std::fmt::Display) -> Result<T, Failure> {
     Err(lockdown::invalid_settings(why))
 }
 
-fn has_store(dir: &Path) -> bool {
+pub(crate) fn has_store(dir: &Path) -> bool {
     dir.join(".solace/store.db").exists()
 }
 
@@ -191,7 +191,7 @@ fn establish(root: &Path) -> Result<(), Failure> {
     if crate::language::detect(root).is_none() && !has_store(root) {
         import(root)?;
     }
-    crate::decisions::ensure(root)?;
+    ensure_logs(root)?;
     Ok(())
 }
 
@@ -330,7 +330,7 @@ pub fn add(root: &Path, dir: &str) -> Out {
 pub fn setup(root: &Path, dir: &str) -> Out {
     if dir == "." {
         let out = import(root)?;
-        crate::decisions::ensure(root)?;
+        ensure_logs(root)?;
         return Ok(format!("{}: {}", root.display(), out));
     }
     if !contained(root, dir) {
@@ -355,7 +355,7 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} and {d} would overlap: a project can't sit inside another's src/, test/ or tests/."));
     }
     let out = import(&path)?;
-    crate::decisions::ensure(root)?;
+    ensure_logs(root)?;
     dirs.push(dir.to_string());
     save(root, &dirs)?;
     Ok(format!("{dir}: {out}"))
@@ -879,6 +879,44 @@ mod tests {
         assert!(refusal.contains("lists projects of its own"), "{refusal}");
         assert!(refusal.contains("move a/docs out of this root and open it on its own"), "{refusal}");
     }
+
+    #[test]
+    fn setting_up_creates_the_review_log_and_keeps_it() {
+        let root = Scratch::new();
+        project(&root, ".");
+        setup(&root, ".").unwrap();
+        let log = root.join("SYSTEMREVIEWS.md");
+        assert!(fs::read_to_string(&log).unwrap().starts_with("# System reviews\n"), "a new root gets the log");
+        fs::write(&log, "# System reviews\n\n## Kept\n").unwrap();
+        project(&root, "frontend");
+        setup(&root, "frontend").unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "# System reviews\n\n## Kept\n", "adding a project keeps the log");
+    }
+
+    #[test]
+    fn adding_a_project_to_a_root_without_the_review_log_creates_it() {
+        let root = Scratch::new();
+        project(&root, "frontend");
+        setup(&root, "frontend").unwrap();
+        assert!(fs::read_to_string(root.join("SYSTEMREVIEWS.md")).unwrap().starts_with("# System reviews\n"));
+        assert!(!root.join("frontend/SYSTEMREVIEWS.md").exists(), "one log, at the top folder");
+    }
+
+    #[test]
+    fn reading_the_review_log_from_a_member_reaches_the_top() {
+        let root = Scratch::new();
+        project(&root, ".");
+        project(&root, "frontend");
+        fs::write(root.join("frontend/src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+        setup(&root, "frontend").unwrap();
+        fs::write(root.join("SYSTEMREVIEWS.md"), "# System reviews\n\n## Security\n").unwrap();
+        let member = root.join("frontend");
+        let s = crate::Store::peek(&member).unwrap();
+        let v = crate::lockdown::settings(&root).unwrap();
+        let mut input = || Ok(String::new());
+        let out = crate::lockdown::dispatch(&s, &v, &["read", "SYSTEMREVIEWS.md"], &mut input, None, 10_000).unwrap().unwrap();
+        assert!(out.contains("## Security"), "{out}");
+    }
 }
 
 /// The language of a project the New project form creates.
@@ -890,7 +928,8 @@ pub enum NewProject {
 
 /// `gleam new`, inside a repository joining it rather than starting its own.
 fn gleam_new(root: &Path, dir: &str, name: &str, javascript: bool) -> Result<(), Failure> {
-    let mut cmd = Command::new("gleam");
+    let mut cmd = Command::new(crate::language::tool_path("gleam").unwrap_or_else(|| "gleam".into()));
+    crate::tools::put_on_path(&mut cmd);
     cmd.args(["new", dir, "--name", name, "--skip-github"]).current_dir(root);
     if javascript {
         cmd.args(["--template", "javascript"]);
@@ -950,4 +989,10 @@ fn in_repository(root: &Path) -> bool {
 /// The advice for a workspace that sits inside another: it can't be opened where it is.
 fn open_on_its_own(inner: impl std::fmt::Display, outer: impl std::fmt::Display) -> String {
     format!("move {inner} out of {outer} and open it on its own")
+}
+
+/// The logs every top folder holds: decisions (D-254) and system reviews (D-265).
+fn ensure_logs(root: &Path) -> Result<(), Failure> {
+    crate::decisions::ensure(root)?;
+    crate::system_reviews::ensure(root)
 }

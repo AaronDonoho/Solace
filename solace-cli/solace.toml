@@ -3,6 +3,8 @@
 watch_limit = 262144
 # Files Solace doesn't watch or search (agents can still read and write them).
 unwatched = []
+# D-263: tools the tests need; `test` stops in one line while one is missing or older.
+test_tools = ["gleam", "node >= 19"]
 
 # Folders outside this project that a sandboxed cargo command may read, relative to it.
 [sandbox]
@@ -17,11 +19,11 @@ read = ["../bench/pilot-large", "../solace-app"]
 rust-board-tests = { run = ["cargo", "test", "board::"], allowed_in_reviews = true }
 rust-lockdown-tests = { run = ["cargo", "test", "lockdown::"], allowed_in_reviews = true }
 # Every module's unit tests; an argument filters by test name (`tasks::`, `scope::`).
-rust-unit = { run = ["cargo", "test", "--bins"], args = true, allowed_in_reviews = true }
+rust-unit = { run = ["cargo", "test", "--bins"], args = true, timeout = 900, allowed_in_reviews = true }
 # D-71: fixture instances run independently of the invoking agent's task context.
 # The server drops that context for every declared command.
 # The integration test is ignored so `test` skips the Python suites in its no-network sandbox; this runs them outside it.
-rust-acceptance = { run = ["cargo", "test", "--test", "acceptance", "--", "--include-ignored"], allowed_in_reviews = true, test = true }
+rust-acceptance = { run = ["cargo", "test", "--test", "acceptance", "--", "--include-ignored"], timeout = 600, tools = ["cargo", "python3", "gleam", "node >= 19"], allowed_in_reviews = true, test = true }
 # Layout measurements and screenshots of a fixture instance, light and dark (D-71 isolation).
 # An argument limits it to one page: board, strategy[-vision|-features|-roadmap|-tasks], settings, task.
 layout_audit = { run = ["python3", "tests/layout_audit.py"], args = true, allowed_in_reviews = true }

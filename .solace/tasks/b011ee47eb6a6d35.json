@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "## Need\nWhen the human presses **Assign** and Solace refuses because an Unexpected Changes task is open (`E7012`), the message tells them the task exists but gives no way to reach it. The human could not find it on the board.\n\n**Wanted:** the refusal message links to the open Unexpected Changes task, and the link opens that task. If more than one is open, it links to each of them.\n\n## For the agent\n`board::task_model.claim_projects` raises `E7012` (D-150 point 3, D-151 point 5). It is not confirmed where the board shows this refusal, so find it from the Assign action. Ask the human before adding any other wording or controls.\n\nDone when: pressing Assign while an Unexpected Changes task is open shows a refusal with a link to each open one, following a link opens that task, and a test covers the link.",
+  "closedTime": 1795211890,
+  "column": "complete",
+  "createdTime": 1795208332,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "b011ee47eb6a6d35",
+  "links": [],
+  "milestone": null,
+  "rank": 426.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "board: link the blocking Unexpected Changes task"
+}

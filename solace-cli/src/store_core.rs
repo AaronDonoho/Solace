@@ -158,15 +158,7 @@ impl Store {
                 })
             })?
             .collect::<Result<_, _>>()?;
-        let file = if self.nested { "file" } else { "NULL" };
-        let owns = if self.owns_dir { "owns_dir" } else { "NULL" };
-        let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file}, {owns} FROM modules ORDER BY dir, path"))?;
-        let modules: Vec<crate::ModuleRow> = stmt
-            .query_map([], |r| {
-                Ok(crate::ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? })
-            })?
-            .collect::<Result<_, _>>()?;
-
+        let modules = self.modules()?;
         Ok(crate::index::build(self.lang(), syms, modules, crate::language::is_rust(&self.root)))
     }
     // --- writing files ------------------------------------------------------------
@@ -245,13 +237,10 @@ impl Store {
     }
     /// Runs `cargo` in the project (D-158): the exit code and its output.
     pub(crate) fn cargo(&self, args: &[&str], timeout: u64) -> Result<(bool, String), Failure> {
-        if let Some(why) = crate::language::reason(crate::language::RUST)? {
-            return Err(Failure(format!("E6013 {why}"), 1));
+        match self.cargo_within(args, timeout)? {
+            (Some(passed), output) => Ok((passed, output)),
+            (None, output) => crate::lockdown::commands::timed_out("cargo", timeout, &output),
         }
-        let mut argv = vec!["cargo".to_string()];
-        argv.extend(args.iter().map(|s| s.to_string()));
-        let text = command(&self.root, &argv, timeout, usize::MAX, false, true)?;
-        Ok((passed(&text), text.split_once('\n').map_or("", |(_, s)| s).to_string()))
     }
     /// Type-checks the project and records which symbols are broken, with
     /// their errors, so the next reply can report only what changed (D-46).
@@ -646,6 +635,31 @@ impl Store {
     pub(crate) fn tool_program(&self) -> PathBuf {
         let tool = self.lang().tool();
         crate::language::tool_path(tool).unwrap_or_else(|| PathBuf::from(tool))
+    }
+
+    /// Runs `cargo` in the project (D-158): whether it exited with 0, or
+    /// `None` when it ran past `timeout` and was stopped, and its output.
+    pub(crate) fn cargo_within(&self, args: &[&str], timeout: u64) -> Result<(Option<bool>, String), Failure> {
+        if let Some(why) = crate::language::reason(crate::language::RUST)? {
+            return Err(Failure(format!("E6013 {why}"), 1));
+        }
+        let mut argv = vec!["cargo".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        let (status, _, output) = crate::lockdown::commands::captured(&self.root, &argv, timeout, true)?;
+        Ok((status.map(|s| s.success()), output))
+    }
+
+    /// The store's modules, without the symbol graph `index` builds.
+    pub(crate) fn modules(&self) -> Result<Vec<crate::ModuleRow>, Failure> {
+        let file = if self.nested { "file" } else { "NULL" };
+        let owns = if self.owns_dir { "owns_dir" } else { "NULL" };
+        let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file}, {owns} FROM modules ORDER BY dir, path"))?;
+        let modules = stmt
+            .query_map([], |r| {
+                Ok(crate::ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(modules)
     }
 
 }

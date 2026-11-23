@@ -147,12 +147,15 @@ pub(crate) fn change(
             return Ok(None);
         }
         let tid = parts[1];
+        // A task an approved proposal creates is saved with the answer, or not at all.
+        let batch = crate::tasks::store::batch(&top)?;
         let (t, after) = crate::board::task_model::change(&root, tid, &method, &parts[2..], &body)?;
         // The feature's Tech Debt task first (D-112): its notes name this task.
         if let After::Clean(Some(debt)) = &after {
             write(&top, debt)?;
         }
         write(&top, &t)?;
+        crate::tasks::store::batch_commit(batch)?;
         if let After::Removed(dir) = &after {
             log(&top, dir, &json!({"removed":tid}));
         }
@@ -183,4 +186,17 @@ pub(super) fn feature_waits(top: &Path, id: &str, waits: &mut HashMap<String, bo
 /// Whether task `t`'s home names a project of the workspace (D-129).
 pub(crate) fn has_project(top: &Path, t: &Value) -> bool {
     project_home(top, t).is_some()
+}
+
+/// `GET /tasks/{id}/dependents` (D-203): the tasks whose `dependsOn` names
+/// task `id`, from any project, archived ones left out, for its **Needed by** line.
+pub fn dependents(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
+    recover(&scope::top(top)).map_err(|e| (409, e))?;
+    let all = all_tasks(top).map_err(|e| (409, e))?;
+    let tasks: Vec<Value> = all
+        .iter()
+        .filter(|t| t["archivedTime"].is_null() && t["dependsOn"].as_array().is_some_and(|d| d.iter().any(|x| x == id)))
+        .map(|t| json!({"id": t["id"], "title": t["title"], "column": t["column"]}))
+        .collect();
+    Ok(json!({"tasks": tasks}))
 }

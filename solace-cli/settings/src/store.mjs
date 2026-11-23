@@ -2,6 +2,9 @@
 // its key; storage may be missing or blocked, and the pages work without it.
 // A change is published to whoever subscribed to its key: in this window by a
 // `solace-setting` event on the document, in other windows by `storage`.
+// In the desktop app each setting is also kept by the app, which gives it to
+// every board window it opens: a page's storage belongs to its port, and a
+// board may get another port next time.
 const event = 'solace-setting';
 
 export function load(key) {
@@ -9,6 +12,9 @@ export function load(key) {
 }
 function keep(key, value) {
   try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
+  if (desktop_app()) {
+    try { globalThis.__TAURI__.core.invoke('save_setting', { key, value }).catch(() => {}); } catch {}
+  }
 }
 // Stores the value, "" to clear it, and publishes the change.
 export function save(key, value) {
@@ -55,7 +61,7 @@ export function follow_theme() {
   subscribe(theme_key, apply_theme);
 }
 
-// The font size scales the whole page (D-261): every `index.html` zooms its
+// The font size scales the whole page (D-262): every `index.html` zooms its
 // root by `--font-scale`, read before first paint from the same key.
 export function apply_font_scale(scale) {
   globalThis.document?.documentElement?.style?.setProperty?.('--font-scale', String(scale));

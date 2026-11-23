@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "board-settings",
+  "description": "Board windows may keep their settings in the app, so a board on another port opens with them.",
+  "windows": ["board-*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": ["allow-save-setting"]
+}

@@ -933,8 +933,6 @@ fn frame(
                 html.div(
                   [
                     attribute.class("plan-body"),
-                    // Focusable, so a click in the conversation brings its
-                    // keys here rather than to the page.
                     attribute.tabindex(-1),
                     event.on("scroll", scrolled(p)),
                     event.on("keydown", selects_conversation(p)),

@@ -1,0 +1,15 @@
+{
+  "archivedTime": null,
+  "body": "Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or canceled.",
+  "closedTime": 1795208481,
+  "column": "complete",
+  "createdTime": 1795202827,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/board",
+  "id": "9b05640722dfb3a1",
+  "links": [],
+  "milestone": null,
+  "rank": -2.0,
+  "title": "Unexpected Changes"
+}

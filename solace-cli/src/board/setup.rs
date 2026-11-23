@@ -382,7 +382,7 @@ pub(crate) fn on_path(program: &str) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
     }
-    env::var_os("PATH").is_some_and(|p| env::split_paths(&p).any(|d| d.join(program).is_file()))
+    crate::language::tool_path(program).is_some()
 }
 
 pub(crate) fn model(config: &Value, name: &str) -> Result<Value, Failure> {

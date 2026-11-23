@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795282871,
+  "column": "complete",
+  "createdTime": 1795280046,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "a5e9844ac587a12c",
+  "links": [],
+  "milestone": null,
+  "rank": 435.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "techDebt": true,
+  "title": "Gleam and Erlang installed in the home folder run in the sandbox"
+}

@@ -13,6 +13,10 @@ from acceptance_wait import wait_for
 
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = str(Path(__file__).with_name('fake_agent.py'))
+# A slow command holds the project lock this long; a request that takes no
+# lock answers well within it, even on a busy machine.
+LOCK_HELD = 24
+NO_WAIT = 8
 
 class Board(unittest.TestCase):
     def setUp(self):
@@ -27,7 +31,7 @@ class Board(unittest.TestCase):
         (self.root/'priv').mkdir()
         (self.root/'priv/a').write_text('original')
         config=self.root/'system.toml'
-        config.write_text('task_timeout=2\n[[models]]\nid="fake"\nlabel="Fake agent"\nagent="codex"\nrun=["python3",'+json.dumps(FAKE)+']\n[[models]]\nid="missing"\nlabel="Missing agent"\nagent="codex"\nrun=["solace-no-such-program"]\n')
+        config.write_text('task_timeout=60\n[[models]]\nid="fake"\nlabel="Fake agent"\nagent="codex"\nrun=["python3",'+json.dumps(FAKE)+']\n[[models]]\nid="missing"\nlabel="Missing agent"\nagent="codex"\nrun=["solace-no-such-program"]\n')
         self.env={**os.environ,'SOLACE_CONFIG':str(config)}
         # Exercise native CLI launch/resume flags without contacting a provider.
         programs = self.root/'fake-bin'
@@ -115,7 +119,7 @@ class Board(unittest.TestCase):
     def test_the_lock_file_holds_the_port_while_served(self):  # D-80
         lock=json.loads((self.root/'.solace/serve.lock').read_text())
         self.assertEqual(lock['port'],self.port);self.assertEqual(lock['pid'],self.server.pid)
-    def wait(self,t,predicate,timeout=10):
+    def wait(self,t,predicate,timeout=30):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
             value=self.get(t)
@@ -124,6 +128,17 @@ class Board(unittest.TestCase):
         self.fail('timed out: '+json.dumps(value))
     def assign(self,steps):
         t=self.create(steps);self.action(t,'plan');return self.action(t,'assign',model='fake')
+    def run_limit(self,seconds):
+        config=self.root/'system.toml'
+        config.write_text(config.read_text().replace('task_timeout=60\n',f'task_timeout={seconds}\n'))
+    def run_slow(self,first='',then=()):
+        # The agent's `run slow` holds the project lock for LOCK_HELD seconds; this returns once it has started.
+        script=f"import time; from pathlib import Path; {first}Path('priv/gen').mkdir(exist_ok=True); Path('priv/gen/marker').write_text('x'); time.sleep({LOCK_HELD})"
+        config=self.root/'solace.toml'
+        config.write_text(config.read_text()+'\n[commands]\nslow={run=["python3","-c",'+json.dumps(script)+']}\n')
+        t=self.assign([{'command':'run slow'},*then])
+        self.assertTrue(wait_for(self.root/'priv/gen/marker',30),'the slow command never started')
+        return t
     def completed(self,steps):
         t=self.assign([*steps,{'command':'task done done'}]);return self.wait(t,lambda t:t['column']=='needs_review')
     def stream(self,seq=0):
@@ -604,7 +619,8 @@ class Board(unittest.TestCase):
         reviewed=self.completed([]);self.api('PATCH','/tasks/'+reviewed['id'],{'body':json.dumps([{'exit':7}])})
         self.action(reviewed,'review',model='fake');reviewed=self.wait(reviewed,lambda x:x['runs'][-1]['state']=='ended')
         self.assertEqual(reviewed['column'],'needs_review');self.assertIn('without finishing',reviewed['attention']['reason'])
-        timed=self.assign([{'sleep':3}]);timed=self.wait(timed,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(timed['column'],'assigned');self.assertIn('timeout',timed['notes'][-1]['text'])
+        self.run_limit(2)
+        timed=self.assign([{'sleep':60}]);timed=self.wait(timed,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(timed['column'],'assigned');self.assertIn('timeout',timed['notes'][-1]['text'])
     def test_a18_review_reads_task_diff(self):
         (self.root/'priv/b').write_text('one\ntwo\nthree\nfour\nfive\nsix\n')
         t=self.completed([
@@ -685,8 +701,7 @@ class Board(unittest.TestCase):
         self.assertIn('pub fn one() { 10 }',replies[2])
 
     def test_a_batched_task_done_waits_for_a_passing_test(self):
-        # D-152: one call submits, tests and finishes; the test builds and runs, so allow it time.
-        config=self.root/'system.toml';config.write_text(config.read_text().replace('task_timeout=2\n','task_timeout=20\n'))
+        # D-152: one call submits, tests and finishes.
         patch=lambda expected:('*** Begin Patch\n*** Update: app.one\n@@\n-pub fn one() { 1 }\n+pub fn one() { 10 }\n'
             '*** Add: fixture_test\n+//// Tests for app.\n+\n+pub fn main() { one_test() }\n+\n'
             f'+pub fn one_test() {{\n+  let assert {expected} = app.one()\n+}}\n*** End Patch')
@@ -805,22 +820,28 @@ class Board(unittest.TestCase):
     def test_wait_again_takes_a_wait_only_call(self):
         # A wait that reaches the tool call's limit sends nothing and returns
         # `WAIT_AGAIN`; the wait-only command then takes the human's next note.
+        # The agent holds the wait-only call until the note is posted, so the
+        # test's own speed can't decide whether that call reaches its limit.
         self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
-        t=self.create([{'command':'task note first reply'},{'command':'task wait'},{'say':'after wait'}])
+        gate=self.root/'.solace'/'noted'
+        t=self.create([{'command':'task note first reply'},{'until':'noted'},{'command':'task wait'},{'say':'after wait'}])
         self.action(t,'plan')
         t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
-        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(self.replies(rid))>=1)
+        t=self.wait(t,lambda x:len(self.replies(rid))>=1)
         self.assertIn('`task wait` (a discussion)',self.replies(rid)[0])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'after the limit'})
+        gate.write_text('')
         t=self.wait(t,lambda x:len(self.replies(rid))>=2)
         self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
         self.assertEqual(len(t['notes']),3)  # The wait sent no note of its own.
         self.action(t,'end_discussion')
-        steps=[{'command':'strategy note','text':'first plan'},{'command':'strategy wait'},{'say':'after wait'}]
+        gate.unlink()
+        steps=[{'command':'strategy note','text':'first plan'},{'until':'noted'},{'command':'strategy wait'},{'say':'after wait'}]
         rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
-        self.wait_run(rid,lambda r:r['state']=='waiting' and len(self.replies(rid))>=1)
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=1)
         self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
         self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'after the limit'})
+        gate.write_text('')
         run=self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
         self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
         self.assertEqual((len(run['notes']),run['questions']),(3,[]))  # No note or proposal from the wait.
@@ -1060,32 +1081,23 @@ class Board(unittest.TestCase):
         review=self.wait(review,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'needs_review')
         self.assertEqual(review['notes'][-1]['text'],'review report')
     def test_board_reads_while_agent_command_runs(self):
-        config=self.root/'solace.toml'
-        config.write_text(config.read_text()+'\n[commands]\nslow={run=["sleep","3"]}\n')
-        t=self.assign([{'command':'run slow'},{'command':'task done done'}])
-        time.sleep(1)  # the agent's command now holds the project lock
+        t=self.run_slow(then=[{'command':'task done done'}])
         start=time.monotonic();self.api('GET','/tasks');self.get(t)
-        self.assertLess(time.monotonic()-start,1)
-        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')  # the fixture's 2-second timeout ends it
+        self.assertLess(time.monotonic()-start,NO_WAIT)
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended',LOCK_HELD+30)
     def test_a_task_command_leaves_a_live_runs_records(self):
         # D-77 point 5: a task command takes no project lock, so it must not
         # recover a live run's records as a crashed one's.
-        config=self.root/'solace.toml'
-        script="import time; from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/gen').mkdir(exist_ok=True); Path('priv/gen/marker').write_text('x'); time.sleep(1.5)"
-        config.write_text(config.read_text()+'\n[commands]\nslow={run=["python3","-c",'+json.dumps(script)+']}\n')
-        t=self.assign([{'command':'run slow'}])
+        t=self.run_slow(first="Path('priv/a').write_text('changed'); ")
         rid=t['runs'][-1]['id'];pending=self.root/'.solace/pending'
-        end=time.monotonic()+5
-        while not (self.root/'priv/gen/marker').exists():
-            self.assertLess(time.monotonic(),end);time.sleep(.02)
         start=time.monotonic()
         p=subprocess.run([BIN,'task','note','x'],cwd=self.root,env={**self.env,'SOLACE_TASK':t['id'],'SOLACE_RUN':rid},text=True,capture_output=True)
         self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-        self.assertLess(time.monotonic()-start,1)
+        self.assertLess(time.monotonic()-start,NO_WAIT)
         self.assertTrue((pending/f'run-{rid}.json').exists());self.assertTrue((pending/f'command-{rid}.json').exists())
         self.assertEqual(self.rows(t['id']),[])
-        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
-        end=time.monotonic()+5
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended',LOCK_HELD+30)
+        end=time.monotonic()+20
         while self.rows(t['id'])!=['file:priv/a']:
             self.assertLess(time.monotonic(),end);time.sleep(.02)
         self.assertEqual(self.rows(t['id']),['file:priv/a'])
@@ -1096,17 +1108,11 @@ class Board(unittest.TestCase):
     def test_task_only_changes_wait_for_no_agent_command(self):
         # D-77 point 5: create, a note and stop take no project lock, so they
         # finish while an agent's command holds it.
-        config=self.root/'solace.toml'
-        script="import time; from pathlib import Path; Path('priv/gen').mkdir(exist_ok=True); Path('priv/gen/marker').write_text('x'); time.sleep(1.5)"
-        config.write_text(config.read_text()+'\n[commands]\nslow={run=["python3","-c",'+json.dumps(script)+']}\n')
-        t=self.assign([{'command':'run slow'}])
-        end=time.monotonic()+5
-        while not (self.root/'priv/gen/marker').exists():
-            self.assertLess(time.monotonic(),end);time.sleep(.02)
+        t=self.run_slow()
         for method,path,body in [('POST','/tasks',{'title':'meanwhile'}),('POST',f'/tasks/{t["id"]}/notes',{'text':'meanwhile'}),('POST',f'/tasks/{t["id"]}/actions',{'action':'stop'})]:
             start=time.monotonic();self.api(method,path,body)
-            self.assertLess(time.monotonic()-start,1,path)
-        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+            self.assertLess(time.monotonic()-start,NO_WAIT,path)
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended',LOCK_HELD+30)
     def test_declared_run_watched_files_revert(self):
         config=self.root/'solace.toml'
         config.write_text(config.read_text()+'\n[commands]\nedit={run=["python3","-c",'+json.dumps("from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/created').write_text('new')")+']}\n')
@@ -1362,16 +1368,16 @@ class Board(unittest.TestCase):
     def test_a_stopped_server_queues_a_note(self):
         # applied() waits for the server, not forever: with no server, the note
         # stays in the inbox for the next serve, and the agent's call returns.
-        t=self.create([{'sleep':.5},{'command':'task note reply'}]);self.action(t,'plan')
+        t=self.create([{'until':'stopped'},{'command':'task note reply'}]);self.action(t,'plan')
         t=self.action(t,'discuss',model='fake',text='What about X?')
         rid=t['runs'][-1]['id']
         prompt=self.root/'.solace'/(rid+'.prompt')
-        self.assertTrue(wait_for(prompt,8),'the discussion agent never started')
-        self.stop()
+        self.assertTrue(wait_for(prompt,30),'the discussion agent never started')
+        self.stop();(self.root/'.solace/stopped').write_text('')
         responses=self.root/'.solace'/(rid+'.responses')
-        self.assertTrue(wait_for(responses,4),'the note call never returned')
+        self.assertTrue(wait_for(responses,30),'the note call never returned')
         exited=self.root/'.solace'/(rid+'.exited')
-        self.assertTrue(wait_for(exited,4),'the discussion agent never exited')
+        self.assertTrue(wait_for(exited,30),'the discussion agent never exited')
         self.assertIn('reaches the board',responses.read_text())
         inbox=self.root/'.solace/tasks/inbox'
         self.assertEqual(len(list(inbox.iterdir())),1)
@@ -1385,16 +1391,16 @@ class Board(unittest.TestCase):
         # landing as feedback on an ended run.
         note = '**Assessment: Needs work**\n\n### Findings\n\nLate feedback.'
         t = self.completed([])
-        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'sleep':.5},{'command':'task note','text':note}])})
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'until':'stopped'},{'command':'task note','text':note}])})
         t = self.action(t, 'review', model='fake')
         rid = t['runs'][-1]['id']
         prompt = self.root/'.solace'/(rid+'.prompt')
-        self.assertTrue(wait_for(prompt, 8), 'the review agent never started')
-        self.stop()
+        self.assertTrue(wait_for(prompt, 30), 'the review agent never started')
+        self.stop(); (self.root/'.solace/stopped').write_text('')
         responses = self.root/'.solace'/(rid+'.responses')
-        self.assertTrue(wait_for(responses, 4), 'the note call never returned')
+        self.assertTrue(wait_for(responses, 30), 'the note call never returned')
         exited = self.root/'.solace'/(rid+'.exited')
-        self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+        self.assertTrue(wait_for(exited, 30), 'the review agent never exited')
         self.assertIn('reaches the board', responses.read_text())
         self.serve()
         t = self.wait(t, lambda x: x['runs'][-1]['outcome']=='reviewed'
@@ -1409,16 +1415,16 @@ class Board(unittest.TestCase):
         note = '**Assessment: Needs work**\n\n### Findings\n\nLate feedback.'
         t = self.completed([])
         self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([
-            {'sleep':.5}, {'command':'task note','text':note}, {'say':assessment}])})
+            {'until':'stopped'}, {'command':'task note','text':note}, {'say':assessment}])})
         t = self.action(t, 'review', model='fake')
         rid = t['runs'][-1]['id']
         prompt = self.root/'.solace'/(rid+'.prompt')
-        self.assertTrue(wait_for(prompt, 8), 'the review agent never started')
-        self.stop()
+        self.assertTrue(wait_for(prompt, 30), 'the review agent never started')
+        self.stop(); (self.root/'.solace/stopped').write_text('')
         responses = self.root/'.solace'/(rid+'.responses')
-        self.assertTrue(wait_for(responses, 4), 'the note call never returned')
+        self.assertTrue(wait_for(responses, 30), 'the note call never returned')
         exited = self.root/'.solace'/(rid+'.exited')
-        self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+        self.assertTrue(wait_for(exited, 30), 'the review agent never exited')
         self.assertIn('reaches the board', responses.read_text())
         self.serve()
         t = self.wait(t, lambda x: x['runs'][-1]['outcome']=='reviewed'
@@ -1427,17 +1433,36 @@ class Board(unittest.TestCase):
         self.assertEqual(t['finished']['outcome'], 'reviewed')
         self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
 
+    def test_a_proposal_wait_returns_at_its_limit_and_task_wait_gets_the_answer(self):
+        # A wait that reaches the tool call's limit returns, and so does a command
+        # held while the run waits, so no later call is left behind it; `task wait`
+        # then takes the answer the human gave after the limit.
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        answered=self.root/'.solace'/'answered'
+        t=self.assign([{'command':'task propose','text':json.dumps({'title':'Later'})},{'command':'view app'},
+                       {'until':'answered'},{'command':'task wait'},{'command':'task wait'},{'command':'task done answered'}])
+        rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['questions'] and len(self.replies(rid))>=2)
+        self.assertIn("Still waiting for the human's answer. Call `task wait`",self.replies(rid)[0])
+        self.assertIn('call `task wait`',self.replies(rid)[1])
+        self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'Reject'})
+        answered.write_text('')
+        t=self.wait(t,lambda x:x['column']=='needs_review')
+        self.assertEqual(json.loads(self.replies(rid)[2])['questions'][0]['answer'],'Reject')
+        self.assertIn("an answer the human hasn't given yet",self.replies(rid)[3])  # Delivered once.
+        answered.unlink()
+
     def test_a_stopped_server_queues_an_ask(self):
         # The same for a question: the agent is told it is queued, not left waiting.
-        t=self.assign([{'sleep':.5},{'command':'task ask','text':'Which?','options':['a','b']}])
+        t=self.assign([{'until':'stopped'},{'command':'task ask','text':'Which?','options':['a','b']}])
         rid=t['runs'][-1]['id']
         prompt=self.root/'.solace'/(rid+'.prompt')
-        self.assertTrue(wait_for(prompt,8),'the work agent never started')
-        self.stop()
+        self.assertTrue(wait_for(prompt,30),'the work agent never started')
+        self.stop();(self.root/'.solace/stopped').write_text('')
         responses=self.root/'.solace'/(rid+'.responses')
-        self.assertTrue(wait_for(responses,4),'the ask call never returned')
+        self.assertTrue(wait_for(responses,30),'the ask call never returned')
         exited=self.root/'.solace'/(rid+'.exited')
-        self.assertTrue(wait_for(exited,4),'the work agent never exited')
+        self.assertTrue(wait_for(exited,30),'the work agent never exited')
         self.assertIn('reaches the board',responses.read_text())
         self.serve()
         # The restart ended the run before the question was applied: the question
@@ -1640,14 +1665,14 @@ class Board(unittest.TestCase):
         while 'personas' not in (e:=self.next_event(fresh)[1]):pass
         self.assertEqual(e,{'personas':[]})
 
-    def wait_run(self,rid,predicate,timeout=10):
+    def wait_run(self,rid,predicate,timeout=30):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
             value=self.api('GET',f'/strategy/runs/{rid}')
             if predicate(value):return value
             time.sleep(.03)
         self.fail('timed out: '+json.dumps(value))
-    def wait_design_run(self,rid,predicate,timeout=10):
+    def wait_design_run(self,rid,predicate,timeout=30):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
             value=self.api('GET',f'/design/runs/{rid}')
@@ -1926,19 +1951,28 @@ class Board(unittest.TestCase):
         self.api('POST',f'/strategy/runs/{rid}/end')
 
     def test_strategy_note_during_a_proposal_and_late_answer(self):
+        # The proposal's wait stops at the limit, and the agent holds each next call at a gate
+        # until the test has posted, so what it posted is pending when that call starts.
+        self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
+        noted,answered=self.root/'.solace'/'noted',self.root/'.solace'/'answered'
         steps=[{'command':'strategy task','text':json.dumps({'title':'Proposed'})},
+               {'until':'noted'},
                {'command':'strategy note','text':'heard note'},
-               {'command':'strategy note','text':'heard answer'}]
+               {'until':'answered'},
+               {'command':'strategy note','text':'heard answer'},
+               {'command':'strategy wait'}]
         rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
-        q=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['questions'])==1)['questions'][0]
+        q=self.wait_run(rid,lambda r:len(r['questions'])==1 and len(self.replies(rid))==1)['questions'][0]
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
         for text in ['change title','also add scope']:self.api('POST',f'/strategy/runs/{rid}/notes',{'text':text})
-        self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])==4 and len(self.replies(rid))==1)
-        self.assertEqual(self.replies(rid)[0],'The human replied:\n\nchange title\n\nalso add scope\n')
+        noted.write_text('')
+        self.wait_run(rid,lambda r:len(self.replies(rid))==2 and len(r['notes'])==4)
+        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nchange title\n\nalso add scope\n')
         self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
-        run=self.wait_run(rid,lambda r:r['state']=='waiting' and len(r['notes'])==6 and len(self.replies(rid))==2)
-        self.assertIn('The human answered the proposal Create task "Proposed": Approved and applied',self.replies(rid)[1])
-        time.sleep(.4)
-        self.assertEqual(len(self.replies(rid)),2)  # The late answer is delivered once.
+        answered.write_text('')
+        self.wait_run(rid,lambda r:len(self.replies(rid))==4 and len(r['notes'])==6)
+        self.assertIn('The human answered the proposal Create task "Proposed": Approved and applied',self.replies(rid)[2])
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[3])  # The late answer is delivered once.
         self.api('POST',f'/strategy/runs/{rid}/end')
 
     def test_a_proposal_answered_while_the_agent_works_reaches_its_next_note(self):

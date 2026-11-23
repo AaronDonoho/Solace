@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "The desktop app's tests can't run under `test`, and when they fail the error is hard to read. Fix both. The findings and acceptance criteria are in note 4.\n\n1. **Readable failure:** when the build fails before any test runs, `test` shows `Tests did not run.` followed only by cargo's `error:` block and its `Caused by:` lines, not the raw build log.\n2. **Declared folder:** a project can list extra folders its build may write to in `solace.toml` (`[sandbox] write`), and the human approves that line. Each folder must be inside the project. Add `gen` for solace-app, so its build can write there and its tests run. Everything else in the project stays read-only.\n\nThis needs the change to D-158 point 4 proposed alongside this task.",
+  "closedTime": 1795223346,
+  "column": "complete",
+  "createdTime": 1795212219,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/settings",
+  "id": "f8d30279d5c20352",
+  "links": [],
+  "milestone": null,
+  "rank": 276.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "techDebt": true,
+  "title": "app tests: declared build folder and readable failure"
+}

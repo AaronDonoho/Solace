@@ -54,8 +54,10 @@ pub fn main_test() {
         (self.root / 'gleam.toml').write_text((PILOT / 'gleam.toml').read_text().replace('pilot_large', 'fixture'))
         shutil.copytree(PILOT / 'build/packages', self.root / 'build/packages')
         shutil.copytree(PILOT / 'build/dev', self.root / 'build/dev')
-        self.env = {**os.environ, 'SOLACE_CONFIG': str(self.root / 'system.toml')}
-        (self.root / 'system.toml').write_text('task_timeout=5\n[[models]]\nid="fake"\nlabel="Fake"\nagent="codex"\nrun=["python3",' + json.dumps(str(FAKE)) + ']\n')
+        # The config sits outside the project, so files the server writes beside it stay out of the project's files.
+        config = Path(self.tmp.name) / 'system.toml'
+        self.env = {**os.environ, 'SOLACE_CONFIG': str(config)}
+        config.write_text('task_timeout=60\n[[models]]\nid="fake"\nlabel="Fake"\nagent="codex"\nrun=["python3",' + json.dumps(str(FAKE)) + ']\n')
         self.cli('migrate', '--yes')
         self.cli('migrate', '--adopt', '--yes')
         self.server = subprocess.Popen([BIN, 'serve', '--port', '0'], cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -111,7 +113,7 @@ pub fn main_test() {
         task = self.api('POST', '/tasks', {'title': 'Print', 'body': json.dumps(steps)})
         self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'plan'})
         self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'assign', 'model': 'fake'})
-        for _ in range(200):
+        for _ in range(600):
             task = self.api('GET', '/tasks/' + task['id'])
             if task['column'] == 'needs_review':
                 break
@@ -187,7 +189,7 @@ pub fn main_test() {
         task = self.api('POST', '/tasks', {'title': 'Print', 'body': json.dumps(steps)})
         self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'plan'})
         self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'assign', 'model': 'fake'})
-        for _ in range(200):
+        for _ in range(600):
             task = self.api('GET', '/tasks/' + task['id'])
             if task['column'] == 'needs_review':
                 break

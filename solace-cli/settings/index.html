@@ -3,8 +3,8 @@
 <script>
 // The saved choice, else the system's, before first paint so there is no flash.
 try { document.documentElement.dataset.theme = localStorage.getItem('solace-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch { document.documentElement.dataset.theme = 'light'; }
-// The chosen font size scales the page (D-261); 15px is the default.
-try { const size = Number(localStorage.getItem('solace-font-size')); if (size) document.documentElement.style.setProperty('--font-scale', String(size / 15)); } catch {}
+// The chosen font size scales the page (D-262); 15px is the default.
+try { const size = localStorage.getItem('solace-font-size'); if (['12', '13', '14', '15', '16', '18', '20', '24', '28', '32', '36'].includes(size)) document.documentElement.style.setProperty('--font-scale', String(Number(size) / 15)); } catch {}
 </script>
 <style>
 html{background:#f7f6f0;color-scheme:light;zoom:var(--font-scale,1)}

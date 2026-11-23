@@ -9,5 +9,5 @@ unwatched = []
 # "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
 
 [commands]
-# The JS tests of <solace-task>'s browser code and flows; run after `gleam build`.
-js_tests = { run = ["bun", "test", "test/task_api.test.mjs"], allowed_in_reviews = true }
+# The JS tests of <solace-task>'s and the plan panel's browser code and flows; run after `gleam build`.
+js_tests = { run = ["bun", "test", "test/task_api.test.mjs", "test/plan_api.test.mjs"], allowed_in_reviews = true }

@@ -709,3 +709,93 @@ fn a_workflow_row_waits_for_the_workflow_stream_before_tasks_advance() {
     assert_eq!(event["workflow"], workflow);
 }
 
+#[test]
+fn the_checklist_installs_only_gleam_and_erlang() {
+    let top = crate::testing::Scratch::new();
+    let board = std::sync::Arc::new(Board::new(top.to_path_buf(), 0));
+    let e = board.projects_api("POST", "/setup/install", &json!({"tool": "node"})).unwrap_err();
+    assert!(e.0.starts_with("E7001"), "{}", e.0);
+    assert!(board.projects_api("POST", "/setup/install", &json!({})).is_err());
+}
+
+/// The checklist asks Solace's own copy (D-264): an installed Gleam passes,
+/// and an Erlang it hasn't installed yet offers Install.
+#[test]
+fn a_tool_solace_installed_passes_the_checklist() {
+    use std::os::unix::fs::PermissionsExt;
+    let top = crate::testing::Scratch::new();
+    let tools = top.join("tools");
+    let board = std::sync::Arc::new(Board::new(top.to_path_buf(), 0));
+    let setup = crate::tools::with_folder(&tools, || {
+        let gleam = crate::tools::program_folder("gleam").unwrap().join("gleam");
+        fs::create_dir_all(gleam.parent().unwrap()).unwrap();
+        fs::write(&gleam, "#!/bin/sh\necho gleam 1.19.2\n").unwrap();
+        fs::set_permissions(&gleam, fs::Permissions::from_mode(0o755)).unwrap();
+        board.projects_api("GET", "/setup", &json!({})).unwrap()
+    });
+    let item = |id: &str| setup["items"].as_array().unwrap().iter().find(|item| item["id"] == id).cloned().unwrap();
+    assert_eq!(item("gleam")["ok"], true, "{setup}");
+    assert_eq!(item("erlang")["ok"], false, "{setup}");
+    assert_eq!(item("erlang")["install"], cfg!(any(target_os = "linux", target_os = "macos")), "{setup}");
+}
+
+/// The watcher lists projects before its pass: one deleted since keeps no folder.
+#[test]
+fn a_deleted_project_is_not_recreated_by_a_watcher_pass() {
+    let top = crate::testing::Scratch::new();
+    let root = top.join("gone");
+    let board = Board::new(top.to_path_buf(), 0);
+    let mut previous = HashMap::from([(root.clone(), Some(b"[board]".to_vec()))]);
+    let mut flows = HashMap::from([(root.clone(), Some(json!({"columns": []})))]);
+    board.watch_project(&root, true, &mut previous, &mut flows);
+    assert!(!root.exists(), "a watcher pass recreated a deleted project's folder");
+}
+
+/// `GET /tasks/{id}/dependents` answers with the tasks that depend on it.
+#[test]
+fn a_tasks_dependents_are_found_by_its_address() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let needed = crate::board::server::api(&p.root, "POST", "/tasks", json!({"title": "Sessions"})).unwrap();
+    let mut login = crate::board::server::api(&p.root, "POST", "/tasks", json!({"title": "Login"})).unwrap();
+    login["dependsOn"] = json!([needed["id"]]);
+    crate::tasks::store::put(&p, &login).unwrap();
+    let top = crate::scope::top(&p.root);
+    let address = format!("/tasks/{}/dependents", needed["id"].as_str().unwrap());
+    let found = lookup_route(&top, "GET", &address).unwrap().unwrap();
+    let column = crate::board::task_model::task(&p.root, login["id"].as_str().unwrap()).unwrap()["column"].clone();
+    assert_eq!(found, json!({"tasks": [{"id": login["id"], "title": "Login", "column": column}]}));
+    assert!(lookup_route(&top, "POST", &address).is_none());
+}
+
+#[test]
+fn a_system_review_needs_known_kinds() {
+    let root = crate::testing::Scratch::new();
+    let board = std::sync::Arc::new(Board::new(root.to_path_buf(), 0));
+    for body in [json!({}), json!({"kinds": []}), json!({"kinds": ["speed"]}), json!({"kinds": ["security", 3]})] {
+        let e = board.projects_api("POST", "/system-reviews", &body).unwrap_err();
+        assert!(e.0.starts_with("E7001"), "{body}: {}", e.0);
+    }
+    assert!(!root.join(".solace/system-reviews").exists(), "a refused review starts no run");
+}
+
+#[test]
+fn system_reviews_stay_at_the_root_when_the_root_is_a_project() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let board = Board::new(p.root.clone(), 0);
+    assert!(!board.explicit(), "the root is one project");
+    for url in [
+        "/system-reviews",
+        "/system-reviews/log",
+        "/system-reviews/schedules",
+        "/system-reviews/schedules/a",
+        "/system-reviews/missed",
+        "/system-reviews/missed/read",
+        "/system-reviews/missed/a/run",
+        "/system-reviews/missed/a/skip",
+        "/system-reviews/log?x=1",
+    ] {
+        assert_eq!(board.route(url).unwrap(), None, "{url} reaches the root");
+    }
+    assert_eq!(board.route("/system-review").unwrap(), Some((p.root.clone(), "/system-review".to_string())));
+}
+

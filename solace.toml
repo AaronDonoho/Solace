@@ -1,5 +1,5 @@
 # Solace root: the projects in this folder, shown on one board. Each has its own solace.toml.
-projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend", "solace-cli/contracts", "solace-cli/components", "solace-cli/strategy", "solace-cli/settings", "solace-cli", "solace-app", "solace-cli/design", "solace-cli/delivery"]
+projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend", "solace-cli/contracts", "solace-cli/components", "solace-cli/strategy", "solace-cli/settings", "solace-cli", "solace-app", "solace-cli/design", "solace-cli/delivery", "solace-cli/sysreview"]
 # Solace project settings. Protected: agents may read this file.
 # Text files up to this many bytes are watched; file writes are limited to it.
 watch_limit = 524288
@@ -15,3 +15,7 @@ unwatched = ["bench/results/"]
 # app = { run = ["gleam", "run", "--"], args = true }
 # Remakes the pages' bundle, solace-cli/frontend/priv/app.js, through the frontend's one bundle script, which also writes its fingerprint.
 bundle = { run = ["sh", "-c", "cd solace-cli/frontend && bun bundle.mjs"], timeout = 600 }
+
+[releases]
+output = "build-output"
+read_only = true

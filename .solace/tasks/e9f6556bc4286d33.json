@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "## Need\nThe front-end code fails to compile (build), so no change to the task panel or settings can be saved. It looks like part of the 0.1.6 font-size work was lost when it was merged into 0.2.0. This blocks the clickable link in task:b011ee47eb6a6d35.\n\n**Wanted:** the front end builds again, and the font-size setting works as task:dad739a761baa5f0 describes (whole page scales, per D-262).\n\n## For the agent\nFound by the work run on task:b011ee47eb6a6d35 (its notes 6 and 7):\n- `solace-cli/components`: `solace_task.model_select` uses `keyed.element` but doesn't import `lustre/element/keyed`.\n- `solace-cli/settings`: `settings.gleam` uses `int` without importing `gleam/int`, and refers to a `SetFontSize` message that doesn't exist.\n- `solace-cli/frontend` depends on settings, so it can't build until settings compiles.\n\nRestore what the merge lost; don't redesign the font-size setting. Ask the human before changing any wording or controls.\n\nDone when: `check` passes in all three projects, the existing settings and components tests pass, and the font-size setting behaves as task:dad739a761baa5f0 describes.",
+  "closedTime": 1795211259,
+  "column": "complete",
+  "createdTime": 1795209840,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "e9f6556bc4286d33",
+  "links": [],
+  "milestone": null,
+  "rank": 131.0,
+  "scope": [
+    "solace-cli/components",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "title": "frontend: repair the broken build"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "`workspace_acceptance.Root.test_folder_of_projects` failed once in 10 acceptance runs at `self.assertFalse((self.root/'fresh').exists())`: after `DELETE /projects/fresh` with `delete: true` answered with the new list, the `fresh` folder still existed.\n\n`board::server.Board::projects_api` unlists the project, drops it from `held`, then calls `fs::remove_dir_all`, which succeeded (the request returned 200). So something (likely the server's background work for that project) writes into the folder after it is removed and recreates it.\n\nDone when a deleted project's folder stays gone, and `test_folder_of_projects` passes in 5 back-to-back `run rust-acceptance` runs.",
+  "closedTime": 1795372690,
+  "column": "complete",
+  "createdTime": 1795369154,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "8d828ae7b59f6ec3",
+  "links": [],
+  "milestone": null,
+  "rank": 449.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "projects: deleting a project with its files leaves no folder behind"
+}

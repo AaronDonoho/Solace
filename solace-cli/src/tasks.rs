@@ -3434,4 +3434,44 @@ mod tests {
         crate::tasks::store::announce_records(&top, "milestones", &mut seen);
         assert_eq!(count(&top), before);
     }
+
+    /// The watcher's check waits for a write the task server is making, so a
+    /// file written but not yet logged is never announced as well.
+    #[test]
+    fn the_watcher_never_announces_a_write_in_progress() {
+        let (_serial, root) = served_root();
+        let file = root.join(".solace/strategy/personas.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut seen = store::Seen::default();
+        store::announce_outside_changes(&root, &mut seen);
+        let before = root_events(&root).len();
+        let (written, on_disk) = std::sync::mpsc::channel();
+        let (go, logged) = std::sync::mpsc::channel::<()>();
+        let (top, path) = (root.clone(), file.clone());
+        let writer = std::thread::spawn(move || {
+            op(&top.clone(), move || {
+                fs::write(&path, r#"{"personas":[{"id":"p9","name":"Watched"}],"retired":[]}"#)?;
+                written.send(()).unwrap();
+                logged.recv().unwrap();
+                log(&top, "", &json!({"personas": [{"id":"p9","name":"Watched"}]}));
+                Ok(())
+            })
+            .unwrap()
+        });
+        on_disk.recv().unwrap();
+        let (checked, check_done) = std::sync::mpsc::channel();
+        let top = root.clone();
+        let checker = std::thread::spawn(move || {
+            store::announce_outside_changes(&top, &mut seen);
+            checked.send(()).unwrap();
+        });
+        let early = check_done.recv_timeout(std::time::Duration::from_millis(300)).is_ok();
+        go.send(()).unwrap();
+        writer.join().unwrap();
+        checker.join().unwrap();
+        fs::remove_file(&file).unwrap();
+        assert!(!early, "the check ran during the write");
+        let personas: Vec<Value> = root_events(&root)[before..].iter().filter(|e| e.get("personas").is_some()).cloned().collect();
+        assert_eq!(personas, [json!({"personas": [{"id":"p9","name":"Watched"}]})]);
+    }
 }

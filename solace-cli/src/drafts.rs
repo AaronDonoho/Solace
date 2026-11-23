@@ -1898,6 +1898,38 @@ mod tests {
         let e = patch_blocks(&s, patch).unwrap_err().0;
         assert!(!e.contains("start it with `+`"), "{e}");
     }
+
+    /// A draft longer than a reply is shown a page at a time: each page ends
+    /// with the `--from` call for the next, and the pages add up to the draft.
+    #[test]
+    fn a_long_draft_is_read_a_page_at_a_time() {
+        let p = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let mut t = api(&p.root, "POST", "/tasks", json!({"title": "Drafts"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["runs"] = json!([{"id": "run-1", "kind": "work", "state": "running"}]);
+        put(&p, &t).unwrap();
+        let draft = format!("pub fn main(\n{}", "  1 +\n".repeat(3000));
+        let id = with_context(&tid, "run-1", || {
+            assert!(submit(&p, &["submit", "app.main"], &mut || Ok(draft.clone()), None).is_err());
+            entries(&p, &tid).unwrap()[0].0.clone()
+        });
+        let run = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+            with_context(&tid, "run-1", || with_root(&p.root, || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))).unwrap()
+        };
+        let mut shown = String::new();
+        let mut reply = run(&["view", "--draft", id.as_str()]);
+        let mut pages = 1;
+        while let Some((text, from)) = reply.split_once(&format!("Next: view --draft {id} --from ")) {
+            assert!(text.len() <= 10_000, "{}", text.len());
+            shown += text;
+            reply = run(&["view", "--draft", id.as_str(), "--from", from.trim()]);
+            pages += 1;
+        }
+        shown += &reply;
+        assert!(pages > 1);
+        assert_eq!(shown, draft);
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or
@@ -2850,4 +2882,26 @@ fn loose_fits(old: &[&str], lines: &[String], k: usize) -> bool {
 fn loose_ambiguous(old: &[&str], lines: &[String]) -> bool {
     let Some(room) = lines.len().checked_sub(old.len()) else { return false };
     (0..=room).filter(|&k| loose_fits(old, lines, k)).take(2).count() > 1
+}
+
+/// `view --draft <id> [--from <line>]`: the draft from line `from`, as much of
+/// it as `budget` holds, ending with the call that shows the rest.
+pub fn view_page(s: &Store, id: &str, from: usize, budget: usize) -> Out {
+    Ok(page(&load(s, id)?.1, from, budget, &format!("view --draft {id}")))
+}
+
+/// `text` from line `from`, cut to fit `budget` with a `Next: <command> --from <line>` line.
+fn page(text: &str, from: usize, budget: usize, command: &str) -> String {
+    let room = budget.saturating_sub(100);
+    let mut out = String::new();
+    for (i, line) in text.split_inclusive('\n').enumerate().skip(from.saturating_sub(1)) {
+        if out.len() + line.len() > room {
+            // A line longer than the whole reply shows what fits of it.
+            let (cut, next) = if out.is_empty() { (&line[..line.floor_char_boundary(room)], i + 2) } else { ("", i + 1) };
+            let end = if cut.is_empty() { "" } else { "\n" };
+            return format!("{out}{cut}{end}Next: {command} --from {next}\n");
+        }
+        out += line;
+    }
+    out
 }

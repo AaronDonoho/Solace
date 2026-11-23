@@ -1,0 +1,23 @@
+{
+  "archivedTime": null,
+  "body": "Part of feature:21d501a74aec4f44.\n\n- If a scheduled review is missed, for example because the app was closed, the human is notified on the **System Review** page and asked what to do.\n- Until the notice is read, it also shows on the **Delivery** page.\n\nThe feature doesn't name the choices offered or how the notice looks. Ask the human for both before building.\n\nDone when: a missed scheduled review produces the notice on both pages, it leaves Delivery once read, and the human's choice is carried out.",
+  "closedTime": 1795417629,
+  "column": "complete",
+  "createdTime": 1795373151,
+  "dependsOn": [
+    "a1caf5250f648184"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "13c0c6f19ee2d333",
+  "links": [],
+  "milestone": null,
+  "rank": 456.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: missed review notice"
+}

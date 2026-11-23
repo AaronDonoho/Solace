@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Bug\nOn the Strategy page, a planning run's `strategy decision` proposal is always refused, and only the command's usage line comes back. D-254 point 3 says a strategy run proposes decisions this way. Decisions proposed from board tasks (`task decision`) still work.\n\n**Expected:** `strategy decision` with an entry in `text` (`## <title>`, what was decided, `Why:`) is shown to the human as a proposal. It is appended to `DECISIONS.md` when approved, and `## D-<n> <title>` edits that record (D-255).\n\n## Where it fails (for the agent)\nThe command dispatcher for strategy runs, `board::strategy.strategy_command`, matches only `task | feature | milestone | vision`, so `decision` falls through to the usage error. Its own usage text lists `strategy decision`. The proposal path below it, `tasks::proposal`, already handles `\"decision\"`, and the tests in `tasks.tests` (`a_strategy_decision_proposal_appends_on_approval` and others) call that function directly, which is why they never caught the gap. `help strategy` also leaves `strategy decision` out.\n\nDone when: a strategy run's `strategy decision` call reaches the human as a proposal, approving it appends or edits the record, a test goes through `strategy_command` and fails on the old code, and `help strategy` lists the command.",
+  "closedTime": 1795208514,
+  "column": "complete",
+  "createdTime": 1795207543,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "4fbb1e8c3bb0c883",
+  "links": [],
+  "milestone": null,
+  "rank": 425.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "strategy: decision proposals refused"
+}

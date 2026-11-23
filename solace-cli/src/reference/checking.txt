@@ -4,6 +4,11 @@ Checking
                                 shows failures only
   test <name>...                run the tests that reach these symbols
   test --all                    run every test
+                                Before any test runs, `test` checks the tools
+                                the tests need: those solace.toml's
+                                `test_tools` lists (`["gleam", "node >= 19"]`)
+                                and a Gleam JavaScript project's runtime. A
+                                missing or older one stops the run in one line
   test --full                   show failed assertions' values whole, not just
                                 the part that explains the failure
   check [--warnings]            type-check everything; lists broken symbols

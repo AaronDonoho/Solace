@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Under WSL (WSLg), the Linux app's window opens and shows the folder select, but doesn't respond to clicks or typing. Two environment settings fix it. Both must be set before the window is created:\n\n- `GDK_BACKEND=x11`: GTK uses X11 instead of Wayland. WSLg's Wayland input is the likely cause.\n- `WEBKIT_DISABLE_DMABUF_RENDERER=1`: WebKit skips GPU buffer sharing, which fails under WSLg (`ZINK: failed to choose pdev`, `failed to create dri2 screen`).\n\nConfirmed on WSL2, Ubuntu 24.04, WebKitGTK 2.52.6, app 0.2.3: the app works with both settings and is unresponsive without them. Only the two together were tested; whether `GDK_BACKEND=x11` alone is enough is unknown.\n\n**Goal:** Linux builds detect WSL at startup and set these two variables first thing in `main`, before Tauri starts or any thread runs.\n\n**Acceptance criteria**\n- WSL is detected when `WSL_DISTRO_NAME` is set, or `/proc/sys/kernel/osrelease` contains `microsoft` (case-insensitive).\n- If the user has already set either variable, that value is kept.\n- Nothing changes outside WSL, on macOS, or on Windows.\n- The detect-and-choose logic is testable without touching the real environment. Its tests live in a separate test file and cover every branch: WSL or not, and each variable set or not.\n- Starting from the Start menu with plain `solace-app` (no wrapper) gives a window that responds.\n- Propose a decision record with `task decision` for \"the Linux app forces X11 and disables WebKit's DMA-BUF renderer under WSL\".",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795421476,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "4c0a1d13715f8ede",
+  "links": [],
+  "milestone": null,
+  "rank": 10.0,
+  "scope": [
+    "solace-app"
+  ],
+  "title": "desktop app: respond to input under WSL"
+}

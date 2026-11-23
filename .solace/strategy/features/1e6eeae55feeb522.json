@@ -1,0 +1,10 @@
+{
+  "body": "The first batch of UI improvements, starting with the task board. Each batch of UI work gets its own feature, so every feature finishes on its own when its tasks are done.\n\nFirst item: moving tasks between columns by dragging them, alongside the existing buttons. It starts with research, because D-56 currently allows dragging only for text in editors.",
+  "colorSlot": null,
+  "id": "1e6eeae55feeb522",
+  "milestone": null,
+  "rank": 19.0,
+  "startTime": null,
+  "state": "upcoming",
+  "title": "UI: board improvements"
+}

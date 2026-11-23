@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "## Need\nWhen a task's run finds work that belongs in another task, it can only describe it in a note, and the human has to create the task by hand (as with task:e9f6556bc4286d33, written up from task:b011ee47eb6a6d35).\n\n**Wanted:**\n- Any run on a task (investigate, work, review, discuss) can propose a new task. The human Approves or Rejects it, as with the run's other proposals. Nothing is created without approval (D-93 point 4).\n- An approved task goes to **Planning**.\n- When the run proposes it because it blocks the current task, approving it also makes the current task depend on the new one.\n- When that new task is done, the human has a link that quickly takes them to the task it was blocking.\n\nOut of scope: resuming the blocked task by itself.\n\n## For the agent\n- Reuse what exists: strategy runs already create tasks through `tasks::strategy.proposed_task` (fields and refusals as in D-93), and task runs already raise proposals the human answers in the task panel (`board::settings.propose_settings`, `board::settings.propose_decision`). Keep to one command for this, and document it in the run briefs and `workflow.txt`.\n- A review run currently can't propose a decision (`board::runs.task_command`). This task lets every run kind propose a task, including review.\n- Ask the human where the link to the blocked task appears and how it reads, and before adding any other wording or controls.\n\nDone when: a run's proposed task, once approved, is in Planning; a blocking one also adds the dependency to the current task; a rejected one changes nothing; the link to the blocked task appears once the new task is done; and tests cover each of these.",
+  "closedTime": 1795219703,
+  "column": "complete",
+  "createdTime": 1795210550,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "6db3f7ccf9d5801b",
+  "links": [],
+  "milestone": null,
+  "rank": 427.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "title": "runs: propose a new task, with approval"
+}

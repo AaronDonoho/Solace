@@ -232,27 +232,9 @@ pub fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
 
 /// A `cargo check` that failed with no located diagnostic — a build script
 /// that panicked or couldn't reach the network, say — as the text to report
-/// (D-158 point 4). A diagnostic cargo emitted without a span is kept;
-/// `--message-format=json`'s other lines and the progress lines are dropped.
+/// (D-158 point 4).
 pub fn failure_text(output: &str) -> String {
-    let mut parts: Vec<String> = vec![];
-    for line in strip_ansi(output).lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('{') {
-            let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
-            if value["reason"] == "compiler-message" && value["message"]["level"] == "error" && primary_span(&value["message"]).is_none() {
-                if let Some(rendered) = value["message"]["rendered"].as_str().map(str::trim_end).filter(|r| !r.is_empty()) {
-                    parts.push(rendered.to_string());
-                }
-            }
-            continue;
-        }
-        if ["Checking ", "Compiling ", "Finished ", "warning: build failed"].iter().any(|p| trimmed.starts_with(p)) {
-            continue;
-        }
-        parts.push(line.to_string());
-    }
-    let text = parts.join("\n").trim().to_string();
+    let text = error_text(output);
     if text.is_empty() { "cargo check failed".to_string() } else { text }
 }
 
@@ -807,4 +789,56 @@ fn collect_span_labels(message: &Value, out: &mut Vec<crate::diagnostics::Sugges
         let Some(label) = span["label"].as_str().filter(|label| !label.is_empty()) else { continue };
         out.push(crate::diagnostics::Suggestion { message: label.to_string(), spans: vec![suggestion_span(span)] });
     }
+}
+
+/// cargo's own words from a failed run's output: a diagnostic cargo emitted
+/// without a span is kept, and so is its plain error text (`error:` and
+/// `Caused by:`); `--message-format=json`'s other lines and the progress
+/// lines are dropped. Empty when cargo said nothing else.
+pub fn error_text(output: &str) -> String {
+    let mut parts: Vec<String> = vec![];
+    for line in strip_ansi(output).lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('{') {
+            let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
+            if value["reason"] == "compiler-message" && value["message"]["level"] == "error" && primary_span(&value["message"]).is_none() {
+                if let Some(rendered) = value["message"]["rendered"].as_str().map(str::trim_end).filter(|r| !r.is_empty()) {
+                    parts.push(rendered.to_string());
+                }
+            }
+            continue;
+        }
+        if ["Checking ", "Compiling ", "Finished ", "Blocking waiting for file lock", "warning: build failed"]
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+        {
+            continue;
+        }
+        parts.push(line.to_string());
+    }
+    parts.join("\n").trim().to_string()
+}
+
+/// The line a `cargo test` stopped at its time limit starts its reply with:
+/// the tests that finished each way, and those libtest saw running for over
+/// a minute that never finished; or that the build hadn't finished when no
+/// test binary had started.
+pub fn timed_out_summary(output: &str, limit: u64, failed: usize) -> String {
+    let (mut passed, mut running, mut started) = (0, Vec::<String>::new(), false);
+    for line in strip_ansi(output).lines() {
+        started |= line.trim_start().starts_with("Running ");
+        let Some(rest) = line.strip_prefix("test ") else { continue };
+        started = true;
+        if let Some(test) = rest.strip_suffix(" has been running for over 60 seconds") {
+            running.push(test.trim().to_string());
+        } else if let Some((test, status)) = rest.rsplit_once(" ... ") {
+            running.retain(|t| t != test.trim());
+            passed += usize::from(status.trim() == "ok");
+        }
+    }
+    if !started {
+        return format!("Tests timed out after {limit}s while building; no test had started.\n");
+    }
+    let running = if running.is_empty() { String::new() } else { format!("; still running: {}", running.join(", ")) };
+    format!("Tests timed out after {limit}s: {passed} passed, {failed} failed so far{running}.\n")
 }

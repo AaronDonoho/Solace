@@ -819,55 +819,7 @@ impl Store {
     /// When the server's own selection code is newer than the binary running it,
     /// its selection is out of date, so every test runs and the reply says why.
     pub(crate) fn test(&self, args: &[&str]) -> Out {
-        let all = args.contains(&"--all");
-        let names = operands(args);
-        let targets = if all || names.is_empty() {
-            None
-        } else {
-            let ix = self.index()?;
-            let ids = names.iter().map(|n| self.resolve(&ix, n).map(|i| ix.syms[i].id.clone())).collect::<Result<Vec<_>, _>>()?;
-            Some(ReachTargets { names: names.iter().map(|n| (*n).to_string()).collect(), ids })
-        };
-        let mut out = self.test_with(args, targets.as_ref(), true)?;
-        if all {
-            return Ok(out);
-        }
-        let top = crate::scope::top(&self.root);
-        let members = crate::workspace::members(&top).unwrap_or_default();
-        // A board run already holds its home project's lock; a dependent that is
-        // its home runs under that lock rather than waiting for a second one.
-        let held = context().and_then(|(tid, _)| crate::scope::home(&self.root, &tid).ok());
-        let roots = crate::extract::deps::all_dependents(&top, &self.root, &members);
-        if roots.is_empty() {
-            return Ok(out);
-        }
-        let to_lock: Vec<PathBuf> =
-            roots.iter().filter(|root| held.as_ref().is_none_or(|home| !crate::project_paths::same_project(root, home))).cloned().collect();
-        let _guards = crate::scope::lock_all(&to_lock)?;
-        let full: &[&str] = if args.contains(&"--full") { &["--full"] } else { &[] };
-        let mut errors = vec![];
-        for root in roots {
-            let dir = crate::scope::dir(&top, &root);
-            let run = crate::Store::at(&root).and_then(|dep| {
-                if crate::reach::test_symbols(&dep.index()?).is_empty() {
-                    return Ok(String::new());
-                }
-                dep.test_with(full, targets.as_ref(), false)
-            });
-            match run {
-                Ok(text) if !text.is_empty() => out += &format!("\n== In {dir} ==\n{text}"),
-                Ok(_) => {}
-                Err(Failure(message, code)) => errors.push((dir, code, message)),
-            }
-        }
-        if !errors.is_empty() {
-            let code = errors[0].1;
-            for (dir, _, message) in errors {
-                out += &format!("\n== In {dir} ==\n{message}");
-            }
-            return Err(Failure(out, code));
-        }
-        Ok(out)
+        self.test_with_limit(args, TEST_LIMIT)
     }
     /// D-152: this task's changed symbols in this project, outside test modules,
     /// that no test reaches (`reached`: what the tests reach), named for a reply;
@@ -1059,7 +1011,7 @@ impl Store {
         self.status()
     }
 
-    fn test_with(&self, args: &[&str], targets: Option<&ReachTargets>, report: bool) -> Out {
+    fn test_with(&self, args: &[&str], targets: Option<&ReachTargets>, report: bool, limit: u64) -> Out {
         let rust = crate::language::is_rust(&self.root);
         let ix = self.index()?;
         let names = operands(args);
@@ -1136,7 +1088,8 @@ impl Store {
             self.since_pass()?.unwrap_or_default().iter().filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id)).collect();
         let suites = crate::reach::reached(&crate::reach::suites(self, &ix)?, &changed);
         let shown: Vec<&str> = targets.map_or_else(|| names.clone(), |targets| targets.names.iter().map(String::as_str).collect());
-        let head = test_head(run.len(), tests.len(), &shown, all_flag, stale);
+        let warning = if server_sandbox_is_stale(&self.root, &ix) { STALE_SANDBOX } else { "" };
+        let head = format!("{warning}{}", test_head(run.len(), tests.len(), &shown, all_flag, stale));
         let also = if suites.is_empty() { String::new() } else { format!("Also reached: {}.\n", suites.join(", ")) };
         if run.is_empty() {
             // gleeunit fails when it finds no tests; type-check instead
@@ -1148,15 +1101,18 @@ impl Store {
             }
             return Ok(head + &also + &untested + &next);
         }
+        let run_names: Vec<String> =
+            run.iter().map(|&t| if rust { crate::reach::libtest_name(&ix, t) } else { ix.syms[t].qname() }).collect();
+        let dir = if report { String::new() } else { crate::scope::dir(&crate::scope::top(&self.root), &self.root) };
+        crate::test_tools::require(&self.root, &dir, &run_names)?;
         let files = self.materialize(&ix)?;
         let result = if rust {
             // Rust runs the chosen tests by libtest name, and the whole suite
             // when every test is due (D-170).
-            let names: Vec<String> = run.iter().map(|&t| crate::reach::libtest_name(&ix, t)).collect();
-            let filters = if run.len() == tests.len() { vec![] } else { names };
+            let filters = if run.len() == tests.len() { vec![] } else { run_names };
             let args = crate::language::cargo::test_args(&self.root, &filters);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.cargo(&argv, 600)
+            self.cargo_within(&argv, limit)
         } else {
             let skipped: Vec<(usize, String)> = tests
                 .iter()
@@ -1173,9 +1129,11 @@ impl Store {
             if !rewritten.is_empty() {
                 self.materialize(&ix)?;
             }
-            result
+            result.map(|(ok, output)| (Some(ok), output))
         };
-        let (ok, output) = result?;
+        let (finished, output) = result?;
+        let ok = finished == Some(true);
+        let timed_out = finished.is_none();
         let diags = if rust {
             crate::language::cargo::diagnostics_for(&self.root, &output, &files)
         } else {
@@ -1193,13 +1151,15 @@ impl Store {
         let summary = output.lines().find(|l| l.contains(" passed, "));
         let complete = if rust {
             let (passed, count) = crate::language::cargo::totals(&output);
-            if !ok && passed + count == 0 {
+            if !ok && !timed_out && passed + count == 0 {
                 // cargo stopped before the tests ran: its own words say why.
-                let mut text = format!("Tests did not run.\n\n{}", output.trim());
+                let errors = crate::language::cargo::error_text(&output);
+                let reason = if errors.is_empty() { "cargo test failed" } else { errors.as_str() };
+                let mut text = format!("Tests did not run.\n\n{reason}\n");
                 text += &self.unfinished_lines(reach_ix, &reach_projects, None);
                 return crate::failure::fail(text);
             }
-            ok || count == failed.len()
+            !timed_out && (ok || count == failed.len())
         } else {
             summary.is_some_and(|l| {
                 let number =
@@ -1246,6 +1206,10 @@ impl Store {
         }
         out += &also;
         out += &self.unfinished_lines(reach_ix, &reach_projects, Some(&ran));
+        if timed_out {
+            let summary = crate::language::cargo::timed_out_summary(&output, limit, failed.len());
+            return crate::lockdown::commands::timed_out("cargo", limit, &(summary + &out));
+        }
         if ok { Ok(out + &untested + &next) } else { crate::failure::fail(out) }
     }
 
@@ -1388,6 +1352,60 @@ impl Store {
             out.push('\n');
         }
         out
+    }
+
+    /// `test`, with a Rust project's `cargo test` stopped after `limit` seconds.
+    pub(crate) fn test_with_limit(&self, args: &[&str], limit: u64) -> Out {
+        let all = args.contains(&"--all");
+        let names = operands(args);
+        let targets = if all || names.is_empty() {
+            None
+        } else {
+            let ix = self.index()?;
+            let ids = names.iter().map(|n| self.resolve(&ix, n).map(|i| ix.syms[i].id.clone())).collect::<Result<Vec<_>, _>>()?;
+            Some(ReachTargets { names: names.iter().map(|n| (*n).to_string()).collect(), ids })
+        };
+        let top = crate::scope::top(&self.root);
+        let roots = if all {
+            vec![]
+        } else {
+            let members = crate::workspace::members(&top).unwrap_or_default();
+            crate::extract::deps::all_dependents(&top, &self.root, &members)
+        };
+        let mut out = self.test_with(args, targets.as_ref(), true, limit)?;
+        // A board run already holds its home project's lock; a dependent that is
+        // its home runs under that lock rather than waiting for a second one.
+        let held = context().and_then(|(tid, _)| crate::scope::home(&self.root, &tid).ok());
+        if roots.is_empty() {
+            return Ok(out);
+        }
+        let to_lock: Vec<PathBuf> =
+            roots.iter().filter(|root| held.as_ref().is_none_or(|home| !crate::project_paths::same_project(root, home))).cloned().collect();
+        let _guards = crate::scope::lock_all(&to_lock)?;
+        let full: &[&str] = if args.contains(&"--full") { &["--full"] } else { &[] };
+        let mut errors = vec![];
+        for root in roots {
+            let dir = crate::scope::dir(&top, &root);
+            let run = crate::Store::at(&root).and_then(|dep| {
+                if crate::reach::test_symbols(&dep.index()?).is_empty() {
+                    return Ok(String::new());
+                }
+                dep.test_with(full, targets.as_ref(), false, limit)
+            });
+            match run {
+                Ok(text) if !text.is_empty() => out += &format!("\n== In {dir} ==\n{text}"),
+                Ok(_) => {}
+                Err(Failure(message, code)) => errors.push((dir, code, message)),
+            }
+        }
+        if !errors.is_empty() {
+            let code = errors[0].1;
+            for (dir, _, message) in errors {
+                out += &format!("\n== In {dir} ==\n{message}");
+            }
+            return Err(Failure(out, code));
+        }
+        Ok(out)
     }
 }
 
@@ -1666,9 +1684,7 @@ const SELECTION_SYMBOLS: &[&str] = &[
 
 /// The modules that hold the test-selection code, with their submodules.
 fn selection_modules(ix: &Index) -> HashSet<String> {
-    let roots: Vec<&str> =
-        SELECTION_SYMBOLS.iter().filter_map(|name| ix.syms.iter().find(|s| s.qname() == *name)).map(|s| s.module.as_str()).collect();
-    ix.modules.iter().map(|m| m.path.as_str()).filter(|path| roots.iter().any(|root| in_module(root, path))).map(str::to_string).collect()
+    modules_holding(ix, SELECTION_SYMBOLS)
 }
 
 /// Whether a selected module's file is newer than `built`; with no selected
@@ -1785,3 +1801,29 @@ fn module_aliases<'a>(header: &str, texts: impl Iterator<Item = &'a str>) -> Has
     }
     known
 }
+
+/// The modules that hold `symbols`, with their submodules.
+fn modules_holding(ix: &Index, symbols: &[&str]) -> HashSet<String> {
+    let roots: Vec<&str> =
+        symbols.iter().filter_map(|name| ix.syms.iter().find(|s| s.qname() == *name)).map(|s| s.module.as_str()).collect();
+    ix.modules.iter().map(|m| m.path.as_str()).filter(|path| roots.iter().any(|root| in_module(root, path))).map(str::to_string).collect()
+}
+
+/// The symbols whose code builds the sandbox a test runs in.
+const SANDBOX_SYMBOLS: &[&str] =
+    &["migrate.cargo_sandbox_args", "migrate.cargo_sandboxed_with", "migrate.sandboxed_with", "tools.folder", "tools.put_on_path"];
+
+const STALE_SANDBOX: &str =
+    "This change touches the sandbox; tests run in the running Solace's old sandbox until it is rebuilt and restarted.\n";
+
+/// Whether the server's own saved sandbox code is newer than the binary
+/// running it: its tests then run in the old sandbox.
+fn server_sandbox_is_stale(root: &Path, ix: &Index) -> bool {
+    crate::project_paths::same_project(root, Path::new(env!("CARGO_MANIFEST_DIR"))) && {
+        let sandbox = modules_holding(ix, SANDBOX_SYMBOLS);
+        !sandbox.is_empty() && selection_source_is_newer(root, running_binary_time(), &ix.modules, &sandbox)
+    }
+}
+
+/// How long a Rust `test` runs before it is stopped, in seconds.
+pub(crate) const TEST_LIMIT: u64 = 600;

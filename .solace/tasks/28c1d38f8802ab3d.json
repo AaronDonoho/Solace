@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Some acceptance tests fail only when the machine is busy: in back-to-back runs, during agent runs, or with the app open. These limits are too tight:\n\n- the stand-in agent's 2 s `task_timeout`\n- 1 s checks, such as `board_acceptance.Board.test_task_only_changes_wait_for_no_agent_command`, which failed in a 69 s run\n- 5 s wait loops\n\nDone when the suite passes in 5 back-to-back runs with 16 workers, while each test still checks what it was written to check (for example, that a note doesn't wait for an agent's command).",
+  "closedTime": 1795371659,
+  "column": "complete",
+  "createdTime": 1795336268,
+  "dependsOn": [
+    "18f8b26b0a05127c"
+  ],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "28c1d38f8802ab3d",
+  "links": [],
+  "milestone": null,
+  "rank": 444.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tests: time limits that hold on a busy machine"
+}

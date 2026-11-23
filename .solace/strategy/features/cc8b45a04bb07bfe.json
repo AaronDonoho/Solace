@@ -1,0 +1,10 @@
+{
+  "body": "Brings a teammate up to date quickly on everything that changed since they last applied a release.\n\n### Each release\n- When a release is made, Solace writes a **short** summary of its changes, built from the notes of the tasks it includes. Keeping it short matters most. There is no approval step.\n- It also writes fuller details, but they show only when the person opens **show details**.\n- The summary and details are shared with the project. Task notes stay private (D-261), so a teammate gets these two texts and never the notes themselves.\n\n### Reading them\n- A **Delivery** tab lists every release's summary, so past ones can be read at any time.\n- When a teammate opens the project with releases they haven't read, they see one tab per unread summary, with a control to close them all. Each summary shows this way only once, and after that it lives in the Delivery tab.\n- The summaries window has a **never show again** button, and the Settings area has a matching setting.\n\nThe release notes humans already ask for, edit and approve (feature:3637869b15413bc5) stay as they are.\n\nDepends on: build: artifacts and versions (complete).",
+  "colorSlot": null,
+  "id": "cc8b45a04bb07bfe",
+  "milestone": null,
+  "rank": 21.0,
+  "startTime": null,
+  "state": "proposed",
+  "title": "release: what's-new summaries for teammates"
+}

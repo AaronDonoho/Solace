@@ -23,6 +23,7 @@ pub fn routes_test() {
     #("/p/web/contracts", Contracts("/p/web", "")),
     #("/contracts?task=t1", Contracts("", "t1")),
     #("/p/web/contracts?task=t1", Contracts("/p/web", "t1")),
+    #("/system-review", frontend.SystemReview),
     #("/strategy", frontend.Strategy("vision")),
     #("/strategy?tab=personas", frontend.Strategy("personas")),
     #("/strategy?tab=tasks", frontend.Strategy("tasks")),
@@ -76,6 +77,14 @@ pub fn page_elements_test() {
       "<solace-contracts base=\"/p/web\" task=\"t1\"></solace-contracts>",
     ),
     #(#(Board, False), "<solace-board hidden></solace-board>"),
+    #(
+      #(frontend.SystemReview, True),
+      "<solace-system-review shown=\"true\"></solace-system-review>",
+    ),
+    #(
+      #(frontend.SystemReview, False),
+      "<solace-system-review hidden shown=\"false\"></solace-system-review>",
+    ),
     #(
       #(frontend.Strategy("vision"), True),
       "<solace-strategy tab=\"vision\"></solace-strategy>",
@@ -162,6 +171,7 @@ pub fn menu_current_test() {
   assert string.contains(board, "<a href=\"/workspace\">Workspace</a>")
   assert !string.contains(board, "Migration</a>")
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
+  assert string.contains(board, "<a href=\"/system-review\">System Review</a>")
   assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
   assert string.contains(board, "<a href=\"/delivery\">Delivery</a>")
   assert string.contains(board, "<a href=\"/design\">Design</a>")
@@ -174,6 +184,7 @@ pub fn menu_current_test() {
       "Design",
       "Board",
       "Contracts",
+      "System Review",
       "Delivery",
       "Knowledgebase",
       "Settings",
@@ -255,6 +266,28 @@ pub fn menu_current_test() {
     settings_page,
     "<a aria-current=\"page\" class=\"current\" href=\"/settings\">Settings</a>",
   )
+  let system_review_page =
+    element.to_string(
+      frontend.view(
+        frontend.Model(
+          frontend.SystemReview,
+          [frontend.SystemReview],
+          frontend.no_focus,
+          [],
+          [],
+          0,
+          [],
+        ),
+      ),
+    )
+  assert string.contains(
+    system_review_page,
+    "<a aria-current=\"page\" class=\"current\" href=\"/system-review\">System Review</a>",
+  )
+  assert string.contains(
+    system_review_page,
+    "<solace-system-review shown=\"true\"></solace-system-review>",
+  )
   assert string.contains(settings_page, "<a href=\"/\">Board</a>")
   assert string.contains(workspace, "<a href=\"/\">Board</a>")
   assert string.contains(
@@ -273,8 +306,8 @@ pub fn menu_current_test() {
 
 pub fn starts_on_the_board_outside_a_browser_test() {
   let #(model, _effect) = frontend.init(Nil)
-  // The board, Strategy, Delivery and Design are open from the start, hidden,
-  // to hear of what needs attention.
+  // The board, Strategy, Delivery, Design and System Review are open from the
+  // start, hidden, to hear of what needs attention.
   assert model
     == frontend.Model(
       Board,
@@ -283,6 +316,7 @@ pub fn starts_on_the_board_outside_a_browser_test() {
         frontend.Strategy("vision"),
         frontend.Delivery("build"),
         frontend.Design("architecture", ""),
+        frontend.SystemReview,
       ],
       frontend.no_focus,
       [],
@@ -1413,4 +1447,36 @@ pub fn a_delivery_tab_stays_on_delivery_test() {
   let html = element.to_string(frontend.view(board))
   assert string.contains(html, "<a href=\"/delivery\">Delivery</a>")
   assert frontend.delivery_path("build") == "/delivery"
+}
+
+/// System Review is told when it shows, so a missed review it holds is read then.
+pub fn system_review_hears_when_it_shows_test() {
+  let shown =
+    element.to_string(
+      frontend.page(frontend.SystemReview, True, frontend.no_focus, []),
+    )
+  assert string.contains(shown, "shown=\"true\"")
+  assert !string.contains(shown, "hidden")
+  let hidden =
+    element.to_string(
+      frontend.page(frontend.SystemReview, False, frontend.no_focus, []),
+    )
+  assert string.contains(hidden, "shown=\"false\"")
+  let #(flagged, _) =
+    frontend.update(
+      frontend.Model(
+        Board,
+        [Board, frontend.SystemReview],
+        frontend.no_focus,
+        [],
+        [],
+        0,
+        [],
+      ),
+      frontend.Attention("solace-system-review"),
+    )
+  assert string.contains(
+    element.to_string(frontend.view(flagged)),
+    "<a class=\"attention\" href=\"/system-review\">System Review",
+  )
 }

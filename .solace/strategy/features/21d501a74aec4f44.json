@@ -1,0 +1,10 @@
+{
+  "body": "Periodic reviews of the whole project, not of one task's changes. Built into Solace for every project.\n\n### Page\n- A new **System Review** page in the main navigation, between Contracts and Delivery.\n- The human sets up several **schedules**. Each one runs a set of review kinds the human chooses, and repeats daily, weekly or monthly, or at a specific day and time.\n- The human can **run a review manually** at any time.\n- A **past reviews** tab lists completed reviews with their runs and timestamps.\n\n### Review kinds (first version)\nSecurity, code quality and user experience. More kinds come later.\n\n### Reviews and findings\n- A review covers the whole project and changes no code.\n- Each finding becomes a task in **Planning**, under one standing findings feature. The first task checks whether that feature completing itself between reviews makes it clumsy. If it does, the human is asked about using one feature per review instead.\n- If a scheduled review is missed (for example, the app was closed), the human is notified on the System Review page and asked what to do. Until the notice is read, it also shows on the Delivery page.\n\n### SYSTEMREVIEWS.md\n- One file at the top folder, created for every project the same way as `DECISIONS.md`.\n- Only Solace writes to it. Agents can read it but cannot change it.\n- For each completed review it records the kinds, the date, the version reviewed and its finding tasks.\n- The human reads it in the app.\n\n### Later\nA build check that every chosen kind was reviewed since the last release. The reviewing agent judges whether to warn or block, and the human can override.",
+  "colorSlot": 39,
+  "id": "21d501a74aec4f44",
+  "milestone": null,
+  "rank": 20.0,
+  "startTime": 1795372822,
+  "state": "active",
+  "title": "System Review: scheduled project reviews"
+}

@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Carry out D-265 points 1 and 2 for feature:21d501a74aec4f44. No review entries are written yet; a later task adds them.\n\n- Every project's top folder gets one `SYSTEMREVIEWS.md`, created where `DECISIONS.md` is created (D-254 point 1): at setup, when a project is added, and by migration. A file that already exists is kept as it is.\n- Agents can `read` it. `write`, `remove` and `move` refuse to change it, and the refusal says that only Solace writes this file.\n- Solace gets one internal way to append an entry to it, for the review task to use later.\n\nDone when: tests show the file is created in all three cases, an existing file is left alone, `read` works and `write`/`remove`/`move` are refused.",
+  "closedTime": 1795399332,
+  "column": "complete",
+  "createdTime": 1795373100,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": ".",
+  "id": "bdabb423a75bef6f",
+  "links": [],
+  "milestone": null,
+  "rank": 395.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/migration"
+  ],
+  "title": "sysreview: SYSTEMREVIEWS.md log file"
+}

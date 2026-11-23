@@ -286,6 +286,15 @@ impl Board {
             (_, p) if p == "/releases" || p.starts_with("/releases/") => {
                 return releases_route(&self.top, method, p, body).unwrap_or_else(|| err("E7001", "unknown route"));
             }
+            (_, p) if p == "/system-reviews/schedules" || p.starts_with("/system-reviews/schedules/") => {
+                return crate::review_schedules::api(&self.top, method, p, body);
+            }
+            (_, p) if p == "/system-reviews/missed" || p.starts_with("/system-reviews/missed/") => {
+                return crate::review_schedules::missed_api(&self.top, method, p);
+            }
+            ("POST", "/system-reviews") => return crate::system_reviews::start(&self.top, body),
+            ("GET", "/system-reviews") => return Ok(crate::system_reviews::past(&self.top)),
+            ("GET", "/system-reviews/log") => return crate::system_reviews::log(&self.top),
             ("DELETE", p) if p.starts_with("/designs/") => {
                 let id = view::percent_decode(&p["/designs/".len()..]);
                 return crate::design::delete(&self.top, &id);
@@ -295,6 +304,10 @@ impl Board {
                 return crate::design::show(&self.top, &id);
             }
             ("GET", "/setup") => return Ok(check()),
+            ("POST", "/setup/install") => {
+                crate::tools::install(body["tool"].as_str().unwrap_or(""))?;
+                return Ok(check());
+            }
             ("POST", "/languages") => return crate::board::setup::save_language(&config_path(), body).and_then(|_| languages()),
             ("POST", "/agent-settings") => {
                 return crate::board::setup::save_agent_setting(&config_path(), body).and_then(|_| crate::board::setup::agent_settings());
@@ -365,6 +378,8 @@ impl Board {
                 } else {
                     None
                 };
+                // A watcher pass already under way finishes before the files go.
+                let _watching = self.watching_guard();
                 // Unlist first, so a failed delete still leaves a consistent list.
                 workspace::remove(&self.top, &dir)?;
                 self.held.lock().unwrap().remove(&root);
@@ -412,6 +427,54 @@ impl Board {
                 (d, r)
             })
             .collect())
+    }
+
+    /// One watcher pass over the project at `root`: code changed outside
+    /// Solace when `scan` (D-58), then a changed workflow. The watcher lists
+    /// projects before this pass, so a project deleted since then is skipped
+    /// here, under the guard its delete holds: opening or locking it would
+    /// recreate its folder.
+    pub(crate) fn watch_project(
+        &self,
+        root: &Path,
+        scan: bool,
+        previous: &mut HashMap<PathBuf, Option<Vec<u8>>>,
+        flows: &mut HashMap<PathBuf, Option<Value>>,
+    ) {
+        let _watching = self.watching_guard();
+        if !root.join(".solace/store.db").exists() {
+            return;
+        }
+        if scan
+            && let Some(_guard) = try_lock(root)
+            && self.step.lock().unwrap().is_none()
+            // an extract's half-written files are not outside changes
+            && !ahead::waiting(root)
+            && let Ok(s) = open(root)
+        {
+            let _ = outside::absorb(&s, Mode::Notice);
+        }
+        let current = fs::read(root.join("solace.toml")).ok();
+        let changed = match previous.insert(root.to_path_buf(), current.clone()) {
+            None => {
+                flows.insert(root.to_path_buf(), lockdown::settings(root).and_then(|v| workflow(&v)).ok());
+                return;
+            }
+            Some(old) => old != current,
+        };
+        if !changed {
+            return;
+        }
+        let w = lockdown::settings(root).and_then(|v| workflow(&v)).ok();
+        if flows.insert(root.to_path_buf(), w.clone()).is_some_and(|old| old == w) {
+            return;
+        }
+        if let Some(w) = w
+            && let Ok(_guard) = lock(root)
+            && let Ok(s) = open(root)
+        {
+            let _ = event(&s, json!({"workflow":w}));
+        }
     }
 }
 
@@ -863,6 +926,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     tasks::plan_active(&board.top)?;
     // Ask each agent which models it offers, so the list is ready when asked.
     std::thread::spawn(refresh_all);
+    crate::review_schedules::watch(board.top.clone());
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
@@ -879,16 +943,18 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
         println!("Solace root {}: {} projects", board.top.display(), board.projects()?.len());
     }
     std::io::stdout().flush()?;
-    let mut designs = crate::design::listed(&board.top).ok();
-    let mut milestones = Some(json!(crate::tasks::records(&board.top, "milestones")));
-    let mut features = Some(json!(crate::tasks::records(&board.top, "features")));
-    let mut vision = Some(crate::tasks::vision(&board.top));
-    let mut personas = Some(json!(crate::tasks::personas(&board.top)));
+    let mut seen = crate::tasks::store::Seen {
+        designs: crate::design::listed(&board.top).ok(),
+        milestones: Some(json!(crate::tasks::records(&board.top, "milestones"))),
+        features: Some(json!(crate::tasks::records(&board.top, "features"))),
+        vision: Some(crate::tasks::vision(&board.top)),
+        personas: Some(json!(crate::tasks::personas(&board.top))),
+        tasks: None,
+    };
     let watcher = board.clone();
     std::thread::spawn(move || {
         let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
         let mut flows: HashMap<PathBuf, Option<Value>> = HashMap::new();
-        let mut tasks: Option<Value> = None;
         let mut tick = 0u64;
         loop {
             tick += 1;
@@ -896,50 +962,11 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if watcher.step.lock().unwrap().is_some() {
                 continue;
             }
-            crate::design::announce_change(&watcher.top, &mut designs);
-            // Strategy records changed outside Solace, such as by `git pull`,
-            // reach open pages without a restart (D-179).
-            crate::tasks::store::announce_records(&watcher.top, "milestones", &mut milestones);
-            crate::tasks::store::announce_records(&watcher.top, "features", &mut features);
-            crate::tasks::strategy::announce_vision(&watcher.top, &mut vision);
-            crate::tasks::strategy::announce_personas(&watcher.top, &mut personas);
-            // Task files changed outside Solace, such as by `git pull`, reach
-            // open boards without a restart.
-            crate::tasks::store::announce_tasks(&watcher.top, &mut tasks);
+            // Records and task files changed outside Solace reach open pages without a restart (D-179).
+            crate::tasks::store::announce_outside_changes(&watcher.top, &mut seen);
             for (_, root) in watcher.projects().unwrap_or_default() {
                 // About once a second, read in code changed outside Solace (D-58).
-                if tick % 10 == 1 {
-                    let _watching = watcher.watching_guard();
-                    if let Some(_guard) = try_lock(&root)
-                        && watcher.step.lock().unwrap().is_none()
-                        // an extract's half-written files are not outside changes
-                        && !ahead::waiting(&root)
-                        && let Ok(s) = open(&root)
-                    {
-                        let _ = outside::absorb(&s, Mode::Notice);
-                    }
-                }
-                let current = fs::read(root.join("solace.toml")).ok();
-                let changed = match previous.insert(root.clone(), current.clone()) {
-                    None => {
-                        flows.insert(root.clone(), lockdown::settings(&root).and_then(|v| workflow(&v)).ok());
-                        continue;
-                    }
-                    Some(old) => old != current,
-                };
-                if !changed {
-                    continue;
-                }
-                let w = lockdown::settings(&root).and_then(|v| workflow(&v)).ok();
-                if flows.insert(root.clone(), w.clone()).is_some_and(|old| old == w) {
-                    continue;
-                }
-                if let Some(w) = w
-                    && let Ok(_guard) = lock(&root)
-                    && let Ok(s) = open(&root)
-                {
-                    let _ = event(&s, json!({"workflow":w}));
-                }
+                watcher.watch_project(&root, tick % 10 == 1, &mut previous, &mut flows);
             }
         }
     });
@@ -970,23 +997,8 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             // Milestones, features (D-87), the vision (D-91), personas (D-216) and
             // strategy runs (D-93) are the root's: never under `/p/{dir}`.
             let strategy: Vec<&str> = path.trim_matches('/').split('/').collect();
-            // A task by id, whichever project stores it (D-98): a task link asks where to open it.
-            if let ("GET", ["tasks", "find", tid]) = (req.method().as_str(), strategy.as_slice()) {
-                return match tasks::find_task(&board.top, tid) {
-                    Ok(v) => respond(req, 200, v),
-                    Err((status, e)) => respond(req, status, error_json(&e)),
-                };
-            }
-            // A feature or milestone by id (D-122): a link to it asks for its title.
-            if let ("GET", [kind @ ("features" | "milestones"), "find", id]) = (req.method().as_str(), strategy.as_slice()) {
-                return match tasks::find_record(&board.top, kind, id) {
-                    Ok(v) => respond(req, 200, v),
-                    Err((status, e)) => respond(req, status, error_json(&e)),
-                };
-            }
-            // A design by id (D-234): a link to it asks for its title and tab.
-            if let ("GET", ["designs", "find", id]) = (req.method().as_str(), strategy.as_slice()) {
-                return match crate::design::find(&board.top, id) {
+            if let Some(found) = lookup_route(&board.top, req.method().as_str(), path) {
+                return match found {
                     Ok(v) => respond(req, 200, v),
                     Err((status, e)) => respond(req, status, error_json(&e)),
                 };
@@ -1093,6 +1105,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                         "/" | "/workspace"
                             | "/migrate"
                             | "/contracts"
+                            | "/system-review"
                             | "/strategy"
                             | "/delivery"
                             | "/design"
@@ -1106,8 +1119,8 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             {
                 let (data, kind) = match page {
                     _ if record_link => (INDEX_HTML, "text/html"),
-                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/delivery" | "/design" | "/settings"
-                    | "/knowledgebase" => (INDEX_HTML, "text/html"),
+                    "/" | "/workspace" | "/migrate" | "/contracts" | "/system-review" | "/strategy" | "/delivery" | "/design"
+                    | "/settings" | "/knowledgebase" => (INDEX_HTML, "text/html"),
                     "/fonts/sans-400.woff2" => (SANS_400, "font/woff2"),
                     "/fonts/sans-700.woff2" => (SANS_700, "font/woff2"),
                     "/fonts/mono-400.woff2" => (MONO_400, "font/woff2"),
@@ -1189,6 +1202,8 @@ fn root_route(path: &str, explicit: bool) -> bool {
         || path.starts_with("/projects/")
         || path == "/migration"
         || path.starts_with("/migration/")
+        || path == "/system-reviews"
+        || path.starts_with("/system-reviews/")
         || (path == "/events" && explicit)
 }
 
@@ -1394,4 +1409,21 @@ fn log_position(top: &Path) -> Result<i64, Failure> {
     }
     let db = crate::tasks::events(top)?;
     Ok(db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?)
+}
+
+/// The root's reads of one record by id, whichever project holds it: `None`
+/// for any other request.
+fn lookup_route(top: &std::path::Path, method: &str, path: &str) -> Option<Result<Value, (u16, Failure)>> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, parts.as_slice()) {
+        // A task by id (D-98): a task link asks where to open it.
+        ("GET", ["tasks", "find", tid]) => Some(tasks::find_task(top, tid)),
+        // The tasks that depend on a task (D-203), for its Needed by line.
+        ("GET", ["tasks", tid, "dependents"]) => Some(crate::tasks::api::dependents(top, tid)),
+        // A feature or milestone by id (D-122): a link to it asks for its title.
+        ("GET", [kind @ ("features" | "milestones"), "find", id]) => Some(tasks::find_record(top, kind, id)),
+        // A design by id (D-234): a link to it asks for its title and tab.
+        ("GET", ["designs", "find", id]) => Some(crate::design::find(top, id)),
+        _ => None,
+    }
 }

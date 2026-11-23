@@ -471,14 +471,15 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     let hidden = note.text;
     prepare(s, &mut w)?;
     let disk = graph_files(s)?;
-    let ix = s.index()?;
     settle_replaced(s, &mut w)?;
     remove_old_copies_once(s, &mut w, &disk)?;
     let command = matches!(mode, Mode::Command);
-    let mut found = scan_disk(s, &ix, &mut w, &disk, mode)?;
+    let mut found = scan_disk(s, &s.modules()?, &mut w, &disk, mode)?;
     if found.changed.is_empty() && found.parked.is_empty() {
         return finish_no_changes(s, &mut w, &hidden, &mut found.fixed, &found.gone_bad);
     }
+    // Building the symbol graph is costly in a large store, and the board's watcher asks every second.
+    let ix = s.index()?;
     if command {
         return record_command(s, &ix, &mut w, &hidden, found);
     }
@@ -618,7 +619,7 @@ fn dropped_gone_bad(
     w: &mut Written,
     disk: &[String],
     changed: &[(String, Option<Vec<u8>>)],
-    ix: &crate::Index,
+    modules: &[crate::ModuleRow],
 ) -> (Vec<String>, Vec<(String, Option<Vec<u8>>)>) {
     let mut gone_bad = vec![];
     let mut removed = vec![];
@@ -626,7 +627,7 @@ fn dropped_gone_bad(
         if disk.contains(rel) || changed.iter().any(|(r, _)| r == rel) {
             continue;
         }
-        if ix.modules.iter().any(|m| m.rel() == *rel) {
+        if modules.iter().any(|m| m.rel() == *rel) {
             removed.push((rel.clone(), None));
         } else {
             gone_bad.push(rel.clone());
@@ -820,7 +821,7 @@ struct Scan {
 }
 
 /// Compares the graph files with the written record: new bytes, repairs, and removals.
-fn scan_disk(s: &Store, ix: &Index, w: &mut Written, disk: &[String], mode: Mode) -> Result<Scan, Failure> {
+fn scan_disk(s: &Store, modules: &[crate::ModuleRow], w: &mut Written, disk: &[String], mode: Mode) -> Result<Scan, Failure> {
     let mut found = Scan { changed: vec![], parked: vec![], fixed: vec![], gone_bad: vec![] };
     for rel in disk {
         let path = s.root.join(rel);
@@ -847,7 +848,7 @@ fn scan_disk(s: &Store, ix: &Index, w: &mut Written, disk: &[String], mode: Mode
             found.changed.push((rel.clone(), None));
         }
     }
-    let (gone_bad, removed) = dropped_gone_bad(w, disk, &found.changed, ix);
+    let (gone_bad, removed) = dropped_gone_bad(w, disk, &found.changed, modules);
     found.gone_bad = gone_bad;
     found.changed.extend(removed);
     Ok(found)

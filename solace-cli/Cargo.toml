@@ -1,6 +1,6 @@
 [package]
 name = "solace"
-version = "0.2.0"
+version = "0.2.5"
 edition = "2024"
 
 [dependencies]
@@ -13,3 +13,4 @@ globset = "0.4"
 tiny_http = "0.12"
 syn = { version = "3", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

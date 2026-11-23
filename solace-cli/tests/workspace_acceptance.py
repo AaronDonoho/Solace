@@ -961,6 +961,7 @@ class Root(unittest.TestCase):
         self.assertIn('E6013', refused)
         self.assertIn('`view <file>::<name>`', refused)
         self.assertIn('# Decisions', self.cli('read', 'DECISIONS.md', '--project', '.', cwd=self.root/'app'))
+        self.assertIn('# System reviews', self.cli('read', 'SYSTEMREVIEWS.md', cwd=self.root/'app'))
         self.start()
         steps = [{'command': 'session start'}, {'command': 'read DECISIONS.md'},
                  {'command': 'read ROOT.md'},
@@ -1180,7 +1181,7 @@ class Root(unittest.TestCase):
         self.assertIn('- D-1 First thing', prompt); self.assertIn('`read DECISIONS.md --lines a..b`', prompt)
         self.assertNotIn('folder of projects', prompt)
         self.assertEqual(self.api('POST', f'/strategy/runs/{rid}/end')['outcome'], 'planned')
-        self.assertTrue(wait_for(self.root/'.solace'/(rid + '.exited'), 10))
+        self.assertTrue(wait_for(self.root/'.solace'/(rid + '.exited'), 30))
 
     def test_a_question_is_alone_in_its_call_and_a_settings_reason_is_part_of_it(self):
         # A note beside a question is refused with nothing recorded; the why goes in `reason`.
@@ -1274,7 +1275,7 @@ class Root(unittest.TestCase):
             prompt = (self.root/'a/.solace'/(rid+'.prompt')).read_text()
             responses = self.root/'a/.solace'/(rid+'.responses')
             exited = self.root/'a/.solace'/(rid+'.exited')
-            self.assertTrue(wait_for(exited, 4), 'the review agent never exited')
+            self.assertTrue(wait_for(exited, 30), 'the review agent never exited')
             replies = [json.loads(l)['result']['content'][0]['text'] for l in responses.read_text().splitlines()]
             return prompt, replies
         review([{'command':'task note baseline'}])

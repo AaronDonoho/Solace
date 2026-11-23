@@ -27,7 +27,8 @@ Reading
                                 and cited by name (`lockdown.dispatch`,
                                 `checkout.pay`); `module:<name>` names no
                                 symbol: use `view <name>`
-  view --draft <id>             a kept draft's text, from `drafts`
+  view --draft <id> [--from n]  a kept draft's text, from `drafts`; a long one
+                                ends with the `--from` call for the rest
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
                                 its docs. Read from build/packages, never stored

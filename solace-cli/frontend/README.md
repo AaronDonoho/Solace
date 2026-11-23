@@ -1,7 +1,7 @@
 # Solace frontend
 
 The Lustre shell registers the board, contract view, migration, strategy,
-delivery, design and settings components, draws its own Knowledgebase page
+system review, delivery, design and settings components, draws its own Knowledgebase page
 (the guide, D-140), and uses modem for menu navigation and `src/history.mjs`
 for browser Back and Forward, including Strategy, Delivery and Design tabs,
 an open design, a record link's focus and Contract view links.
@@ -11,6 +11,7 @@ an open design, a record link's focus and Contract view links.
 | / | solace-board |
 | /workspace | solace-migration (the Workspace page, D-146); /migrate lands here |
 | /contracts | solace-contracts |
+| /system-review | solace-system-review |
 | /strategy | solace-strategy |
 | /delivery | solace-delivery |
 | /design | solace-design |
@@ -70,8 +71,8 @@ A Contract view link on a lane or a task's Changes tab, and the contract page's
 **← Board** link, are followed in-page the same way. The address is added to the
 history, so Back and Board keep the board mounted with its open task, details
 and editor text.
-The menu (Workspace, Strategy, Design, Board, Contracts, Delivery, Knowledgebase,
-Settings) is on every page and highlights the current one; a workspace
+The menu (Workspace, Strategy, Design, Board, Contracts, System Review, Delivery,
+Knowledgebase, Settings) is on every page and highlights the current one; a workspace
 project's contract page highlights Contracts. A Strategy or Settings menu link
 keeps the tab last shown on that page; the Design menu link keeps its tab but
 not the open design. The menu is 56px high, and the contract page fills the
@@ -91,7 +92,7 @@ colours; registering Settings makes the shell follow a theme chosen in another
 window.
 
 The font size is chosen on Settings → Appearance and scales the whole page
-(D-261). `index.html` sets `--font-scale` from `solace-font-size` before first
+(D-262). `index.html` sets `--font-scale` from `solace-font-size` before first
 paint and zooms the root by it; a viewport height it sets is divided by
 `--font-scale`. Registering Settings makes the shell follow a size chosen in
 another window and, in the desktop app, step it with Ctrl + mouse wheel.
@@ -104,7 +105,7 @@ while reads still work and changes, checks and tests are refused.
 
 The frontend's one bundle command is `bun bundle.mjs`, run from
 solace-cli/frontend with the sibling board, components, contracts, migration,
-strategy, delivery, settings and design projects present. It writes `priv/app.js` and
+strategy, sysreview, delivery, settings and design projects present. It writes `priv/app.js` and
 `priv/app.js.fingerprint`; both are committed. The root `bundle` command, this
 project's `bundle` and `build-release` commands, and the desktop app's
 pre-build command all run it. `build plan` marks the bundle out of date from
@@ -133,7 +134,7 @@ modem require a browser.
 ## Server integration
 
 The server task must serve this index.html at /, /workspace, /migrate, /contracts,
-/strategy, /delivery, /design, /settings, /knowledgebase, /task/<id>, /feature/<id>,
+/system-review, /strategy, /delivery, /design, /settings, /knowledgebase, /task/<id>, /feature/<id>,
 /milestone/<id> and /p/<dir>/contracts, and priv/app.js at /app.js, all on port 3030.
 
 priv/app.js is generated, not source: run `bun bundle.mjs` (or

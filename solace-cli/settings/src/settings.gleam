@@ -58,10 +58,9 @@ pub type Model {
     dark: Bool,
     /// The tab shown.
     tab: Tab,
-    /// Stops listening for theme and font size changes; Some while the element is in the page.
+    /// Stops listening for theme and font size changes; Some while the element
+    /// is in the page.
     unsubscribe: Option(fn() -> Nil),
-    /// The font size in pixels the pages are drawn at.
-    font_size: Int,
     /// The models this computer can pick, from the system settings.
     models: List(Entry),
     /// The languages on this computer, from the system settings.
@@ -70,6 +69,8 @@ pub type Model {
     finished_sound: Bool,
     /// Whether the needs-attention sound plays.
     attention_sound: Bool,
+    /// The font size in pixels, one of `font_sizes`.
+    font_size: Int,
     /// The version of the Solace program running this page.
     version: String,
     /// How agents address the human, how much they write, and how readily they ask.
@@ -110,13 +111,13 @@ pub type Msg {
   SetFinishedSound(Bool)
   /// The Needs attention sound switch: on or off.
   SetAttentionSound(Bool)
+  /// The Font size dropdown or Reset to default: a size in pixels.
+  SetFontSize(Int)
   /// The theme setting changed, here or in another window; "" follows the system.
   ThemeChanged(String)
-  /// The Font size dropdown, or its Reset to default button: a size in pixels.
-  SetFontSize(Int)
   /// The font size setting changed, here or in another window; "" is the default.
   FontSizeChanged(String)
-  /// The element was added to the page: it listens for theme and font size changes.
+  /// The element was added to the page: it listens for theme changes.
   Connected
   /// Listening began; the function stops it.
   Subscribed(fn() -> Nil)
@@ -202,6 +203,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, attention_sound: on),
       effect.from(fn(_) { save(sound_attention_key, sound_stored(on)) }),
     )
+    SetFontSize(size) -> #(
+      Model(..model, font_size: size),
+      effect.from(fn(_) { set_font_size(size) }),
+    )
     // The page has applied the system's theme by now (`follow_theme`).
     ThemeChanged("") -> #(
       Model(..model, dark: theme() == "dark"),
@@ -210,10 +215,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     ThemeChanged(value) -> #(
       Model(..model, dark: value == "dark"),
       effect.none(),
-    )
-    SetFontSize(font_size) -> #(
-      Model(..model, font_size:),
-      effect.from(fn(_) { set_font_size(font_size) }),
     )
     FontSizeChanged(value) -> #(
       Model(..model, font_size: font_size_from(value)),
@@ -554,7 +555,7 @@ const view_styles =
   solace_task.control_styles
   <> solace_task.tab_styles
   <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6}
-.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh / var(--font-scale, 1) - 56px);box-sizing:border-box;background:var(--sheet);color:var(--ink);--tabs-height:44px;--tab-pad:0 18px}
+.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;background:var(--sheet);color:var(--ink);--tabs-height:44px;--tab-pad:0 18px}
 .settings>[role=tabpanel]{padding:var(--space-6)}
 .settings>[role=tabpanel][hidden]{display:none}
 .settings section{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
@@ -584,7 +585,6 @@ const view_styles =
 .role-models{margin-top:8px}.role-model{margin:14px 0}.role-model-picks{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));max-width:640px}
 .role-model .field{max-width:none}
 .field{display:grid;gap:4px;margin:8px 0;max-width:480px}
-.font-size-pick{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
 .settings .error{color:var(--ink);font-weight:600;padding:0 var(--space-6) var(--space-6)}
 .switch{display:flex;align-items:center;gap:10px;width:fit-content;cursor:pointer}
 .switch input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}
@@ -654,11 +654,11 @@ pub fn initial(dark: Bool) -> Model {
     dark:,
     tab: Agents,
     unsubscribe: None,
-    font_size: font_size_from(load(font_size_key)),
     models: [],
     languages: [],
     finished_sound: load(sound_finished_key) != "0",
     attention_sound: load(sound_attention_key) != "0",
+    font_size: font_size_from(load(font_size_key)),
     version: "",
     behavior: default_behavior,
     behavior_before: None,
@@ -1862,7 +1862,7 @@ pub const font_size_key = "solace-font-size"
 /// The pages' own text size in pixels, which a page is drawn at unscaled.
 pub const default_font_size = 15
 
-/// The Font size choices in pixels, smallest first (D-261).
+/// The Font size choices in pixels, smallest first (D-262).
 pub const font_sizes = [12, 13, 14, 15, 16, 18, 20, 24, 28, 32, 36]
 
 /// The font size a stored value names; the default for "" or a size not offered.
@@ -1895,7 +1895,7 @@ pub fn set_font_size(size: Int) -> Nil {
   })
 }
 
-/// Scales the page so its text is drawn at `size` (D-261).
+/// Scales the page so its text is drawn at `size` (D-262).
 fn show_font_size(size: Int) -> Nil {
   apply_font_scale(int.to_float(size) /. int.to_float(default_font_size))
 }
