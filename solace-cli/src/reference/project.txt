@@ -9,5 +9,8 @@ Project (commands declared in solace.toml)
   format                        Gleam: gleam format for the project; Rust:
                                 name a module to rustfmt that module whole
   run <name> [args...]          a command declared in solace.toml's [commands];
-                                extra arguments only when it allows them
+                                extra arguments only when it allows them.
+                                The tools its `tools` lists (`["python3",
+                                "node >= 19"]`) are checked first: a missing
+                                or older one stops it in one line
 

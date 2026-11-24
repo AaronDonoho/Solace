@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Bug\nOn the Strategy page, choosing a model (e.g. Opus 5.5) from the model pick when nothing is picked yet makes the box show a different model (e.g. Sonnet). Choosing Opus 5.5 again from the drop-down then works.\n\n## Expected\nThe box shows the model the human chose, the first time.\n\n## Likely cause (unconfirmed)\n`solace_task.placeholder_option` adds a disabled \"pick a model\" option at the top only while nothing is picked. The first pick removes it, so every option moves up one place. The select likely keeps its old position number, which now points at the next model in the list. A second pick doesn't add or remove the placeholder, so it works.\n\nBoth `plan_panel.agent_choice` (Strategy page) and `solace_task.agent_pick` (task detail) use this placeholder, so the task detail pick may have the same bug. Check it and fix it too if it does.\n\n## Done when\n- A first pick shows the chosen model on the Strategy page, and in the task detail if it had the bug.\n- A test covers a first pick made while the placeholder is showing.",
+  "closedTime": 1795050465,
+  "column": "complete",
+  "createdTime": 1795048100,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "88c7294b1f407cae",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "title": "model pick: first choice shows the wrong model"
+}

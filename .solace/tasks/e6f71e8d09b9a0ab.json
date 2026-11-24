@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "Part of feature:21d501a74aec4f44.\n\n- A new **System Review** page in the main menu, between **Contracts** and **Delivery**.\n- From the page the human can **run a review manually** at any time, choosing which review kinds it covers (Security, code quality, user experience).\n\nAsk the human how the kind choice and the run control look and where they sit. Nothing else is specified.\n\nOther pages are each their own project (for example `solace-cli/delivery`) bundled into the frontend. If this page needs a new project folder, ask the human before adding one: it isn't in this task's scope.\n\nDone when: the page is in the menu in that place and a manual review started there runs as task:d0d60d7a9688c214 built it.",
+  "closedTime": 1795411668,
+  "column": "complete",
+  "createdTime": 1795373123,
+  "dependsOn": [
+    "d0d60d7a9688c214"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "e6f71e8d09b9a0ab",
+  "links": [],
+  "milestone": null,
+  "rank": 452.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: page with a manual review"
+}

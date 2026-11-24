@@ -109,16 +109,21 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
         }
     }
     // `[sandbox] read`: folders outside the project a sandboxed command may
-    // read (D-158 point 4).
+    // read; `write`: folders inside it a sandboxed command may write (D-158 point 4).
     if let Some(t) = v.get("sandbox") {
         let t = t.as_table().ok_or_else(|| invalid("sandbox"))?;
         for (key, value) in t {
-            if key != "read" {
+            if key != "read" && key != "write" {
                 return Err(invalid(key));
             }
             let paths = value.as_array().ok_or_else(|| invalid(key))?;
             if paths.iter().any(|p| p.as_str().is_none_or(|p| p.is_empty())) {
                 return Err(invalid(key));
+            }
+            if key == "write" {
+                if let Some(p) = paths.iter().filter_map(|p| p.as_str()).find(|p| !inside_project(p)) {
+                    return Err(invalid_settings(format!("sandbox.write: `{p}` is not a folder inside the project")));
+                }
             }
         }
     }
@@ -126,6 +131,8 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
     recipe::check(&v)?;
     // `[releases]`: the output folder and its read-only option (D-247).
     crate::releases::check(&v)?;
+    // `test_tools`: the tools the project's tests need (D-263).
+    crate::test_tools::check(&v)?;
     Ok(v)
 }
 
@@ -289,3 +296,12 @@ pub(crate) fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text:
 
 /// The default `watch_limit`: text files up to this many bytes are watched.
 pub const WATCH_LIMIT: usize = 262_144;
+
+/// Whether a relative path names a folder below the project's own folder:
+/// not absolute, not the folder itself, and never up through `..`.
+fn inside_project(p: &str) -> bool {
+    use std::path::Component;
+    let path = Path::new(p);
+    path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        && path.components().any(|c| matches!(c, Component::Normal(_)))
+}

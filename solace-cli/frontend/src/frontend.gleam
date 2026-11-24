@@ -24,6 +24,7 @@ import setup
 import solace_board
 import solace_task
 import strategy
+import sysreview
 
 pub fn main() -> Nil {
   let assert Ok(_) = solace_board.register()
@@ -33,6 +34,7 @@ pub fn main() -> Nil {
   let assert Ok(_) = settings.register()
   let assert Ok(_) = design.register()
   let assert Ok(_) = delivery.register()
+  let assert Ok(_) = sysreview.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
     |> lustre.start("#app", Nil)
@@ -44,6 +46,8 @@ pub type Route {
   /// The Workspace page (D-146): the workspace and its migration. `/migrate` lands here.
   Workspace
   Contracts(base: String, task: String)
+  /// The System Review page: run a review of the whole workspace by hand.
+  SystemReview
   /// The Strategy page and the tab its address names.
   Strategy(tab: String)
   /// The Design page, the tab its address names, and the design open there.
@@ -85,6 +89,10 @@ pub type Msg {
   SetupLoaded(String)
   /// The checklist's **Check again** button.
   CheckSetup
+  /// A checklist item's **Install** button: the tool's id (D-264).
+  InstallTool(String)
+  /// The reply to `POST /setup/install`: the tool's id and the reply.
+  ToolInstalled(String, String)
 }
 
 pub fn route(uri: Uri) -> Route {
@@ -92,6 +100,7 @@ pub fn route(uri: Uri) -> Route {
     [] -> Board
     ["workspace"] | ["migrate"] -> Workspace
     ["contracts"] -> Contracts("", task_query(uri.query))
+    ["system-review"] -> SystemReview
     ["strategy"] ->
       Strategy(strategy.tab_name(strategy.tab_from(uri_query(uri))))
     ["design"] ->
@@ -138,6 +147,13 @@ pub fn page(
     ]
     Delivery(tab) -> [attribute.attribute("tab", tab)]
     Settings(tab) -> [attribute.attribute("tab", tab)]
+    // A missed scheduled review is read once System Review shows.
+    SystemReview -> [
+      attribute.attribute("shown", case shown {
+        True -> "true"
+        False -> "false"
+      }),
+    ]
     _ -> []
   }
   let attributes = case focus.page == page_of(route) && focus.id != "" {
@@ -189,8 +205,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     RecordLink(kind, id) -> #(Board, find(kind, id, True, Board, 0))
     _ -> #(initial, effect.none())
   }
-  // The board, Strategy, Delivery and Design are open from the start, hidden,
-  // so they hear of what needs the human and can flag their tab.
+  // The board, Strategy, Delivery, Design and System Review are open from the
+  // start, hidden, so they hear of what needs the human and can flag their tab.
   let strategy_page = case initial {
     Strategy(tab) -> Strategy(tab)
     _ -> Strategy(strategy.tab_name(strategy.Vision))
@@ -209,6 +225,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     |> open(strategy_page)
     |> open(delivery_page)
     |> open(design_page)
+    |> open(SystemReview)
   #(
     Model(
       route: shown,
@@ -396,12 +413,25 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // down says nothing about this computer.
     SetupLoaded(text) ->
       case setup.decode(text) {
-        Ok(items) -> #(Model(..model, setup: items), effect.none())
+        Ok(items) -> #(
+          Model(..model, setup: setup.reloaded(model.setup, items)),
+          effect.none(),
+        )
         Error(_) -> #(model, effect.none())
       }
     CheckSetup -> #(
       model,
       effect.from(fn(send) { load_setup(fn(text) { send(SetupLoaded(text)) }) }),
+    )
+    InstallTool(id) -> #(
+      Model(..model, setup: setup.installing(model.setup, id)),
+      effect.from(fn(send) {
+        install_tool(id, fn(text) { send(ToolInstalled(id, text)) })
+      }),
+    )
+    ToolInstalled(id, text) -> #(
+      Model(..model, setup: setup.installed(model.setup, id, text)),
+      effect.none(),
     )
   }
 }
@@ -450,6 +480,7 @@ pub fn view(model: Model) -> Element(Msg) {
       link(design_path(design_tab), "Design", Design(design_tab, "")),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("", "")),
+      link("/system-review", "System Review", SystemReview),
       link(
         delivery_path(current_delivery_tab),
         "Delivery",
@@ -462,7 +493,7 @@ pub fn view(model: Model) -> Element(Msg) {
         Settings(current_settings_tab),
       ),
     ]),
-    setup.view(model.setup, CheckSetup),
+    setup.view(model.setup, CheckSetup, InstallTool),
     ..list.map(model.opened, fn(r) {
       page(r, page_of(r) == shown, model.focus, model.columns)
     })
@@ -756,6 +787,7 @@ pub fn page_of(route: Route) -> String {
     Board -> "solace-board"
     Workspace -> "solace-migration"
     Contracts(_, _) -> "solace-contracts"
+    SystemReview -> "solace-system-review"
     Strategy(_) -> "solace-strategy"
     Design(_, _) -> "solace-design"
     Delivery(_) -> "solace-delivery"
@@ -1176,6 +1208,7 @@ pub fn path_of(route: Route) -> String {
     Board -> "/"
     Workspace -> "/workspace"
     Contracts(base, _) -> base <> "/contracts"
+    SystemReview -> "/system-review"
     Strategy(_) -> "/strategy"
     Design(_, _) -> "/design"
     Delivery(_) -> "/delivery"
@@ -1253,3 +1286,6 @@ fn delivery_query(tab: String) -> String {
 fn delivery_tab(model: Model) -> String {
   page_tab(model, "solace-delivery", delivery.tab_name(delivery.BuildTab))
 }
+
+@external(javascript, "./setup_ffi.mjs", "install_tool")
+fn install_tool(tool: String, receive: fn(String) -> Nil) -> Nil

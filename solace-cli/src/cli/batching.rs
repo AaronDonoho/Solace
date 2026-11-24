@@ -192,7 +192,7 @@ pub(crate) fn read_hint(streak: &mut usize, commands: &[&str], failed: bool) -> 
 pub(crate) fn is_question(line: &str) -> bool {
     let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
     match w.as_slice() {
-        ["task", "ask" | "decision", ..]
+        ["task", "ask" | "decision" | "propose", ..]
         | ["strategy", "task" | "feature" | "milestone" | "vision" | "decision", ..]
         | ["design", "propose", ..] => true,
         ["write", rest @ ..] if context().is_some() => {

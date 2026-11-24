@@ -64,6 +64,10 @@ mod base64;
 mod releases;
 mod versions;
 mod decisions;
+mod test_tools;
+mod tools;
+mod system_reviews;
+mod review_schedules;
 use crate::cli::{next_step, operands, path_dependencies};
 pub(crate) use failure::{Failure, Out, fail, usage};
 use crate::store_core::SCHEMA;
@@ -258,7 +262,9 @@ fn import_with(root: &Path, has_cargo: bool) -> Out {
     }
     written.save()?;
     // The first check is warm, without making the import wait (D-158 point 3).
-    if rust_imported && has_cargo {
+    // A test's scratch project gets none: nothing waits for or stops it, so
+    // every imported fixture would leave a build competing with the run.
+    if rust_imported && has_cargo && !cfg!(test) {
         cargo::warm(root);
     }
     let store = Store::new(Rc::new(db), root, true, true);

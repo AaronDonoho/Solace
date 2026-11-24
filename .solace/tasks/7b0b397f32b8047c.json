@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\n`system_reviews.finish` files the finding tasks, marks the run as ended (`put_run`), and only then adds the SYSTEMREVIEWS.md entry. If adding the entry fails, the run is already marked ended. When the agent retries, `finish` sees the ended run, returns success early, and tells the agent the review \"was logged in SYSTEMREVIEWS.md\", but no entry is ever written. This breaks D-265 point 3: every completed review adds one entry.\n\n### Done when\n- A run is marked ended only after its SYSTEMREVIEWS.md entry has been written.\n- If writing the entry fails, `finish` reports the failure, and a retry writes the entry without filing the findings twice or adding a second entry.\n- The agent is told the review was logged only when it was.\n- Tests cover a failed log write followed by a retry, the early return for a run that has really ended, and the rollback when writing the finding tasks fails.",
+  "closedTime": 1795486229,
+  "column": "complete",
+  "createdTime": 1795480175,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "7b0b397f32b8047c",
+  "links": [],
+  "milestone": null,
+  "rank": 463.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "sysreview: every finished review is logged"
+}

@@ -68,14 +68,7 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
             ),
         );
     }
-    let use_ = if board::strategy_context().is_some()
-        || crate::board::runs::design_context().is_some()
-        || crate::board::runs::notes_context().is_some()
-    {
-        "files, grep and read"
-    } else {
-        "files, grep, read, write and run"
-    };
+    let use_ = if crate::board::runs::workspace_context() { "files, grep and read" } else { "files, grep, read, write and run" };
     // D-121: Rust and Python files are read by item.
     let files = if matches!(command, "view" | "inspect" | "refs") {
         "; a .rs or .py file: `view <file>` lists its items, `view <file>::<name>` shows one"
@@ -164,11 +157,14 @@ pub fn dispatch(
                 patch_with_draft(store, v, Some(id), &raw, budget, replaced)
             })());
         }
-        // The decision log lives at the board's top; read it from any project.
-        if a[0] == "read" && a.get(1).is_some_and(|p| crate::file_name(Path::new(p)) == crate::decisions::FILE) {
+        // The decision and review logs live at the board's top; read them from any project.
+        if a[0] == "read"
+            && let Some(log) =
+                a.get(1).map(|p| crate::file_name(Path::new(p))).filter(|n| n == crate::decisions::FILE || n == crate::system_reviews::FILE)
+        {
             let top = crate::scope::top(root);
             if top != *root {
-                return Some(read_part(&top, crate::decisions::FILE, &a[2..], budget).map(|(text, _)| text));
+                return Some(read_part(&top, &log, &a[2..], budget).map(|(text, _)| text));
             }
         }
         // D-102: `files` and `read` take a list of paths, answered in order;
@@ -316,6 +312,9 @@ pub fn dispatch(
                                     ),
                                 );
                             }
+                            if name == crate::system_reviews::FILE {
+                                return crate::system_reviews::refusal(&name);
+                            }
                             return error(
                                 "E6002",
                                 &name,
@@ -345,7 +344,9 @@ pub fn dispatch(
                             refused.extend(crate::lockdown::paths::release_error::<()>(&name).err());
                             continue;
                         }
-                        if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
+                        if name == crate::system_reviews::FILE {
+                            refused.extend(crate::system_reviews::refusal::<()>(&name).err());
+                        } else if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
                             refused.extend(
                                 error::<()>(
                                     "E6002",
@@ -431,6 +432,7 @@ pub fn dispatch(
                 if a.len() > 2 && c.get("args").and_then(|x| x.as_bool()) != Some(true) {
                     return error("E6011", name, "this command does not allow extra arguments");
                 }
+                crate::test_tools::require_command(root, c)?;
                 let mut argv: Vec<String> = c["run"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().into()).collect();
                 argv.extend(a[2..].iter().map(|s| s.to_string()));
                 (argv, c.get("timeout").and_then(|x| x.as_integer()).unwrap_or(120) as u64)
@@ -570,7 +572,10 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 ],
                 "env": {
                     "MCP_TIMEOUT": "60000",
-                    "MCP_TOOL_TIMEOUT": (tool_timeout(timeout) * 1000).to_string()
+                    "MCP_TOOL_TIMEOUT": (tool_timeout(timeout) * 1000).to_string(),
+                    // Claude Code otherwise aborts a stdio tool call after 30 silent minutes,
+                    // well before a wait for the human reaches its limit.
+                    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": (tool_timeout(timeout) * 1000).to_string()
                 },
                 "config": "settings.json"
             })
@@ -593,7 +598,7 @@ mod tests {
         (dir.import(), v)
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
-        dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
+        super::dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
     }
     /// A folder's `.gitignore` is matched from that folder: `/gen` in
     /// `src/.gitignore` ignores `src/gen`, not a `gen` at the root.

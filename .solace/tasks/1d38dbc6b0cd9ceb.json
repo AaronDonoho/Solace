@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "Opening the desktop app again should keep things the way the human left them, so nothing has to be set up again.\n\n**Behavior**\n- **Window size:** a board window opens at the size it had when it was last closed, not at the fixed starting size each time.\n- **Settings:** settings such as the font size (and the theme) are still in place after the app is closed and opened again.\n\n**Notes for the agent**\n- Board windows always open at 1280 × 820 today (`open_board_window` in solace-app); nothing saves their size.\n- Settings are kept in the page's `localStorage` (D-97 item 2, `settings.load` / `settings.save` in `solace-cli/settings/src/store.mjs`). That storage belongs to the page's address, port included (`http://127.0.0.1:<port>/`). The app tries port 3030 first (`PREFERRED_PORT`) but takes another one when 3030 is busy (a second workspace, or `wsl.free_port` on Windows), and a different port starts with empty storage. Check whether this is why settings are lost, and keep them across opens whichever port a board gets. If that means moving settings out of `localStorage`, propose the change to D-97 first.\n- Font size itself comes from task:dad739a761baa5f0, which is still waiting for review.",
+  "closedTime": 1795338163,
+  "column": "complete",
+  "createdTime": 1795075460,
+  "dependsOn": [
+    "dad739a761baa5f0"
+  ],
+  "feature": null,
+  "home": "solace-app",
+  "id": "1d38dbc6b0cd9ceb",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-app",
+    "solace-cli/settings"
+  ],
+  "title": "desktop app: remember window size and settings"
+}

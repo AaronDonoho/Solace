@@ -1,0 +1,23 @@
+{
+  "archivedTime": null,
+  "body": "Part of feature:21d501a74aec4f44.\n\n- The human can read the project's `SYSTEMREVIEWS.md` in the app. It is read-only there: only Solace writes it (D-265).\n\nThe feature doesn't say where it opens. Ask the human where it goes and how it looks before building.\n\nDone when: the human can open and read the file's current contents in the app.",
+  "closedTime": 1795414017,
+  "column": "complete",
+  "createdTime": 1795373136,
+  "dependsOn": [
+    "bdabb423a75bef6f",
+    "e6f71e8d09b9a0ab"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "adfdebf0932ec578",
+  "links": [],
+  "milestone": null,
+  "rank": 454.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: read SYSTEMREVIEWS.md in the app"
+}

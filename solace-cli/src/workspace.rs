@@ -17,7 +17,7 @@ fn invalid<T>(why: impl std::fmt::Display) -> Result<T, Failure> {
     Err(lockdown::invalid_settings(why))
 }
 
-fn has_store(dir: &Path) -> bool {
+pub(crate) fn has_store(dir: &Path) -> bool {
     dir.join(".solace/store.db").exists()
 }
 
@@ -191,7 +191,7 @@ fn establish(root: &Path) -> Result<(), Failure> {
     if crate::language::detect(root).is_none() && !has_store(root) {
         import(root)?;
     }
-    crate::decisions::ensure(root)?;
+    ensure_logs(root)?;
     Ok(())
 }
 
@@ -330,7 +330,7 @@ pub fn add(root: &Path, dir: &str) -> Out {
 pub fn setup(root: &Path, dir: &str) -> Out {
     if dir == "." {
         let out = import(root)?;
-        crate::decisions::ensure(root)?;
+        ensure_logs(root)?;
         return Ok(format!("{}: {}", root.display(), out));
     }
     if !contained(root, dir) {
@@ -355,7 +355,7 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} and {d} would overlap: a project can't sit inside another's src/, test/ or tests/."));
     }
     let out = import(&path)?;
-    crate::decisions::ensure(root)?;
+    ensure_logs(root)?;
     dirs.push(dir.to_string());
     save(root, &dirs)?;
     Ok(format!("{dir}: {out}"))
@@ -890,7 +890,8 @@ pub enum NewProject {
 
 /// `gleam new`, inside a repository joining it rather than starting its own.
 fn gleam_new(root: &Path, dir: &str, name: &str, javascript: bool) -> Result<(), Failure> {
-    let mut cmd = Command::new("gleam");
+    let mut cmd = Command::new(crate::language::program("gleam")?);
+    crate::tools::put_on_path(&mut cmd);
     cmd.args(["new", dir, "--name", name, "--skip-github"]).current_dir(root);
     if javascript {
         cmd.args(["--template", "javascript"]);
@@ -950,4 +951,10 @@ fn in_repository(root: &Path) -> bool {
 /// The advice for a workspace that sits inside another: it can't be opened where it is.
 fn open_on_its_own(inner: impl std::fmt::Display, outer: impl std::fmt::Display) -> String {
     format!("move {inner} out of {outer} and open it on its own")
+}
+
+/// The logs every top folder holds: decisions (D-254) and system reviews (D-265).
+fn ensure_logs(root: &Path) -> Result<(), Failure> {
+    crate::decisions::ensure(root)?;
+    crate::system_reviews::ensure(root)
 }

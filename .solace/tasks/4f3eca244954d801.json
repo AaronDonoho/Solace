@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795372690,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "4f3eca244954d801",
+  "links": [],
+  "milestone": null,
+  "rank": 450.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "Reliable test runs and an idle server: Tech Debt"
+}

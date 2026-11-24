@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795402490,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "ba2c94e549a3b759",
+  "links": [],
+  "milestone": null,
+  "rank": 458.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "System Review: scheduled project reviews: Tech Debt"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nWhen one line of a draft is longer than a whole page, `drafts.page` shows as much of the line as fits, then tells the agent to continue from the next line (`i + 2`) instead of from the rest of this one. Nothing past the cut can be read. The test `a_long_draft_is_read_a_page_at_a_time` only uses short lines, so it misses this, and its doc comment, which says the pages add up to the whole draft, isn't true.\n\n### Done when\n- Reading a draft page by page, following each page's continue point, shows every character of the draft once, including lines longer than a page.\n- A test with a line longer than a page checks that the pages add up to the whole draft.",
+  "closedTime": 1795493146,
+  "column": "complete",
+  "createdTime": 1795480212,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "09ec790be37bf90f",
+  "links": [],
+  "milestone": null,
+  "rank": 465.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "drafts: page through very long lines"
+}

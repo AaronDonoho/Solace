@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nOn the System Review page, the Schedules, Past reviews and Log tabs show `E7001 command refused at task unknown route` instead of their content.\n\n### Cause\n`board::server.root_route` lists the routes the root answers itself (`projects_api`). It is missing `/system-reviews` and everything under `/system-reviews/`. When the workspace root is itself a project (as Solace's own is), `Board::route` sends those requests to the root project's `board::server.api`, which doesn't know them and answers `unknown route`. The routes themselves exist in `Board::projects_api`; their tests call `projects_api` directly, so they never went through `route` and missed this.\n\nThe same gap likely affects starting a review from Run Review and the missed-review notice (`/system-reviews/missed`) on the System Review and Delivery pages.\n\n### Done when\n- `root_route` answers `/system-reviews` and every path under `/system-reviews/`.\n- A test sends each System Review route through `Board::route` with the root as a project and checks it reaches the root, not the root project.\n- Past reviews, Log, Schedules, starting a review and the missed-review notice work on a workspace whose root is a project.",
+  "closedTime": 1795420529,
+  "column": "complete",
+  "createdTime": 1795420169,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "48f97d8c9cc24bcf",
+  "links": [],
+  "milestone": null,
+  "rank": 459.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "sysreview: route review requests to the root"
+}

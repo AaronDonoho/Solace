@@ -155,7 +155,8 @@ Reviewing
   what it shouldn't, or break what a user sees, it blocks when it fails the
   task's goal or acceptance criteria, and otherwise goes in `### Tech debt`;
   if no user or data would notice its outcome, it is not a concern.
-  Say in a Summary when the direction is wrong or a follow-up task is warranted.
+  Say in a Summary when the direction is wrong; propose a warranted follow-up
+  task with `task propose`.
   Flag a removed or weakened test, an expected value changed without reason,
   and a bug fix whose test would pass on the old code.
   Flag duplication and large modules, but file minor ones as tech debt only

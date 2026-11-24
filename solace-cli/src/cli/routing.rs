@@ -249,7 +249,7 @@ pub(crate) fn run_inner(
         return out;
     }
     // drafts include kept file patches (D-120), so a plain-files project lists, reads and drops them
-    if GLEAM.contains(&a[0]) && a[0] != "drafts" && !matches!(a.as_slice(), ["view", "--draft", _]) && store.lang.is_none() {
+    if GLEAM.contains(&a[0]) && a[0] != "drafts" && !matches!(a.as_slice(), ["view", "--draft", ..]) && store.lang.is_none() {
         if !crate::language::is_rust(&store.root) {
             return crate::lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied());
         }
@@ -283,7 +283,11 @@ pub(crate) fn run_inner(
         ["submit", ..] => crate::drafts::submit(&store, &a, input, old),
         ["drafts", "drop", id] => crate::drafts::drop_one(&store, id),
         ["drafts"] => crate::drafts::list(&store),
-        ["view", "--draft", id] => crate::drafts::view(&store, id),
+        ["view", "--draft", id] => crate::drafts::view_page(&store, id, (1, 1), budget),
+        ["view", "--draft", id, "--from", from] => match crate::drafts::page_start(from) {
+            Some(start) => crate::drafts::view_page(&store, id, start, budget),
+            None => usage("view --draft <id> [--from <line>[:<column>]]"),
+        },
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
         ["view", rest @ ..] if !operands(rest).is_empty() => {
             store.view_with_header(&operands(rest), rest.contains(&"--bodies"), rest.contains(&"--header"), budget)
@@ -414,6 +418,9 @@ fn early_options(args: &[String], input: &mut dyn FnMut() -> Out, budget: usize)
     }
     if let Some(rid) = crate::board::runs::design_context() {
         return Ok(Some(design_run(&rid, args, input, budget)));
+    }
+    if let Some(rid) = crate::board::runs::system_review_context() {
+        return Ok(Some(system_review_run(&rid, args, input, budget)));
     }
     if let Some(rid) = strategy_context() {
         return Ok(Some(strategy_run(&rid, args, input, budget)));
@@ -744,11 +751,40 @@ fn notes_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget:
     if command == "notes" {
         return crate::board::runs::notes_command(&top, rid, &a, input);
     }
-    match a.iter().position(|x| *x == "--project") {
+    run_read(args, budget)
+}
+
+/// A read in a workspace run: in the project `--project` names, else here.
+fn run_read(args: &[String], budget: usize) -> Out {
+    match args.iter().position(|x| x == "--project") {
         Some(i) => {
-            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
+            let dir = args.get(i + 1).map(String::as_str).ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
             read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
         }
         None => read_project(".", args, budget),
     }
+}
+
+/// A command in system review run `rid`: plain reads, and `review findings`
+/// to report. Every other command is refused (`E7010`).
+fn system_review_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    if command != "review" && !READS.contains(&command) {
+        let why = match command {
+            "task" => "a system review reports its findings with review findings; task commands are refused",
+            c if HOST.contains(&c) => "host command is unavailable in a run",
+            _ => {
+                "a system review reads the project and changes no code: review findings, and view, inspect, refs, \
+                 find, grep, files and read (with --project <folder> for another project)"
+            }
+        };
+        return crate::lockdown::error("E7010", command, why);
+    }
+    let top = crate::workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
+    crate::board::runs::system_review_guard(&top, rid, &a)?;
+    if command == "review" {
+        return crate::system_reviews::command(&top, rid, &a, input);
+    }
+    run_read(args, budget)
 }

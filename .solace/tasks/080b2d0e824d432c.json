@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "Part of feature:21d501a74aec4f44.\n\n- A **past reviews** tab on the System Review page lists completed reviews with their runs and timestamps.\n\nAsk the human how each entry is laid out and what clicking one does. Nothing else is specified.\n\nDone when: completed reviews show on the tab with their runs and timestamps.",
+  "closedTime": 1795412890,
+  "column": "complete",
+  "createdTime": 1795373131,
+  "dependsOn": [
+    "e6f71e8d09b9a0ab"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "080b2d0e824d432c",
+  "links": [],
+  "milestone": null,
+  "rank": 453.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: past reviews tab"
+}

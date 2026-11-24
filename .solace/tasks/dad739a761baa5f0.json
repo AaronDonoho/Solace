@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "The text in the desktop app looks too small. Let the human change the font size.\n\n**Behavior**\n- Settings → Appearance tab: a **Font size** dropdown whose choices are font size values in pixels: 12, 13, 14, 16, 18, 20, 24. Plus a **Reset to default** button that sets it back to the default size.\n- In the desktop app, **Ctrl + mouse wheel up** makes the font bigger and **Ctrl + mouse wheel down** makes it smaller. Each step moves to the next size in the dropdown. It stops at the smallest and largest sizes.\n- The wheel and the dropdown stay in step: zooming with the wheel changes the dropdown's value, and picking a value in the dropdown changes the size.\n- The chosen size applies to every page and is remembered when the app is opened again.\n\n**Notes for the agent**\n- The default is the app's current base font size; if that isn't one of the listed values, add it to the list.\n- Settings are kept through `settings.load` / `settings.save` / `settings.subscribe` in `solace-cli/settings/src/store.mjs`, so pages that are already open pick up changes.\n- Make sure Ctrl + wheel doesn't also trigger the webview's own built-in zoom in the desktop app.",
+  "closedTime": 1795203158,
+  "column": "complete",
+  "createdTime": 1795071494,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/settings",
+  "id": "dad739a761baa5f0",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-app",
+    "solace-cli/frontend",
+    "solace-cli/settings"
+  ],
+  "title": "appearance: adjustable font size"
+}

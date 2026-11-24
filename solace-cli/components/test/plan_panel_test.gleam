@@ -234,3 +234,48 @@ pub fn tabs_show_at_the_top_and_replace_the_agent_body_test() {
   assert string.contains(agent, ">Agent</button>")
   assert string.contains(agent, "plan-compose")
 }
+
+/// On the Strategy page's pick, the first pick removes the placeholder and
+/// each model's option keeps its key, so the box shows the model picked.
+pub fn a_first_pick_keeps_each_model_option_test() {
+  let agent = fn(id) {
+    solace_task.Agent(
+      id: id,
+      label: id,
+      available: True,
+      reason: "",
+      effort: "",
+      efforts: [],
+      agent: "",
+      retry: False,
+      sign_in: False,
+      model: "",
+    )
+  }
+  let draw = fn(model) {
+    element.to_string(plan_panel.view_with_notes(
+      "",
+      settings(),
+      plan_panel.Panel(
+        ..panel(),
+        models: [agent("a"), agent("b")],
+        model: model,
+      ),
+      plan_panel.marker(settings().labels),
+    ))
+  }
+  let before = draw("")
+  assert string.contains(before, "Select a model")
+  assert string.contains(before, "data-lustre-key=\"a\"")
+  assert string.contains(before, "data-lustre-key=\"b\"")
+  let after = draw("b")
+  assert !string.contains(after, "Select a model")
+  assert string.contains(after, "data-lustre-key=\"a\"")
+  assert string.contains(after, "data-lustre-key=\"b\" selected")
+}
+
+/// The conversation can take focus, so Ctrl+A there selects only its text.
+pub fn the_conversation_takes_its_own_keys_test() {
+  let page = element.to_string(plan_panel.view("", settings(), panel()))
+  assert string.contains(page, "tabindex=\"-1\"")
+}

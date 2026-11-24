@@ -1,6 +1,9 @@
 name = "strategy"
-version = "0.2.0"
+version = "0.2.6"
 target = "javascript"
+
+[javascript]
+runtime = "bun"
 
 [dependencies]
 gleam_stdlib = ">= 1.0.0 and < 2.0.0"

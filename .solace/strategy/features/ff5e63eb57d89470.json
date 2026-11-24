@@ -1,0 +1,11 @@
+{
+  "body": "What system reviews found in the project, one task per finding. `SYSTEMREVIEWS.md` lists each review and its tasks.",
+  "colorSlot": 40,
+  "findings": true,
+  "id": "ff5e63eb57d89470",
+  "milestone": null,
+  "rank": 23.0,
+  "startTime": 1795503693,
+  "state": "active",
+  "title": "System review findings"
+}

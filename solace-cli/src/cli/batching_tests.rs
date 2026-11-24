@@ -28,6 +28,7 @@ fn a_question_is_told_from_a_command() {
     for line in [
         "task ask What next?",
         "task decision ## Toolchain",
+        "task propose --blocking",
         "strategy vision Add a page",
         "strategy decision ## Toolchain",
         "design propose 0123456789abcdef",

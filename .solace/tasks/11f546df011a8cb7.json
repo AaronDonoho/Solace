@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "A `solace test` run inside a task is stopped after 10 minutes (E6012, `timed out after 600s`). That limit is right and stays as it is.\n\nIn task:52803ec35dce669f, run `c33314e7c8934805`, the first `solace test` in `solace-cli` hit that limit. The agent called it a cold compile, but cargo's log marked the dependencies as already built (`\"fresh\": true`), and the end of the log was cut off. So it isn't known whether the time went into compiling the `solace` crate, running its tests, or waiting on another cargo process.\n\nDone when a `solace test` of `solace-cli` inside a task, on this machine (WSL2, 16 logical processors, 7.7 GB), finishes in under 10 minutes, and the summary says where the time went.",
+  "closedTime": 1795341387,
+  "column": "complete",
+  "createdTime": 1795338586,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "11f546df011a8cb7",
+  "links": [],
+  "milestone": null,
+  "rank": 446.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tests: a task's test run fits in 10 minutes"
+}

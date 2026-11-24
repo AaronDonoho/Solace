@@ -2851,3 +2851,39 @@ fn loose_ambiguous(old: &[&str], lines: &[String]) -> bool {
     let Some(room) = lines.len().checked_sub(old.len()) else { return false };
     (0..=room).filter(|&k| loose_fits(old, lines, k)).take(2).count() > 1
 }
+
+/// `view --draft <id> [--from <line>[:<column>]]`: the draft from `from`, as
+/// much of it as `budget` holds, ending with the call that shows the rest.
+pub fn view_page(s: &Store, id: &str, from: (usize, usize), budget: usize) -> Out {
+    Ok(page(&load(s, id)?.1, from, budget, &format!("view --draft {id}")))
+}
+
+/// `text` from `(line, column)`, both counted from 1 and the column in bytes,
+/// cut to fit `budget` with a `Next: <command> --from <line>[:<column>]` line.
+fn page(text: &str, (line, column): (usize, usize), budget: usize, command: &str) -> String {
+    let room = budget.saturating_sub(100);
+    let mut out = String::new();
+    for (i, whole) in text.split_inclusive('\n').enumerate().skip(line.saturating_sub(1)) {
+        let start = if i + 1 == line { whole.floor_char_boundary(column.saturating_sub(1)) } else { 0 };
+        let rest = &whole[start..];
+        if out.len() + rest.len() > room {
+            if !out.is_empty() {
+                return format!("{out}Next: {command} --from {}\n", i + 1);
+            }
+            // A line longer than the whole reply shows what fits of it, at least one character.
+            let end = start + rest.ceil_char_boundary(rest.floor_char_boundary(room).max(1));
+            return format!("{}\nNext: {command} --from {}:{}\n", &whole[start..end], i + 1, end + 1);
+        }
+        out += rest;
+    }
+    out
+}
+
+/// A `--from` value: `<line>` or `<line>:<column>`, each counted from 1.
+pub fn page_start(from: &str) -> Option<(usize, usize)> {
+    let (line, column) = from.split_once(':').unwrap_or((from, "1"));
+    match (line.parse(), column.parse()) {
+        (Ok(line), Ok(column)) if line > 0 && column > 0 => Some((line, column)),
+        _ => None,
+    }
+}

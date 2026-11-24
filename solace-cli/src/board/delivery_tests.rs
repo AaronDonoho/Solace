@@ -27,9 +27,16 @@ fn notes_keep_order_and_an_answer_names_its_proposal() {
 
 #[test]
 fn wait_limit_stays_below_the_agent_clients_timeout() {
+    let dir = crate::testing::Scratch::new();
     for timeout in [60, 7200] {
         let client = std::time::Duration::from_secs(crate::lockdown::tool_timeout(timeout));
         assert!(super::wait_limit_for(timeout) < client, "timeout {timeout}");
+        let launch: serde_json::Value = serde_json::from_str(
+            &crate::lockdown::agent_config("claude", &dir.join("claude"), std::path::Path::new("/bin/solace"), timeout).unwrap(),
+        )
+        .unwrap();
+        let idle = launch["env"]["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"].as_str().and_then(|ms| ms.parse::<u64>().ok()).unwrap_or(0);
+        assert!(super::wait_limit_for(timeout) < std::time::Duration::from_millis(idle), "idle limit, timeout {timeout}");
     }
 }
 

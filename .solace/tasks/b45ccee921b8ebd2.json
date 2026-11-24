@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Research only: no code changes. The human wants to move tasks between board columns by dragging them, alongside the existing buttons. The human may follow up with Aaron before deciding.\n\n**The conflict to research:** D-56 says *\"only editor text can be dragged\"*, and the board's `api.prevent_drag` blocks every other drag. Find out what D-56 and `prevent_drag` protect against, and whether dragging cards can be allowed without bringing those problems back. Then write a proposed wording for a change to D-56 that the human can take to Aaron.\n\n**Behaviour the human has asked for, to carry into the build task later:**\n- A drop runs the same workflow step as the button that leads to that column.\n- If no button leads to that column, the card shakes and stays where it is.\n- If the step needs input, the task's details open, the field that needs input is highlighted, and a short message says what's needed.\n- If the step needs a model, it uses the models saved in Settings → Agents → Roles. If none are saved, the user sees a warning.\n\nWrite up the findings as a task note: what D-56 protects, the risks of allowing card drags, the D-56 wording, and any open questions.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795203782,
+  "dependsOn": [],
+  "feature": "1e6eeae55feeb522",
+  "home": "solace-cli/board",
+  "id": "b45ccee921b8ebd2",
+  "links": [],
+  "milestone": null,
+  "rank": 181.0,
+  "scope": [
+    "solace-cli/board"
+  ],
+  "title": "board: research dragging tasks between columns"
+}

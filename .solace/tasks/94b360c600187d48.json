@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795248655,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "94b360c600187d48",
+  "links": [],
+  "milestone": null,
+  "rank": 434.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "board: link the blocking Unexpected Changes task"
+}

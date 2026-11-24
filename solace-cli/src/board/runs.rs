@@ -536,8 +536,10 @@ pub(crate) fn supervise(
             ending.get_or_insert_with(Instant::now);
         }
         if let Some(status) = child.try_wait()? {
-            if !ended {
-                handle_exit(&watch, rid, RunContext { run: r, log, model: m, resumed, retried }, status)?;
+            // A finish the agent made just before exiting is newer than `run`.
+            let (run, _) = watch.run(rid)?;
+            if run["state"] != "ended" {
+                handle_exit(&watch, rid, RunContext { run: &run, log, model: m, resumed, retried }, status)?;
             }
             return Ok(false);
         }
@@ -1052,7 +1054,7 @@ pub fn context() -> Option<(String, String)> {
 
 /// The task run's ids: both of them, and the task is not a strategy run's.
 pub(super) fn task_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
-    Some((task.filter(|t| t != STRATEGY_RUN && t != crate::board::roles::DESIGN_RUN)?, run?))
+    Some((task.filter(|t| t != STRATEGY_RUN && t != crate::board::roles::DESIGN_RUN && t != crate::board::roles::SYSTEM_REVIEW_RUN)?, run?))
 }
 
 /// A strategy run's id, from its agent's environment.
@@ -1066,69 +1068,7 @@ pub fn strategy_context() -> Option<String> {
 /// and, for a command in another project of its scope (`also`), that
 /// project's too (D-61).
 pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]) -> Result<Vec<fs::File>, Failure> {
-    loop {
-        // A task file is replaced while the server saves it; a check that arrives
-        // in that moment waits for it rather than reporting it missing.
-        let (guard, t) = scope::retry_task(|| {
-            let guard = if a.first() == Some(&"task") {
-                vec![]
-            } else {
-                scope::lock_all(&[root].iter().chain(also).map(|p| p.to_path_buf()).collect::<Vec<_>>())?
-            };
-            Ok((guard, task(root, tid)?))
-        })?;
-        let r = &t["runs"][run_at(&t, rid)?];
-        if r["state"] == "ended" {
-            return err("E7003", "run ended");
-        }
-        if !t["paused_from"].is_null() {
-            drop(guard);
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        // The run waits for an answer: an agent that went on without it (its ask was
-        // queued) holds still until the human replies, or stops if no server is there to hear.
-        if r["state"] == "waiting" && a.first() != Some(&"task") {
-            let notes = t["notes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-            let replied = r["kind"] == "discuss" && crate::board::delivery::pending_task_reply(r, notes, rid);
-            drop(guard);
-            if !tasks::serving(&scope::top(root)) {
-                return err("E7003", "the run waits for an answer and no board server is running; stop now");
-            }
-            if replied {
-                return err("E7003", "the human replied; call `task wait` to receive it");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        if crate::cli::HOST.contains(&a[0]) {
-            return err("E7010", "host command is unavailable in a run");
-        }
-        if r["kind"] != "work" && a.starts_with(&["drafts", "drop"]) {
-            return err("E7010", "this run is read-only");
-        }
-        // Every read-only run may run the commands a human marked (D-67, D-161).
-        if r["kind"] != "work" && a[0] == "run" && a.len() > 1 {
-            let marked = lockdown::settings(also.first().copied().unwrap_or(root))
-                .ok()
-                .and_then(|v| v.get("commands")?.get(a[1])?.get("allowed_in_reviews")?.as_bool())
-                .unwrap_or(false);
-            if !marked {
-                return err("E7010", "this run is read-only: run only works for commands marked allowed_in_reviews in solace.toml");
-            }
-        } else if r["kind"] != "work" && crate::command_tx::CHANGES.contains(&a[0]) && a[0] != "build" {
-            return err("E7010", "this run is read-only");
-        }
-        // The human may have changed the task's projects while it was paused.
-        for p in also {
-            let top = scope::top(root);
-            let dir = scope::dir(&top, p);
-            if !scope::of(&t, &scope::dir(&top, root)).contains(&dir) {
-                return lockdown::error("E6007", &dir, "no longer one of this task's projects");
-            }
-        }
-        return Ok(guard);
-    }
+    agent_guard_within(root, tid, rid, a, also, crate::board::delivery::wait_limit)
 }
 
 #[cfg(test)]
@@ -1170,13 +1110,20 @@ pub fn task_command(
     let discussing = t["runs"][i]["kind"] == "discuss";
     // A wait-only call keeps waiting without sending the same note again.
     if a.get(1) == Some(&"wait") {
-        if !discussing {
-            return err("E7001", "task wait is only for a discussion");
-        }
         drop(guard);
-        return wait_discussion(s, tid, rid, Some(crate::board::delivery::wait_limit()));
+        let limit = crate::board::delivery::wait_limit();
+        if discussing {
+            return wait_discussion(s, tid, rid, Some(limit));
+        }
+        if t["runs"][i]["state"] != "waiting" && crate::board::delivery::reply_delivered(&t["runs"][i]) {
+            return err("E7001", "task wait is for a discussion, or for an answer the human hasn't given yet");
+        }
+        return wait_reply(s, tid, rid, limit);
     }
-    let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
+    // `--blocking` is `task propose`'s flag; its fields are the text.
+    let blocking = a.get(1) == Some(&"propose") && a.get(2) == Some(&"--blocking");
+    let words = if blocking { 3 } else { 2 };
+    let text = if a.len() > words { a[words..].join(" ") } else { input()? };
     let top = scope::top(&s.root);
     // The agent sends the task server a message; the server applies it (D-77).
     let mut m = json!({"kind":"agent","task":tid,"run":rid,"command":a.get(1),"text":text});
@@ -1236,7 +1183,7 @@ pub fn task_command(
             if tasks::rejected(&top, &sent) {
                 return err("E7001", REJECTED);
             }
-            return wait_reply(s, tid, rid);
+            return wait_reply(s, tid, rid, crate::board::delivery::wait_limit());
         }
         Some("decision") => {
             if t["runs"][i]["kind"] == "review" {
@@ -1244,10 +1191,11 @@ pub fn task_command(
             }
             return crate::board::settings::propose_decision(s, tid, rid, &text, None, guard);
         }
+        Some("propose") => return crate::board::settings::propose_task(s, tid, rid, &text, blocking, guard),
         _ => {
             return usage(concat!(
                 "task peek <task> [--notes [3,7,10..12]] [--from <n>] | task peek feature | ",
-                "task note | task wait | task ask | task decision | task done, with the text in `text`; ",
+                "task note | task wait | task ask | task decision | task propose [--blocking] | task done, with the text in `text`; ",
                 "task diff [--since-review] [name ...]",
             ));
         }
@@ -1257,28 +1205,42 @@ pub fn task_command(
     message(&w, &mut next, &m)?;
     // Moving into a final column settles on the server, once it has applied the
     // move (`tasks::settle_later`): the task may have changed since this copy.
-    tasks::send(&top, m)?;
-    Ok(if tasks::serving(&top) { "Recorded.\n".into() } else { format!("{}\n", tasks::QUEUED) })
+    let sent = tasks::send(&top, m)?;
+    drop(guard);
+    // An agent may exit as soon as this returns, so its run has ended by then.
+    if !tasks::applied(&top, &sent) {
+        return Ok(format!("{}\n", tasks::QUEUED));
+    }
+    if tasks::rejected(&top, &sent) {
+        return err("E7001", REJECTED);
+    }
+    Ok("Recorded.\n".into())
 }
 
-/// Holds the agent's call until its answers arrive and the run continues. The
-/// caller has seen its message applied (`tasks::applied`), or the run would still
-/// read `running` here and get the previous reply.
-pub(crate) fn wait_reply(s: &Store, tid: &str, rid: &str) -> Out {
+/// Holds the agent's call until its answers arrive and the run continues, or
+/// until `limit`. The caller has seen its message applied (`tasks::applied`), or
+/// the run would still read `running` here and get the previous reply.
+pub(crate) fn wait_reply(s: &Store, tid: &str, rid: &str, limit: Duration) -> Out {
     let top = scope::top(&s.root);
+    let started = std::time::Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(50));
-        // No server, so no answer is coming: return rather than wait forever.
-        if !tasks::serving(&top) {
-            return err("E7003", "the board server stopped while waiting");
-        }
         let t = task(&s.root, tid)?;
         let i = run_at(&t, rid)?;
         if t["runs"][i]["state"] == "ended" {
             return err("E7003", "run ended while waiting");
         }
         if t["runs"][i]["state"] == "running" && t["paused_from"].is_null() {
+            // The answer is handed over even when marking it fails: losing it would be worse than a repeat.
+            let _ = crate::board::delivery::mark_reply_delivered(&s.root, tid, rid, &t["runs"][i]);
             return Ok(format!("{}\n", t["runs"][i]["reply"]));
+        }
+        // No server, so no answer is coming: return rather than wait forever.
+        if !tasks::serving(&top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
+        if started.elapsed() > limit {
+            return Ok(crate::board::delivery::ANSWER_WAIT_AGAIN.into());
         }
     }
 }
@@ -1584,6 +1546,7 @@ fn record_line(line: &str) {
         .or_else(|| strategy_context().map(|rid| (STRATEGY_RUN.into(), rid)))
         .or_else(|| notes_context().map(|rid| (crate::board::roles::NOTES_RUN.into(), rid)))
         .or_else(|| design_context().map(|rid| (crate::board::roles::DESIGN_RUN.into(), rid)));
+    let ids = ids.or_else(|| system_review_context().map(|rid| (crate::board::roles::SYSTEM_REVIEW_RUN.into(), rid)));
     record_line_for(&root, ids, line);
 }
 
@@ -1639,4 +1602,110 @@ pub(crate) fn notes_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn F
 /// Launches notes run `rid`'s agent on its own thread.
 pub(crate) fn start_notes(top: PathBuf, rid: String) {
     super::strategy::start_notes(top, rid)
+}
+
+/// `agent_guard`, holding a waiting run's command no longer than `limit` gives.
+pub(crate) fn agent_guard_within(
+    root: &Path,
+    tid: &str,
+    rid: &str,
+    a: &[&str],
+    also: &[&Path],
+    limit: fn() -> Duration,
+) -> Result<Vec<fs::File>, Failure> {
+    let started = std::time::Instant::now();
+    let mut held = None;
+    loop {
+        // A task file is replaced while the server saves it; a check that arrives
+        // in that moment waits for it rather than reporting it missing.
+        let (guard, t) = scope::retry_task(|| {
+            let guard = if a.first() == Some(&"task") {
+                vec![]
+            } else {
+                scope::lock_all(&[root].iter().chain(also).map(|p| p.to_path_buf()).collect::<Vec<_>>())?
+            };
+            Ok((guard, task(root, tid)?))
+        })?;
+        let r = &t["runs"][run_at(&t, rid)?];
+        if r["state"] == "ended" {
+            return err("E7003", "run ended");
+        }
+        if !t["paused_from"].is_null() {
+            drop(guard);
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        // The run waits for an answer: an agent that went on without it (its ask was
+        // queued) holds still until the human replies, or stops if no server is there to hear.
+        if r["state"] == "waiting" && a.first() != Some(&"task") {
+            let notes = t["notes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let replied = r["kind"] == "discuss" && crate::board::delivery::pending_task_reply(r, notes, rid);
+            drop(guard);
+            if !tasks::serving(&scope::top(root)) {
+                return err("E7003", "the run waits for an answer and no board server is running; stop now");
+            }
+            if replied {
+                return err("E7003", "the human replied; call `task wait` to receive it");
+            }
+            // A hold past the agent client's limit would leave every later call behind it.
+            if started.elapsed() > *held.get_or_insert_with(limit) {
+                return err("E7003", "the run still waits for the human; call `task wait` to keep waiting");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        if crate::cli::HOST.contains(&a[0]) {
+            return err("E7010", "host command is unavailable in a run");
+        }
+        if r["kind"] != "work" && a.starts_with(&["drafts", "drop"]) {
+            return err("E7010", "this run is read-only");
+        }
+        // Every read-only run may run the commands a human marked (D-67, D-161).
+        if r["kind"] != "work" && a[0] == "run" && a.len() > 1 {
+            let marked = lockdown::settings(also.first().copied().unwrap_or(root))
+                .ok()
+                .and_then(|v| v.get("commands")?.get(a[1])?.get("allowed_in_reviews")?.as_bool())
+                .unwrap_or(false);
+            if !marked {
+                return err("E7010", "this run is read-only: run only works for commands marked allowed_in_reviews in solace.toml");
+            }
+        } else if r["kind"] != "work" && crate::command_tx::CHANGES.contains(&a[0]) && a[0] != "build" {
+            return err("E7010", "this run is read-only");
+        }
+        // The human may have changed the task's projects while it was paused.
+        for p in also {
+            let top = scope::top(root);
+            let dir = scope::dir(&top, p);
+            if !scope::of(&t, &scope::dir(&top, root)).contains(&dir) {
+                return lockdown::error("E6007", &dir, "no longer one of this task's projects");
+            }
+        }
+        return Ok(guard);
+    }
+}
+
+/// A system review run's task and run ids from an agent's environment values.
+fn system_review_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
+    Some((task.filter(|t| t == crate::board::roles::SYSTEM_REVIEW_RUN)?, run?))
+}
+
+/// A system review run's id, from its agent's environment.
+pub fn system_review_context() -> Option<String> {
+    system_review_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok()).map(|(_, rid)| rid)
+}
+
+/// Whether this agent is in a workspace run (strategy, design, notes or system
+/// review): it changes no code and has no task.
+pub(crate) fn workspace_context() -> bool {
+    strategy_context().is_some() || design_context().is_some() || notes_context().is_some() || system_review_context().is_some()
+}
+
+/// Launches system review run `rid`'s agent on its own thread.
+pub(crate) fn start_system_review(top: PathBuf, rid: String) {
+    super::strategy::start_system_review(top, rid)
+}
+
+/// Waits until system review run `rid`'s agent may act, taking no project lock.
+pub(crate) fn system_review_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    super::strategy::system_review_guard(top, rid, a)
 }

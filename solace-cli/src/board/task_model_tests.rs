@@ -440,3 +440,19 @@ fn a_workflow_event_goes_to_the_local_log_under_its_project() {
     assert_eq!(old, 0, "the shared store still has a board event table");
 }
 
+/// D-160 point 6: a project taken off the board with its store kept keeps its
+/// tasks; adding it back puts them in its lane again.
+#[test]
+fn a_task_of_a_project_off_the_board_keeps_its_home() {
+    let root = homeless_root();
+    fs::create_dir_all(root.join("web/.solace")).unwrap();
+    fs::write(root.join("web/.solace/store.db"), "").unwrap();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!((t["home"].as_str(), t["scope"].clone(), t["noProject"].as_bool()), (Some("web"), json!(["sub", "web"]), Some(true)), "{t}");
+    assert!(!t["notes"].to_string().contains("Moved from"), "{t}");
+    assert!(root.join(".solace/board/t1").is_dir(), "its folder stays");
+    fs::write(root.join("solace.toml"), "projects = [\"sub\", \"web\"]\n").unwrap();
+    let back = tasks(&root.join("web")).unwrap();
+    assert_eq!(back.iter().map(|t| (t["id"].as_str(), t["noProject"].is_null())).collect::<Vec<_>>(), vec![(Some("t1"), true)]);
+}
+

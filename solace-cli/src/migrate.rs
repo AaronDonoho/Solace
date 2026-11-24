@@ -14,6 +14,9 @@ use std::env;
 use crate::lockdown::settings::settings;
 #[cfg(test)] use crate::board::task_model::lock;
 use crate::outside_share::share_store;
+#[cfg(test)]
+#[path = "migrate_tests.rs"]
+mod tests;
 
 pub const COPY: &str = "solace-migration";
 const STATE: &str = ".solace/migration.json";
@@ -303,18 +306,24 @@ pub fn protected(root: &Path) -> Option<PathBuf> {
 }
 
 /// The arguments that run `argv` in `root` under bubblewrap: no network, only
-/// `root/target` writable; Cargo's and rustup's caches, the toolchain, and the
+/// `root/target`, the lockfile and the folders a project's `[sandbox] write`
+/// names writable; Cargo's and rustup's caches, the toolchain, and the
 /// folders a project's `[sandbox] read` names read-only (D-158 point 4). `home`
 /// is the home folder, emptied first so a build script can't read what else is
 /// in it; with `None` it is left as it is. `cargo_home` and `rustup_home` are
 /// where Cargo and rustup keep their caches, which a machine may put elsewhere
-/// (`CARGO_HOME`, `RUSTUP_HOME`).
+/// (`CARGO_HOME`, `RUSTUP_HOME`). `program_folder` is the folder `argv[0]` is
+/// found in on `PATH`, and `tools` the folder of Solace's own Gleam and Erlang
+/// (D-264); each is mounted read-only after the home folder is emptied, since
+/// it may be inside it, unless it is the home folder or holds it.
 pub fn cargo_sandbox_args(
     argv: &[String],
     root: &Path,
     home: Option<&Path>,
     cargo_home: &Path,
     rustup_home: &Path,
+    program_folder: Option<&Path>,
+    tools: Option<&Path>,
 ) -> Result<Vec<String>, Failure> {
     let mut a: Vec<String> =
         ["--die-with-parent", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
@@ -322,18 +331,21 @@ pub fn cargo_sandbox_args(
             .map(|s| s.to_string())
             .collect();
     if let Some(home) = home {
-        let home = home.to_string_lossy().to_string();
-        a.extend(["--tmpfs".to_string(), home]);
+        a.extend(["--tmpfs".to_string(), home.to_string_lossy().to_string()]);
         for sub in ["registry", "git", "bin"] {
             let p = cargo_home.join(sub).to_string_lossy().to_string();
             a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
         }
         let p = rustup_home.to_string_lossy().to_string();
         a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
+        for folder in [program_folder, tools].into_iter().flatten().filter(|f| f.is_absolute() && !home.starts_with(f)) {
+            let p = folder.to_string_lossy().to_string();
+            a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
+        }
     }
     // A project's tests may read fixtures beside it. Only the folders it names
     // come back after the home folder was emptied, never the whole root.
-    for p in sandbox_reads(root)? {
+    for p in sandbox_folders(root, "read")? {
         let p = p.to_string_lossy().to_string();
         a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
     }
@@ -342,6 +354,10 @@ pub fn cargo_sandbox_args(
     // `/tmp` and the home folder were emptied above, so a project below one
     // of them is put back before its `target/` becomes the writable folder.
     a.extend(["--ro-bind".to_string(), dir.clone(), dir.clone(), "--bind".to_string(), target.clone(), target, "--chdir".to_string(), dir]);
+    for p in sandbox_folders(root, "write")? {
+        let p = p.to_string_lossy().to_string();
+        a.extend(["--bind".to_string(), p.clone(), p]);
+    }
     // A project's lockfile lives outside `target/`: bound writable, because
     // cargo writes it. `cargo_sandboxed` creates a missing one first, so this
     // only builds the arguments.
@@ -366,6 +382,7 @@ fn run(dir: &Path, argv: &[&str], secs: u64, protect: Option<&Path>) -> (bool, S
     let log = env::temp_dir().join(format!("solace-{}.log", unique_id()));
     let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
     let result = (|| -> Result<(bool, String), Failure> {
+        let argv = crate::language::command_line(dir, &argv)?;
         let f = fs::File::create(&log)?;
         let mut child = sandboxed(&argv, dir, protect).process_group(0).stdin(Stdio::null()).stdout(f.try_clone()?).stderr(f).spawn()?;
         let ok = lockdown::wait_or_kill(&mut child, std::time::Duration::from_secs(secs))?.is_some_and(|s| s.success());
@@ -1620,182 +1637,8 @@ pub fn command(args: &[&str]) -> Out {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explains_layout_differences() {
-        assert_eq!(explain("a\r\nb\r\n", "a\nb\n"), vec!["Windows line endings"]);
-        assert_eq!(
-            explain("fn a() {}\n\n\n\nfn b() {}", "fn a() {}\n\nfn b() {}\n"),
-            vec!["the newline at the end of the file", "blank lines between definitions"]
-        );
-    }
-
-    #[test]
-    fn finds_lines_inside_strings() {
-        let src = "pub fn a() {\n  \"one\n\npub fn b() {}\n\\\"still\"\n}\n// \"not a string\npub fn c() { \"x\" }\n";
-        assert_eq!(string_lines(src), vec![2, 3, 4]);
-    }
-
-    #[test]
-    fn a_definition_inside_a_string_is_not_layout() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
-        let src = "pub fn a() {\n  \"\npub fn b() {}\n\"\n}\n";
-        let m = gleam::split(src);
-        db.execute("INSERT INTO modules(path, dir, header) VALUES ('app', 'src', ?1)", [&m.header]).unwrap();
-        for (i, it) in m.items.iter().enumerate() {
-            db.execute(
-                "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, 'app', ?2, 'fn', ?3, ?4, '')",
-                params![i as i64, it.name, it.text, i as i64],
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            changed_pieces(&gleam::Gleam, &db, "src/app.gleam", src).unwrap(),
-            vec!["a text value spanning several lines, holding a line Solace would take for a new definition"]
-        );
-        assert!(!changed_pieces(&gleam::Gleam, &db, "src/app.gleam", "pub fn a() {\n  \"\n").unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_failure_the_original_had_is_not_blamed() {
-        let base = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.old_test"]}},"smoke":[{"ok":true}]});
-        let now = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.old_test","app_test.new_test"],"output":""}},
-            "smoke":[{"command":"true","ok":false,"output":""}]});
-        let items = behavior(&base, &now, true);
-        let status = |t: &str| items.iter().find(|i| i["text"].as_str().unwrap().contains(t)).unwrap()["status"].clone();
-        assert_eq!(status("old_test"), "not checked");
-        assert_eq!(status("new_test"), "failed");
-        assert_eq!(status("check command"), "failed");
-        assert_eq!(check(TESTS, "", items)["status"], "failed");
-    }
-
-    #[test]
-    fn tests_are_reported_when_only_the_migration_builds() {
-        let base = json!({"projects":{".":{"build":false,"test":false,"failing":[]}},"smoke":[]});
-        let now = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.t"],"output":""}},"smoke":[]});
-        let items = behavior(&base, &now, false);
-        assert!(
-            items.iter().any(|i| i["text"].as_str().unwrap().contains("app_test.t fails; your project didn't build before the migration"))
-        );
-        let none = json!({"projects":{".":{"build":false,"test":false,"failing":[],"output":""}},"smoke":[]});
-        assert_eq!(warnings(&base, &none).len(), 1);
-    }
-
-    #[test]
-    fn relative_paths() {
-        assert_eq!(relative(Path::new("/a/b"), Path::new("/a/c/d")), PathBuf::from("../c/d"));
-        assert_eq!(relative(Path::new("/a"), Path::new("/a/x")), PathBuf::from("x"));
-    }
-
-    fn project_with_lock() -> (crate::testing::Project, fs::File) {
-        let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let held = lock(&p.root).unwrap();
-        (p, held)
-    }
-
-    #[test]
-    fn hold_refuses_a_lock_held_for_the_whole_wait() {
-        let (p, _held) = project_with_lock();
-        let e = hold(&p.root).unwrap_err();
-        assert!(e.0.starts_with("E7003"), "{}", e.0);
-        assert!(e.0.contains("is busy with another command"), "{}", e.0);
-    }
-
-    #[test]
-    fn hold_takes_a_lock_released_during_the_wait() {
-        let (p, held) = project_with_lock();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            drop(held);
-        });
-        assert!(hold_within(&p.root, Duration::from_secs(10)).is_ok());
-    }
-
-    #[test]
-    fn nothing_to_migrate_says_why() {
-        let empty = crate::testing::Scratch::new();
-        let none = status(&empty).unwrap();
-        assert_eq!(none["state"], "none");
-        assert_eq!(none["reason"], nothing_reason(false));
-        let root = crate::testing::Scratch::new().with(&[("solace.toml", "projects = []\n")]);
-        let none = status(&root).unwrap();
-        assert_eq!(none["state"], "none");
-        assert_eq!(none["reason"], nothing_reason(true));
-    }
-}
-
-/// A test run from a task must not see the agent's task context (D-71): the
-/// same five variables the `rust-*` commands unset with `env -u`.
-#[cfg(test)]
-#[test]
-fn a_sandboxed_command_drops_the_agents_task_context() {
-    let dir =
-        crate::testing::Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
-    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let command = cargo_sandboxed(&argv, &dir).unwrap();
-    let mut removed = 0;
-    for (name, value) in command.get_envs() {
-        if value.is_none() {
-            for key in TASK_ENV {
-                if name == std::ffi::OsStr::new(key) {
-                    removed += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(removed, TASK_ENV.len());
-}
-
-/// A sandbox mounts only the folders a project declares in `[sandbox] read`,
-/// so a member's build script cannot read the whole Solace root (D-158 point 4).
-#[cfg(test)]
-#[test]
-fn a_sandbox_in_a_solace_root_mounts_only_the_declared_reads() {
-    let top = crate::testing::Scratch::new().with(&[
-        ("solace.toml", "projects = [\"app\"]\n"),
-        ("app/solace.toml", "[sandbox]\nread = [\"../fixtures\", \"/opt/shared\"]\n"),
-        ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
-    ]);
-    let root = top.join("app");
-    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let args =
-        cargo_sandbox_args(&argv, &root, Some(Path::new("/home/x")), Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup")).unwrap();
-    let line = args.join(" ");
-    let top = top.display().to_string();
-    assert!(line.contains(&format!("--ro-bind-try {top}/fixtures {top}/fixtures")), "{line}");
-    assert!(line.contains("--ro-bind-try /opt/shared /opt/shared"), "{line}");
-    assert!(line.contains(&format!("--ro-bind {top}/app {top}/app")), "{line}");
-    assert!(line.contains(&format!("--bind {top}/app/target {top}/app/target")), "{line}");
-    assert!(!line.contains(&format!("--ro-bind {top} {top}")), "the whole root is not mounted: {line}");
-}
-
-/// The folders a project's `[sandbox] read` names, resolved against its root,
-/// so a sandboxed command can read fixtures beside the project (D-158 point 4).
-fn sandbox_reads(root: &Path) -> Result<Vec<PathBuf>, Failure> {
-    let v = settings(root)?;
-    Ok(v.get("sandbox")
-        .and_then(|s| s.get("read"))
-        .and_then(|r| r.as_array())
-        .map(|paths| paths.iter().filter_map(|p| p.as_str()).map(|p| lexical(&root.join(p))).collect())
-        .unwrap_or_default())
-}
-
 /// The environment a task run sets; a command must not inherit it (D-71).
 pub(crate) const TASK_ENV: [&str; 5] = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG", "SOLACE_BIN"];
-
-#[cfg(test)]
-#[test]
-fn a_sandbox_with_unreadable_settings_is_refused() {
-    let (root, _store) = crate::testing::rust_project("pub fn one() -> i32 { 1 }\n");
-    fs::write(root.join("solace.toml"), "[sandbox]\nread = 3\n").unwrap();
-    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let e = cargo_sandbox_args(&argv, &root, None, Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup")).unwrap_err();
-    assert!(e.0.starts_with("E6020"), "{}", e.0);
-}
 
 /// Removes the task context a command must not inherit (D-71): a declared
 /// command or a sandboxed Rust command runs as the project's own tool.
@@ -1803,24 +1646,6 @@ pub(crate) fn drop_task_context(c: &mut Command) {
     for key in TASK_ENV {
         c.env_remove(key);
     }
-}
-
-#[cfg(test)]
-#[test]
-fn a_declared_command_drops_the_agents_task_context() {
-    let mut command = Command::new("true");
-    drop_task_context(&mut command);
-    let mut removed = 0;
-    for (name, value) in command.get_envs() {
-        if value.is_none() {
-            for key in TASK_ENV {
-                if name == std::ffi::OsStr::new(key) {
-                    removed += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(removed, TASK_ENV.len());
 }
 
 /// Whether bubblewrap can run commands here, checked now instead of from the cache.
@@ -1875,6 +1700,10 @@ fn cargo_sandboxed_with(argv: &[String], root: &Path, unshare_pid: bool) -> Resu
     let mut c = match home {
         Some(home) => {
             let _ = fs::create_dir_all(root.join("target"));
+            // A writable bind needs its folder to exist.
+            for p in sandbox_folders(root, "write")? {
+                let _ = fs::create_dir_all(p);
+            }
             // A fresh package has no lockfile; a writable bind needs the file
             // to exist, and cargo writes it as it would without the sandbox.
             let lock = root.join("Cargo.lock");
@@ -1884,7 +1713,10 @@ fn cargo_sandboxed_with(argv: &[String], root: &Path, unshare_pid: bool) -> Resu
             let elsewhere = |key: &str| env::var_os(key).map(PathBuf::from).filter(|p| p.is_absolute());
             let cargo_home = elsewhere("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
             let rustup_home = elsewhere("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
-            let mut args = cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home)?;
+            let program = crate::language::tool_path(&argv[0]);
+            let program_folder = program.as_deref().and_then(Path::parent);
+            let tools = crate::tools::folder();
+            let mut args = cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home, program_folder, tools.as_deref())?;
             if unshare_pid {
                 args.insert(2, "--unshare-pid".into());
             }
@@ -1899,6 +1731,7 @@ fn cargo_sandboxed_with(argv: &[String], root: &Path, unshare_pid: bool) -> Resu
         }
     };
     c.current_dir(root);
+    crate::tools::put_on_path(&mut c);
     drop_task_context(&mut c);
     Ok(c)
 }
@@ -1925,9 +1758,21 @@ fn sandboxed_with(argv: &[String], dir: &Path, protect: Option<&Path>, unshare_p
         c
     };
     c.current_dir(dir);
+    crate::tools::put_on_path(&mut c);
     c
 }
 
 fn nothing_reason(uses_solace: bool) -> &'static str {
     if uses_solace { "This folder already uses Solace." } else { "This folder has no Gleam projects that still need migrating." }
+}
+
+/// The folders a project's `[sandbox]` names under `key`, `read` or `write`,
+/// resolved against its root (D-158 point 4).
+fn sandbox_folders(root: &Path, key: &str) -> Result<Vec<PathBuf>, Failure> {
+    let v = settings(root)?;
+    Ok(v.get("sandbox")
+        .and_then(|s| s.get(key))
+        .and_then(|r| r.as_array())
+        .map(|paths| paths.iter().filter_map(|p| p.as_str()).map(|p| lexical(&root.join(p))).collect())
+        .unwrap_or_default())
 }

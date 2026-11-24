@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "## Problem\n`review_schedules.start_due` starts each due schedule's review. When `start` fails (no reviewer model, another review already open, a store error), it only runs `eprintln!(\"scheduled system review {id}: …\")` and moves the schedule on.\n\nThe desktop app's human never sees stderr. The review silently doesn't happen, and nothing records it: no missed notice and no past entry. The comment says \"is not retried\", so the human only finds out by noticing that no findings arrived.\n\n## Change\nIn `start_due`, when `start(&kinds)` returns `Err`:\n- Record it on that schedule the same way a missed review is recorded: set `missed` to the due time and `missed_read` to `false`.\n- Add a `reason` field with the refusal's message.\n\nThe existing missed-review banner (`sysreview.missed_notice`, also shown on Delivery) then offers **Run now** and **Skip**. Extend `sysreview.MissedReview` / `missed_decoder` with an optional `reason`. Extend `sysreview.missed_text` to read e.g. \"Weekly security review was due <time> and couldn't start: <reason>.\" when a reason is present.\n\n## Check\n- Add a Rust test in `review_schedules` tests: call `start_due` with a `start` closure that returns `Err(Failure(\"E7003 …\"))`. Check that the schedule now lists as missed, unread, with that reason.\n- Add a Gleam test in `test/schedule_test.gleam` or `sysreview_test.gleam`: `missed_text` with a reason includes it.\n- Keep the existing missed-review tests passing.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503693,
+  "dependsOn": [],
+  "feature": "ff5e63eb57d89470",
+  "home": "solace-cli",
+  "id": "26a7ea39a81c0a66",
+  "links": [],
+  "milestone": null,
+  "rank": 473.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/sysreview"
+  ],
+  "title": "Tell the human when a scheduled review can't start"
+}

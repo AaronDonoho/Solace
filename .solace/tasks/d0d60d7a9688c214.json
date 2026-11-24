@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "The review itself, with no page yet. Part of feature:21d501a74aec4f44.\n\n- A system review is an agent run over the **whole project**, not one task's changes. It changes no code.\n- It is given one or more review kinds. The first version has three: **Security**, **code quality** and **user experience**.\n- Each finding becomes a task in **Planning**, under one standing findings feature.\n- When the review finishes, Solace appends an entry to `SYSTEMREVIEWS.md` (D-265 point 3) with the kinds, the date, the version reviewed and the finding tasks it created.\n- The run's conversation stays local (D-265 point 4, D-261).\n\n**Check first (the feature asks for this):** an active feature becomes complete by itself once all of its tasks are final. Find out whether that makes one standing findings feature clumsy between reviews, for example findings arriving under a feature that already completed. If it does, ask the human whether to use one feature per review instead, and build what they choose.\n\nDone when: a review can be started from the server with chosen kinds, its findings land as Planning tasks under the findings feature, and its log entry is written.",
+  "closedTime": 1795402490,
+  "column": "complete",
+  "createdTime": 1795373109,
+  "dependsOn": [
+    "bdabb423a75bef6f"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "d0d60d7a9688c214",
+  "links": [],
+  "milestone": null,
+  "rank": 451.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "sysreview: review run and findings"
+}

@@ -157,10 +157,11 @@ fn the_stale_reason_is_shown_only_when_selection_forced_every_test() {
     );
 }
 
-/// Every symbol the test-selection fallback names resolves, so a rename here
-/// fails instead of silently shrinking the modules that force every test.
+/// Every symbol the test-selection fallback and the stale-sandbox warning
+/// name resolves, so a rename here fails instead of silently shrinking the
+/// modules that force every test or mark the sandbox old.
 #[test]
-fn every_selection_symbol_resolves_in_this_crate() {
+fn every_selection_and_sandbox_symbol_resolves_in_this_crate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let db = rusqlite::Connection::open_in_memory().unwrap();
     db.execute_batch(crate::store_core::SCHEMA).unwrap();
@@ -168,7 +169,7 @@ fn every_selection_symbol_resolves_in_this_crate() {
     crate::store::store_rust_package(&db, &files).unwrap();
     let store = Store::new(Rc::new(db), root, true, true);
     let ix = store.index().unwrap();
-    for name in SELECTION_SYMBOLS {
+    for name in SELECTION_SYMBOLS.iter().chain(SANDBOX_SYMBOLS) {
         assert!(ix.syms.iter().any(|s| s.qname() == *name), "{name} names no symbol in this crate");
     }
 }
@@ -212,5 +213,33 @@ fn the_stale_binary_note_is_sent_once() {
     let fresh = std::sync::atomic::AtomicBool::new(false);
     assert!(stale_binary_notice_from(&fresh, later, || earlier).is_none());
     assert!(!fresh.load(std::sync::atomic::Ordering::Relaxed), "an unchanged binary leaves the note unsent");
+}
+
+/// Only the sandbox's own modules mark the running sandbox as old; another
+/// module's change does not.
+#[test]
+fn the_servers_own_sandbox_source_newer_than_its_binary_is_stale() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod migrate;\npub mod tools;\npub mod view;\n"),
+        ("src/migrate.rs", "pub fn cargo_sandbox_args() {}\n\npub fn cargo_sandboxed_with() {}\n\npub fn sandboxed_with() {}\n"),
+        ("src/tools.rs", "pub fn folder() {}\n\npub fn put_on_path() {}\n"),
+        ("src/view.rs", "pub fn page() {}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let ix = Store::at(&root).unwrap().index().unwrap();
+    let sandbox = modules_holding(&ix, SANDBOX_SYMBOLS);
+    assert_eq!(sandbox, ["migrate".to_string(), "tools".to_string()].into_iter().collect::<HashSet<_>>());
+    let built = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(20));
+    set_time(&root.join("src/migrate.rs"), 10);
+    set_time(&root.join("src/tools.rs"), 10);
+    set_time(&root.join("src/view.rs"), 30);
+    assert!(!selection_source_is_newer(&root, built, &ix.modules, &sandbox), "a view change leaves the sandbox current");
+    set_time(&root.join("src/tools.rs"), 30);
+    assert!(selection_source_is_newer(&root, built, &ix.modules, &sandbox), "a tools change makes the sandbox old");
+    assert!(!server_sandbox_is_stale(&root, &ix), "another project than Solace's own is never warned");
 }
 

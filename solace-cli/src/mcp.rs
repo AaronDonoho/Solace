@@ -34,6 +34,26 @@ pub(crate) fn tool_schema() -> Value {
             }
         });
     }
+    if crate::board::runs::system_review_context().is_some() {
+        return json!({
+            "name": "solace",
+            "description": concat!(
+                "Review the whole project for this run's review kinds; this run changes no code. ",
+                "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` ",
+                "(`--project <folder>` for a project below the root). ",
+                "Finish with `review findings`, the findings as a JSON list in `text`: one object per finding ",
+                "with `kind`, `title`, `body` and an optional `scope`, or `[]` for none."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "One command, e.g. `review findings` or `view app.main`"},
+                    "text": {"type": "string", "description": "The findings as a JSON list, for `review findings`"}
+                },
+                "required": ["command"]
+            }
+        });
+    }
     if crate::board::runs::design_context().is_some() {
         return json!({
             "name": "solace",

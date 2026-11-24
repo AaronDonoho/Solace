@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Solace's server (`solace serve`) uses a large share of one processor core even when no agent is working. Measured on WSL2:\n\n- 44–47% of a core with nothing happening: 318 minutes of processor time over 11 hours, on 10 threads.\n- 60% of a core with one planning conversation waiting for the human.\n\nThe cause isn't known yet. Candidates: wait loops that check every 50 ms (`board::runs.wait_reply`), the file watcher, and the app's live-update stream.\n\nDone when an idle server, and one with a conversation waiting for the human, uses close to no processor time. The summary names what was causing it.",
+  "closedTime": 1795342587,
+  "column": "complete",
+  "createdTime": 1795336248,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "18f8b26b0a05127c",
+  "links": [],
+  "milestone": null,
+  "rank": 443.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "server: no busy processor while idle"
+}

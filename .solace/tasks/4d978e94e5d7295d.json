@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "The cargo sandbox (`migrate.cargo_sandbox_args`) empties the home folder, so programs installed under it are hidden from builds and tests. On this computer `gleam` is in `~/.local/bin` and Erlang in `~/.local/otp/OTP-29.1.1` (with `bin/`, `erts-17.1/` and `lib/`). Inside the sandbox Gleam can't be found, or Erlang can't load its libraries (`Runtime terminating during boot ({load_failed,…})`, `Shell command failure … escript`). About 300 solace-cli Rust tests fail this way.\n\nSettle which home folders the sandbox may show, without exposing secrets: `~/.cargo/credentials.toml` and `~/.local/share` (keyrings) must stay hidden. An earlier attempt mounted every home folder on PATH plus the installs their links point into. It exposed `~/.cargo` and `~/.local` through sibling links (`cargo -> rustup`), and even with that fixed it still didn't give Erlang its `lib/`. Options found so far: mount the parent of a PATH `bin` folder when it is at least two levels below home; declare the folder per machine in `[sandbox] read`; or a machine-level (not committed) list of tool folders.\n\nDone when: `test --all` in solace-cli passes on a machine with Gleam and Erlang under the home folder, and a test shows that `~/.cargo/credentials.toml` and `~/.ssh` aren't readable inside the sandbox.",
+  "closedTime": 1795280046,
+  "column": "complete",
+  "createdTime": 1795248530,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "4d978e94e5d7295d",
+  "links": [],
+  "milestone": null,
+  "rank": 433.0,
+  "scope": [
+    ".",
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "title": "Gleam and Erlang installed in the home folder run in the sandbox"
+}

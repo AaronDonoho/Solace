@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Removing a project from the workspace and adding it back sometimes shows it with no tasks, even though its tasks are still in its store.\n\nThe acceptance test `workspace_acceptance.Root.test_folder_of_projects` catches this at the step `DELETE /projects/b`, then `POST /projects {dir: b}`, then `GET /p/b/tasks`. The last call should list `['In b']` but sometimes returns `[]`. It failed in 3 of 5 back-to-back runs (16 workers, app closed).\n\nDone when the re-added project lists its tasks every time, both through the server and in the test. If the server's behaviour turns out to be correct and only the test is wrong, say why in the summary before changing the test.",
+  "closedTime": 1795339463,
+  "column": "complete",
+  "createdTime": 1795336220,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "52803ec35dce669f",
+  "links": [],
+  "milestone": null,
+  "rank": 442.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "projects: re-adding a project keeps its tasks"
+}

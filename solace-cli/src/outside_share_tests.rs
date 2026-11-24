@@ -322,3 +322,11 @@ fn an_old_combined_task_file_is_split_before_the_block_commits_it() {
     assert_eq!(t["runs"][0]["id"], "r1");
 }
 
+/// D-265 point 4: a system review's run and its log stay out of the shared files.
+#[test]
+fn system_review_runs_stay_local() {
+    for local in [".solace/system-reviews/r1.json", ".solace/system-reviews/r1.jsonl"] {
+        assert!(ignored(STORE_IGNORE, local), "{local}");
+    }
+}
+

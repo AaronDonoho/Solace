@@ -852,7 +852,7 @@ pub(crate) fn rehome(top: &Path, t: &Value) -> Result<Value, Failure> {
     let (top, tid) = (top.to_path_buf(), t["id"].as_str().unwrap_or("").to_string());
     op(&top.clone(), move || {
         let mut t = read_task(&top, &store_dir(&top).join(format!("{tid}.json")))?;
-        let Some((home, dirs)) = rehome_to(&workspace::members(&top)?, &t) else { return Ok(t) };
+        let Some((home, dirs)) = rehome_to(&top, &workspace::members(&top)?, &t) else { return Ok(t) };
         let old = t["home"].as_str().unwrap_or(".").to_string();
         // A homeless task's runs wrote in the root, where its folder is.
         let from = scope::path(&top, &old);
@@ -1027,4 +1027,31 @@ fn remember_written(top: &Path, id: &str, path: &Path, home: &str) {
 fn written_here(top: &Path, id: &str, stamp: &str) -> Option<String> {
     let written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
     written.get(&(top.to_path_buf(), id.to_string())).filter(|(s, _)| s == stamp).map(|(_, home)| home.clone())
+}
+
+/// What the board's watcher last saw of the root's designs, strategy records
+/// and task files, so it announces only what changed outside Solace.
+#[derive(Default)]
+pub(crate) struct Seen {
+    pub(crate) designs: Option<Value>,
+    pub(crate) milestones: Option<Value>,
+    pub(crate) features: Option<Value>,
+    pub(crate) vision: Option<Value>,
+    pub(crate) personas: Option<Value>,
+    pub(crate) tasks: Option<Value>,
+}
+
+/// Announces the root's designs, strategy records and task files changed
+/// outside Solace, such as by `git pull`. Solace's own writes are task server
+/// operations (D-77), so the check runs between them: it never reads one half
+/// done and announces it again, or after a newer change.
+pub(crate) fn announce_outside_changes(top: &Path, seen: &mut Seen) {
+    crate::tasks::server::between_operations(|| {
+        crate::design::announce_change(top, &mut seen.designs);
+        announce_records(top, "milestones", &mut seen.milestones);
+        announce_records(top, "features", &mut seen.features);
+        crate::tasks::strategy::announce_vision(top, &mut seen.vision);
+        crate::tasks::strategy::announce_personas(top, &mut seen.personas);
+        announce_tasks(top, &mut seen.tasks);
+    });
 }

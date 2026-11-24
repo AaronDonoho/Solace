@@ -128,6 +128,8 @@ fn test_args_filter_by_libtest_name() {
 /// The sandbox's arguments (D-158 point 4): no network, the home folder and
 /// the project read-only, only `target/` writable, then the command. Building
 /// them writes nothing, and a moved Cargo or rustup home is mounted where it is.
+/// The folder cargo is found in comes back read-only after the home folder is
+/// emptied, so a cargo outside Cargo's home still runs.
 #[test]
 fn cargo_sandbox_arguments_keep_only_target_writable() {
     let dir = Scratch::new().with(&[
@@ -141,6 +143,8 @@ fn cargo_sandbox_arguments_keep_only_target_writable() {
         Some(Path::new("/home/x")),
         Path::new("/home/x/.cargo"),
         Path::new("/home/x/.rustup"),
+        None,
+        None,
     )
     .unwrap();
     let line = args.join(" ");
@@ -155,12 +159,22 @@ fn cargo_sandbox_arguments_keep_only_target_writable() {
     assert!(line.contains(&format!("--bind {root}/Cargo.lock {root}/Cargo.lock")), "{line}");
     assert_eq!(&args[args.len() - 2..], ["cargo", "check"]);
     assert!(!dir.join("Cargo.lock").exists(), "building the arguments writes nothing");
-    let moved =
-        crate::migrate::cargo_sandbox_args(&argv, &dir, Some(Path::new("/home/x")), Path::new("/opt/cargo"), Path::new("/opt/rustup"))
-            .unwrap();
+    let moved = crate::migrate::cargo_sandbox_args(
+        &argv,
+        &dir,
+        Some(Path::new("/home/x")),
+        Path::new("/opt/cargo"),
+        Path::new("/opt/rustup"),
+        Some(Path::new("/home/x/.local/bin")),
+        None,
+    )
+    .unwrap();
     let line = moved.join(" ");
     assert!(line.contains("--ro-bind-try /opt/cargo/registry /opt/cargo/registry"), "{line}");
     assert!(line.contains("--ro-bind-try /opt/rustup /opt/rustup"), "{line}");
+    let emptied = line.find("--tmpfs /home/x").unwrap();
+    let program = line.find("--ro-bind-try /home/x/.local/bin /home/x/.local/bin").expect("cargo's folder is mounted");
+    assert!(emptied < program, "{line}");
 }
 
 /// One item is formatted, a nested one inside its parent's opening at the
@@ -682,4 +696,37 @@ fn a_failed_tests_location_names_its_symbol_and_source() {
     assert!(mapped.contains("assertion `left == right` failed"), "{mapped}");
     let outside = "thread 'x' panicked at src/orientation_tests.rs:30:5:\nboom";
     assert_eq!(relocate_failure(outside, &files, |_| Some(source)), outside);
+}
+
+#[test]
+fn a_timed_out_run_counts_what_finished_and_names_what_still_ran() {
+    let output = concat!(
+        "test a ... ok\n",
+        "test b has been running for over 60 seconds\n",
+        "test c has been running for over 60 seconds\n",
+        "test c ... FAILED\n",
+        "test d ... ignored\n",
+    );
+    assert_eq!(
+        crate::language::cargo::timed_out_summary(output, 600, 1),
+        "Tests timed out after 600s: 1 passed, 1 failed so far; still running: b.\n"
+    );
+    assert_eq!(
+        crate::language::cargo::timed_out_summary("     Running unittests src/lib.rs\n", 600, 0),
+        "Tests timed out after 600s: 0 passed, 0 failed so far.\n"
+    );
+}
+
+#[test]
+fn a_timed_out_build_says_no_test_had_started() {
+    let output = concat!(
+        "   Compiling one v0.1.0 (/tmp/one)\n",
+        "{\"reason\":\"compiler-artifact\"}\n",
+        "    Blocking waiting for file lock on build directory\n",
+    );
+    assert_eq!(
+        crate::language::cargo::timed_out_summary(output, 600, 0),
+        "Tests timed out after 600s while building; no test had started.\n"
+    );
+    assert_eq!(crate::language::cargo::timed_out_summary("", 600, 0), "Tests timed out after 600s while building; no test had started.\n");
 }

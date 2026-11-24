@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "### Problems\n1. **Install comes back while an install is still running.** The first-run checklist reloads itself every 30 seconds (`frontend`), and each reload rebuilds every item with `installing` set back to False (`setup`). During a long Erlang download, the button reads \"Install\" again. A second click does no harm, because the server's install lock (`INSTALLING` in `tools`) makes it wait for the first, but the person watching has no sign the first download is still going.\n2. **A damaged tool install can't be repaired.** Install (`tools`) treats an existing folder as a finished install without checking that the program is inside. If the folder is incomplete, the checklist still says the tool is missing, and Install reports success without doing anything.\n3. **Error replies are read as successes.** `setup_ffi.mjs` treats every reply as a success. An error reply with an empty body leaves an empty error message, so the button resets and nothing explains why.\n\n### Done when\n- \"Installing…\" stays on through reloads until that install finishes or fails.\n- Install on a tool folder that lacks its program installs the tool again, and the checklist then shows it installed.\n- An error reply shows as an error on the checklist. If the reply has no message, the error names the reply's status (for example, `HTTP 500`).\n- Tests cover each of these.",
+  "closedTime": 1795488746,
+  "column": "complete",
+  "createdTime": 1795480202,
+  "dependsOn": [
+    "bae3922e0653dad1"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "4ec22057e6a98829",
+  "links": [],
+  "milestone": null,
+  "rank": 464.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "title": "setup checklist: install state and repair"
+}

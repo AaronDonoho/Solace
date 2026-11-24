@@ -1,0 +1,10 @@
+{
+  "body": "Agent task runs keep producing test failures, which reviews then file as Tech Debt tasks. This feature gathers the fixes:\n\n- Removing a project and adding it back keeps its tasks (`test_folder_of_projects` sometimes sees none).\n- Solace's server stops using about half a processor core while nothing is happening.\n- The acceptance tests' time limits hold on a busy machine.\n- `task propose` doesn't leave an agent waiting past Claude Code's 30-minute limit.\n\nMeasured on WSL2 (16 logical processors, 7.7 GB): with the app closed, the suite takes about 38–40 s, and `test_folder_of_projects` failed in 3 of 5 runs. With the app open it took 47–60 s, with more timing failures. The server used 60% of a core while one planning conversation was waiting.",
+  "colorSlot": 38,
+  "id": "292bbe524b8267fe",
+  "milestone": null,
+  "rank": 22.0,
+  "startTime": 1795336106,
+  "state": "active",
+  "title": "Reliable test runs and an idle server"
+}

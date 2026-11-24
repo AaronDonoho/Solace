@@ -31,13 +31,7 @@ use crate::board::task_model::store_dir;
 /// which a bare link shows (D-122). 404 for no such task.
 pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
     recover(&scope::top(top)).map_err(|e| (409, e))?;
-    if !valid_id(id) {
-        return board::err("E7001", "invalid task id").map_err(|e| (400, e));
-    }
-    let path = store_dir(top).join(format!("{id}.json"));
-    if !path.exists() {
-        return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
-    }
+    let path = known_task(top, id)?;
     let t = read_task(top, &path).map_err(|e| (409, e))?;
     let found_project = has_project(top, &t);
     let mut waits = HashMap::new();
@@ -147,12 +141,15 @@ pub(crate) fn change(
             return Ok(None);
         }
         let tid = parts[1];
+        // A task an approved proposal creates is saved with the answer, or not at all.
+        let batch = crate::tasks::store::batch(&top)?;
         let (t, after) = crate::board::task_model::change(&root, tid, &method, &parts[2..], &body)?;
         // The feature's Tech Debt task first (D-112): its notes name this task.
         if let After::Clean(Some(debt)) = &after {
             write(&top, debt)?;
         }
         write(&top, &t)?;
+        crate::tasks::store::batch_commit(batch)?;
         if let After::Removed(dir) = &after {
             log(&top, dir, &json!({"removed":tid}));
         }
@@ -183,4 +180,31 @@ pub(super) fn feature_waits(top: &Path, id: &str, waits: &mut HashMap<String, bo
 /// Whether task `t`'s home names a project of the workspace (D-129).
 pub(crate) fn has_project(top: &Path, t: &Value) -> bool {
     project_home(top, t).is_some()
+}
+
+/// `GET /tasks/{id}/dependents` (D-203): the tasks whose `dependsOn` names
+/// task `id`, from any project, archived ones left out, for its **Needed by** line.
+/// 400 for an id that can't name a task, 404 for no such task.
+pub fn dependents(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
+    recover(&scope::top(top)).map_err(|e| (409, e))?;
+    known_task(top, id)?;
+    let all = all_tasks(top).map_err(|e| (409, e))?;
+    let tasks: Vec<Value> = all
+        .iter()
+        .filter(|t| t["archivedTime"].is_null() && t["dependsOn"].as_array().is_some_and(|d| d.iter().any(|x| x == id)))
+        .map(|t| json!({"id": t["id"], "title": t["title"], "column": t["column"]}))
+        .collect();
+    Ok(json!({"tasks": tasks}))
+}
+
+/// The file of task `id`: 400 for an id that can't name a task, 404 for no such task.
+fn known_task(top: &Path, id: &str) -> Result<std::path::PathBuf, (u16, Failure)> {
+    if !valid_id(id) {
+        return board::err("E7001", "invalid task id").map_err(|e| (400, e));
+    }
+    let path = store_dir(top).join(format!("{id}.json"));
+    if !path.exists() {
+        return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
+    }
+    Ok(path)
 }

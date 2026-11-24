@@ -15,7 +15,6 @@ use crate::lockdown::settings::in_skills;
 mod tests;
 use crate::scope;
 use crate::workspace;
-use crate::board::runs::strategy_context;
 pub(crate) fn matches(pattern: &str, path: &str) -> bool {
     if pattern.ends_with('/') {
         return path == pattern.trim_end_matches('/') || path.starts_with(pattern);
@@ -146,7 +145,7 @@ pub(crate) fn tier_and_bytes(
     if crate::language::is_rust(root) && (name.starts_with("src/") || name.starts_with("tests/")) && name.ends_with(".rs") {
         return ("graph".into(), None);
     }
-    if name == "solace.toml" || name == "AGENTS.md" || name == crate::decisions::FILE {
+    if name == "solace.toml" || name == "AGENTS.md" || name == crate::decisions::FILE || name == crate::system_reviews::FILE {
         return ("protected".into(), None);
     }
     // Cargo's and rustup's settings run programs at check time (D-158 point 4, D-174);
@@ -216,14 +215,7 @@ pub(crate) fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     // A path out of the project, or into a project nested in it, is another project's.
     if internal(root, name) || name.split('/').any(|c| c == "..") {
         // A strategy run changes nothing and has no task to ask about (D-93).
-        let ask = if strategy_context().is_some()
-            || crate::board::runs::design_context().is_some()
-            || crate::board::runs::notes_context().is_some()
-        {
-            String::new()
-        } else {
-            format!(". {}", crate::scope::ASK_FOR_PROJECT)
-        };
+        let ask = if crate::board::runs::workspace_context() { String::new() } else { format!(". {}", crate::scope::ASK_FOR_PROJECT) };
         let form = match elsewhere(root, name, false) {
             Some((dir, _, rest)) => format!("; it is {rest} in {dir}: add --project {dir}"),
             None => String::new(),

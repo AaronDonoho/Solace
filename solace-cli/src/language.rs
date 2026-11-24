@@ -207,8 +207,8 @@ pub fn label(id: &str) -> &'static str {
     }
 }
 
-/// Whether the language's toolchain is on `PATH`, regardless of whether the
-/// language is turned on in settings.
+/// Whether the language's toolchain is installed (Solace's own Gleam, D-264),
+/// regardless of whether the language is turned on in settings.
 pub fn installed(id: &str) -> bool {
     match id {
         GLEAM => on_path("gleam"),
@@ -217,11 +217,11 @@ pub fn installed(id: &str) -> bool {
     }
 }
 
-pub fn missing(id: &str) -> &'static str {
+pub fn missing(id: &str) -> String {
     match id {
-        GLEAM => "Needs the Gleam toolchain (`gleam`)",
-        RUST => "Needs the Rust toolchain (`cargo`)",
-        _ => "Needs its toolchain",
+        GLEAM => crate::tools::not_installed("gleam").unwrap_or_else(|| "Needs the Gleam toolchain (`gleam`)".into()),
+        RUST => "Needs the Rust toolchain (`cargo`)".into(),
+        _ => "Needs its toolchain".into(),
     }
 }
 
@@ -234,7 +234,7 @@ pub fn off(id: &str) -> &'static str {
 }
 
 fn on_path(program: &str) -> bool {
-    crate::language::paths::search_path(program).is_some()
+    tool_path(program).is_some()
 }
 
 /// The language of `root`, as the system settings name it.
@@ -259,14 +259,57 @@ pub fn enabled(id: &str) -> Result<bool, Failure> {
     language_enabled(id)
 }
 
-/// The path a tool name resolves to on `PATH`; a test can put fixed folders in
-/// its place (`language::paths`). `Store::tool` uses it, falling back to the
-/// bare name when it finds nothing.
+/// The path a tool name resolves to: Solace's own copy for Gleam's and
+/// Erlang's programs (D-264), else the program on `PATH`; a test can put fixed
+/// folders in its place (`language::paths`), standing in for Solace's copies
+/// too unless it moved them. `Store::tool` uses it, falling back to the bare
+/// name when it finds nothing.
 pub(crate) fn tool_path(program: &str) -> Option<std::path::PathBuf> {
-    paths::search_path(program)
+    #[cfg(test)]
+    if paths::standing_in() && !crate::tools::folder_overridden() {
+        return paths::search_path(program);
+    }
+    match crate::tools::program_folder(program) {
+        Some(_) => crate::tools::program(program),
+        None => paths::search_path(program),
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn with_tool_path<T>(dirs: &[std::path::PathBuf], f: impl FnOnce() -> T) -> T {
     paths::with_path(dirs, f)
+}
+
+/// The program Solace starts for `name`: `tool_path`'s, or the bare name for
+/// `PATH` to find. A Gleam or Erlang program Solace hasn't installed on a
+/// computer it has a download for is refused instead (D-264).
+pub(crate) fn program(name: &str) -> Result<std::path::PathBuf, crate::failure::Failure> {
+    if let Some(path) = tool_path(name) {
+        return Ok(path);
+    }
+    match crate::tools::not_installed(name) {
+        Some(why) => Err(crate::failure::Failure(format!("E6013 {why}"), 1)),
+        None => Ok(name.into()),
+    }
+}
+
+/// `argv` as Solace starts it: a Gleam or Erlang program resolved by
+/// `program`. Gleam on the Erlang target starts Erlang itself, so it needs
+/// Solace's Erlang too.
+pub(crate) fn command_line(root: &Path, argv: &[String]) -> Result<Vec<String>, crate::failure::Failure> {
+    let mut line = argv.to_vec();
+    let Some(first) = line.first_mut() else {
+        return Ok(line);
+    };
+    let name = crate::file_name(Path::new(first.as_str()));
+    if crate::tools::tool_of(&name).is_none() {
+        return Ok(line);
+    }
+    if !first.contains('/') {
+        *first = program(first)?.to_string_lossy().into_owned();
+    }
+    if name == "gleam" && crate::workspace::target(root) == "erlang" {
+        program("erl")?;
+    }
+    Ok(line)
 }

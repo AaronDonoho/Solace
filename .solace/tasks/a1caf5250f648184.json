@@ -1,0 +1,22 @@
+{
+  "archivedTime": null,
+  "body": "Part of feature:21d501a74aec4f44.\n\n- On the System Review page the human sets up **several schedules**.\n- Each schedule runs a set of review kinds the human chooses. It repeats **daily, weekly or monthly**, or runs at **a specific day and time**.\n- A schedule's review runs the same way as a manual one (task:d0d60d7a9688c214).\n\nAsk the human how schedules are listed, added, changed and removed on the page. Nothing else is specified. A review missed while the app was closed is handled by a separate task.\n\nDone when: the human can set up several schedules and each one starts its reviews on time while the app is open.",
+  "closedTime": 1795415928,
+  "column": "complete",
+  "createdTime": 1795373145,
+  "dependsOn": [
+    "e6f71e8d09b9a0ab"
+  ],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "a1caf5250f648184",
+  "links": [],
+  "milestone": null,
+  "rank": 455.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: scheduled reviews"
+}

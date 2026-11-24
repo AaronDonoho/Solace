@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nThe dependents route (`tasks::api`) doesn't check the task ID. Other task routes answer 400 for a malformed ID and 404 for an unknown one. This one answers 200 with an empty list, so a mistyped or out-of-date link shows \"Needed by: nothing\" instead of an error.\n\n### Done when\n- The dependents route answers 400 for a malformed ID and 404 for an unknown one, like the other task routes.\n- Tests cover both, and a known task with no dependents still gets an empty list.",
+  "closedTime": 1795501692,
+  "column": "complete",
+  "createdTime": 1795480252,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "feba6fd34236c06e",
+  "links": [],
+  "milestone": null,
+  "rank": 467.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "tasks: dependents list checks the task ID"
+}

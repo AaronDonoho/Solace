@@ -2389,8 +2389,10 @@ pub fn a_wide_detail_shows_two_columns_test() {
   // No error: no empty alert paragraph to leave a gap above the details.
   body(model) |> string.contains("role=\"alert\"") |> should.be_false
   let #(failed, _) = task.update(model, task.Failed("Broken"))
-  html(failed)
-  |> string.contains("<p role=\"alert\">Broken</p>")
+  let assert Ok(#(_, alert)) =
+    string.split_once(html(failed), "<div role=\"alert\">")
+  alert
+  |> string.starts_with("<div class=\"md\"><p>Broken</p>")
   |> should.be_true
 }
 
@@ -4765,4 +4767,110 @@ pub fn a_question_and_a_discussion_open_their_own_editors_test() {
   body(notes) |> string.contains("class=\"add-note\"") |> should.be_false
   let #(questions, _) = task.update(model, task.Tab("questions"))
   body(questions) |> string.contains("id=\"note-text\"") |> should.be_true
+}
+
+/// The first pick removes the placeholder; each model's option keeps its
+/// key, so the browser's selection stays on the model picked.
+pub fn a_first_pick_keeps_each_model_option_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+    )
+  let workflow =
+    "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\"],\"final\":false,\"role\":\"investigator\"}],\"roles\":{\"investigate\":\"investigator\"}}"
+  let #(model, _) =
+    task.update(model, task.WorkflowLoaded(model.generation, workflow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.RoleModelsLoaded(
+        "[{\"role\":\"investigator\",\"name\":\"Investigator\",\"default\":\"\",\"backup\":\"\"}]",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]",
+      ),
+    )
+  let before = html(model)
+  assert model.model == ""
+  assert string.contains(before, "Select a model")
+  let #(picked, _) = task.update(model, task.AgentSelected("b"))
+  let after = html(picked)
+  assert !string.contains(after, "Select a model")
+  assert string.contains(before, "data-lustre-key=\"a\"")
+  assert string.contains(before, "data-lustre-key=\"b\"")
+  assert string.contains(after, "data-lustre-key=\"a\"")
+  assert string.contains(after, "data-lustre-key=\"b\" selected")
+}
+
+/// A refusal is Markdown, so each `task:<id>` it names is a link that opens
+/// that task: Assign refused while Unexpected Changes tasks are open names them.
+pub fn a_refusal_links_each_task_it_names_test() {
+  let model =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}",
+      ),
+      workflow: task.Workflow(
+        [task.Column("triage", "Triage", ["assign"], False, "")],
+        dict.new(),
+      ),
+    )
+  let #(model, _) = task.update(model, task.Action("assign"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.Acted(
+        model.generation,
+        "{\"code\":\"E7012\",\"message\":\"complete or cancel the Unexpected Changes task first (task:0123456789abcdef, task:fedcba9876543210): it holds code changed outside Solace that no one has reviewed\"}",
+      ),
+    )
+  let rendered = html(model)
+  let assert Ok(#(_, alert)) = string.split_once(rendered, "role=\"alert\"")
+  let assert Ok(#(alert, _)) = string.split_once(alert, "</div></div>")
+  list.each(["0123456789abcdef", "fedcba9876543210"], fn(id) {
+    alert |> string.contains("href=\"/task/" <> id <> "\"") |> should.be_true
+    alert |> string.contains("data-task=\"" <> id <> "\"") |> should.be_true
+  })
+}
+
+/// A run's task proposal shows in the panel with its fields, the body as
+/// Markdown and each linked task as a link, and Approve and Reject.
+pub fn a_task_proposal_question_shows_its_fields_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"Login\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Create task \\\"Fix sessions\\\"\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"task\":{\"fields\":{\"title\":\"Fix sessions\",\"body\":\"Keep **one** session.\",\"dependsOn\":[\"t2\"]},\"blocking\":true,\"run\":\"r1\"}}}]}",
+    )
+  let #(model, _) = task.update(model, task.Tab("questions"))
+  let rendered = html(model)
+  rendered
+  |> string.contains("<dt>title</dt><dd>Fix sessions</dd>")
+  |> should.be_true
+  rendered |> string.contains("<strong>one</strong>") |> should.be_true
+  rendered |> string.contains("href=\"/task/t2\"") |> should.be_true
+  rendered |> string.contains(">Approve</button>") |> should.be_true
+  rendered |> string.contains(">Reject</button>") |> should.be_true
+}
+
+/// A task approved as blocking another still links that task in **Needed by**
+/// once it is complete.
+pub fn a_complete_task_links_the_task_it_blocked_test() {
+  let model = loaded(depends_task("1", "Fix sessions", "complete", ""))
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.DependentsLoaded(
+        g,
+        "{\"tasks\":[{\"id\":\"b1\",\"title\":\"Login\",\"column\":\"backlog\"}]}",
+      ),
+    )
+  let page = html(model)
+  assert string.contains(page, "Needed by")
+  assert string.contains(page, "href=\"/task/b1\"")
+  assert string.contains(page, ">Login</a> (Backlog, unfinished)")
 }

@@ -264,3 +264,28 @@ fn wait_limit_with_env(get: impl Fn(&str) -> Option<String>) -> std::time::Durat
     let launch = get("SOLACE_LAUNCH_TIMEOUT_SECS").and_then(|s| s.parse::<u64>().ok()).filter(|n| *n > 0);
     wait_limit_with_launch(launch)
 }
+
+/// The reply of a wait for a question's answer that reached `wait_limit`: the
+/// answer, when it comes, waits for the `task wait` that follows.
+pub(crate) const ANSWER_WAIT_AGAIN: &str = "Still waiting for the human's answer. Call `task wait` to keep waiting; it sends nothing.\n";
+
+/// Whether every answer in `run`'s reply has already reached a wait.
+pub(crate) fn reply_delivered(run: &Value) -> bool {
+    let delivered = seen(run, "answers_seen");
+    reply_answer_keys(run).iter().all(|id| delivered.contains(*id))
+}
+
+fn reply_answer_keys(run: &Value) -> Vec<&str> {
+    run["reply"]["questions"].as_array().into_iter().flatten().filter_map(|q| q["id"].as_str()).collect()
+}
+
+/// Marks the answers in `run`'s reply as delivered, so a later `task wait`
+/// doesn't hand them over again.
+pub(crate) fn mark_reply_delivered(root: &Path, tid: &str, rid: &str, run: &Value) -> Result<(), Failure> {
+    let m = serde_json::json!({
+        "kind": "delivery", "target": "task", "task": tid, "run": rid, "wake": false, "claim": crate::unique_id(),
+        "notes": [], "answers": reply_answer_keys(run),
+    });
+    send_delivery(&scope::top(root), m)?;
+    Ok(())
+}

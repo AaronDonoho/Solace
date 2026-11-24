@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Bug\nA strategy run (one planning session on the Strategy page) loses its registration while it is still working. After that, every `strategy task` proposal it sends is refused with `E7023 command refused / at task / unknown strategy run <id>`. The run can't do anything more and stops. The refused proposal is lost, because it was never saved as a pending proposal.\n\n**Seen twice in a row, in the `map` workspace:**\n\n| Run | Last success | Then |\n|---|---|---|\n| `e5163d815c4e9b09` | `strategy vision` proposal approved and applied | next `strategy task` → E7023 unknown strategy run |\n| `244d62dab62521d3` | 2 feature edits, 1 milestone edit and 4 task creates approved (createdTime 1795074198 → 1795074264) | next `strategy task` → E7023 unknown strategy run |\n\n**Expected:** a run stays registered until it ends itself or the human ends it, and its proposals keep working for its whole life.\n\n**Actual:** the run's id disappears while the agent is still sending commands.\n\n## Also asked for in the report\n- E7023 says *why* the run is unknown (expired, superseded or ended) and when that happened.\n- When a run is dropped, keep the proposal it was refused, or show it to the human, so the content isn't lost.\n- The human's note thread shows \"this run ended; start a new one\" instead of the bare error.\n\n## Where the error comes from (for the agent)\n`board::strategy.run_guard` returns this E7023 when `tasks::strategy_run` gives `None`, meaning `tasks::strategy.run_record` couldn't read `<run_dir>/<rid>.json`. A run whose state is `ended` gets `E7003 run ended` instead, so in these cases the run file was missing or unreadable, rather than marked ended. The cause is not confirmed.\n\nThings to check, roughly most likely first (guesses from the report and a quick code read):\n1. **Reading while the file is being written.** If `jsonx::read_opt` returns `None` for a half-written or unparsable file, a guard that reads during a run-record rewrite (for example, right after an approval updates the run) would wrongly say \"unknown\". Check whether run records are written atomically (to a temp file, then renamed into place).\n2. **Something deletes run files.** Look for cleanup that removes run files (a reaper, startup cleanup, a page opening or refreshing that starts a new run, or a server restart), especially for runs waiting a long time on an answer.\n3. **An approval ends or replaces the run.** The first failure came right after a `vision` approval.\n4. **Kind lookup.** Both failures were at `task`. Rule out a lookup only `strategy task` does.\n5. **`.solace/store.db` or run files rolled back** by git (checkout or stash), since `.solace` files are tracked.\n\n**Repro idea:** start a strategy run, approve one proposal, then wait, refresh the page or restart Solace, and send another `strategy task`. See which of these triggers E7023.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795074922,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "26921817979f2e57",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "strategy: active run dropped, proposals refused"
+}

@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "`task propose` waits for the human's answer with no time limit. Claude Code gives up on a tool call after 30 minutes of silence, and in task:0d391c4f357223b0 (run `a73df04d`) the calls after it, `task done` and `session remember`, then hung for 30 minutes each: 93 minutes in total.\n\nDone when an agent waiting on `task propose` past Claude Code's limit doesn't leave its next calls hanging, and still gets the human's answer when it comes.",
+  "closedTime": 1795368907,
+  "column": "complete",
+  "createdTime": 1795336277,
+  "dependsOn": [],
+  "feature": "292bbe524b8267fe",
+  "home": "solace-cli",
+  "id": "c9b5b379b04cc403",
+  "links": [],
+  "milestone": null,
+  "rank": 445.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "runs: task propose wait outlasts Claude Code"
+}

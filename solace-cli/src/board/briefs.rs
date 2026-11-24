@@ -201,6 +201,7 @@ pub(crate) fn continuation_brief(
     }
     if matches!(kind, "work" | "investigate" | "review" | "discuss") {
         out += &crate::decisions::section(&scope::top(root), kind);
+        out += PROPOSE_TASK;
     }
     let workspace = scope::top(root);
     out += &vision_section(&workspace, kind);
@@ -257,7 +258,7 @@ pub(crate) fn brief(t: &Value, kind: &str, involvement: &str, detail: &str, aski
         "give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change"
     };
     let ask = format!(
-        "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, {example}; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. {} ",
+        "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer, and when it says it is still waiting, call `task wait`, which sends nothing. In the question's `text`, {example}; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. {} ",
         crate::scope::ASK_FOR_PROJECT
     );
     let settings = "To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
@@ -1153,4 +1154,10 @@ pub(crate) const NAMING: &str = concat!(
     "Don't rename unless the existing name is misleading or the task requires it. When you rename, update code, tests and docs together. ",
     "Renaming public or persisted names (API fields, schema columns, config keys, serialized names, event names) is a breaking change; treat it as one. ",
     "In your summary, note any new terms you introduced and inconsistencies you found."
+);
+
+/// How a task run hands work that belongs elsewhere to a new task.
+pub(crate) const PROPOSE_TASK: &str = concat!(
+    "\nWork that belongs in another task: propose it with `task propose`, its fields as a JSON object in `text`; ",
+    "add `--blocking` when this task can't be finished without it. It is created only when the human approves it.\n"
 );

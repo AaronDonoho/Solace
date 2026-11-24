@@ -1,0 +1,23 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503507,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "fa15a1ac0332146f",
+  "links": [],
+  "milestone": null,
+  "rank": 471.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy",
+    "solace-cli/sysreview"
+  ],
+  "techDebt": true,
+  "title": "tests: follow the project's test rules"
+}

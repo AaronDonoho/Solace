@@ -2,6 +2,7 @@
 
 import gleam/dynamic
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -57,7 +58,8 @@ pub type Model {
     dark: Bool,
     /// The tab shown.
     tab: Tab,
-    /// Stops listening for theme changes; Some while the element is in the page.
+    /// Stops listening for theme and font size changes; Some while the element
+    /// is in the page.
     unsubscribe: Option(fn() -> Nil),
     /// The models this computer can pick, from the system settings.
     models: List(Entry),
@@ -67,6 +69,8 @@ pub type Model {
     finished_sound: Bool,
     /// Whether the needs-attention sound plays.
     attention_sound: Bool,
+    /// The font size in pixels, one of `font_sizes`.
+    font_size: Int,
     /// The version of the Solace program running this page.
     version: String,
     /// How agents address the human, how much they write, and how readily they ask.
@@ -107,8 +111,12 @@ pub type Msg {
   SetFinishedSound(Bool)
   /// The Needs attention sound switch: on or off.
   SetAttentionSound(Bool)
+  /// The Font size dropdown or Reset to default: a size in pixels.
+  SetFontSize(Int)
   /// The theme setting changed, here or in another window; "" follows the system.
   ThemeChanged(String)
+  /// The font size setting changed, here or in another window; "" is the default.
+  FontSizeChanged(String)
   /// The element was added to the page: it listens for theme changes.
   Connected
   /// Listening began; the function stops it.
@@ -195,6 +203,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, attention_sound: on),
       effect.from(fn(_) { save(sound_attention_key, sound_stored(on)) }),
     )
+    SetFontSize(size) -> #(
+      Model(..model, font_size: size),
+      effect.from(fn(_) { set_font_size(size) }),
+    )
     // The page has applied the system's theme by now (`follow_theme`).
     ThemeChanged("") -> #(
       Model(..model, dark: theme() == "dark"),
@@ -204,22 +216,39 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, dark: value == "dark"),
       effect.none(),
     )
+    FontSizeChanged(value) -> #(
+      Model(..model, font_size: font_size_from(value)),
+      effect.none(),
+    )
     Connected ->
       case model.unsubscribe {
         Some(_) -> #(model, effect.none())
         None -> {
           let #(model, skills_effect) =
-            queue_skill_load(Model(..model, dark: theme() == "dark"))
+            queue_skill_load(
+              Model(
+                ..model,
+                dark: theme() == "dark",
+                font_size: font_size_from(load(font_size_key)),
+              ),
+            )
           #(
             model,
             effect.batch([
               effect.from(fn(dispatch) {
+                let stop_theme =
+                  subscribe(theme_key, fn(value) {
+                    dispatch(ThemeChanged(value))
+                  })
+                let stop_font_size =
+                  subscribe(font_size_key, fn(value) {
+                    dispatch(FontSizeChanged(value))
+                  })
                 dispatch(
-                  Subscribed(
-                    subscribe(theme_key, fn(value) {
-                      dispatch(ThemeChanged(value))
-                    }),
-                  ),
+                  Subscribed(fn() {
+                    stop_theme()
+                    stop_font_size()
+                  }),
                 )
               }),
               call("/models", "GET", ""),
@@ -482,7 +511,10 @@ pub fn view(model: Model) -> Element(Msg) {
             role_models_section(model),
             skills_section(model),
           ]
-          Appearance -> [appearance_section(model.dark)]
+          Appearance -> [
+            appearance_section(model.dark),
+            font_size_section(model.font_size),
+          ]
           Languages -> [languages_section(model)]
           Notifications -> [notifications_section(model)]
           About -> [about_section(model)]
@@ -566,8 +598,10 @@ const view_styles =
 "
 
 pub fn register() -> Result(Nil, lustre.Error) {
-  // Every page that registers Settings follows a theme chosen in another window.
+  // Every page that registers Settings follows a theme and a font size chosen
+  // in another window.
   follow_theme()
+  follow_font_size()
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("tab", fn(name) {
@@ -624,6 +658,7 @@ pub fn initial(dark: Bool) -> Model {
     languages: [],
     finished_sound: load(sound_finished_key) != "0",
     attention_sound: load(sound_attention_key) != "0",
+    font_size: font_size_from(load(font_size_key)),
     version: "",
     behavior: default_behavior,
     behavior_before: None,
@@ -1816,6 +1851,96 @@ fn sound_row(name: String, on: Bool, msg: fn(Bool) -> Msg) -> Element(Msg) {
         event.on_check(msg),
       ]),
       html.text(name),
+    ]),
+  ])
+}
+
+/// The font size's key in the store: a size in pixels, or "" for the default.
+/// Every `index.html` reads it before first paint.
+pub const font_size_key = "solace-font-size"
+
+/// The pages' own text size in pixels, which a page is drawn at unscaled.
+pub const default_font_size = 15
+
+/// The Font size choices in pixels, smallest first (D-262).
+pub const font_sizes = [12, 13, 14, 15, 16, 18, 20, 24, 28, 32, 36]
+
+/// The font size a stored value names; the default for "" or a size not offered.
+pub fn font_size_from(value: String) -> Int {
+  case int.parse(value) {
+    Ok(size) ->
+      case list.contains(font_sizes, size) {
+        True -> size
+        False -> default_font_size
+      }
+    Error(_) -> default_font_size
+  }
+}
+
+/// The next size offered above (`up`) or below `size`; the end sizes stay.
+pub fn font_size_step(size: Int, up: Bool) -> Int {
+  case up {
+    True -> list.filter(font_sizes, fn(s) { s > size }) |> list.first
+    False -> list.filter(font_sizes, fn(s) { s < size }) |> list.last
+  }
+  |> result.unwrap(size)
+}
+
+/// Shows a font size on the page, stores it and tells every subscriber.
+pub fn set_font_size(size: Int) -> Nil {
+  show_font_size(size)
+  save(font_size_key, case size == default_font_size {
+    True -> ""
+    False -> int.to_string(size)
+  })
+}
+
+/// Scales the page so its text is drawn at `size` (D-262).
+fn show_font_size(size: Int) -> Nil {
+  apply_font_scale(int.to_float(size) /. int.to_float(default_font_size))
+}
+
+@external(javascript, "./store.mjs", "apply_font_scale")
+fn apply_font_scale(scale: Float) -> Nil
+
+@external(javascript, "./store.mjs", "on_ctrl_wheel")
+fn on_ctrl_wheel(handler: fn(Bool) -> Nil) -> Nil
+
+/// The page shows the stored font size, one the dropdown offers, and follows
+/// a size chosen in another window; in the desktop app Ctrl + mouse wheel
+/// steps through the sizes.
+pub fn follow_font_size() -> Nil {
+  show_font_size(font_size_from(load(font_size_key)))
+  let _ =
+    subscribe(font_size_key, fn(value) { show_font_size(font_size_from(value)) })
+  on_ctrl_wheel(fn(up) {
+    set_font_size(font_size_step(font_size_from(load(font_size_key)), up))
+  })
+}
+
+/// The Font size dropdown, in pixels, whose tooltip names its hotkey, and the
+/// button back to the default.
+pub fn font_size_section(size: Int) -> Element(Msg) {
+  html.section([attribute.attribute("aria-labelledby", "font-size")], [
+    html.h2([attribute.id("font-size")], [html.text("Font size")]),
+    html.div([attribute.class("font-size-pick")], [
+      html.select(
+        [
+          attribute.name("font-size"),
+          attribute.attribute("aria-labelledby", "font-size"),
+          attribute.title("Hotkey: Ctrl + Mouse wheel"),
+          event.on_change(fn(value) { SetFontSize(font_size_from(value)) }),
+        ],
+        list.map(font_sizes, fn(s) {
+          html.option(
+            [attribute.value(int.to_string(s)), attribute.selected(s == size)],
+            int.to_string(s) <> "px",
+          )
+        }),
+      ),
+      html.button([event.on_click(SetFontSize(default_font_size))], [
+        html.text("Reset to default"),
+      ]),
     ]),
   ])
 }

@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Propose these two decisions with `task decision`, one per call, and the human approves or rejects each one. No code changes. A planning (investigate) run can do this and then complete the task.\n\n**1. A system review log is one file only Solace writes** (feature:21d501a74aec4f44)\n- Each project's top folder has one `SYSTEMREVIEWS.md`, created the same way as `DECISIONS.md` (D-254). An existing file is kept.\n- Agents read it, but no `write`, `remove` or `move` changes it. Only Solace adds to it.\n- Each completed system review adds one entry with its review kinds, date, version reviewed and finding tasks.\n- Review run conversations stay local, like other runs (D-261).\n- Why: a shared record agents can't forge shows when each review was done and what it found, and a later build check can rely on it.\n\n**2. Every release gets a shared what's-new summary, made automatically** (feature:cc8b45a04bb07bfe)\n- When a release is made, Solace writes a short summary and fuller details from the notes of the tasks it includes, with no approval step.\n- The summary and details are shared with the project. The task notes themselves stay private (D-261 point 4).\n- This changes \"notes are never drafted on their own\" in feature:3637869b15413bc5 for these summaries only. The release notes humans ask for and approve stay as they are.\n- Why: teammates get briefed quickly on what changed since their last release, without anyone's private task conversations being shared.\n\nDone when: both have been proposed and the human has answered each.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795208677,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "1153df5e8c65608b",
+  "links": [],
+  "milestone": null,
+  "rank": 394.0,
+  "scope": [
+    "."
+  ],
+  "title": "decisions: record system reviews and summaries"
+}

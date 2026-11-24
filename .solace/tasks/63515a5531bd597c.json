@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795211919,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli/components",
+  "id": "63515a5531bd597c",
+  "links": [],
+  "milestone": null,
+  "rank": 133.0,
+  "scope": [
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "agent panel: Ctrl+A selects only the conversation"
+}

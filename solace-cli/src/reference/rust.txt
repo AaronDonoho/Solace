@@ -146,7 +146,8 @@ A new module's name must be an identifier `syn` reads; a keyword or `_` is
 refused. `refs` lists a method name as a possible use; `impact` and
 `inspect --context` count it. A name a local binding, a module's own item, or
 a named import hides is not a use.
-On Linux, cargo runs in a sandbox with no network and only `target/` writable,
+On Linux, cargo runs in a sandbox with no network and only `target/`,
+`Cargo.lock` and the folders `solace.toml`'s `[sandbox] write` lists writable,
 so dependencies are fetched after an import or an approved Cargo.toml change;
 without `cargo`, those commands are refused.
 `submit` and `format` name an item and the lines rustfmt leaves longer than

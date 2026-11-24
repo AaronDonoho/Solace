@@ -890,3 +890,103 @@ fn inspect_context_shows_a_symbols_own_test_module_first() {
     assert!(out.contains("\n  a.tests::own_test\n"), "{out}");
     assert!(out.contains("…and 2 more (solace refs a.f)"), "{out}");
 }
+
+/// A build script that fails stops `test` before any test runs: the reply is
+/// cargo's error and its cause, not the build's JSON messages.
+#[test]
+fn a_build_that_stops_before_the_tests_shows_only_cargos_error() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (root, store) =
+        crate::testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\n#[test]\nfn it_works() {\n    assert_eq!(one(), 1);\n}\n");
+    std::fs::write(root.join("build.rs"), "fn main() {\n    panic!(\"gen is not writable\");\n}\n").unwrap();
+    let err = store.test(&["--all"]).unwrap_err().0;
+    assert!(err.starts_with("Tests did not run.\n\nerror: failed to run custom build command"), "{err}");
+    assert!(err.contains("Caused by:"), "{err}");
+    assert!(err.contains("gen is not writable"), "{err}");
+    assert!(!err.contains("{\"reason\""), "{err}");
+    assert!(!err.contains("Compiling "), "{err}");
+}
+
+/// A build script may write a folder its project declares in `[sandbox]
+/// write`, so the tests run; without it the write is refused (D-158 point 4).
+#[test]
+fn a_build_may_write_the_folders_its_project_declares() {
+    if !crate::language::cargo::installed() || !crate::migrate::sandbox_works() {
+        return;
+    }
+    let (root, store) =
+        crate::testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\n#[test]\nfn it_works() {\n    assert_eq!(one(), 1);\n}\n");
+    std::fs::write(root.join("build.rs"), "fn main() {\n    std::fs::write(\"gen/x\", \"1\").unwrap();\n}\n").unwrap();
+    let err = store.test(&["--all"]).unwrap_err().0;
+    assert!(err.starts_with("Tests did not run."), "{err}");
+    let settings = std::fs::read_to_string(root.join("solace.toml")).unwrap_or_default();
+    std::fs::write(root.join("solace.toml"), format!("{settings}\n[sandbox]\nwrite = [\"gen\"]\n")).unwrap();
+    store.test(&["--all"]).unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("gen/x")).unwrap(), "1");
+}
+
+/// A `test` stopped at its time limit says how many tests finished each way
+/// and which failed, not the build's JSON messages.
+#[test]
+fn a_test_run_stopped_at_its_time_limit_reports_what_finished() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = crate::testing::rust_project(concat!(
+        "pub fn one() -> i32 {\n    1\n}\n\n",
+        "#[test]\nfn passes() {\n    assert_eq!(one(), 1);\n}\n\n",
+        "#[test]\nfn fails() {\n    assert_eq!(one(), 2);\n}\n\n",
+        "#[test]\nfn hangs() {\n    std::thread::sleep(std::time::Duration::from_secs(300));\n}\n",
+    ));
+    store.test(&["passes"]).unwrap();
+    let err = store.test_with_limit(&["--all"], 10).unwrap_err().0;
+    assert!(
+        err.starts_with(
+            "E6012 command refused\n  at cargo\n  timed out after 10s\nTests timed out after 10s: 1 passed, 1 failed so far.\n"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("\nfails:\n"), "{err}");
+    assert!(!err.contains("{\"reason\""), "{err}");
+    let failed: Vec<String> = store
+        .db
+        .prepare("SELECT test FROM test_runs WHERE result = 'fail'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(failed.iter().any(|t| t.ends_with("fails")), "{failed:?}");
+}
+
+/// A `test` stopped at its time limit records no pass for a test it never finished.
+#[test]
+fn a_test_run_stopped_at_its_time_limit_records_no_pass() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = crate::testing::rust_project(concat!(
+        "pub fn one() -> i32 {\n    1\n}\n\n",
+        "#[test]\nfn passes() {\n    assert_eq!(one(), 1);\n}\n\n",
+        "#[test]\nfn hangs() {\n    std::thread::sleep(std::time::Duration::from_secs(300));\n}\n",
+    ));
+    store.test(&["passes"]).unwrap();
+    let err = store.test_with_limit(&["--all"], 10).unwrap_err().0;
+    assert!(
+        err.starts_with(
+            "E6012 command refused\n  at cargo\n  timed out after 10s\nTests timed out after 10s: 1 passed, 0 failed so far.\n"
+        ),
+        "{err}"
+    );
+    let passed: Vec<String> = store
+        .db
+        .prepare("SELECT test FROM test_runs WHERE result = 'pass'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(passed.iter().all(|t| !t.ends_with("hangs")), "{passed:?}");
+}

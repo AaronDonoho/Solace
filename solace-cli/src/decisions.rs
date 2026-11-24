@@ -229,7 +229,7 @@ pub(crate) fn section(top: &Path, kind: &str) -> String {
 
 /// Today's date, as a decision's attribution line writes it: the computer's
 /// local day, or UTC when no offset can be found.
-fn today() -> String {
+pub(crate) fn today() -> String {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
     date_at(seconds, crate::board::local_offset(seconds).unwrap_or(0))
 }

@@ -2,3 +2,8 @@
 identifier = "allow-open-release-folder"
 description = "Lets a board window open a release's folder in the system file manager."
 commands.allow = ["open_release_folder"]
+
+[[permission]]
+identifier = "allow-save-setting"
+description = "Lets a board window keep a setting for the board windows opened later."
+commands.allow = ["save_setting"]

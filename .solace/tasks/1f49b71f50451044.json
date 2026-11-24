@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "Once Solace is rebuilt with the per-test `test_tools` entries (D-263 as changed), change solace-cli's `solace.toml` from `test_tools = [\"gleam\", \"node >= 19\"]` to `test_tools = [\"gleam\", { tool = \"node >= 19\", tests = [\"versions::\"] }]`. The `versions::` tests (npm) are the only Rust tests found that use Node. The server running before the rebuild refuses the new form as invalid settings, so this couldn't be done in the task that added it. Check: with Node older than 19, `test` on a change that reaches only `board::` tests runs them, and one that reaches a `versions::` test stops with `E6013 Tests not run: node …`.",
+  "closedTime": null,
+  "column": "assigned",
+  "createdTime": 1795245655,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "1f49b71f50451044",
+  "links": [],
+  "milestone": null,
+  "rank": 432.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "solace-cli: link Node to the tests that need it in solace.toml"
+}

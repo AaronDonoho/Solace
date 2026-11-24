@@ -38,7 +38,9 @@ else:
     steps = json.loads(task['body'])
 root = Path('.solace')
 (root / (rid + '.prompt')).write_text(prompt)
-(root / (rid + '.pid')).write_text(str(os.getpid()))
+# Written whole, then renamed, so a test's tearDown never reads it half-written.
+(root / (rid + '.pid.tmp')).write_text(str(os.getpid()))
+(root / (rid + '.pid.tmp')).replace(root / (rid + '.pid'))
 native = '--json' in sys.argv or '--output-format' in sys.argv
 claude = '--output-format' in sys.argv
 home = Path(os.environ['CLAUDE_CONFIG_DIR'] if claude else os.environ['CODEX_HOME'])
@@ -91,6 +93,12 @@ for i, step in enumerate(steps):
         continue
     if 'sleep' in step:
         time.sleep(step['sleep'])
+        continue
+    if 'until' in step:
+        # Pauses until the test writes this file under `.solace`, so a test can act between two steps however slowly.
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not (root / step['until']).exists():
+            time.sleep(.05)
         continue
     mcp.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': 'solace', 'arguments': step}}) + '\n')
     mcp.stdin.flush()

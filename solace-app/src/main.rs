@@ -7,6 +7,7 @@ mod workspaces;
 mod supervisor;
 mod wsl;
 mod sidecar;
+mod preferences;
 
 #[cfg(test)]
 use std::fs;
@@ -126,9 +127,12 @@ fn main() {
             install_wsl,
             import_distro,
             open_release_folder,
-            open_terminal
+            open_terminal,
+            save_setting
         ])
         .setup(|app| {
+            let preferences = app.path().app_config_dir()?.join("preferences.json");
+            app.manage(preferences::Store::open(preferences));
             let open = MenuItem::with_id(app, "open", "Open board", true, None::<&str>)?;
             let workspace =
                 MenuItem::with_id(app, "workspace", "Open workspace", true, None::<&str>)?;
@@ -153,6 +157,11 @@ fn main() {
                     }
                     "workspace" => focus_main(app),
                     "quit" => {
+                        for label in workspaces::window_labels(&app.state::<workspaces::Server>()) {
+                            if let Some(window) = app.get_webview_window(&label) {
+                                remember_size(&window.as_ref().window());
+                            }
+                        }
                         stop_workspaces(&app.state::<workspaces::Server>());
                         app.exit(0);
                     }
@@ -178,6 +187,7 @@ fn main() {
                         app.exit(0);
                     }
                 } else if let Some(closed) = workspaces::close_window(&server, label) {
+                    remember_size(window);
                     if !closed.browser {
                         sidecar::stop(closed.child);
                     }
@@ -316,9 +326,18 @@ fn open_board_window(app: &AppHandle, root: &Path, port: u16) -> Result<(), Stri
     let server = app.state::<workspaces::Server>();
     let label = workspaces::next_window_label(&server);
     let url = tauri::Url::parse(&board_url(port)).map_err(|e| e.to_string())?;
+    let preferences = app.state::<preferences::Store>();
+    let (width, height) = preferences.size();
     WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(workspace_title(root))
-        .inner_size(1280.0, 820.0)
+        .inner_size(width, height)
+        .initialization_script(preferences::seed_script(&preferences.settings()))
+        .on_page_load(|window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let settings = window.state::<preferences::Store>().settings();
+                let _ = window.eval(preferences::settings_script(&settings));
+            }
+        })
         .build()
         .map_err(|e| e.to_string())?;
     workspaces::set_workspace_window(&server, root, &label);
@@ -797,4 +816,21 @@ fn release_folder_test() {
     for output in ["", "/out", "../out", "a/../out", ".solace/out", "a\\out"] {
         assert!(release_folder(root, output, "b1").is_err(), "{output}");
     }
+}
+
+/// Keeps a board window's size for the next board window opened.
+fn remember_size(window: &tauri::Window) {
+    if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+        let size = size.to_logical::<f64>(scale);
+        let _ = window
+            .state::<preferences::Store>()
+            .set_size(size.width, size.height);
+    }
+}
+
+/// Keeps a page's setting for the board windows opened later, "" when it was
+/// cleared.
+#[tauri::command]
+fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    app.state::<preferences::Store>().set_setting(&key, &value)
 }

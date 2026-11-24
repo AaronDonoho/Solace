@@ -95,11 +95,13 @@ fn problem(p: &Probe, tool: Tool) -> Option<String> {
 
 fn item(p: &Probe, tool: Tool) -> (Value, Vec<Step>) {
     let problem = problem(p, tool);
-    let steps = match problem.is_some() {
+    let install = problem.is_some() && solace_installs(p.platform, tool);
+    let steps = match problem.is_some() && !install {
         true => steps(p, tool),
         false => Vec::new(),
     };
-    let value = item_with(tool_id(tool), tool_label(tool), problem, steps.clone());
+    let mut value = item_with(tool_id(tool), tool_label(tool), problem, steps.clone());
+    value["install"] = json!(install);
     (value, steps)
 }
 
@@ -181,7 +183,7 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn version(text: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn version(text: &str) -> Option<(u32, u32, u32)> {
     text.split_whitespace().find_map(|part| {
         let mut pieces = part.trim_start_matches('v').split('.');
         let major: u32 = pieces.next()?.parse().ok()?;
@@ -247,7 +249,8 @@ mod tests {
         for item in &items {
             assert_eq!(item["ok"], false, "{item}");
             assert!(!item["why"].as_str().unwrap_or("").is_empty(), "{item}");
-            assert!(!item["steps"].as_array().unwrap_or(&Vec::new()).is_empty(), "{item}");
+            let steps = !item["steps"].as_array().unwrap_or(&Vec::new()).is_empty();
+            assert!(steps != (item["install"] == true), "steps or Install: {item}");
         }
     }
 
@@ -305,15 +308,14 @@ mod tests {
     #[test]
     fn each_system_gets_its_own_install_step() {
         assert!(!homebrew_steps().is_empty());
-        assert_eq!(install(Platform::Macos, Tool::Gleam)[0].text, "brew install gleam");
-        assert!(install(Platform::Debian, Tool::Erlang).iter().any(|step| step.command && step.text.contains("otp_src_29.0.tar.gz")));
+        assert_eq!(install(Platform::Other, Tool::Gleam)[0].text, "Install it from https://gleam.run/install/");
         assert_eq!(install(Platform::Arch, Tool::Bubblewrap)[0].text, "sudo pacman -S --needed bubblewrap");
         assert_eq!(install(Platform::OtherLinux, Tool::Git)[0].text, "Install it from https://git-scm.com/downloads");
         assert!(install(Platform::Macos, Tool::Agent).iter().any(|step| step.text.contains("claude.ai")));
         assert!(install(Platform::Debian, Tool::Agent).iter().any(|step| step.text.contains("codex/releases")));
         for platform in [Platform::Macos, Platform::Debian, Platform::Arch, Platform::OtherLinux, Platform::Other] {
             for tool in TOOLS {
-                assert!(!install(platform, tool).is_empty());
+                assert!(solace_installs(platform, tool) || !install(platform, tool).is_empty(), "{}", tool_id(tool));
             }
         }
     }
@@ -374,14 +376,8 @@ mod tests {
                 }
             }
         }
-        let debian = install(Platform::Debian, Tool::Gleam);
-        assert!(debian.iter().any(|step| !step.command && step.text.contains("gleam-lang/gleam/releases")));
-        assert!(debian.iter().any(|step| step.command && step.text == "tar xf gleam-*-unknown-linux-musl.tar.gz"));
-        assert!(debian.iter().any(|step| step.command && step.text == "sudo install -m 755 gleam /usr/local/bin/gleam"));
-        let erlang = install(Platform::Debian, Tool::Erlang);
-        assert!(erlang.iter().any(|step| step.command && step.text.contains("otp_src_29.0.tar.gz")));
-        assert!(erlang.iter().any(|step| step.command && step.text == "./configure --prefix=/usr/local && make && sudo make install"));
-        assert!(!erlang.iter().any(|step| step.text == "sudo apt install -y erlang"));
+        let bubblewrap = install(Platform::Debian, Tool::Bubblewrap);
+        assert!(bubblewrap.iter().all(|step| step.command && step.text == "sudo apt install -y bubblewrap"));
     }
 
     #[test]
@@ -445,6 +441,44 @@ mod tests {
     fn a_step_without_a_command_is_an_error() {
         static STEP: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| serde_json::json!({"text": "run it"}));
         step(&STEP);
+    }
+
+    /// Solace installs its own Gleam and Erlang (D-264): their items offer
+    /// Install instead of commands, except where Solace has no download.
+    #[test]
+    fn gleam_and_erlang_are_installed_by_solace() {
+        for platform in [Platform::Macos, Platform::Debian, Platform::Arch, Platform::OtherLinux] {
+            let p = Probe { on_path: &no, output: &nothing, agent: &agent_yes, sandbox: &sandbox_yes, platform };
+            let items = items(&p);
+            for id in ["gleam", "erlang"] {
+                let item = items.iter().find(|item| item["id"] == id).unwrap();
+                assert_eq!(item["install"], true, "{item}");
+                assert_eq!(item["steps"], json!([]), "{item}");
+            }
+            let git = items.iter().find(|item| item["id"] == "git").unwrap();
+            assert_eq!(git["install"], false, "{git}");
+        }
+        let p = Probe { on_path: &no, output: &nothing, agent: &agent_yes, sandbox: &sandbox_yes, platform: Platform::Other };
+        let gleam = items(&p).into_iter().find(|item| item["id"] == "gleam").unwrap();
+        assert_eq!(gleam["install"], false, "{gleam}");
+        assert_eq!(gleam["steps"][0]["text"], "Install it from https://gleam.run/install/");
+    }
+
+    /// Linux on a CPU Solace has no Gleam or Erlang download for lists how to
+    /// install them instead of offering an Install that can only fail.
+    #[test]
+    fn a_system_with_no_download_gets_steps_instead_of_install() {
+        for platform in [Platform::Debian, Platform::Arch, Platform::OtherLinux] {
+            let p = Probe { on_path: &no, output: &nothing, agent: &agent_yes, sandbox: &sandbox_yes, platform };
+            let items = crate::tools::with_system(Some("riscv64-linux-gnu"), || items(&p));
+            for (id, text) in
+                [("gleam", "Install it from https://gleam.run/install/"), ("erlang", "Install it from https://www.erlang.org/downloads")]
+            {
+                let item = items.iter().find(|item| item["id"] == id).unwrap();
+                assert_eq!(item["install"], false, "{item}");
+                assert_eq!(item["steps"][0]["text"], text, "{item}");
+            }
+        }
     }
 
 
@@ -526,4 +560,10 @@ fn step(value: &'static Value) -> Step {
 
 fn homebrew_steps() -> Vec<Step> {
     install_table()["homebrew"].as_array().map(|steps| steps.iter().map(step).collect()).unwrap_or_default()
+}
+
+/// Whether Solace installs `tool` itself here (D-264): Gleam and Erlang, on
+/// the systems it has downloads for.
+fn solace_installs(platform: Platform, tool: Tool) -> bool {
+    matches!(tool, Tool::Gleam | Tool::Erlang) && platform != Platform::Other && crate::tools::downloadable(tool_id(tool))
 }

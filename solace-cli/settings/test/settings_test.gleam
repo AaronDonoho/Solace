@@ -1316,3 +1316,53 @@ pub fn notifications_tab_lists_both_sounds_test() {
   assert !both_on.finished_sound
   assert !both_on.attention_sound
 }
+
+/// The Appearance tab's Font size dropdown lists every size in pixels with the
+/// one in use chosen, 15 by default; picking one and Reset to default change it.
+pub fn font_size_dropdown_lists_sizes_and_resets_test() {
+  let model = settings.initial(False)
+  assert model.font_size == 15
+  let page = element.to_string(settings.view(model))
+  assert string.contains(page, "Font size</h2>")
+  assert string.contains(page, ">Reset to default</button>")
+  list.each([12, 13, 14, 15, 16, 18, 20, 24, 28, 32, 36], fn(size) {
+    let px = int.to_string(size)
+    assert string.contains(page, "value=\"" <> px <> "\"")
+    assert string.contains(page, ">" <> px <> "px</option>")
+  })
+  assert string.contains(page, "<option selected value=\"15\">")
+    || string.contains(page, "<option value=\"15\" selected>")
+  let #(bigger, _) = settings.update(model, settings.SetFontSize(20))
+  assert bigger.font_size == 20
+  let page = element.to_string(settings.view(bigger))
+  assert string.contains(page, "<option selected value=\"20\">")
+    || string.contains(page, "<option value=\"20\" selected>")
+  let #(reset, _) =
+    settings.update(bigger, settings.SetFontSize(settings.default_font_size))
+  assert reset.font_size == 15
+  let #(heard, _) = settings.update(bigger, settings.FontSizeChanged(""))
+  assert heard.font_size == 15
+  let #(heard, _) = settings.update(model, settings.FontSizeChanged("24"))
+  assert heard.font_size == 24
+}
+
+/// Each wheel step moves to the next size offered and stops at 12 and 36; a
+/// stored value not offered reads as the default.
+pub fn font_size_steps_stop_at_the_ends_test() {
+  assert settings.font_size_step(15, True) == 16
+  assert settings.font_size_step(15, False) == 14
+  assert settings.font_size_step(24, True) == 28
+  assert settings.font_size_step(36, True) == 36
+  assert settings.font_size_step(12, False) == 12
+  assert settings.font_size_from("20") == 20
+  assert settings.font_size_from("") == 15
+  assert settings.font_size_from("17") == 15
+  assert settings.font_size_from("big") == 15
+}
+
+/// The Font size dropdown's tooltip names its hotkey, in the desktop app and
+/// in a browser alike.
+pub fn font_size_tooltip_names_the_hotkey_test() {
+  let page = element.to_string(settings.view(settings.initial(False)))
+  assert string.contains(page, "title=\"Hotkey: Ctrl + Mouse wheel\"")
+}

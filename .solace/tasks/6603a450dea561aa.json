@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nThe desktop app's `preferences` saves with `fs::write`, which empties the file and then writes the new contents. A crash or power loss in between leaves an empty file. On the next start, reading quietly treats it as \"no preferences\" and uses the defaults, so the window size and every page setting are lost with no message.\n\n### Done when\n- Preferences are written to a temporary file that is then renamed into place, so a crash leaves either the old file or the new one. The repository's `fsx::write_atomic` does this; if solace-app can't use it, the same steps are fine.\n- A test checks that a save replaces the whole file and leaves no temporary file behind.",
+  "closedTime": 1795493356,
+  "column": "complete",
+  "createdTime": 1795480225,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "6603a450dea561aa",
+  "links": [],
+  "milestone": null,
+  "rank": 11.0,
+  "scope": [
+    "solace-app"
+  ],
+  "title": "desktop app: save preferences safely"
+}

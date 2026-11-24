@@ -7,7 +7,6 @@ use super::routing::{operands, unknown_option};
 use super::READS;
 use crate::lockdown::settings::settings;
 use crate::board::runs::context;
-use crate::board::runs::strategy_context;
 use crate::board::runs::agent_guard;
 /// `--project <dir>` on a command that isn't a plain read, in a board run whose
 /// task may change that project (D-61): the folder the command runs in. Plain
@@ -138,10 +137,7 @@ pub(crate) fn read_project_with_version(dir: &str, args: &[String], budget: usiz
         return crate::lockdown::error(
             "E6007",
             command,
-            if strategy_context().is_some()
-                || crate::board::runs::design_context().is_some()
-                || crate::board::runs::notes_context().is_some()
-            {
+            if crate::board::runs::workspace_context() {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read, design)"
             } else {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read, design) here; in a board run, \

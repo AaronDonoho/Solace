@@ -302,6 +302,7 @@ pub(crate) fn put_run(top: &Path, run: &Value) -> Result<(), Failure> {
     let event = match kind {
         crate::board::roles::DESIGN_RUN => json!({"designRun": run}),
         crate::board::roles::NOTES_RUN => return Ok(()),
+        crate::board::roles::SYSTEM_REVIEW_RUN => return Ok(()),
         _ => json!({"strategyRun": run}),
     };
     log(top, "", &event);
@@ -313,6 +314,7 @@ pub(crate) fn strategy_run(top: &Path, rid: &str) -> Option<Value> {
     run_record(top, STRATEGY_RUN, rid)
         .or_else(|| run_record(top, crate::board::roles::NOTES_RUN, rid))
         .or_else(|| run_record(top, crate::board::roles::DESIGN_RUN, rid))
+        .or_else(|| run_record(top, crate::board::roles::SYSTEM_REVIEW_RUN, rid))
 }
 
 /// Changes strategy run `rid` with `f`, read and written as one operation.
@@ -332,7 +334,7 @@ pub(crate) fn update_run<R: Send + 'static>(
 
 /// Ends the workspace runs a previous server left going: their agents are gone.
 pub fn end_strategy_runs(top: &Path) -> Result<(), Failure> {
-    for kind in [STRATEGY_RUN, crate::board::roles::DESIGN_RUN, crate::board::roles::NOTES_RUN] {
+    for kind in [STRATEGY_RUN, crate::board::roles::DESIGN_RUN, crate::board::roles::NOTES_RUN, crate::board::roles::SYSTEM_REVIEW_RUN] {
         for run in run_records(top, kind).into_iter().filter(|r| r["state"] != "ended") {
             let rid = run["id"].as_str().unwrap_or("").to_string();
             update_run(top, &rid.clone(), move |r| {
@@ -550,7 +552,7 @@ fn build(top: &Path, rid: &str, p: &Value, column: Column) -> Result<Built, Fail
                 note(&mut t, "solace", None, &format!("Changed by strategy run {rid}"));
                 Ok(Built::Task(t, false))
             }
-            None => Ok(Built::Task(proposed_task(top, rid, fields, column)?, true)),
+            None => Ok(Built::Task(proposed_task(top, &format!("Created by strategy run {rid}"), fields, column)?, true)),
         },
         "vision" => {
             let Some(text) = fields["text"].as_str() else { return board::err("E7001", "a vision proposal needs its text") };
@@ -566,8 +568,9 @@ fn build(top: &Path, rid: &str, p: &Value, column: Column) -> Result<Built, Fail
 /// first column if it has none, D-132), with `feature`, `milestone` and
 /// `dependsOn` set as `PATCH` sets them. Every folder in `scope` must be a
 /// project (D-129): a proposal naming one that isn't is refused here, when the
-/// proposal is sent, before the human is asked.
-fn proposed_task(top: &Path, rid: &str, fields: &Value, column: Column) -> Result<Value, Failure> {
+/// proposal is sent, before the human is asked. `origin`, a `solace` note,
+/// says what proposed it.
+pub(crate) fn proposed_task(top: &Path, origin: &str, fields: &Value, column: Column) -> Result<Value, Failure> {
     let folders: Vec<String> = match fields.get("scope") {
         None => vec![".".into()],
         Some(v) => {
@@ -587,7 +590,7 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value, column: Column) -> Resul
     let mut body = fields.clone();
     body["scope"] = json!(folders);
     let mut t = created(&scope::path(top, &folders[0]), &body, column)?;
-    note(&mut t, "solace", None, &format!("Created by strategy run {rid}"));
+    note(&mut t, "solace", None, origin);
     set_links(top, &mut t, fields)?;
     Ok(t)
 }
@@ -638,32 +641,9 @@ pub(crate) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
             "answer": null,
         }));
     }
-    let fields = if kind == "vision" {
-        json!({"text": text})
-    } else {
-        match serde_json::from_str::<Value>(text) {
-            Ok(v) if v.is_object() => v,
-            _ => return board::err("E7001", "the proposal's fields go in `text`, as a JSON object"),
-        }
-    };
-    let fields = bare_links(fields);
     let id = id.map(bare_id);
+    let fields = if kind == "vision" { json!({"text": text}) } else { proposal_fields(kind, id.is_some(), text)? };
     let offers_planning = kind == "task" && id.is_none() && matches!(fields.get("feature"), None | Some(Value::Null));
-    // D-105: a field the request doesn't take is refused, so a misspelt one isn't lost.
-    if kind != "vision" {
-        let allowed: &[&str] = match (kind, id.is_some()) {
-            ("task", false) => &["title", "body", "scope", "feature", "milestone", "dependsOn"],
-            ("task", true) => &["title", "body", "feature", "milestone", "dependsOn", "rank"],
-            ("feature", false) => &["title", "body", "milestone", "state"],
-            ("feature", true) => &["title", "body", "milestone", "state", "rank"],
-            ("milestone", false) => &["title", "body", "targetDate", "state"],
-            _ => &["title", "body", "targetDate", "state", "rank"],
-        };
-        if let Some(k) = fields.as_object().into_iter().flat_map(|o| o.keys()).find(|k| !allowed.contains(&k.as_str())) {
-            let edit = if id.is_some() { " that edits" } else { "" };
-            return board::err("E7001", format!("a {kind} proposal{edit} takes {}; not `{k}`", allowed.join(", ")));
-        }
-    }
     let mut p = json!({"kind": kind, "fields": fields});
     // D-115: the record's current value of each proposed field, as the human
     // sees only what changes. The vision's is its text.
@@ -1000,6 +980,8 @@ fn run_dir(top: &Path, kind: &str) -> PathBuf {
         top.join(".solace/design/runs")
     } else if kind == crate::board::roles::NOTES_RUN {
         top.join(".solace/release-notes")
+    } else if kind == crate::board::roles::SYSTEM_REVIEW_RUN {
+        top.join(".solace/system-reviews")
     } else {
         strategy_dir(top, "runs")
     }
@@ -1028,7 +1010,7 @@ fn run_records(top: &Path, kind: &str) -> Vec<Value> {
 
 /// Every workspace run of `kind`, oldest first, without its notes: the list a
 /// `GET` returns and a new connection's replay sends.
-fn runs_list(top: &Path, kind: &str) -> Vec<Value> {
+pub(crate) fn runs_list(top: &Path, kind: &str) -> Vec<Value> {
     let mut out = run_records(top, kind);
     for r in out.iter_mut().filter_map(Value::as_object_mut) {
         r.remove("notes");
@@ -1328,15 +1310,7 @@ pub(crate) fn notes_runs(top: &Path) -> Vec<Value> {
 
 /// Starts a notes run for release `version`, its first note `message`.
 pub(crate) fn start_notes_run(top: &Path, version: &str, message: &str) -> Result<Value, Failure> {
-    let m = family_model(&system()?, &json!({}), NOTES_FAMILY)?;
-    let id = unique_id();
-    let log = run_dir(top, crate::board::roles::NOTES_RUN).join(format!("{id}.jsonl"));
-    let mut run = json!({"id": id, "kind": crate::board::roles::NOTES_RUN, "model": m["id"],
-        "effort": m["effort"], "state": "running", "started": now(),
-        "log": log, "context": {"kind": "release", "id": version}, "notes": [], "questions": []});
-    note(&mut run, "solace", Some(&id), message);
-    put_run(top, &run)?;
-    Ok(run)
+    start_workspace_run(top, NOTES_FAMILY, json!({"kind": "release", "id": version}), message)
 }
 
 /// Announces the vision as a root event when it differs from `seen`.
@@ -1347,4 +1321,43 @@ pub(crate) fn announce_vision(top: &Path, seen: &mut Option<Value>) {
 /// Announces the personas as a root event when they differ from `seen`.
 pub(crate) fn announce_personas(top: &Path, seen: &mut Option<Value>) {
     crate::tasks::store::announce(top, "personas", json!(personas(top)), seen);
+}
+
+/// A proposal's request fields: `text` as a JSON object, each linked id bare.
+/// A field the request doesn't take is refused (D-105), so a misspelt one isn't
+/// lost; `edit` says whether the proposal edits a record or creates one.
+pub(crate) fn proposal_fields(kind: &str, edit: bool, text: &str) -> Result<Value, Failure> {
+    let fields = match serde_json::from_str::<Value>(text) {
+        Ok(v) if v.is_object() => bare_links(v),
+        _ => return board::err("E7001", "the proposal's fields go in `text`, as a JSON object"),
+    };
+    let allowed: &[&str] = match (kind, edit) {
+        ("task", false) => &["title", "body", "scope", "feature", "milestone", "dependsOn"],
+        ("task", true) => &["title", "body", "feature", "milestone", "dependsOn", "rank"],
+        ("feature", false) => &["title", "body", "milestone", "state"],
+        ("feature", true) => &["title", "body", "milestone", "state", "rank"],
+        ("milestone", false) => &["title", "body", "targetDate", "state"],
+        _ => &["title", "body", "targetDate", "state", "rank"],
+    };
+    if let Some(k) = fields.as_object().into_iter().flat_map(|o| o.keys()).find(|k| !allowed.contains(&k.as_str())) {
+        let edits = if edit { " that edits" } else { "" };
+        return board::err("E7001", format!("a {kind} proposal{edits} takes {}; not `{k}`", allowed.join(", ")));
+    }
+    Ok(fields)
+}
+
+pub(crate) const SYSTEM_REVIEW_FAMILY: Family = Family { kind: crate::board::roles::SYSTEM_REVIEW_RUN, role: Some("reviewer") };
+
+/// Records a new workspace run of `family` on `context`, on its role's model,
+/// its first note `message`; its agent is launched apart.
+pub(crate) fn start_workspace_run(top: &Path, family: Family, context: Value, message: &str) -> Result<Value, Failure> {
+    let m = family_model(&system()?, &json!({}), family)?;
+    let id = unique_id();
+    let log = run_dir(top, family.kind).join(format!("{id}.jsonl"));
+    let mut run = json!({"id": id, "kind": family.kind, "model": m["id"],
+        "effort": m["effort"], "state": "running", "started": now(),
+        "log": log, "context": context, "notes": [], "questions": []});
+    note(&mut run, "solace", Some(&id), message);
+    put_run(top, &run)?;
+    Ok(run)
 }

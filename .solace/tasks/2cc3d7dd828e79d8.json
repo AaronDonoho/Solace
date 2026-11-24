@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "## Problem\nOnce **Run review** is pressed, the human loses track of the review.\n\n- `sysreview.run_view` shows \"Review started: … Its findings will appear as tasks in Planning.\" only until the page reloads. After a reload, nothing on the page says a review is running.\n- `system_reviews.past` (`GET /system-reviews`) keeps only runs with `state == \"ended\"` and `outcome == \"finished\"`. A review whose agent fails, is stopped or is interrupted never shows anywhere. The human waits for Planning tasks that will never come.\n- D-24 says a human can follow a run and that a failed run says why. System review runs get neither.\n\n## Change\n1. Server: make `system_reviews.past` list every system review run (or add `GET /system-reviews/runs`). Each entry gets its `state` and `outcome`, plus the run's last agent message or failure text when it has one. Keep newest first. `SYSTEMREVIEWS.md` stays completed-only (D-265).\n2. Page (`solace-cli/sysreview/src/sysreview.gleam`):\n   - Load that list when the page opens. On the Run tab, show \"A review is running (started <clock>): <kinds>\" while one is open.\n   - Disable **Run review** while a review runs, or keep the server's refusal and show it.\n   - On the Past tab, add a **State** column: Finished, Running, Failed or Stopped. A failed row's dialog shows the reason.\n   - Rename the tab if it is no longer completed-only.\n3. Refresh the list when a review run ends, for example from the event stream the page already uses for `missedReviews`.\n\n## Check\n- Add a Rust test beside `board::server::tests.a_system_review_needs_known_kinds`. Start a review, end its run as failed, and check that `GET /system-reviews` lists it with `state` and `outcome`.\n- Add Gleam tests in `test/sysreview_test.gleam`: a running review shows the running line and disables Run review, and a failed review's row reads \"Failed\".\n- By hand: start a review with no reviewer model available. The page says it failed and why.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503693,
+  "dependsOn": [],
+  "feature": "ff5e63eb57d89470",
+  "home": "solace-cli",
+  "id": "2cc3d7dd828e79d8",
+  "links": [],
+  "milestone": null,
+  "rank": 472.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/sysreview"
+  ],
+  "title": "Show running and failed system reviews"
+}

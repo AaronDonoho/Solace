@@ -14,6 +14,7 @@ import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
 import solace_task
+import sysreview
 
 pub fn main() -> Nil {
   let assert Ok(_) = register()
@@ -130,6 +131,11 @@ pub type Model {
     notes_edit: Option(String),
     saving_notes: Bool,
     desktop: Bool,
+    /// The missed scheduled reviews not yet answered, as the server last listed them.
+    missed: List(sysreview.MissedReview),
+    missed_error: String,
+    /// Whether a missed review's answer is on its way.
+    answering: Bool,
   )
 }
 
@@ -192,6 +198,12 @@ pub type Msg {
   OpenFolder
   /// The desktop app's reply to opening the folder: empty on success.
   FolderOpened(String)
+  /// A missed review's **Run now** button: its schedule.
+  RunMissed(String)
+  /// A missed review's **Skip** button: its schedule.
+  SkipMissed(String)
+  /// The reply to answering a missed review: those left, or a refusal.
+  MissedAnswered(String)
 }
 
 /// The page before it hears from anywhere.
@@ -229,6 +241,9 @@ pub fn initial() -> Model {
     notes_edit: None,
     saving_notes: False,
     desktop: False,
+    missed: [],
+    missed_error: "",
+    answering: False,
   )
 }
 
@@ -257,7 +272,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                     "",
                     fn(text) { send(Live(text)) },
                     fn() { send(CaughtUp) },
-                    ["build", "buildLog", "builds", "releaseNotes"],
+                    [
+                      "build",
+                      "buildLog",
+                      "builds",
+                      "releaseNotes",
+                      "missedReviews",
+                    ],
                   ),
                 ),
               )
@@ -675,6 +696,19 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
       effect.none(),
     )
+    RunMissed(id) -> answer(model, id, "run")
+    SkipMissed(id) -> answer(model, id, "skip")
+    MissedAnswered(text) ->
+      case json.parse(text, sysreview.missed_decoder()) {
+        Ok(missed) -> #(
+          Model(..model, missed:, missed_error: "", answering: False),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, missed_error: refusal(text), answering: False),
+          effect.none(),
+        )
+      }
   }
 }
 
@@ -744,7 +778,16 @@ fn apply(model: Model, text: String) -> #(Model, Bool) {
             )
           {
             Ok(#(id, step, text)) -> #(append_log(model, id, step, text), False)
-            Error(_) -> #(model, False)
+            Error(_) ->
+              case
+                json.parse(
+                  text,
+                  decode.at(["missedReviews"], sysreview.missed_decoder()),
+                )
+              {
+                Ok(missed) -> #(Model(..model, missed:), False)
+                Error(_) -> #(model, False)
+              }
           }
       }
   }
@@ -877,6 +920,13 @@ fn log_decoder() -> decode.Decoder(#(String, Int, String)) {
 pub fn view(model: Model) -> Element(Msg) {
   html.main([attribute.class("delivery")], [
     html.style([], view_styles),
+    sysreview.missed_notice(
+      list.filter(model.missed, fn(m) { !m.read }),
+      model.missed_error,
+      model.answering,
+      RunMissed,
+      SkipMissed,
+    ),
     html.div(
       [
         attribute.class("tabs"),
@@ -1263,6 +1313,7 @@ pub fn register() -> Result(Nil, lustre.Error) {
 const view_styles =
   solace_task.control_styles
   <> solace_task.tab_styles
+  <> sysreview.missed_styles
   <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--ok-text:#1a6b30;--warn-text:#8a4a0a;--revision:#a32628;--shadow:#17222626}
 .delivery{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;background:var(--sheet);color:var(--ink);--tabs-height:44px;--tab-pad:0 18px}
 .delivery>[role=tabpanel]{padding:var(--space-6)}
@@ -1807,5 +1858,16 @@ fn kept_notes_edit(
     Some(Release(before, _, _)), Some(Release(after, _, _)) if before == after ->
       edited
     _, _ -> None
+  }
+}
+
+/// Answers schedule `id`'s missed review with `action`, unless an answer is on its way.
+fn answer(model: Model, id: String, action: String) -> #(Model, Effect(Msg)) {
+  case model.answering {
+    True -> #(model, effect.none())
+    False -> #(
+      Model(..model, answering: True, missed_error: ""),
+      post(sysreview.missed_path(id, action), "{}", MissedAnswered),
+    )
   }
 }

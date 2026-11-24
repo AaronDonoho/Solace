@@ -932,7 +932,8 @@ Amends Spec 3 §1 (Aaron, board task "replies: catch re-reads after compaction",
 Why: run 11 made four separate re-reads after compaction. The server can't see the agent compact, and the guess came one turn late; the agent can see it and ask.
 
 ## D-158 Rust projects are held by symbol
-Amends Spec 1 §4, §8 and its tests, Spec 2 §1, §2 and its tests, and Spec 14 §1, §4, §7 and its tests (Aaron, board task "Rust: record the store decision", 2026-10-17). Part of the Rust symbol store and lockdown feature; proposed in task:d41626ab51473623, measured in task:4f32c653e33b9caf.
+Changed by (human, board task "app tests: declared build folder and readable failure", 2026-11-20)
+Amends Spec 1 §4, §8 and its tests, Spec 2 §1, §2 and its tests, and Spec 14 §1, §4, §7 and its tests (Aaron, board task "Rust: record the store decision", 2026-10-17). Part of the Rust symbol store and lockdown feature; proposed in task:d41626ab51473623, measured in task:4f32c653e33b9caf. Point 4 changed in task "app tests: declared build folder and readable failure" (2026-11-20).
 1. A Cargo package of one crate is a Rust project. Its `.rs` files in `src/` and `tests/` are symbols: items by module path (`board::agents::cached`), methods as `Type::name`, trait impls as `<Type as Trait>` (their functions `<Type as Trait>::f`), inline `mod` blocks as modules.
 2. The subset: every item has its own name, once per module (platform differences go inside the body); at module level a macro only defines (`macro_rules!`) or is `thread_local!`; no `include!` (`include_str!` and `include_bytes!` are data); a `#[path]` module is a `.rs` file beside its parent. Every `unsafe` has a `// SAFETY:` comment: a review rule, not a refusal; the review lists new `unsafe`. `submit` refuses code outside the subset, keeping a draft (D-46) and giving the rewrite:
    - same name twice: "Not saved: `f` is defined twice in `board` (`#[cfg(unix)]`, `#[cfg(windows)]`). Keep one `f` and put the platform code inside it: `#[cfg(unix)] { … }` or `if cfg!(unix) { … }`."
@@ -942,10 +943,10 @@ Amends Spec 1 §4, §8 and its tests, Spec 2 §1, §2 and its tests, and Spec 14
    - at import: "`x` is a proc-macro crate; Solace doesn't hold proc-macro crates yet." and "This is a workspace of N crates; add each member as its own project."
    A Rust project's session start, and no other, carries the brief lines: "Rust in Solace: every item has its own name, once per module; put platform differences inside the body (`#[cfg(unix)] { … }` or `if cfg!(unix)`). At module level a macro only defines (`macro_rules!`) or is `thread_local!`: no `lazy_static!`, `bitflags!` or other item-making calls (use `LazyLock`, `OnceLock`, consts). No `include!`; use `include_str!` or `include_bytes!` for data. `#[path]` names a file beside its parent. Every `unsafe` has a `// SAFETY:` comment. `build.rs`, `.cargo/config.toml`, `rust-toolchain.toml` and Cargo.toml's dependencies are settings: `write` them with `reason`."
 3. Every change is checked with `cargo check --all-targets --message-format=json`; a change with errors is not saved. Errors are located by their primary span, and an error reported once per target is shown once. A warm check after a one-function edit took 0.71 s and a cold one 10.4 s, so every submit is checked, in the project's own target folder. `cargo test` (26–28 s, mostly running the suite) stays at `test` and the existing gates, never per submit.
-4. `build.rs`, `.cargo/config.toml`, `rust-toolchain.toml` and Cargo.toml's dependency and build keys (the dependency tables, `[target.*]` dependencies, `[patch]`, `[replace]`, `package.build`, `package.links`, `lib.proc-macro`) are settings the human approves. On Linux, checks run under bubblewrap without network, with only `target/` writable; so do Solace's `test` and `build`, which run `build.rs` too. Checks pass `--offline`; `~/.cargo/registry`, `~/.cargo/git` and the toolchain are mounted read-only; `cargo fetch` runs outside the sandbox only after an import and after an approved change to Cargo.toml's dependencies.
+4. `build.rs`, `.cargo/config.toml`, `rust-toolchain.toml` and Cargo.toml's dependency and build keys (the dependency tables, `[target.*]` dependencies, `[patch]`, `[replace]`, `package.build`, `package.links`, `lib.proc-macro`) are settings the human approves. On Linux, checks run under bubblewrap without network, with only `target/`, `Cargo.lock` and the folders the project's `solace.toml` lists in `[sandbox] write` writable; so do Solace's `test` and `build`, which run `build.rs` too. Each `[sandbox] write` folder is inside the project, never the project folder itself, and the line is a settings change the human approves; everything else in the project stays read-only. Checks pass `--offline`; `~/.cargo/registry`, `~/.cargo/git` and the toolchain are mounted read-only; `cargo fetch` runs outside the sandbox only after an import and after an approved change to Cargo.toml's dependencies.
 5. Items are parsed with `syn`, and files are written from stored text exactly. rustfmt formats a submitted item only: the code isn't rustfmt-clean (about 295 hunks across 21 files with its `rustfmt.toml`), so items not submitted keep their text.
 6. Deferred: workspaces, proc-macro crates, type-accurate refs, extract and merge, probe.
-Why: Rust code is kept as plain files today, so agents edit it by file with no type check per change. A warm check is under a second, so checking every change is affordable; formatting whole files would bury a change in unrelated reformatting.
+Why: Rust code is kept as plain files today, so agents edit it by file with no type check per change. A warm check is under a second, so checking every change is affordable; formatting whole files would bury a change in unrelated reformatting. Point 4's `[sandbox] write`: the desktop app's build (Tauri) writes generated files to `gen/`, so with only `target/` writable none of its tests could run in a task run; a declared, approved list keeps every other folder read-only and works for any framework (chosen over a built-in Tauri rule and over fixing only the error output).
 
 ## D-159 The frontend bundles build in the plan; `build.rs` only embeds
 Amends D-131 point 6 (Aaron, board task "Self-build: bundling out of build.rs", 2026-10-17). Part of the Rust symbol store and lockdown feature.
@@ -956,13 +957,15 @@ Amends D-131 point 6 (Aaron, board task "Self-build: bundling out of build.rs", 
 Why: a Rust check ran bun and gleam in other projects, so it failed on their Gleam errors and needed write access to them; the plan already says how each project builds.
 
 ## D-160 A task whose home is no project is re-homed
-Amends D-129 point 2, and Spec 15 §4 (Aaron, board task "Homeless tasks fall back to the root", 2026-10-17).
+Changed by (human, board task "projects: re-adding a project keeps its tasks", 2026-11-22)
 1. When a task's home is no project of the workspace, it is re-homed: its home becomes the first project of its scope, and its scope keeps only the projects of it.
 2. When none of its scope folders is a project, its home becomes the root and its scope becomes `.`, when the root is a project. A task stays without a project only when the root itself isn't a project.
 3. The load (`GET /tasks` and `GET /tasks/{id}`) applies this and writes the change: the task's folder moves as a scope change moves it, and the task gets a `solace` note naming its old and new home and the folders it dropped. The `noProject` mark comes from the home on each load and is never saved to the file.
 4. A task with a run still live is not re-homed until the run ends: the agent works from the task's folder, and the load leaves it marked.
 5. A project list that can't be read counts every home as a project, so no task is marked or moved while the list is unreadable.
-Why: task:59d0b7ae77d161d9 showed as having no project although its scope named projects: a change on such a task saved the mark into its file, where it stayed whatever the home. A task with no project is a dead end the human can't fix, and the root is where its runs wrote, so it falls back to the root. The scope drops its non-project folders (Aaron's choice) so the Scope tab of a re-homed task shows only projects and saves.
+6. A task whose home is a project taken off the board with its files kept (its Solace store is still there) is not re-homed. It keeps its home and scope and is listed as having no project (D-129) until the project is added back; then it is in that project's lane again. Its tasks are re-homed as above only once the project's files are deleted, or for a home that was never a project.
+
+Why: removing a project and adding it back showed it with no tasks: the next load re-homed them to the root, and adding the project back didn't return them (task "projects: re-adding a project keeps its tasks"). The human chose to keep the tasks with the removed project, so taking a project off the board can be undone.
 
 ## D-161 Every read-only run may run marked commands
 Amends D-67 (Aaron, board task "Address failing tests", 2026-10-17). Investigations and discussions, like reviews, may `run` a `[commands]` entry marked `allowed_in_reviews = true` in that project's `solace.toml`; unmarked commands stay refused, with "this run is read-only". The key keeps its name. Why: an investigation asked about failing tests couldn't run the suites in question, and D-67 gave no reason to leave investigations out. A command a human vetted for reviews is just as safe there; commands that change project files, such as a bundle step, stay unmarked.
@@ -1690,4 +1693,38 @@ Amends D-179 point 1 and D-191, deliberately changing the block D-191 pins.
 4. Tasks are shared without their notes, questions and runs. Current designs live at `<workspace root>/designs/` (D-230 point 6); design runs and other local state under `.solace/` stay local. Personas stay in one file, so concurrent persona edits on two computers can conflict.
 
 Why: the vision, personas, milestones and features are the team's direction and belong in the project, while strategy runs are conversations that can hold private data. Tasks and current designs are shared for the same reason: a clone needs them, while their conversations and local run state stay private. Committing the records avoids an import/export step that would drift.
+
+## D-262 Font size scales the whole page
+(human, board task "appearance: adjustable font size", 2026-11-18)
+The Appearance tab's Font size scales each page as a whole, the way a zoom does: text, controls, spacing and the menu bar all grow by the chosen size divided by the 15px default. Pages keep their fixed pixel sizes, and nothing is converted to relative units. The sizes are 12, 13, 14, 15 (default), 16, 18, 20, 24, 28, 32 and 36px. In the desktop app, Ctrl + mouse wheel steps through them.
+
+Why: every page fixes its text sizes in pixels, so changing a base size would leave most text unchanged; scaling the page reaches every page without rewriting each project's styles.
+
+## D-263 A test run checks the tools its tests need first
+(human, board task "board: link the blocking Unexpected Changes task", 2026-11-20)
+Changed by (human, board task "board: link the blocking Unexpected Changes task", 2026-11-20)
+Changed by (human, board task "board: link the blocking Unexpected Changes task", 2026-11-20)
+A project's `solace.toml` can list the tools its tests need, each with an optional minimum version (solace-cli: Gleam, and Node 19 or newer). An entry can also name the tests that need the tool, by test-name prefix (for example `workspace::`). An entry that names no tests applies to every test in the project. A Gleam project whose JavaScript runtime is Node checks Node's version without declaring it. Before `test` runs any test, Solace checks the tools that the tests it is about to run need, once. If one is missing or too old, the run stops with a single line naming the tool, the version found and the version needed, and no test runs. A run whose tests need none of the listed tools isn't held back by them.
+
+Each `[commands]` entry can list its own tools the same way, in `tools` (`rust-acceptance` lists cargo, python3, gleam and Node 19 or newer). `run <name>` checks them before anything else, and a missing or too old one stops it in one line, with nothing run. A command that lists no tools runs as before.
+
+Why: a missing or outdated tool made every affected test fail on its own, so real failures were buried; one line before the run says what to install. A declared command's suites failed the same way (103 seconds for 10 failures), and each command needs different tools, so each names its own. A project-wide check then refused Rust-only changes whose tests never use Node, so a tool is checked only for the tests that need it.
+
+## D-264 Solace installs and uses its own Gleam and Erlang
+(human, board task "Gleam and Erlang installed in the home folder run in the sandbox", 2026-11-21)
+Changed by (human, board task "tools: use only Solace's own Gleam", 2026-11-23)
+Solace downloads pinned versions of Gleam and Erlang/OTP into a tools folder of its own. That folder holds only these programs and is never the folder that holds `config.toml` or `keys.json`. Every check, format, test, probe and build uses these copies, whatever else is installed. Copies elsewhere, on PATH or in the home folder, are not used. When Solace's copy is missing, the action stops with one line that points to Install on the first-run checklist, and nothing else runs in its place. The one exception: on a computer Solace has no download for (for example Linux on a RISC-V processor), the checklist lists install steps instead of Install, and a Gleam and Erlang found on PATH are used. Each Solace release names the exact versions, and each download is checked against a published checksum before it is unpacked. Gleam comes from its official releases. Erlang comes from prebuilt, relocatable builds: `gleam-community/erlang-linux-builds` on Linux and `erlef/otp_builds` on macOS. The first-run checklist installs them with an Install button instead of listing commands. Inside the cargo sandbox, which still empties the home folder, only this tools folder is shown read-only, beside cargo's own folders. No other folder in the home folder is shown because a tool lives there.
+
+Why: tools installed in the home folder were hidden by the sandbox, and every rule that showed them also exposed private files (`~/.cargo/credentials.toml`, `~/.local/share`) or depended on each computer's setup. One pinned copy shows a single folder that holds no secrets. It builds and formats code the same way on every computer, and it gives one way to find each tool. Falling back to another copy without a sign could format or build with a different version. A computer with no download keeps its own Gleam so Solace still works there.
+
+## D-265 A system review log is one file only Solace writes
+(human, board task "decisions: record system reviews and summaries", 2026-11-22)
+Part of feature:21d501a74aec4f44; follows D-254 and D-261.
+
+1. Each project's top folder has one `SYSTEMREVIEWS.md`, created the same way as `DECISIONS.md` (D-254 point 1): setup, adding a project and migration create it, and an existing file is kept.
+2. Agents read it, but no `write`, `remove` or `move` changes it. Only Solace adds to it.
+3. Each completed system review adds one entry with its review kinds, the date, the version reviewed and the tasks its findings created.
+4. Review run conversations stay local, like other runs (D-261).
+
+Why: a shared record agents can't forge shows when each review was done and what it found, and a later build check can rely on it.
 

@@ -1,0 +1,30 @@
+{
+  "archivedTime": null,
+  "body": "Findings from the 0.2.5 review that the other fix tasks don't cover. This task goes last because it moves tests out of files those tasks change.\n\n### Tests inside runtime files\nAGENTS.md asks for tests in separate files, as `lockdown/paths_tests.rs` does. Move the inline test modules out of `test_tools.rs`, `system_reviews.rs`, `review_schedules.rs` and solace-app's `preferences.rs`. Move the tests added in 0.2.5 to the inline modules in `lockdown.rs`, `migrate.rs`, `workspace.rs` and `drafts.rs` as well.\n\n### Untested branches\nAGENTS.md asks for every logical branch to be tested. Add tests for these:\n- the schedule's time calculation at the two daylight-saving changes: a time skipped when clocks go forward, and a time repeated when they go back;\n- the plan panel's Alt-key and missing-body branches.\n\n(The other untested branches from the review are covered by task:fce41cf13cdbc11e, task:7b0b397f32b8047c and task:b168f0218db19782.)\n\n### Tests that can't fail\n- `board_acceptance.py` (around line 825): the human's note and the gate file are written before the agent calls `task wait`, so the wait finds the note at once and the time-limit branch the test is named for never runs. Make the test reach that branch, so it fails if the branch is deleted.\n- `sysreview_test.gleam` (around line 385): the check accepts the text both escaped and unescaped. Make it check the escaped form only.\n\n### Spelling\n- In `board::tests.a_bad_task_proposal_is_refused_before_asking`, change the unknown field `colour` to `color`.\n\n### Done when\nEach item above is done and every test passes.",
+  "closedTime": 1795503507,
+  "column": "complete",
+  "createdTime": 1795480443,
+  "dependsOn": [
+    "fce41cf13cdbc11e",
+    "7b0b397f32b8047c",
+    "b168f0218db19782",
+    "09ec790be37bf90f",
+    "cb99efffa917d3c5",
+    "6603a450dea561aa",
+    "b080800281fd72bb"
+  ],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "8a4706ce0dfaa784",
+  "links": [],
+  "milestone": null,
+  "rank": 468.0,
+  "scope": [
+    "solace-app",
+    "solace-cli",
+    "solace-cli/components",
+    "solace-cli/strategy",
+    "solace-cli/sysreview"
+  ],
+  "title": "tests: follow the project's test rules"
+}

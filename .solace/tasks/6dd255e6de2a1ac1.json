@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Problem\nIn `delivery.release_view` and `delivery.notes_view` (`solace-cli/delivery/src/delivery.gleam`):\n\n- **Ask for notes** has no busy state. `AskNotes` posts and clears the error. Nothing on the page says notes are being written until a `releaseNotes` event arrives, and the button can be pressed again and again.\n- **Reject** (`RejectNotes`) immediately posts `/notes/reject`. That throws away the draft and any edits the human typed into the textarea (`notes_edit`), with no confirmation. One misclick loses the work. The page already confirms other destructive acts in-app (D-32, D-259 point 6).\n- The notes `textarea` has no label, so screen readers announce an unnamed text box.\n\n## Change\n1. Add `asking_notes: Bool` to `Model`:\n   - Set it on `AskNotes`.\n   - Clear it on `NotesAsked` error or when the release's notes arrive.\n   - Disable the button and label it \"Asking…\" while set.\n   - While a draft is being written, show \"Writing release notes…\" in the notes section.\n2. Reject: when `edited_notes(model)` differs from the stored draft (or always), first show Solace's in-app prompt via `solace_task.modal`: \"Reject these notes? Your edits will be lost.\" with **Reject** and **Keep editing**. Post only on confirm.\n3. Give the textarea `aria-label=\"Release notes\"`.\n\n## Check\nAdd tests in `solace-cli/delivery/test/delivery_test.gleam`:\n- `update(model, AskNotes(v))` sets the busy flag and the view shows a disabled \"Asking…\" button.\n- `RejectNotes` with edited notes opens the confirmation and sends nothing until it is confirmed.\n\nRun the delivery project's tests.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503693,
+  "dependsOn": [],
+  "feature": "ff5e63eb57d89470",
+  "home": "solace-cli/delivery",
+  "id": "6dd255e6de2a1ac1",
+  "links": [],
+  "milestone": null,
+  "rank": 4.0,
+  "scope": [
+    "solace-cli/delivery"
+  ],
+  "title": "Release notes: show progress and confirm Reject"
+}

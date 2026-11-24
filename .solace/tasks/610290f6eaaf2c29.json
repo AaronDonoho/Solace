@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": 1795386946,
+  "column": "complete",
+  "createdTime": 1795219703,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "610290f6eaaf2c29",
+  "links": [],
+  "milestone": null,
+  "rank": 429.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/board",
+    "solace-cli/components"
+  ],
+  "techDebt": true,
+  "title": "runs: propose a new task, with approval"
+}

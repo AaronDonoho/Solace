@@ -115,6 +115,8 @@ class Migrate(unittest.TestCase):
         self.assertIn('✓ The build of app works, as before', recovery)
         self.assertIn('✓ The build of lib works, as before', recovery)
         self.assertIn('Ready to switch', out)
+        # The migrated copy's top folder gets the review log (D-265).
+        self.assertTrue((self.copy/'SYSTEMREVIEWS.md').read_text().startswith('# System reviews\n'))
         status = json.loads((self.copy/'.solace/migration.json').read_text())
         diff = next(i for c in status['report']['checks'] if c['name'] == 'Your code, written back by Solace' for i in c['items'] if 'app.gleam' in i['text'])
         self.assertIn('-\n', diff['detail'])

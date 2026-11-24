@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nD-264 says every check, format, test, probe and build uses Solace's own pinned Gleam and Erlang, never copies on PATH or in the home folder. Two places don't follow it: formatting (`language::gleam`) and the Gleam build command (`lockdown`) fall back to whatever `gleam` is on PATH when Solace's own copy is missing. On a computer with an older Gleam, code can be formatted or built with a different version than the one Solace pins, without any sign of it.\n\nAlso, `scripts/setup-ubuntu.sh` still installs Gleam 1.19.1 and OTP 29.1.1 into `~/.local`, which Solace no longer uses (it pins 1.19.2 and 29.1.2). After the script runs, the checklist still reports Gleam and Erlang missing. The matching part of `.claude/skills/setup/SKILL.md` is out of date too.\n\n### Done when\n- Formatting and the Gleam build use only Solace's own Gleam. When it is missing, they stop with a clear message that points to Install on the first-run checklist, and never run a Gleam found elsewhere.\n- No other code path runs `gleam` or Erlang from PATH or the home folder.\n- The setup script and the setup skill no longer install Gleam or Erlang. They say these are installed from the first-run checklist.\n- Tests cover formatting and building with Solace's Gleam missing while another `gleam` is on PATH.",
+  "closedTime": 1795501207,
+  "column": "complete",
+  "createdTime": 1795480235,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "b080800281fd72bb",
+  "links": [],
+  "milestone": null,
+  "rank": 397.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "title": "tools: use only Solace's own Gleam"
+}
