@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Problem\nIn `sysreview.schedule_dialog`, **Delete** sends `DeleteSchedule`, which immediately calls `DELETE /system-reviews/schedules/<id>`. There is no confirmation, and Delete sits next to Cancel and Save, so a misclick removes the schedule for good. The board confirms other destructive actions by name (D-32), and there's no undo here.\n\n## Change\n1. Add `confirming_delete: Bool` to `sysreview.Model`.\n2. **Delete** sets it. The dialog then shows \"Delete the <repeat_text> <kinds> review schedule?\" with **Delete** and **Keep**. Only the confirming **Delete** sends `DeleteSchedule`'s request.\n3. Clear the flag on `CloseSchedule`, `ScheduleSaved` and when another schedule opens.\n\n## Check\nAdd tests in `solace-cli/sysreview/test/sysreview_test.gleam`:\n- After `EditSchedule(id)` then the first Delete, the model is confirming and nothing has been sent (`saving` is still `False`).\n- Confirming sets `saving: True`.\n- Cancel clears the confirmation.\n\nRun the sysreview tests.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503693,
+  "dependsOn": [],
+  "feature": "ff5e63eb57d89470",
+  "home": "solace-cli/sysreview",
+  "id": "e99c286682d2d427",
+  "links": [],
+  "milestone": null,
+  "rank": 6.0,
+  "scope": [
+    "solace-cli/sysreview"
+  ],
+  "title": "Confirm before deleting a review schedule"
+}

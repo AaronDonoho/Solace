@@ -413,7 +413,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // down says nothing about this computer.
     SetupLoaded(text) ->
       case setup.decode(text) {
-        Ok(items) -> #(Model(..model, setup: items), effect.none())
+        Ok(items) -> #(
+          Model(..model, setup: setup.reloaded(model.setup, items)),
+          effect.none(),
+        )
         Error(_) -> #(model, effect.none())
       }
     CheckSetup -> #(

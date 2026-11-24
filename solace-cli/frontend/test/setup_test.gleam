@@ -235,3 +235,49 @@ pub fn a_finished_install_shows_the_fresh_checklist_test() {
   assert setup.installed([gleam, erlang], "gleam", reply)
     == [setup.Item("erlang", "Erlang/OTP", False, "", [], True, True)]
 }
+
+pub fn an_install_refused_by_a_solace_bug_says_so_plainly_test() {
+  let item = setup.Item("gleam", "Gleam", False, "", [], True, True)
+  let reply =
+    "{\"code\":\"E7001\",\"message\":\"E7001 command refused\\n  at task\\n  unknown route\\n\"}"
+  assert setup.installed([item], "gleam", reply)
+    == [
+      setup.Item(
+        ..item,
+        why: "Solace couldn't install Gleam: this version has a bug in its install request",
+        installing: False,
+      ),
+    ]
+}
+
+pub fn an_install_stays_busy_through_a_reload_until_it_answers_test() {
+  let reply =
+    "{\"items\":[{\"id\":\"erlang\",\"label\":\"Erlang/OTP\",\"ok\":false,\"why\":\"Gleam projects run on Erlang.\",\"steps\":[],\"install\":true}]}"
+  let assert Ok(items) = setup.decode(reply)
+  let model =
+    frontend.Model(
+      frontend.Board,
+      [frontend.Board],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      items,
+    )
+  let #(model, _) = frontend.update(model, frontend.InstallTool("erlang"))
+  let #(model, _) = frontend.update(model, frontend.SetupLoaded(reply))
+  assert string.contains(element.to_string(frontend.view(model)), "Installing…")
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.ToolInstalled("erlang", "{\"message\":\"HTTP 500\"}"),
+    )
+  let page = element.to_string(frontend.view(model))
+  assert string.contains(page, ">Install</button>")
+  assert string.contains(page, "HTTP 500")
+  let #(model, _) = frontend.update(model, frontend.SetupLoaded(reply))
+  assert !string.contains(
+    element.to_string(frontend.view(model)),
+    "Installing…",
+  )
+}

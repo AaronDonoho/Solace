@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "## Problem\nIn `setup.view` (`solace-cli/frontend/src/setup.gleam`):\n\n- The heading is **Recommended setup** and the text says \"These tools are highly recommended: each makes part of Solace work.\" D-264 makes Solace's own Gleam and Erlang required: without them every check, format, test, probe and build stops. Calling them \"recommended\" invites a new user to skip the one step nothing works without.\n- `setup.installed` handles a failed install by replacing the item's `why` with the server's message. The explanation of what the tool is for is lost, and the error is drawn as ordinary text, not as an error.\n- When the reply is not JSON with a `message` (the `Error(_)` branch: dropped connection, server crash or timeout during a large Erlang download), the button simply comes back as **Install** with no word of what happened. The test `setup_test.a_failed_install_says_why_and_can_be_tried_again_test` currently expects that for `\"not json\"`.\n\n## Change\n1. Copy: keep the section, but say which items are required. Items Solace installs (`install: True`) or Gleam/Erlang get a \"Required\" marker. Change the intro to something like \"Solace needs the tools marked Required to check, test and build your projects; the others make part of Solace work.\" Keep the heading honest, e.g. **Setup**.\n2. Add an `error: String` field to `setup.Item`. `installed` sets it on failure and leaves `why` unchanged. For a reply without a message, set it to \"Couldn't install <label>: Solace didn't answer. Try again.\"\n3. Render the error under the item with `role=\"alert\"` and the page's error style. Clear it when Install is pressed again (`setup.installing`).\n\n## Check\n- Update `test/setup_test.gleam`. A failed install keeps `why` and sets `error`, and a non-JSON reply sets the generic error. Add a test that the view marks Gleam and Erlang as Required.\n- Run the frontend's Gleam tests and `test/setup_ffi.test.mjs`.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795503693,
+  "dependsOn": [],
+  "feature": "ff5e63eb57d89470",
+  "home": "solace-cli/frontend",
+  "id": "508d058bdaaf572b",
+  "links": [],
+  "milestone": null,
+  "rank": 23.0,
+  "scope": [
+    "solace-cli/frontend"
+  ],
+  "title": "Setup checklist: say Gleam/Erlang are required, keep failed installs visible"
+}

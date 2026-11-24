@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "### Problems\n1. **Saving one schedule can close another schedule's form.** Cancel (`sysreview.update`) clears the \"saving\" flag even while a save is still in progress. When that save's reply arrives, `ScheduleSaved` closes whatever form is open. So if you save schedule A, cancel, then open schedule B and start editing it, A's reply closes B's form and its unsaved edits are lost.\n2. **Run now and Skip can be sent twice.** Unlike Save and Delete, these buttons have no in-progress guard. On a double click, the first request starts the review and clears the notice. The second is refused with \"no missed review for schedule …\", so the page shows an error even though the review started.\n3. **Error replies are read as successes.** `src/api.mjs` treats every reply as a success. An error reply with an empty body leaves an empty error message, so the button resets and nothing explains why.\n\n### Done when\n- A save's reply only affects the schedule it saved. A form opened afterward stays open with its edits.\n- Run now and Skip are guarded while their request is in progress, the same way Save and Delete are.\n- An error reply shows as an error on the page. If the reply has no message, the error names the reply's status (for example, `HTTP 500`).\n- Tests cover each of these, plus the branches that aren't tested yet: the form's Monthly option, `weekday_name` for Tuesday through Sunday, and marking notices read when the page is shown.",
+  "closedTime": 1795488686,
+  "column": "complete",
+  "createdTime": 1795480188,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli/sysreview",
+  "id": "b168f0218db19782",
+  "links": [],
+  "milestone": null,
+  "rank": 1.0,
+  "scope": [
+    "solace-cli/delivery",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview page: double sends and lost edits"
+}

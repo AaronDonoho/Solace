@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795501207,
+  "dependsOn": [],
+  "feature": null,
+  "home": ".",
+  "id": "05f28fefb86c3455",
+  "links": [],
+  "milestone": null,
+  "rank": 398.0,
+  "scope": [
+    ".",
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "tools: use only Solace's own Gleam"
+}

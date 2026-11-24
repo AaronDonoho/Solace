@@ -879,44 +879,6 @@ mod tests {
         assert!(refusal.contains("lists projects of its own"), "{refusal}");
         assert!(refusal.contains("move a/docs out of this root and open it on its own"), "{refusal}");
     }
-
-    #[test]
-    fn setting_up_creates_the_review_log_and_keeps_it() {
-        let root = Scratch::new();
-        project(&root, ".");
-        setup(&root, ".").unwrap();
-        let log = root.join("SYSTEMREVIEWS.md");
-        assert!(fs::read_to_string(&log).unwrap().starts_with("# System reviews\n"), "a new root gets the log");
-        fs::write(&log, "# System reviews\n\n## Kept\n").unwrap();
-        project(&root, "frontend");
-        setup(&root, "frontend").unwrap();
-        assert_eq!(fs::read_to_string(&log).unwrap(), "# System reviews\n\n## Kept\n", "adding a project keeps the log");
-    }
-
-    #[test]
-    fn adding_a_project_to_a_root_without_the_review_log_creates_it() {
-        let root = Scratch::new();
-        project(&root, "frontend");
-        setup(&root, "frontend").unwrap();
-        assert!(fs::read_to_string(root.join("SYSTEMREVIEWS.md")).unwrap().starts_with("# System reviews\n"));
-        assert!(!root.join("frontend/SYSTEMREVIEWS.md").exists(), "one log, at the top folder");
-    }
-
-    #[test]
-    fn reading_the_review_log_from_a_member_reaches_the_top() {
-        let root = Scratch::new();
-        project(&root, ".");
-        project(&root, "frontend");
-        fs::write(root.join("frontend/src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
-        setup(&root, "frontend").unwrap();
-        fs::write(root.join("SYSTEMREVIEWS.md"), "# System reviews\n\n## Security\n").unwrap();
-        let member = root.join("frontend");
-        let s = crate::Store::peek(&member).unwrap();
-        let v = crate::lockdown::settings(&root).unwrap();
-        let mut input = || Ok(String::new());
-        let out = crate::lockdown::dispatch(&s, &v, &["read", "SYSTEMREVIEWS.md"], &mut input, None, 10_000).unwrap().unwrap();
-        assert!(out.contains("## Security"), "{out}");
-    }
 }
 
 /// The language of a project the New project form creates.
@@ -928,7 +890,7 @@ pub enum NewProject {
 
 /// `gleam new`, inside a repository joining it rather than starting its own.
 fn gleam_new(root: &Path, dir: &str, name: &str, javascript: bool) -> Result<(), Failure> {
-    let mut cmd = Command::new(crate::language::tool_path("gleam").unwrap_or_else(|| "gleam".into()));
+    let mut cmd = Command::new(crate::language::program("gleam")?);
     crate::tools::put_on_path(&mut cmd);
     cmd.args(["new", dir, "--name", name, "--skip-github"]).current_dir(root);
     if javascript {

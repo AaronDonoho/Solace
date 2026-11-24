@@ -1,0 +1,20 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795488746,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "66690ab2c473975e",
+  "links": [],
+  "milestone": null,
+  "rank": 469.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "techDebt": true,
+  "title": "setup checklist: install state and repair"
+}

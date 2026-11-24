@@ -72,11 +72,15 @@ pub type Model {
     schedules_error: String,
     /// The schedule open in the form: a new one has no id.
     editing: Option(schedule.Schedule),
+    /// How many times the form has opened; a save's reply names the form it was sent from.
+    opened: Int,
     saving: Bool,
     edit_error: String,
     /// The missed reviews not yet answered, as the server last listed them.
     missed: List(MissedReview),
     missed_error: String,
+    /// Whether a missed review's answer is on its way.
+    answering: Bool,
     /// Whether the shell shows this page; a missed review is read once it is.
     shown: Bool,
     source: Option(solace_task.Source),
@@ -108,8 +112,9 @@ pub type Msg {
   EditDate(String)
   SaveSchedule
   DeleteSchedule
-  /// The reply to a schedule's save or removal: every schedule, or a refusal.
-  ScheduleSaved(String)
+  /// The reply to a schedule's save or removal from the form opened `n`th:
+  /// every schedule, or a refusal.
+  ScheduleSaved(Int, String)
   Connected
   Disconnected
   Listening(solace_task.Source)
@@ -121,8 +126,10 @@ pub type Msg {
   RunMissed(String)
   /// A missed review's **Skip** button: its schedule.
   SkipMissed(String)
-  /// The reply to answering or reading missed reviews: those left, or a refusal.
+  /// The reply to answering a missed review: those left, or a refusal.
   MissedAnswered(String)
+  /// The reply to reading missed reviews: those left, or a refusal.
+  MissedRead(String)
 }
 
 /// Every kind is chosen at first.
@@ -141,10 +148,12 @@ pub fn initial() -> Model {
     schedules: None,
     schedules_error: "",
     editing: None,
+    opened: 0,
     saving: False,
     edit_error: "",
     missed: [],
     missed_error: "",
+    answering: False,
     shown: False,
     source: None,
   )
@@ -186,22 +195,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
         Error(_) -> #(model, effect.none())
       }
     Shown(shown) -> heard(Model(..model, shown:), model.missed)
-    RunMissed(id) -> #(
-      Model(..model, missed_error: ""),
-      post(missed_path(id, "run"), "{}", MissedAnswered),
-    )
-    SkipMissed(id) -> #(
-      Model(..model, missed_error: ""),
-      post(missed_path(id, "skip"), "{}", MissedAnswered),
-    )
+    RunMissed(id) -> answer(model, id, "run")
+    SkipMissed(id) -> answer(model, id, "skip")
     MissedAnswered(text) ->
-      case json.parse(text, missed_decoder()) {
-        Ok(missed) -> heard(Model(..model, missed_error: ""), missed)
-        Error(_) -> #(
-          Model(..model, missed_error: refusal(text)),
-          effect.none(),
-        )
-      }
+      missed_listed(Model(..model, answering: False), text)
+    MissedRead(text) -> missed_listed(model, text)
     Select(RunTab) -> #(Model(..model, tab: RunTab), effect.none())
     // Listed afresh each time, so a due time that passed since shows its next one.
     Select(SchedulesTab) -> #(
@@ -215,7 +213,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
           effect.none(),
         )
         Error(_) -> #(
-          Model(..model, schedules_error: refusal(text)),
+          Model(..model, schedules: None, schedules_error: refusal(text)),
           effect.none(),
         )
       }
@@ -223,6 +221,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       Model(
         ..model,
         editing: Some(schedule.new(list.map(kinds(), kind_id))),
+        opened: model.opened + 1,
         edit_error: "",
       ),
       effect.none(),
@@ -232,7 +231,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
         option.unwrap(model.schedules, [])
         |> list.find(fn(s) { s.id == id })
         |> option.from_result
-      #(Model(..model, editing: found, edit_error: ""), effect.none())
+      #(
+        Model(..model, editing: found, opened: model.opened + 1, edit_error: ""),
+        effect.none(),
+      )
     }
     CloseSchedule -> #(
       Model(..model, editing: None, saving: False, edit_error: ""),
@@ -271,7 +273,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       case model.editing, save_disabled(model) {
         Some(s), False -> #(
           Model(..model, saving: True, edit_error: ""),
-          save(s),
+          save(s, model.opened),
         )
         _, _ -> #(model, effect.none())
       }
@@ -279,13 +281,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       case model.editing {
         Some(s) if s.id != "" && !model.saving -> #(
           Model(..model, saving: True, edit_error: ""),
-          send("DELETE", schedules_path <> "/" <> s.id, "{}", ScheduleSaved),
+          send("DELETE", schedules_path <> "/" <> s.id, "{}", fn(text) {
+            ScheduleSaved(model.opened, text)
+          }),
         )
         _ -> #(model, effect.none())
       }
-    ScheduleSaved(text) ->
-      case json.parse(text, decode.list(schedule.decoder())) {
-        Ok(all) -> #(
+    ScheduleSaved(opened, text) ->
+      case
+        json.parse(text, decode.list(schedule.decoder())),
+        opened == model.opened
+      {
+        Ok(all), True -> #(
           Model(
             ..model,
             schedules: Some(all),
@@ -296,10 +303,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
           ),
           effect.none(),
         )
-        Error(_) -> #(
+        Ok(all), False -> #(
+          Model(..model, schedules: Some(all), schedules_error: ""),
+          effect.none(),
+        )
+        Error(_), True -> #(
           Model(..model, saving: False, edit_error: refusal(text)),
           effect.none(),
         )
+        Error(_), False -> #(model, effect.none())
       }
     // Listed afresh each time, so a review that completed since shows.
     Select(PastTab) -> #(
@@ -397,9 +409,7 @@ fn run_decoder() -> decode.Decoder(String) {
 }
 
 fn refusal(text: String) -> String {
-  case
-    json.parse(text, decode.field("message", decode.string, decode.success))
-  {
+  case json.parse(text, message_decoder()) {
     Ok(message) -> message
     Error(_) -> text
   }
@@ -410,7 +420,7 @@ fn request_ffi(
   path: String,
   method: String,
   body: String,
-  receive: fn(String) -> Nil,
+  receive: fn(Int, String) -> Nil,
 ) -> Nil
 
 fn post(
@@ -424,7 +434,13 @@ fn post(
 pub fn view(model: Model) -> element.Element(Msg) {
   html.main([attribute.class("sysreview")], [
     html.style([], view_styles),
-    missed_banner(model.missed, model.missed_error, RunMissed, SkipMissed),
+    missed_notice(
+      model.missed,
+      model.missed_error,
+      model.answering,
+      RunMissed,
+      SkipMissed,
+    ),
     html.div(
       [
         attribute.class("tabs"),
@@ -774,11 +790,11 @@ pub fn save_disabled(model: Model) -> Bool {
 }
 
 /// Adds a new schedule, or changes a saved one.
-fn save(s: schedule.Schedule) -> effect.Effect(Msg) {
+fn save(s: schedule.Schedule, opened: Int) -> effect.Effect(Msg) {
+  let saved = fn(text) { ScheduleSaved(opened, text) }
   case s.id {
-    "" -> send("POST", schedules_path, schedule.body(s), ScheduleSaved)
-    id ->
-      send("PUT", schedules_path <> "/" <> id, schedule.body(s), ScheduleSaved)
+    "" -> send("POST", schedules_path, schedule.body(s), saved)
+    id -> send("PUT", schedules_path <> "/" <> id, schedule.body(s), saved)
   }
 }
 
@@ -789,7 +805,9 @@ fn send(
   msg: fn(String) -> Msg,
 ) -> effect.Effect(Msg) {
   effect.from(fn(dispatch) {
-    request_ffi(path, method, body, fn(text) { dispatch(msg(text)) })
+    request_ffi(path, method, body, fn(status, text) {
+      dispatch(msg(reply_text(status, text)))
+    })
   })
 }
 
@@ -985,7 +1003,7 @@ fn heard(
     False, _ -> #(model, effect.none())
     True, True -> #(
       model,
-      post("/system-reviews/missed/read", "{}", MissedAnswered),
+      post("/system-reviews/missed/read", "{}", MissedRead),
     )
     True, False -> #(model, event.emit("attention", json.null()))
   }
@@ -1034,11 +1052,64 @@ pub fn missed_text(missed: MissedReview) -> String {
   <> " and didn't run."
 }
 
+/// The missed-review banner's styles, for each page that shows it.
+pub const missed_styles =
+  ".missed-reviews{margin:var(--space-3) var(--space-6) 0;background:#fff4c2;color:#172226;border:1px solid #8a4a0a;border-left:6px solid #8a4a0a;padding:var(--space-2) var(--space-3)}
+.missed-reviews ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-2)}
+.missed-review{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
+.missed-review span{flex:1 1 20em}
+.missed-error{margin:var(--space-2) 0 0;font-weight:600}
+"
+
+/// Answers schedule `id`'s missed review with `action`, unless an answer is on its way.
+fn answer(
+  model: Model,
+  id: String,
+  action: String,
+) -> #(Model, effect.Effect(Msg)) {
+  case model.answering {
+    True -> #(model, effect.none())
+    False -> #(
+      Model(..model, answering: True, missed_error: ""),
+      post(missed_path(id, action), "{}", MissedAnswered),
+    )
+  }
+}
+
+/// The model holding the missed reviews a reply lists, or its refusal.
+fn missed_listed(model: Model, text: String) -> #(Model, effect.Effect(Msg)) {
+  case json.parse(text, missed_decoder()) {
+    Ok(missed) -> heard(Model(..model, missed_error: ""), missed)
+    Error(_) -> #(Model(..model, missed_error: refusal(text)), effect.none())
+  }
+}
+
+fn message_decoder() -> decode.Decoder(String) {
+  decode.field("message", decode.string, decode.success)
+}
+
+/// A reply as the page reads it: an error reply without a message becomes a
+/// refusal naming its status, so it never reads as a success. A request that
+/// got no reply has status 0 and its own message.
+pub fn reply_text(status: Int, text: String) -> String {
+  case status >= 200 && status < 300, json.parse(text, message_decoder()) {
+    True, _ -> text
+    False, Ok(message) if message != "" -> text
+    False, _ ->
+      json.to_string(
+        json.object([
+          #("message", json.string("HTTP " <> int.to_string(status))),
+        ]),
+      )
+  }
+}
+
 /// The missed reviews above a page's tabs, each with **Run now** and **Skip**;
-/// none while there are none.
-pub fn missed_banner(
+/// none while there are none. Both wait while an answer is on its way.
+pub fn missed_notice(
   missed: List(MissedReview),
   error: String,
+  answering: Bool,
   run: fn(String) -> msg,
   skip: fn(String) -> msg,
 ) -> element.Element(msg) {
@@ -1051,12 +1122,20 @@ pub fn missed_banner(
           list.map(missed, fn(m) {
             html.li([attribute.class("missed-review")], [
               html.span([], [html.text(missed_text(m))]),
-              html.button([event.on_click(run(m.schedule))], [
-                html.text("Run now"),
-              ]),
-              html.button([event.on_click(skip(m.schedule))], [
-                html.text("Skip"),
-              ]),
+              html.button(
+                [
+                  attribute.disabled(answering),
+                  event.on_click(run(m.schedule)),
+                ],
+                [html.text("Run now")],
+              ),
+              html.button(
+                [
+                  attribute.disabled(answering),
+                  event.on_click(skip(m.schedule)),
+                ],
+                [html.text("Skip")],
+              ),
             ])
           }),
         ),
@@ -1070,12 +1149,3 @@ pub fn missed_banner(
       ])
   }
 }
-
-/// The missed-review banner's styles, for each page that shows it.
-pub const missed_styles =
-  ".missed-reviews{margin:var(--space-3) var(--space-6) 0;background:#fff4c2;color:#172226;border:1px solid #8a4a0a;border-left:6px solid #8a4a0a;padding:var(--space-2) var(--space-3)}
-.missed-reviews ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-2)}
-.missed-review{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
-.missed-review span{flex:1 1 20em}
-.missed-error{margin:var(--space-2) 0 0;font-weight:600}
-"

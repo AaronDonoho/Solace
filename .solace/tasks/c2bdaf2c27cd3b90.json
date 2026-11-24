@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795493146,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "c2bdaf2c27cd3b90",
+  "links": [],
+  "milestone": null,
+  "rank": 470.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "techDebt": true,
+  "title": "drafts: page through very long lines"
+}

@@ -134,6 +134,8 @@ pub type Model {
     /// The missed scheduled reviews not yet answered, as the server last listed them.
     missed: List(sysreview.MissedReview),
     missed_error: String,
+    /// Whether a missed review's answer is on its way.
+    answering: Bool,
   )
 }
 
@@ -241,6 +243,7 @@ pub fn initial() -> Model {
     desktop: False,
     missed: [],
     missed_error: "",
+    answering: False,
   )
 }
 
@@ -693,22 +696,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
       effect.none(),
     )
-    RunMissed(id) -> #(
-      Model(..model, missed_error: ""),
-      post(sysreview.missed_path(id, "run"), "{}", MissedAnswered),
-    )
-    SkipMissed(id) -> #(
-      Model(..model, missed_error: ""),
-      post(sysreview.missed_path(id, "skip"), "{}", MissedAnswered),
-    )
+    RunMissed(id) -> answer(model, id, "run")
+    SkipMissed(id) -> answer(model, id, "skip")
     MissedAnswered(text) ->
       case json.parse(text, sysreview.missed_decoder()) {
         Ok(missed) -> #(
-          Model(..model, missed:, missed_error: ""),
+          Model(..model, missed:, missed_error: "", answering: False),
           effect.none(),
         )
         Error(_) -> #(
-          Model(..model, missed_error: refusal(text)),
+          Model(..model, missed_error: refusal(text), answering: False),
           effect.none(),
         )
       }
@@ -923,9 +920,10 @@ fn log_decoder() -> decode.Decoder(#(String, Int, String)) {
 pub fn view(model: Model) -> Element(Msg) {
   html.main([attribute.class("delivery")], [
     html.style([], view_styles),
-    sysreview.missed_banner(
+    sysreview.missed_notice(
       list.filter(model.missed, fn(m) { !m.read }),
       model.missed_error,
+      model.answering,
       RunMissed,
       SkipMissed,
     ),
@@ -1860,5 +1858,16 @@ fn kept_notes_edit(
     Some(Release(before, _, _)), Some(Release(after, _, _)) if before == after ->
       edited
     _, _ -> None
+  }
+}
+
+/// Answers schedule `id`'s missed review with `action`, unless an answer is on its way.
+fn answer(model: Model, id: String, action: String) -> #(Model, Effect(Msg)) {
+  case model.answering {
+    True -> #(model, effect.none())
+    False -> #(
+      Model(..model, answering: True, missed_error: ""),
+      post(sysreview.missed_path(id, action), "{}", MissedAnswered),
+    )
   }
 }

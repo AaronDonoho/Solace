@@ -1294,7 +1294,7 @@ pub(crate) fn check() -> Value {
 }
 
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let mut cmd = Command::new(crate::language::tool_path(program).unwrap_or_else(|| program.into()));
+    let mut cmd = Command::new(crate::language::program(program).ok()?);
     crate::tools::put_on_path(&mut cmd);
     let out = cmd.args(args).output().ok()?;
     if !out.status.success() {

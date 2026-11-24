@@ -1,0 +1,21 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nA missed-review notice only shows on a page that was already open when the notice was logged. When a page connects to the event stream, it gets a snapshot of the current state (`board::server`) and then only new events. That snapshot has no `missedReviews`, and neither the System Review page nor the Delivery page fetches `GET /system-reviews/missed`. The most common case fails: the app was closed when a review was due, the notice is logged at startup before any page connects, and nobody sees it. The comment in `review_schedules` that says \"a page that connects later is given it\" is wrong. The in-memory list only stops the same notice from being announced twice.\n\n### Done when\n- A System Review or Delivery page opened after a notice was logged shows that notice, as the feature describes (System Review always; Delivery until the notice is read).\n- A test covers a notice logged before any page connects.\n- The `review_schedules` comment says what the code does.\n\nHow a page gets the notices (in the snapshot, or by fetching `/system-reviews/missed`) is up to the worker.",
+  "closedTime": 1795482949,
+  "column": "complete",
+  "createdTime": 1795480104,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "c6b4f9aee65c60a0",
+  "links": [],
+  "milestone": null,
+  "rank": 461.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/delivery",
+    "solace-cli/frontend",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: missed notice on pages opened later"
+}

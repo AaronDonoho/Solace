@@ -128,3 +128,61 @@ fn a_computer_with_no_download_finds_its_tools_on_path() {
     with_folder(&tools, || with_system(None, || assert_eq!(program_folder("erl"), None)));
     with_folder(&tools, || with_system(Some("x86_64-linux-gnu"), || assert!(program_folder("erl").is_some())));
 }
+
+#[test]
+fn a_tool_folder_without_its_program_is_installed_again() {
+    let dir = Scratch::new();
+    let (bytes, sum) = gleam_archive(&dir);
+    let tools = dir.join("tools");
+    let dest = install_folder(&tools, "gleam");
+    fs::create_dir_all(&dest).unwrap();
+    with_folder(&tools, || assert_eq!(crate::language::tool_path("gleam"), None));
+    let fetch = |_: &str, to: &Path| -> Result<(), Failure> { Ok(fs::write(to, &bytes)?) };
+    install_into(&pinned_gleam(&sum), &tools, &fetch).unwrap();
+    assert!(dest.join("gleam").is_file());
+    with_folder(&tools, || assert_eq!(crate::language::tool_path("gleam"), Some(dest.join("gleam"))));
+    let refuse = |_: &str, _: &Path| -> Result<(), Failure> { fail("downloaded again") };
+    install_into(&pinned_gleam(&sum), &tools, &refuse).unwrap();
+}
+
+/// Saving, formatting, building, checking and a declared `gleam` command
+/// stop with Install named when Solace's Gleam isn't installed, and the
+/// `gleam` on PATH never runs (D-264).
+#[test]
+fn a_gleam_project_stops_without_solaces_gleam() {
+    let s = crate::testing::project(&[("src/main.gleam", "pub fn main() { 1 }\n")]);
+    let v: toml::Value = "[commands]\nsuite={run=[\"gleam\",\"test\"]}".parse().unwrap();
+    let install = "`gleam` is not installed; install it with Install on Solace's checklist";
+    let (errors, ran) = crate::testing::with_tools_elsewhere(|| {
+        vec![
+            s.submit_symbols(None, Some("main"), "pub fn main() { 2 }").unwrap_err().0,
+            crate::testing::dispatch(&s, &v, &["build"], "").unwrap_err().0,
+            crate::testing::dispatch(&s, &v, &["format"], "").unwrap_err().0,
+            s.tool(&["check"]).unwrap_err().0,
+            crate::testing::dispatch(&s, &v, &["run", "suite"], "").unwrap_err().0,
+        ]
+    });
+    for e in &errors {
+        assert!(e.starts_with("E6013") && e.contains(install), "{e}");
+    }
+    assert!(!ran, "no other gleam runs");
+}
+
+/// With Solace's Gleam installed but not its Erlang, a Gleam command on
+/// the Erlang target stops before it starts, so no other `erl` runs.
+#[test]
+fn gleam_on_the_erlang_target_stops_without_solaces_erlang() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = crate::testing::project(&[("src/main.gleam", "pub fn main() { 1 }\n")]);
+    let v: toml::Value = "[commands]\nsuite={run=[\"gleam\",\"test\"]}".parse().unwrap();
+    let solace_ran = s.root.join("solace-gleam-ran");
+    let (err, ran) = crate::testing::with_tools_elsewhere(|| {
+        let gleam = crate::tools::program_folder("gleam").unwrap().join("gleam");
+        std::fs::create_dir_all(gleam.parent().unwrap()).unwrap();
+        std::fs::write(&gleam, format!("#!/bin/sh\ntouch '{}'\n", solace_ran.display())).unwrap();
+        std::fs::set_permissions(&gleam, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::dispatch(&s, &v, &["run", "suite"], "").unwrap_err().0
+    });
+    assert_eq!(err, "E6013 `erl` is not installed; install it with Install on Solace's checklist");
+    assert!(!ran && !solace_ran.exists(), "nothing runs");
+}

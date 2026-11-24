@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
+#[cfg(test)]
+#[path = "preferences_tests.rs"]
+mod tests;
 
 
 
@@ -78,7 +81,14 @@ fn write(path: &PathBuf, preferences: &Preferences) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    fs::write(path, to_json(preferences).to_string()).map_err(|e| e.to_string())
+    // A crash mid-write leaves the old file whole: only a finished file is renamed into place.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    fs::write(&tmp, to_json(preferences).to_string()).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 /// Puts `settings` in the page's storage and tells the page's subscribers of
@@ -104,45 +114,6 @@ pub(crate) fn seed_script(settings: &BTreeMap<String, String>) -> String {
          sessionStorage.setItem('solace-seeded', '1'); }} catch {{ return; }} {} }})();",
         settings_script(settings)
     )
-}
-
-#[cfg(test)]
-fn test_path(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("solace-preferences-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    dir.join("preferences.json")
-}
-
-#[test]
-fn a_closed_board_windows_size_opens_the_next_one() {
-    let path = test_path("size");
-    let store = Store::open(path.clone());
-    assert_eq!(store.size(), DEFAULT_SIZE);
-    store.set_size(1500.0, 900.0).unwrap();
-    store.set_size(0.0, 0.0).unwrap();
-    assert_eq!(Store::open(path.clone()).size(), (1500.0, 900.0));
-    fs::write(&path, r#"{"size":[0,820]}"#).unwrap();
-    assert_eq!(Store::open(path).size(), DEFAULT_SIZE);
-}
-
-#[test]
-fn settings_survive_a_restart_and_a_cleared_one_stays_cleared() {
-    let path = test_path("settings");
-    let store = Store::open(path.clone());
-    store.set_setting("solace-font-size", "20").unwrap();
-    store.set_setting("solace-theme", "dark").unwrap();
-    store.set_setting("solace-theme", "").unwrap();
-    let settings = Store::open(path).settings();
-    let expected: BTreeMap<String, String> = [
-        ("solace-font-size".to_string(), "20".to_string()),
-        ("solace-theme".to_string(), String::new()),
-    ]
-    .into();
-    assert_eq!(settings, expected);
-    let script = seed_script(&settings);
-    assert!(script.contains(r#"{"solace-font-size":"20","solace-theme":""}"#));
-    assert!(script.contains("sessionStorage.getItem('solace-seeded')"));
 }
 
 impl Store {

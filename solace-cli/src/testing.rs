@@ -110,3 +110,29 @@ pub(crate) fn rust_span_start() -> String {
     let ident: syn::Ident = syn::parse_str("x").expect("x is an identifier");
     format!("{:?}", ident.span())
 }
+
+/// Runs `f` on a computer Solace has a download for, with its own Gleam and
+/// Erlang not installed and another `gleam` and `erl` on `PATH`: what `f`
+/// returns, and whether either of those ran.
+pub(crate) fn with_tools_elsewhere<T>(f: impl FnOnce() -> T) -> (T, bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new();
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    let ran = dir.join("ran");
+    for program in ["gleam", "erl"] {
+        let path = other.join(program);
+        fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = crate::language::with_tool_path(&[other], || {
+        crate::tools::with_folder(&dir.join("tools"), || crate::tools::with_system(Some("x86_64-linux-gnu"), f))
+    });
+    (out, ran.exists())
+}
+
+/// What the agent's file command `args`, with `text` as its input, replies in
+/// the project `s` with settings `v`.
+pub(crate) fn dispatch(s: &Store, v: &toml::Value, args: &[&str], text: &str) -> Out {
+    crate::lockdown::dispatch(s, v, args, &mut || Ok(text.into()), None, 10_000).unwrap()
+}

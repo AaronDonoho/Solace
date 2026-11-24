@@ -616,7 +616,13 @@ pub fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Resul
 pub fn format(source: &str) -> Result<String, Failure> {
     // Formatting stdin needs no project folder; a fixed child folder keeps a
     // process-wide `Within` from moving the formatter's working directory.
-    let mut cmd = Command::new(crate::tools::program("gleam").unwrap_or_else(|| "gleam".into()));
+    // Solace's installed copy comes first even where a test stands in fixed
+    // folders, whose `gleam` fakes test runs, not formatting.
+    let gleam = match crate::tools::program("gleam") {
+        Some(gleam) => gleam,
+        None => crate::language::program("gleam")?,
+    };
+    let mut cmd = Command::new(gleam);
     crate::tools::put_on_path(&mut cmd);
     let mut child = cmd
         .args(["format", "--stdin"])

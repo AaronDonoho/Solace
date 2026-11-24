@@ -30,9 +30,25 @@ test('Ctrl or Cmd+A selects only the conversation', () => {
 });
 
 test('other keys keep their default', () => {
-  for (const [key, keys] of [['a', {}], ['c', { ctrlKey: true }], ['a', { ctrlKey: true, shiftKey: true }]]) {
+  for (const [key, keys] of [
+    ['a', {}],
+    ['c', { ctrlKey: true }],
+    ['a', { ctrlKey: true, shiftKey: true }],
+    ['a', { ctrlKey: true, altKey: true }],
+    ['a', { metaKey: true, altKey: true }],
+  ]) {
     const { prevented, selected } = press(key, keys);
     expect(prevented).toBe(false);
     expect(selected).toEqual([]);
   }
+});
+
+test('Ctrl+A outside a conversation keeps its default', () => {
+  let prevented = false;
+  select_conversation({
+    key: 'a', ctrlKey: true,
+    target: { closest: () => null },
+    preventDefault: () => { prevented = true; },
+  });
+  expect(prevented).toBe(false);
 });

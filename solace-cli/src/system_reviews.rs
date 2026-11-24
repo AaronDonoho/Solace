@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 use crate::board::task_model::{Column, set_links};
 use crate::failure::{Failure, Out, usage};
 use crate::fsx;
+#[cfg(test)]
+#[path = "system_reviews_tests.rs"]
+mod tests;
 pub(crate) const FILE: &str = "SYSTEMREVIEWS.md";
 
 const HEADER: &str = concat!(
@@ -55,252 +58,6 @@ pub(crate) fn append(top: &Path, entry: &str) -> Result<(), crate::Failure> {
 /// The refusal of any agent command that would change the log.
 pub(crate) fn refusal<T>(name: &str) -> Result<T, crate::Failure> {
     crate::lockdown::error("E6002", name, "only Solace writes this file: it adds an entry when a system review completes. `read` it")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_entry_goes_after_what_the_log_holds() {
-        let root = crate::testing::Scratch::new();
-        fs::write(file(&root), "# System reviews\n\n## Earlier\nKept.").unwrap();
-        append(&root, "## Security, 2026-11-22\nTasks: t1\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(file(&root)).unwrap(),
-            "# System reviews\n\n## Earlier\nKept.\n\n## Security, 2026-11-22\nTasks: t1\n"
-        );
-    }
-
-    #[test]
-    fn appending_to_a_board_with_no_log_creates_it_first() {
-        let root = crate::testing::Scratch::new();
-        append(&root, "## Code quality, 2026-11-22").unwrap();
-        let text = fs::read_to_string(file(&root)).unwrap();
-        assert!(text.starts_with(HEADER) && text.ends_with("\n\n## Code quality, 2026-11-22\n"), "{text}");
-    }
-
-    #[test]
-    fn ensure_keeps_an_existing_log() {
-        let root = crate::testing::Scratch::new();
-        fs::write(file(&root), "# System reviews\n\n## Kept\n").unwrap();
-        ensure(&root).unwrap();
-        assert_eq!(fs::read_to_string(file(&root)).unwrap(), "# System reviews\n\n## Kept\n");
-    }
-
-    /// A project at the root, with nothing reviewed yet.
-    fn reviewed() -> crate::testing::Project {
-        crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")])
-    }
-
-    /// A new system review run of `kinds` on a fake reviewer model, its agent not started.
-    fn review(top: &Path, kinds: &[&str]) -> String {
-        let config = top.join("review-config.toml");
-        fs::write(
-        &config,
-        "[[models]]\nid = \"fake\"\nlabel = \"Fake\"\nagent = \"codex\"\nrun = [\"sh\"]\n\n[role_models.reviewer]\ndefault = \"fake\"\n",
-    )
-    .unwrap();
-        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
-        let run = crate::board::setup::with_config(&config, || begin(top, &kinds).unwrap());
-        run["id"].as_str().unwrap().to_string()
-    }
-
-    /// The agent's `review findings` in run `rid`.
-    fn report(top: &Path, rid: &str, findings: Value) -> Out {
-        let mut input = move || -> Out { Ok(findings.to_string()) };
-        command(top, rid, &["review", "findings"], &mut input)
-    }
-
-    /// The tasks run `rid` filed, in the order it lists them.
-    fn findings(top: &Path, rid: &str) -> Vec<Value> {
-        let run = crate::tasks::strategy::strategy_run(top, rid).unwrap();
-        let all = crate::board::task_model::all_tasks(top).unwrap();
-        run["findings"].as_array().unwrap().iter().map(|id| all.iter().find(|t| t["id"] == *id).unwrap().clone()).collect()
-    }
-
-    #[test]
-    fn findings_land_in_planning_under_the_findings_feature_and_are_logged() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let rid = review(&top, &["security", "code-quality"]);
-        let out = report(
-            &top,
-            &rid,
-            json!([
-                {"kind": "security", "title": "Check the token", "body": "`auth.check` trusts any token."},
-                {"kind": "code-quality", "title": "Split the server", "body": "`server.api` is too long.", "scope": ["."]}
-            ]),
-        )
-        .unwrap();
-        let tasks = findings(&top, &rid);
-        let feature = crate::tasks::records(&top, "features").into_iter().find(|f| f["findings"] == true).unwrap();
-        assert_eq!(feature["state"], "active");
-        let titles: Vec<&str> = tasks.iter().map(|t| t["title"].as_str().unwrap()).collect();
-        assert_eq!(titles, ["Check the token", "Split the server"]);
-        for t in &tasks {
-            assert_eq!((t["column"].as_str(), &t["feature"]), (Some("planning"), &feature["id"]));
-            assert!(out.contains(&format!("task:{}", t["id"].as_str().unwrap())), "{out}");
-        }
-        assert!(tasks[0]["notes"].to_string().contains(&format!("Found by the security review of system review run {rid}")));
-        let run = crate::tasks::strategy::strategy_run(&top, &rid).unwrap();
-        assert_eq!((run["state"].as_str(), run["outcome"].as_str()), (Some("ended"), Some("finished")));
-        let logged = format!(
-            "## {}: Security, Code quality\n\n- Version: 1.0.0\n- Findings: task:{}, task:{}\n",
-            crate::decisions::today(),
-            tasks[0]["id"].as_str().unwrap(),
-            tasks[1]["id"].as_str().unwrap()
-        );
-        let log = fs::read_to_string(file(&top)).unwrap();
-        assert!(log.ends_with(&logged), "{log}");
-    }
-
-    /// D-128 point 3 and D-134: a completed findings feature takes the next
-    /// review's findings, in Planning, and is active again.
-    #[test]
-    fn findings_after_the_feature_completed_go_to_it_and_make_it_active() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let mut done = crate::tasks::strategy_api(&top, "POST", &["features"], json!({"title": "Findings", "state": "complete"})).unwrap();
-        done["findings"] = json!(true);
-        crate::tasks::store::put_record(&top, "features", &done).unwrap();
-        let rid = review(&top, &["user-experience"]);
-        report(&top, &rid, json!([{"kind": "user-experience", "title": "Name the button", "body": "The Save button has no label."}]))
-            .unwrap();
-        let tasks = findings(&top, &rid);
-        assert_eq!((tasks[0]["feature"].clone(), tasks[0]["column"].as_str()), (done["id"].clone(), Some("planning")));
-        assert_eq!(crate::tasks::record(&top, "features", done["id"].as_str().unwrap()).unwrap()["state"], "active");
-    }
-
-    #[test]
-    fn a_canceled_findings_feature_is_not_reused() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let mut gone = crate::tasks::strategy_api(&top, "POST", &["features"], json!({"title": "Findings", "state": "canceled"})).unwrap();
-        gone["findings"] = json!(true);
-        crate::tasks::store::put_record(&top, "features", &gone).unwrap();
-        let rid = review(&top, &["security"]);
-        report(&top, &rid, json!([{"kind": "security", "title": "Check the token", "body": "Any token passes."}])).unwrap();
-        let feature = crate::tasks::record(&top, "features", findings(&top, &rid)[0]["feature"].as_str().unwrap()).unwrap();
-        assert_ne!(feature["id"], gone["id"]);
-        assert_eq!((feature["findings"].as_bool(), feature["state"].as_str()), (Some(true), Some("active")));
-    }
-
-    #[test]
-    fn a_review_with_no_findings_is_logged_with_none() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let rid = review(&top, &["security"]);
-        let out = report(&top, &rid, json!([])).unwrap();
-        assert!(out.starts_with("No findings were filed."), "{out}");
-        assert!(crate::tasks::records(&top, "features").iter().all(|f| f["findings"] != true), "no feature without findings");
-        let log = fs::read_to_string(file(&top)).unwrap();
-        assert!(log.ends_with(&format!("## {}: Security\n\n- Version: 1.0.0\n- Findings: none\n", crate::decisions::today())), "{log}");
-        assert_eq!(crate::tasks::strategy::strategy_run(&top, &rid).unwrap()["state"], "ended");
-    }
-
-    /// One finding outside the review's kinds, or without a body, files none of
-    /// them and writes no entry, so the agent can resend.
-    #[test]
-    fn a_wrong_finding_files_nothing_and_keeps_the_run_open() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let rid = review(&top, &["security"]);
-        let before = crate::board::task_model::all_tasks(&top).unwrap().len();
-        for findings in [
-            json!([
-                {"kind": "security", "title": "Fine", "body": "Fine."},
-                {"kind": "user-experience", "title": "Other", "body": "Other."}
-            ]),
-            json!([{"kind": "security", "title": "Fine", "body": " "}]),
-            json!([{"kind": "security", "title": "Fine", "body": "Fine.", "scope": ["nowhere"]}]),
-            json!({"kind": "security"}),
-        ] {
-            let e = report(&top, &rid, findings).unwrap_err();
-            assert!(e.0.starts_with("E7001"), "{}", e.0);
-        }
-        assert_eq!(crate::board::task_model::all_tasks(&top).unwrap().len(), before);
-        assert!(!file(&top).exists() || !fs::read_to_string(file(&top)).unwrap().contains("Findings:"));
-        assert_eq!(crate::tasks::strategy::strategy_run(&top, &rid).unwrap()["state"], "running");
-    }
-
-    #[test]
-    fn a_review_records_its_kinds_once_and_the_version_it_reviews() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        fs::write(top.join("gleam.toml"), "name = \"app\"\nversion = \"1.2.0\"\n").unwrap();
-        let kinds = requested_kinds(&json!({"kinds": ["security", "security", "code-quality"]})).unwrap();
-        assert_eq!(kinds, ["security", "code-quality"]);
-        let rid = review(&top, &["security", "code-quality"]);
-        let run = crate::tasks::strategy::strategy_run(&top, &rid).unwrap();
-        assert_eq!(run["kind"], crate::board::roles::SYSTEM_REVIEW_RUN);
-        assert_eq!(
-            (run["context"]["kinds"].clone(), run["context"]["version"].as_str()),
-            (json!(["security", "code-quality"]), Some("1.2.0"))
-        );
-        assert!(top.join(format!(".solace/system-reviews/{rid}.json")).exists());
-        let b = brief(&top, &run, "engineer", "", "");
-        assert!(b.contains("for: Security, Code quality") && b.contains("one of security, code-quality"), "{b}");
-        assert!(b.contains(crate::board::briefs::FINDINGS_ASK) && b.contains("`review findings`"), "{b}");
-    }
-
-    #[test]
-    fn an_entry_without_a_version_says_none_is_named() {
-        let root = crate::testing::Scratch::new();
-        assert_eq!(reviewed_version(&root), None);
-        let kinds = vec!["user-experience".to_string()];
-        assert_eq!(entry("2026-11-22", &kinds, None, &[]), "## 2026-11-22: User experience\n\n- Version: none named\n- Findings: none\n");
-    }
-
-    #[test]
-    fn the_kinds_the_page_sends_are_known() {
-        // The System Review page's start body, as `sysreview.start_body` writes it for every kind.
-        let body = serde_json::json!({"kinds": ["security", "code-quality", "user-experience"]});
-        assert_eq!(requested_kinds(&body).unwrap(), ["security", "code-quality", "user-experience"]);
-    }
-
-    #[test]
-    fn past_reviews_are_the_finished_ones_newest_first() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let at = |rid: &str, started: u64, ended: u64| {
-            let mut run = crate::tasks::strategy::strategy_run(&top, rid).unwrap();
-            run["started"] = json!(started);
-            run["ended"] = json!(ended);
-            crate::tasks::strategy::put_run(&top, &run).unwrap();
-        };
-        let older = review(&top, &["security"]);
-        report(&top, &older, json!([])).unwrap();
-        at(&older, 100, 150);
-        let newer = review(&top, &["security", "code-quality"]);
-        report(&top, &newer, json!([{"kind": "security", "title": "Check the token", "body": "`auth.check` trusts any token."}])).unwrap();
-        at(&newer, 200, 260);
-        review(&top, &["user-experience"]);
-        let board = std::sync::Arc::new(crate::board::server::Board::new(top.clone(), 0));
-        let listed = board.projects_api("GET", "/system-reviews", &json!(null)).unwrap();
-        let task = findings(&top, &newer)[0]["id"].clone();
-        assert_eq!(
-            listed,
-            json!([
-                {"id": newer, "started": 200, "ended": 260, "kinds": ["security", "code-quality"], "version": "1.0.0", "findings": [task]},
-                {"id": older, "started": 100, "ended": 150, "kinds": ["security"], "version": "1.0.0", "findings": []}
-            ])
-        );
-    }
-
-    #[test]
-    fn the_log_reads_through_its_route() {
-        let p = reviewed();
-        let top = crate::scope::top(&p.root);
-        let rid = review(&top, &["security"]);
-        report(&top, &rid, json!([])).unwrap();
-        let board = std::sync::Arc::new(crate::board::server::Board::new(top.clone(), 0));
-        let log = board.projects_api("GET", "/system-reviews/log", &json!(null)).unwrap();
-        let text = log["text"].as_str().unwrap();
-        assert_eq!(text, std::fs::read_to_string(file(&top)).unwrap());
-        assert!(text.starts_with("# System reviews\n"), "{text}");
-        assert!(text.contains(": Security\n\n- Version: 1.0.0\n- Findings: none\n"), "{text}");
-    }
 }
 
 /// The kinds a system review covers: the id a request names, and the name an
@@ -452,8 +209,9 @@ fn finding_tasks(top: &Path, run: &Value, findings: &Value) -> Result<Vec<Value>
 }
 
 /// Files review run `rid`'s findings as Planning tasks under the findings
-/// feature, all or none, ends the run and logs the review (D-265 point 3).
-/// The task server applies it; a run that has ended was filed already.
+/// feature, all or none, logs the review (D-265 point 3), then ends the run.
+/// The task server applies it; a run that has ended was logged already, and
+/// a run whose findings were filed but not logged keeps them and is only logged.
 pub(crate) fn finish(top: &Path, rid: &str, findings: &Value) -> Result<(), Failure> {
     let Some(mut run) = crate::tasks::strategy::strategy_run(top, rid) else {
         return Err(Failure(format!("E7023 unknown system review run {rid}"), 1));
@@ -461,31 +219,14 @@ pub(crate) fn finish(top: &Path, rid: &str, findings: &Value) -> Result<(), Fail
     if run["state"] == "ended" {
         return Ok(());
     }
-    let mut tasks = finding_tasks(top, &run, findings)?;
-    let batch = crate::tasks::store::batch(top)?;
-    let written: Result<(), Failure> = (|| {
-        if tasks.is_empty() {
-            return Ok(());
-        }
-        let feature = findings_feature(top)?;
-        for t in &mut tasks {
-            set_links(top, t, &json!({"feature": feature["id"]}))?;
-            crate::tasks::store::write(top, t)?;
-        }
-        Ok(())
-    })();
-    match written {
-        Ok(()) => crate::tasks::store::batch_commit(batch)?,
-        Err(e) => {
-            crate::tasks::store::batch_rollback(batch);
-            return Err(e);
-        }
+    if run["findings"].is_null() {
+        run["findings"] = json!(file_findings(top, &run, findings)?);
+        crate::tasks::strategy::put_run(top, &run)?;
     }
-    let ids: Vec<String> = tasks.iter().filter_map(|t| t["id"].as_str().map(String::from)).collect();
-    run["findings"] = json!(ids);
+    let ids: Vec<String> = run["findings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+    append(top, &entry(&crate::decisions::today(), &run_kinds(&run), run["context"]["version"].as_str(), &ids))?;
     crate::tasks::strategy::end_strategy(&mut run, "finished");
-    crate::tasks::strategy::put_run(top, &run)?;
-    append(top, &entry(&crate::decisions::today(), &run_kinds(&run), run["context"]["version"].as_str(), &ids))
+    crate::tasks::strategy::put_run(top, &run)
 }
 
 /// The standing findings feature: the one marked `findings` that is active or
@@ -531,4 +272,30 @@ pub(crate) fn past(top: &Path) -> Value {
 /// The log's text, for the System Review page to show. `GET /system-reviews/log`.
 pub(crate) fn log(top: &Path) -> Result<Value, Failure> {
     Ok(json!({"text": fs::read_to_string(file(top))?}))
+}
+
+/// Writes run `run`'s findings as tasks under the findings feature, all or
+/// none; the ids of the tasks written.
+fn file_findings(top: &Path, run: &Value, findings: &Value) -> Result<Vec<String>, Failure> {
+    let mut tasks = finding_tasks(top, run, findings)?;
+    let batch = crate::tasks::store::batch(top)?;
+    let written: Result<(), Failure> = (|| {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let feature = findings_feature(top)?;
+        for t in &mut tasks {
+            set_links(top, t, &json!({"feature": feature["id"]}))?;
+            crate::tasks::store::write(top, t)?;
+        }
+        Ok(())
+    })();
+    match written {
+        Ok(()) => crate::tasks::store::batch_commit(batch)?,
+        Err(e) => {
+            crate::tasks::store::batch_rollback(batch);
+            return Err(e);
+        }
+    }
+    Ok(tasks.iter().filter_map(|t| t["id"].as_str().map(String::from)).collect())
 }

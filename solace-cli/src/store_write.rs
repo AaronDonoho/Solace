@@ -1300,7 +1300,7 @@ impl Store {
             if !built {
                 return Ok(ProbeOutcome { ok: false, timed_out: false, cut_short: false, output });
             }
-            let program = self.tool_program();
+            let program = self.tool_program()?;
             let argv = vec![program.to_string_lossy().into_owned(), "run".into(), "-m".into(), crate::cli::PROBE.to_string()];
             let cmd = crate::migrate::probe_sandboxed(&argv, &self.root, crate::migrate::protected(&self.root).as_deref());
             let ran = crate::lockdown::commands::run_probe(&self.root, cmd, limit)?;

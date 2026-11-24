@@ -1,5 +1,5 @@
 name = "bench_visualizer_frontend"
-version = "0.2.5"
+version = "0.2.6"
 target = "javascript"
 
 [dependencies]

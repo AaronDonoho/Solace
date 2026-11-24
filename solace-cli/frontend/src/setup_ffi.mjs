@@ -21,7 +21,16 @@ export function install_tool(tool, receive) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tool }),
   })
-    .then((response) => response.text())
+    .then((response) => response.text().then((text) => (response.ok ? text : refusal(response.status, text))))
     .then(receive)
     .catch((error) => receive(JSON.stringify({ message: String(error) })));
+}
+
+// An error reply, as a refusal with a message: its own, or its status.
+function refusal(status, text) {
+  try {
+    const reply = JSON.parse(text);
+    if (typeof reply?.message === 'string' && reply.message !== '') return text;
+  } catch {}
+  return JSON.stringify({ message: `HTTP ${status}` });
 }

@@ -5,13 +5,10 @@
 #   scripts/setup-ubuntu.sh          # tools, web client deps, solace
 #   scripts/setup-ubuntu.sh --app    # also the Tauri app's libraries and CLI
 #
-# Only the apt step uses sudo, and only when a package is missing. Erlang/OTP
-# comes from builds.hex.pm (Ubuntu's apt sources stop at OTP 27) and lives in
-# ~/.local/otp; Gleam goes in ~/.local/bin.
+# Only the apt step uses sudo, and only when a package is missing. Gleam and
+# Erlang/OTP are not installed here: Solace uses only its own pinned copies,
+# installed with Install on the first-run checklist (`solace serve`).
 set -euo pipefail
-
-OTP_VERSION=29.1.1
-GLEAM_VERSION=1.19.1
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 app=false
@@ -56,49 +53,23 @@ profile_line 'export PATH="$HOME/.bun/bin:$PATH"'
 export PATH="$HOME/.bun/bin:$PATH"
 bun --version
 
-step "Gleam $GLEAM_VERSION"
-export PATH="$HOME/.local/bin:$PATH"
-if ! gleam --version 2>/dev/null | grep -qx "gleam $GLEAM_VERSION"; then
-    tmp=$(mktemp -d)
-    name="gleam-v$GLEAM_VERSION-$(uname -m)-unknown-linux-musl.tar.gz"
-    url="https://github.com/gleam-lang/gleam/releases/download/v$GLEAM_VERSION/$name"
-    curl -fsSL -o "$tmp/$name" "$url"
-    (cd "$tmp" && echo "$(curl -fsSL "$url.sha256" | cut -d' ' -f1)  $name" | sha256sum -c -)
-    tar xzf "$tmp/$name" -C "$tmp"
-    install -D -m 755 "$tmp/gleam" ~/.local/bin/gleam
-    rm -rf "$tmp"
-fi
-profile_line 'export PATH="$HOME/.local/bin:$PATH"'
-gleam --version
-
-step "Erlang/OTP $OTP_VERSION"
-otp=~/.local/otp/OTP-$OTP_VERSION
-if [ ! -x "$otp/bin/erl" ]; then
-    . /etc/os-release
-    base="https://builds.hex.pm/builds/otp/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/ubuntu-$VERSION_ID"
-    tmp=$(mktemp -d)
-    curl -fsSL -o "$tmp/otp.tar.gz" "$base/OTP-$OTP_VERSION.tar.gz"
-    sum=$(curl -fsSL "$base/builds.txt" | awk -v v="OTP-$OTP_VERSION" '$1 == v { print $4 }')
-    [ -n "$sum" ] || { echo "no checksum for OTP-$OTP_VERSION in $base/builds.txt" >&2; exit 1; }
-    echo "$sum  $tmp/otp.tar.gz" | sha256sum -c -
-    mkdir -p ~/.local/otp
-    tar xzf "$tmp/otp.tar.gz" -C ~/.local/otp
-    (cd "$otp" && ./Install -minimal "$otp" >/dev/null)
-    rm -rf "$tmp"
-fi
-profile_line "export PATH=\"\$HOME/.local/otp/OTP-$OTP_VERSION/bin:\$PATH\""
-export PATH="$otp/bin:$PATH"
-erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
-
 step "Web client dependencies"
 (cd "$repo/solace-cli/board" && bun install)
 (cd "$repo/solace-cli/frontend" && bun install)
 
-step "Pilot build (the Rust tests copy bench/pilot-large/build)"
-(cd "$repo/bench/pilot-large" && gleam test >/dev/null 2>&1 && echo "built")
-
 step "Solace"
 cargo install --locked --path "$repo/solace-cli"
+
+step "Pilot build (the Rust tests copy bench/pilot-large/build)"
+# Solace's own tools folder, as the first-run checklist installs it.
+tools="${XDG_DATA_HOME:-$HOME/.local/share}/solace/tools"
+gleam=$(ls -d "$tools"/gleam-*/gleam 2>/dev/null | sort -V | tail -n 1)
+erl_bin=$(ls -d "$tools"/erlang-*/bin 2>/dev/null | sort -V | tail -n 1)
+if [ -n "$gleam" ] && [ -n "$erl_bin" ]; then
+    (cd "$repo/bench/pilot-large" && PATH="$erl_bin:$PATH" "$gleam" test >/dev/null 2>&1 && echo "built")
+else
+    echo "skipped: install Gleam and Erlang with Install on Solace's first-run checklist, then run this script again"
+fi
 
 if $app; then
     step "Tauri CLI"
@@ -109,4 +80,5 @@ fi
 
 step "Done"
 echo "Open a new terminal (or run: source ~/.bashrc), then run: solace serve"
+echo "On its first-run checklist, install Gleam and Erlang with Install; Solace uses only those copies."
 echo "Agents: install and sign in to Claude Code (curl -fsSL https://claude.ai/install.sh | bash; claude) or the Codex CLI."

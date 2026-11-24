@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nOn the first-run checklist, the Install button's `POST /setup/install` replies `E7001 command refused at task: unknown route`. `board::server.root_route` lists `/setup` but not `/setup/install`, so when the workspace root is also a project, the request goes to that project's task routes. The install tests call `projects_api` directly, which skips routing, so they missed this. (The same kind of bug as task:48f97d8c9cc24bcf.)\n\n### Done when\n- `root_route` also matches `path.starts_with(\"/setup/\")`.\n- The routing test that already covers `/system-reviews/...` also sends `/setup` and `/setup/install` through `Board::route` with the root as a project, and checks that they reach the root.\n- When the install request is refused because of a bug in Solace (as here), the checklist shows: *Solace couldn't install <tool>: this version has a bug in its install request* (for example, \"Solace couldn't install Gleam: …\"), not the raw error. Other failures, such as a failed download, keep their own messages.\n- Clicking Install on a workspace whose root is a project installs the tool.",
+  "closedTime": 1795481067,
+  "column": "complete",
+  "createdTime": 1795479970,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "bae3922e0653dad1",
+  "links": [],
+  "milestone": null,
+  "rank": 460.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/frontend"
+  ],
+  "title": "setup: Install button reaches Solace"
+}

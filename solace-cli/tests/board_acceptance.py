@@ -819,31 +819,34 @@ class Board(unittest.TestCase):
         self.action(self.get(t),'end_discussion')
     def test_wait_again_takes_a_wait_only_call(self):
         # A wait that reaches the tool call's limit sends nothing and returns
-        # `WAIT_AGAIN`; the wait-only command then takes the human's next note.
-        # The agent holds the wait-only call until the note is posted, so the
-        # test's own speed can't decide whether that call reaches its limit.
+        # `WAIT_AGAIN`, the reply's own wait and the wait-only call's alike; a
+        # later wait-only call then takes the human's next note. The note is
+        # posted only after the first wait-only call has reached its limit,
+        # and the agent holds the second until then.
         self.restart({'SOLACE_WAIT_LIMIT_SECS':'1'})
         gate=self.root/'.solace'/'noted'
-        t=self.create([{'command':'task note first reply'},{'until':'noted'},{'command':'task wait'},{'say':'after wait'}])
+        t=self.create([{'command':'task note first reply'},{'command':'task wait'},{'until':'noted'},{'command':'task wait'},{'say':'after wait'}])
         self.action(t,'plan')
         t=self.action(t,'discuss',model='fake',text='Start');rid=t['runs'][-1]['id']
-        t=self.wait(t,lambda x:len(self.replies(rid))>=1)
+        t=self.wait(t,lambda x:len(self.replies(rid))>=2)
         self.assertIn('`task wait` (a discussion)',self.replies(rid)[0])
+        self.assertIn('`task wait` (a discussion)',self.replies(rid)[1])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'after the limit'})
         gate.write_text('')
-        t=self.wait(t,lambda x:len(self.replies(rid))>=2)
-        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
+        t=self.wait(t,lambda x:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[2],'The human replied:\n\nafter the limit\n')
         self.assertEqual(len(t['notes']),3)  # The wait sent no note of its own.
         self.action(t,'end_discussion')
         gate.unlink()
-        steps=[{'command':'strategy note','text':'first plan'},{'until':'noted'},{'command':'strategy wait'},{'say':'after wait'}]
+        steps=[{'command':'strategy note','text':'first plan'},{'command':'strategy wait'},{'until':'noted'},{'command':'strategy wait'},{'say':'after wait'}]
         rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
-        self.wait_run(rid,lambda r:len(self.replies(rid))>=1)
+        self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
         self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[0])
+        self.assertIn('`strategy wait` (a strategy run)',self.replies(rid)[1])
         self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'after the limit'})
         gate.write_text('')
-        run=self.wait_run(rid,lambda r:len(self.replies(rid))>=2)
-        self.assertEqual(self.replies(rid)[1],'The human replied:\n\nafter the limit\n')
+        run=self.wait_run(rid,lambda r:len(self.replies(rid))>=3)
+        self.assertEqual(self.replies(rid)[2],'The human replied:\n\nafter the limit\n')
         self.assertEqual((len(run['notes']),run['questions']),(3,[]))  # No note or proposal from the wait.
         self.api('POST',f'/strategy/runs/{rid}/end')
     def test_a_read_after_wait_again_names_the_wait(self):

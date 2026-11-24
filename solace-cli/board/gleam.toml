@@ -1,5 +1,5 @@
 name = "solace_board"
-version = "0.2.5"
+version = "0.2.6"
 target = "javascript"
 
 [javascript]

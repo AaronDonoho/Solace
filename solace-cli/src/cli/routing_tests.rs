@@ -193,3 +193,62 @@ fn a_design_run_checks_without_saving() {
     assert_eq!(crate::design::versions(&root, id).unwrap(), versions);
 }
 
+/// `draft` submitted and rejected in a work run, then read with `view --draft`
+/// a 10 000-byte page at a time, following each page's `--from` call: the
+/// text the pages show, without the line break ending a cut line's page,
+/// and how many pages there were.
+fn read_in_pages(draft: &str) -> (String, usize) {
+    use crate::board::runs::with_context;
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    crate::board::open(&p.root).unwrap();
+    let mut t = crate::board::server::api(&p.root, "POST", "/tasks", serde_json::json!({"title": "Drafts"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = serde_json::json!([{"id": "run-1", "kind": "work", "state": "running"}]);
+    crate::tasks::store::put(&p, &t).unwrap();
+    let id = with_context(&tid, "run-1", || {
+        assert!(crate::drafts::submit(&p, &["submit", "app.main"], &mut || Ok(draft.to_string()), None).is_err());
+        crate::drafts::entries(&p, &tid).unwrap()[0].0.clone()
+    });
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+        with_context(&tid, "run-1", || {
+            crate::cli::routing::with_root(&p.root, || {
+                crate::cli::routing::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])
+            })
+        })
+        .unwrap()
+    };
+    let mut shown = String::new();
+    let mut reply = run(&["view", "--draft", id.as_str()]);
+    let mut pages = 1;
+    while let Some((text, from)) = reply.split_once(&format!("Next: view --draft {id} --from ")) {
+        assert!(reply.len() <= 10_000, "{}", reply.len());
+        let from = from.trim();
+        shown += if from.contains(':') { text.strip_suffix('\n').unwrap() } else { text };
+        reply = run(&["view", "--draft", id.as_str(), "--from", from]);
+        pages += 1;
+    }
+    shown += &reply;
+    (shown, pages)
+}
+
+/// A draft longer than a reply is shown a page at a time: each page ends
+/// with the `--from` call for the next, and the pages add up to the draft.
+#[test]
+fn a_long_draft_is_read_a_page_at_a_time() {
+    let draft = format!("pub fn main(\n{}", "  1 +\n".repeat(3000));
+    let (shown, pages) = read_in_pages(&draft);
+    assert!(pages > 1);
+    assert_eq!(shown, draft);
+}
+
+/// A line longer than a whole page goes on from where its page cut it,
+/// even inside a character of several bytes.
+#[test]
+fn a_line_longer_than_a_page_is_read_across_pages() {
+    let draft = format!("pub fn main(\n  {}\n  1 +\n{})", "é1 + ".repeat(5000), "  2 +\n".repeat(2000));
+    let (shown, pages) = read_in_pages(&draft);
+    assert!(pages > 3, "{pages}");
+    assert_eq!(shown, draft);
+}
+

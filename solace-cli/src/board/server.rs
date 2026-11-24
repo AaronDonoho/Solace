@@ -588,8 +588,8 @@ impl Events {
     fn at_root(&self) -> bool {
         self.merged || self.streams.iter().any(|s| s.0 == ".")
     }
-    /// The root's milestones, features, vision, personas, role models and
-    /// strategy runs as they are, after the tasks.
+    /// The root's milestones, features, vision, personas, role models,
+    /// strategy runs and missed reviews as they are, after the tasks.
     fn strategy_state(&self) -> String {
         if !self.at_root() {
             return String::new();
@@ -623,8 +623,14 @@ impl Events {
             })
             .collect::<Vec<_>>();
         let homeless = json!({"tasks": tasks, "noProject": true});
+        let missed = crate::review_schedules::missed_reviews(top);
+        let missed = if missed.as_array().is_some_and(Vec::is_empty) {
+            String::new()
+        } else {
+            format!("id: {id}\ndata: {}\n\n", json!({"missedReviews": missed}))
+        };
         format!(
-            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}{builds}id: {id}\ndata: {homeless}\n\n"
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {personas}\n\n{role_models}id: {id}\ndata: {runs}\n\nid: {id}\ndata: {design_runs}\n\n{designs}{builds}{missed}id: {id}\ndata: {homeless}\n\n"
         )
     }
     /// The workflow and tasks of the streams at `which`, as events.
@@ -1197,6 +1203,7 @@ fn root_route(path: &str, explicit: bool) -> bool {
         || path == "/releases"
         || path.starts_with("/releases/")
         || path == "/setup"
+        || path.starts_with("/setup/")
         || path == "/models"
         || path.starts_with("/models/")
         || path.starts_with("/projects/")

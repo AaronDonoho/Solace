@@ -2,6 +2,7 @@ import gleam/list
 import gleam/option
 import gleam/string
 import gleeunit
+import lustre/effect
 import lustre/element
 import schedule
 import sysreview
@@ -296,7 +297,10 @@ pub fn an_added_schedule_is_listed_once_saved_test() {
   assert saving.saving
   assert sysreview.save_disabled(saving)
   let #(saved, _) =
-    sysreview.update(saving, sysreview.ScheduleSaved(listed_schedules()))
+    sysreview.update(
+      saving,
+      sysreview.ScheduleSaved(saving.opened, listed_schedules()),
+    )
   assert saved.editing == option.None
   assert !saved.saving
   let assert option.Some(all) = saved.schedules
@@ -345,6 +349,7 @@ pub fn a_clicked_schedule_opens_to_change_or_delete_test() {
     sysreview.update(
       saving,
       sysreview.ScheduleSaved(
+        saving.opened,
         "{\"message\":\"E7001 that date and time has passed; choose a later one\"}",
       ),
     )
@@ -383,7 +388,6 @@ pub fn a_missed_review_shows_above_the_tabs_until_answered_test() {
   assert string.contains(page, "Weekly security, code quality review was due ")
   assert string.contains(page, "Scheduled user experience review was due ")
   assert string.contains(page, "and didn&#39;t run.")
-    || string.contains(page, "and didn't run.")
   assert list.length(string.split(page, "Run now")) == 3
   assert list.length(string.split(page, "Skip")) == 3
   let assert [banner, tabs] = string.split(page, "role=\"tablist\"")
@@ -421,4 +425,149 @@ pub fn showing_the_page_keeps_its_missed_reviews_test() {
   let #(hidden, _) = sysreview.update(shown, sysreview.Shown(False))
   assert !hidden.shown
   assert sysreview.missed_path("a", "run") == "/system-reviews/missed/a/run"
+}
+
+pub fn a_refused_listing_replaces_the_schedules_test() {
+  let #(shown, _) =
+    sysreview.update(
+      sysreview.initial(),
+      sysreview.Select(sysreview.SchedulesTab),
+    )
+  let #(listed, _) =
+    sysreview.update(shown, sysreview.SchedulesLoaded(listed_schedules()))
+  let #(refused, _) =
+    sysreview.update(
+      listed,
+      sysreview.SchedulesLoaded(
+        "{\"message\":\"E7030 the review schedules file is unreadable; it was left as it is\"}",
+      ),
+    )
+  let page = element.to_string(sysreview.view(refused))
+  assert string.contains(page, "E7030 the review schedules file is unreadable")
+  assert !string.contains(page, "<th>Kinds</th>")
+  assert !string.contains(page, "Weekly, Mondays 09:00")
+}
+
+pub fn a_save_reply_leaves_a_form_opened_since_open_test() {
+  let #(listed, _) =
+    sysreview.update(
+      sysreview.initial(),
+      sysreview.SchedulesLoaded(listed_schedules()),
+    )
+  let #(open, _) = sysreview.update(listed, sysreview.EditSchedule("a"))
+  let #(saving, _) = sysreview.update(open, sysreview.SaveSchedule)
+  let #(closed, _) = sysreview.update(saving, sysreview.CloseSchedule)
+  let #(other, _) = sysreview.update(closed, sysreview.EditSchedule("b"))
+  let #(edited, _) = sysreview.update(other, sysreview.EditDate("2027-01-04"))
+  let #(refused, _) =
+    sysreview.update(
+      edited,
+      sysreview.ScheduleSaved(saving.opened, "{\"message\":\"E7001 late\"}"),
+    )
+  assert refused.edit_error == ""
+  let #(saved, _) =
+    sysreview.update(refused, sysreview.ScheduleSaved(saving.opened, "[]"))
+  let assert option.Some(s) = saved.editing
+  assert s.id == "b"
+  assert s.date == "2027-01-04"
+  assert saved.schedules == option.Some([])
+  let #(again, _) = sysreview.update(saved, sysreview.CloseSchedule)
+  let #(adding, _) = sysreview.update(again, sysreview.AddSchedule)
+  let #(after, _) =
+    sysreview.update(adding, sysreview.ScheduleSaved(saving.opened, "[]"))
+  assert after.editing == adding.editing
+}
+
+pub fn run_now_and_skip_wait_for_their_reply_test() {
+  let #(heard, _) =
+    sysreview.update(
+      sysreview.initial(),
+      sysreview.MissedHeard("{\"missedReviews\":" <> missed_reviews() <> "}"),
+    )
+  assert !string.contains(
+    element.to_string(sysreview.view(heard)),
+    "<button disabled>",
+  )
+  let #(running, sent) = sysreview.update(heard, sysreview.RunMissed("a"))
+  assert sent != effect.none()
+  assert running.answering
+  let page = element.to_string(sysreview.view(running))
+  assert string.contains(page, "<button disabled>Run now</button>")
+  assert string.contains(page, "<button disabled>Skip</button>")
+  let #(again, resent) = sysreview.update(running, sysreview.RunMissed("a"))
+  assert resent == effect.none()
+  assert again == running
+  let #(skipped, skip_sent) =
+    sysreview.update(running, sysreview.SkipMissed("a"))
+  assert skip_sent == effect.none()
+  assert skipped == running
+  let #(read, _) =
+    sysreview.update(running, sysreview.MissedRead(missed_reviews()))
+  assert read.answering
+  let #(answered, _) = sysreview.update(read, sysreview.MissedAnswered("[]"))
+  assert !answered.answering
+  let #(refused, _) =
+    sysreview.update(
+      running,
+      sysreview.MissedAnswered("{\"message\":\"E7023 no missed review\"}"),
+    )
+  assert !refused.answering
+}
+
+pub fn an_error_reply_reads_as_a_refusal_test() {
+  assert sysreview.reply_text(200, "[]") == "[]"
+  assert sysreview.reply_text(500, "") == "{\"message\":\"HTTP 500\"}"
+  assert sysreview.reply_text(500, "[]") == "{\"message\":\"HTTP 500\"}"
+  assert sysreview.reply_text(404, "{\"message\":\"\"}")
+    == "{\"message\":\"HTTP 404\"}"
+  assert sysreview.reply_text(400, "{\"message\":\"E7001 late\"}")
+    == "{\"message\":\"E7001 late\"}"
+  assert sysreview.reply_text(0, "{\"message\":\"TypeError: offline\"}")
+    == "{\"message\":\"TypeError: offline\"}"
+  let #(open, _) = sysreview.update(sysreview.initial(), sysreview.AddSchedule)
+  let #(saving, _) = sysreview.update(open, sysreview.SaveSchedule)
+  let #(refused, _) =
+    sysreview.update(
+      saving,
+      sysreview.ScheduleSaved(saving.opened, sysreview.reply_text(500, "")),
+    )
+  assert !refused.saving
+  assert refused.editing == open.editing
+  assert string.contains(element.to_string(sysreview.view(refused)), "HTTP 500")
+}
+
+pub fn a_monthly_schedule_picks_its_day_of_the_month_test() {
+  let #(adding, _) =
+    sysreview.update(sysreview.initial(), sysreview.AddSchedule)
+  let #(monthly, _) = sysreview.update(adding, sysreview.EditRepeat("monthly"))
+  let form = element.to_string(sysreview.view(monthly))
+  assert string.contains(form, "Day of the month")
+  assert string.contains(form, "name=\"day\"")
+  let #(fifteenth, _) = sysreview.update(monthly, sysreview.EditDay("15"))
+  let #(kept, _) = sysreview.update(fifteenth, sysreview.EditDay("x"))
+  let assert option.Some(s) = kept.editing
+  assert s.day == 15
+  assert schedule.repeat_text(s) == "Monthly, day 15, 09:00"
+}
+
+pub fn showing_the_page_reads_its_missed_reviews_test() {
+  let #(heard, attention) =
+    sysreview.update(
+      sysreview.initial(),
+      sysreview.MissedHeard("{\"missedReviews\":" <> missed_reviews() <> "}"),
+    )
+  assert attention != effect.none()
+  let #(_, read) = sysreview.update(heard, sysreview.Shown(True))
+  assert read != effect.none()
+  let #(all_read, _) =
+    sysreview.update(
+      heard,
+      sysreview.MissedRead(string.replace(
+        missed_reviews(),
+        "\"read\":false",
+        "\"read\":true",
+      )),
+    )
+  let #(_, nothing) = sysreview.update(all_read, sysreview.Shown(True))
+  assert nothing == effect.none()
 }

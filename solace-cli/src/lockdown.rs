@@ -598,7 +598,7 @@ mod tests {
         (dir.import(), v)
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
-        dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
+        super::dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
     }
     /// A folder's `.gitignore` is matched from that folder: `/gen` in
     /// `src/.gitignore` ignores `src/gen`, not a `gen` at the root.
@@ -2485,38 +2485,6 @@ mod tests {
     fn grep_text(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         let words: Vec<&str> = query.split_whitespace().collect();
         crate::lockdown::files::grep_words(root, v, &words, budget)
-    }
-
-    /// `run` of a command whose `tools` names a missing tool stops in one
-    /// line, before its program runs or its files are snapshotted.
-    #[test]
-    fn a_run_stops_while_a_listed_tool_is_missing() {
-        let (s, _) = fixture();
-        let v: toml::Value = "[commands]\nsuite={run=[\"touch\",\"ran\"],tools=[\"solace-absent-tool\"]}".parse().unwrap();
-        let err = crate::language::with_tool_path(&[], || call(&s, &v, &["run", "suite"], "", None).unwrap_err().0);
-        assert_eq!(err, "E6013 Not run: `solace-absent-tool` is not installed (not on PATH)");
-        assert!(!s.root.join("ran").exists());
-    }
-
-    #[test]
-    fn the_review_log_is_readable_and_only_solace_writes_it() {
-        let (s, v) = fixture();
-        std::fs::write(s.root.join("SYSTEMREVIEWS.md"), "# System reviews\n").unwrap();
-        assert_eq!(crate::lockdown::paths::tier(&s.root, &v, "SYSTEMREVIEWS.md", None), "protected");
-        assert!(!crate::lockdown::settings::settings_file(&s.root, "SYSTEMREVIEWS.md"), "a write is refused, not proposed");
-        assert!(call(&s, &v, &["read", "SYSTEMREVIEWS.md"], "", None).unwrap().contains("# System reviews"));
-        let patch = "*** Begin Patch\n*** Update File: SYSTEMREVIEWS.md\n@@\n-# System reviews\n+# Forged\n*** End Patch\n";
-        for (args, text) in [
-            (vec!["write", "SYSTEMREVIEWS.md"], "# Forged\n"),
-            (vec!["write"], patch),
-            (vec!["remove", "SYSTEMREVIEWS.md"], ""),
-            (vec!["move", "SYSTEMREVIEWS.md", "priv/reviews.md"], ""),
-        ] {
-            let e = call(&s, &v, &args, text, None).unwrap_err();
-            assert!(e.0.contains("only Solace writes this file"), "{args:?}: {}", e.0);
-        }
-        assert_eq!(std::fs::read_to_string(s.root.join("SYSTEMREVIEWS.md")).unwrap(), "# System reviews\n");
-        assert!(!s.root.join("priv/reviews.md").exists());
     }
 }
 

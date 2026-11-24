@@ -793,9 +793,25 @@ fn system_reviews_stay_at_the_root_when_the_root_is_a_project() {
         "/system-reviews/missed/a/run",
         "/system-reviews/missed/a/skip",
         "/system-reviews/log?x=1",
+        "/setup",
+        "/setup/install",
     ] {
         assert_eq!(board.route(url).unwrap(), None, "{url} reaches the root");
     }
     assert_eq!(board.route("/system-review").unwrap(), Some((p.root.clone(), "/system-review".to_string())));
+}
+
+/// `GET /tasks/{id}/dependents` answers 400 for an id that can't name a task,
+/// 404 for no such task, and an empty list for a task nothing depends on.
+#[test]
+fn a_tasks_dependents_need_a_known_task() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let alone = crate::board::server::api(&p.root, "POST", "/tasks", json!({"title": "Sessions"})).unwrap();
+    let top = crate::scope::top(&p.root);
+    let status = |id: &str| lookup_route(&top, "GET", &format!("/tasks/{id}/dependents")).unwrap().unwrap_err().0;
+    assert_eq!(status("bad.id"), 400);
+    assert_eq!(status("0123456789abcdef"), 404);
+    let address = format!("/tasks/{}/dependents", alone["id"].as_str().unwrap());
+    assert_eq!(lookup_route(&top, "GET", &address).unwrap().unwrap(), json!({"tasks": []}));
 }
 

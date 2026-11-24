@@ -3799,7 +3799,7 @@ fn a_bad_task_proposal_is_refused_before_asking() {
     let tid = t["id"].as_str().unwrap().to_string();
     t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
     tasks::put(&s, &t).unwrap();
-    for fields in [json!({"title": "Fix", "colour": "red"}), json!({"title": "Fix", "scope": ["nowhere"]})] {
+    for fields in [json!({"title": "Fix", "color": "red"}), json!({"title": "Fix", "scope": ["nowhere"]})] {
         let text = fields.to_string();
         let e = task_command(&s, &tid, "r1", &["task", "propose"], &mut || Ok(text.clone()), &[], vec![]).unwrap_err();
         assert!(e.0.starts_with("E7001"), "{fields}: {}", e.0);

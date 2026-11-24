@@ -3,6 +3,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
+import lustre/effect
 import lustre/element
 
 pub fn main() -> Nil {
@@ -375,4 +376,46 @@ pub fn a_missed_review_shows_until_read_test() {
   assert string.contains(html(refused), "no missed review for schedule a")
   let #(answered, _) = delivery.update(refused, delivery.MissedAnswered("[]"))
   assert !string.contains(html(answered), "class=\"missed-reviews\"")
+}
+
+/// A page opened after a review was missed hears it in the stream's first state, before it catches up.
+pub fn a_missed_review_in_the_first_state_shows_test() {
+  let unread =
+    "{\"missedReviews\":[{\"schedule\":\"a\",\"kinds\":[\"security\"],\"repeat\":\"weekly\",\"due\":1795424400,\"read\":false}]}"
+  let #(replayed, _) =
+    delivery.update(delivery.initial(), delivery.Live(unread))
+  let #(caught_up, _) = delivery.update(replayed, delivery.CaughtUp)
+  let assert [banner, _] = string.split(html(caught_up), "role=\"tablist\"")
+  assert string.contains(banner, "Weekly security review was due ")
+}
+
+/// A double click on Run now or Skip sends one answer; both wait for its reply.
+pub fn run_now_and_skip_wait_for_their_reply_test() {
+  let live = delivery.Model(..delivery.initial(), caught_up: True)
+  let #(heard, _) =
+    delivery.update(
+      live,
+      delivery.Live(
+        "{\"missedReviews\":[{\"schedule\":\"a\",\"kinds\":[\"security\"],\"repeat\":\"weekly\",\"due\":1795424400,\"read\":false}]}",
+      ),
+    )
+  assert !string.contains(html(heard), "<button disabled>Run now")
+  let #(running, sent) = delivery.update(heard, delivery.RunMissed("a"))
+  assert sent != effect.none()
+  assert string.contains(html(running), "<button disabled>Run now</button>")
+  assert string.contains(html(running), "<button disabled>Skip</button>")
+  let #(again, resent) = delivery.update(running, delivery.RunMissed("a"))
+  assert resent == effect.none()
+  assert again == running
+  let #(skipped, skip_sent) = delivery.update(running, delivery.SkipMissed("a"))
+  assert skip_sent == effect.none()
+  assert skipped == running
+  let #(refused, _) =
+    delivery.update(
+      running,
+      delivery.MissedAnswered("{\"message\":\"E7023 no missed review\"}"),
+    )
+  assert !refused.answering
+  let #(answered, _) = delivery.update(running, delivery.MissedAnswered("[]"))
+  assert !answered.answering
 }

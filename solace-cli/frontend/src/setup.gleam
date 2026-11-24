@@ -3,6 +3,7 @@
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -148,27 +149,44 @@ pub fn installing(items: List(Item), id: String) -> List(Item) {
 /// tool still installing stays busy.
 pub fn installed(items: List(Item), id: String, reply: String) -> List(Item) {
   case decode(reply) {
-    Ok(fresh) -> {
-      let busy =
-        list.filter_map(items, fn(item) {
-          case item.installing && item.id != id {
-            True -> Ok(item.id)
-            False -> Error(Nil)
-          }
-        })
-      list.map(fresh, fn(item) {
-        Item(..item, installing: list.contains(busy, item.id))
-      })
-    }
+    Ok(fresh) -> reloaded(list.filter(items, fn(item) { item.id != id }), fresh)
     Error(_) -> {
       let reason = json.parse(reply, decode.at(["message"], decode.string))
       list.map(items, fn(item) {
         case item.id == id, reason {
-          True, Ok(why) -> Item(..item, why: why, installing: False)
+          True, Ok(message) ->
+            Item(..item, why: install_failure(item, message), installing: False)
           True, Error(_) -> Item(..item, installing: False)
           False, _ -> item
         }
       })
     }
   }
+}
+
+/// Why tool `item` didn't install, from the refusal's `message`: an unknown
+/// route means this version of Solace sent the request where nothing answers it.
+fn install_failure(item: Item, message: String) -> String {
+  case string.contains(message, "unknown route") {
+    True ->
+      "Solace couldn't install "
+      <> item.label
+      <> ": this version has a bug in its install request"
+    False -> message
+  }
+}
+
+/// The fresh checklist `fresh` in place of `items`: a tool still installing
+/// in `items` stays busy until its own install answers.
+pub fn reloaded(items: List(Item), fresh: List(Item)) -> List(Item) {
+  let busy =
+    list.filter_map(items, fn(item) {
+      case item.installing {
+        True -> Ok(item.id)
+        False -> Error(Nil)
+      }
+    })
+  list.map(fresh, fn(item) {
+    Item(..item, installing: list.contains(busy, item.id))
+  })
 }

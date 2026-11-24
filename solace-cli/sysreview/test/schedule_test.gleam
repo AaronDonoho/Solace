@@ -67,3 +67,11 @@ pub fn a_listed_schedule_reads_with_only_its_repeats_field_test() {
     |> result.is_error
   assert list.length(schedule.days()) == 31
 }
+
+pub fn each_weekday_has_its_name_test() {
+  assert list.map([1, 2, 3, 4, 5, 6, 7], schedule.weekday_name)
+    == [
+      "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+      "Sunday",
+    ]
+}

@@ -283,10 +283,10 @@ pub(crate) fn run_inner(
         ["submit", ..] => crate::drafts::submit(&store, &a, input, old),
         ["drafts", "drop", id] => crate::drafts::drop_one(&store, id),
         ["drafts"] => crate::drafts::list(&store),
-        ["view", "--draft", id] => crate::drafts::view_page(&store, id, 1, budget),
-        ["view", "--draft", id, "--from", line] => match line.parse() {
-            Ok(line) if line > 0 => crate::drafts::view_page(&store, id, line, budget),
-            _ => usage("view --draft <id> [--from <line>]"),
+        ["view", "--draft", id] => crate::drafts::view_page(&store, id, (1, 1), budget),
+        ["view", "--draft", id, "--from", from] => match crate::drafts::page_start(from) {
+            Some(start) => crate::drafts::view_page(&store, id, start, budget),
+            None => usage("view --draft <id> [--from <line>[:<column>]]"),
         },
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
         ["view", rest @ ..] if !operands(rest).is_empty() => {

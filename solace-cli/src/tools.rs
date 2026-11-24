@@ -106,7 +106,7 @@ thread_local! {
 static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The tool a program belongs to, for the programs Solace installs.
-fn tool_of(program: &str) -> Option<&'static str> {
+pub(crate) fn tool_of(program: &str) -> Option<&'static str> {
     match program {
         "gleam" => Some("gleam"),
         "erl" | "erlc" | "escript" => Some("erlang"),
@@ -225,11 +225,12 @@ pub(crate) fn install(tool: &str) -> Result<(), Failure> {
 }
 
 /// `install` from `fetch`, which saves a URL's bytes to a file. A download
-/// that misses its checksum, or doesn't unpack, leaves nothing installed.
+/// that misses its checksum, or doesn't unpack, leaves nothing installed. A
+/// folder that lacks the tool's program is installed again.
 fn install_into(release: &Release, folder: &Path, fetch: &dyn Fn(&str, &Path) -> Result<(), Failure>) -> Result<(), Failure> {
     let name = format!("{}-{}", release.tool, release.version);
     let dest = folder.join(&name);
-    if dest.exists() {
+    if holds(release.tool, &dest) {
         return Ok(());
     }
     let part = folder.join(format!(".{name}.part"));
@@ -251,6 +252,9 @@ fn install_into(release: &Release, folder: &Path, fetch: &dyn Fn(&str, &Path) ->
         let Some(root) = unpacked_root(&unpacked, release.tool) else {
             return fail(format!("The {label} download didn't hold {label}, so nothing was installed."));
         };
+        if dest.exists() {
+            fs::remove_dir_all(&dest)?;
+        }
         fs::rename(root, &dest)?;
         Ok(())
     })();
@@ -261,12 +265,10 @@ fn install_into(release: &Release, folder: &Path, fetch: &dyn Fn(&str, &Path) ->
 /// The folder of an unpacked archive that holds the tool where `bin` looks:
 /// the archive's top, or its one folder.
 fn unpacked_root(unpacked: &Path, tool: &str) -> Option<PathBuf> {
-    let program = if tool == "erlang" { "erl" } else { "gleam" };
-    let holds = |dir: &Path| bin(tool, dir).join(program).is_file();
-    if holds(unpacked) {
+    if holds(tool, unpacked) {
         return Some(unpacked.to_path_buf());
     }
-    fs::read_dir(unpacked).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_dir() && holds(p))
+    fs::read_dir(unpacked).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_dir() && holds(tool, p))
 }
 
 fn download(url: &str, to: &Path) -> Result<(), Failure> {
@@ -311,4 +313,17 @@ fn pinned(tool: &str) -> Option<&'static Release> {
 /// Whether Solace has a download of `tool` for this computer.
 pub(crate) fn downloadable(tool: &str) -> bool {
     pinned(tool).is_some()
+}
+
+/// Whether folder `install` holds `tool`'s program where `bin` looks.
+fn holds(tool: &str, install: &Path) -> bool {
+    let program = if tool == "erlang" { "erl" } else { "gleam" };
+    bin(tool, install).join(program).is_file()
+}
+
+/// Why Solace won't start `program`, one of its own tools' programs, on a
+/// computer it has a download for but hasn't installed it on: no copy found
+/// elsewhere stands in for its own (D-264).
+pub(crate) fn not_installed(program: &str) -> Option<String> {
+    program_folder(program).map(|_| format!("`{program}` is not installed; install it with Install on Solace's checklist"))
 }

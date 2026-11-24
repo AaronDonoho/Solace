@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "### Problems\n1. **A damaged schedules file erases every schedule.** `review_schedules.list` reads the file with `read_opt`, which returns nothing for a file it can't parse, and `list` treats that as an empty list. Adding, editing or deleting a schedule then saves that empty list plus the change over the file, and every other schedule is lost.\n2. **Scheduled reviews start before the schedule records that they started.** `review_schedules.start_due` starts each due review first and saves the schedule's new \"next\" time afterward. If that save fails (for example, the disk is full or `.solace` is read-only), the file still says the review is due, and the watcher starts another review agent on every pass. A crash between the start and the save causes one duplicate on restart.\n\n### Done when\n- A schedules file that can't be parsed is an error, not an empty list. A missing file is still an empty list.\n- While the file is damaged, the Schedules tab shows the error in place of the list, and adding, editing and deleting a schedule are refused, so the file isn't overwritten.\n- `start_due` saves the new \"next\" time before it starts the review. If the save fails, no review starts.\n- Tests cover a damaged file (listing it, and a save being refused), a failed save in `start_due` (no review starts), and `start_due` when a review fails to start.",
+  "closedTime": 1795483936,
+  "column": "complete",
+  "createdTime": 1795480155,
+  "dependsOn": [],
+  "feature": "21d501a74aec4f44",
+  "home": "solace-cli",
+  "id": "fce41cf13cdbc11e",
+  "links": [],
+  "milestone": null,
+  "rank": 462.0,
+  "scope": [
+    "solace-cli",
+    "solace-cli/sysreview"
+  ],
+  "title": "sysreview: schedules file safety"
+}

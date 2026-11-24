@@ -1,0 +1,19 @@
+{
+  "archivedTime": null,
+  "body": "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.",
+  "closedTime": null,
+  "column": "planning",
+  "createdTime": 1795493356,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-app",
+  "id": "8d774f8ec02b197f",
+  "links": [],
+  "milestone": null,
+  "rank": 12.0,
+  "scope": [
+    "solace-app"
+  ],
+  "techDebt": true,
+  "title": "desktop app: save preferences safely"
+}

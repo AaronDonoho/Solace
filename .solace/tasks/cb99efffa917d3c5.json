@@ -1,0 +1,18 @@
+{
+  "archivedTime": null,
+  "body": "### Problem\nD-263 says a Gleam project whose JavaScript runtime is Node checks Node's version without declaring it. In `test_tools`, that automatic check is added only when no declared entry names Node. So a project that declares Node for some tests only (for example `{ tool = \"node >= 19\", tests = [\"workspace::\"] }`) loses the automatic check for every other test, and a too-old Node goes unnoticed for them.\n\n### Done when\n- In a Gleam project on Node, a declared Node entry that names tests applies to those tests, and the automatic Node check still applies to the others.\n- A declared Node entry that names no tests still replaces the automatic check.\n- Tests cover both cases.\n\nThe matching change to solace-cli's own `solace.toml` is task:1f49b71f50451044.",
+  "closedTime": 1795493255,
+  "column": "complete",
+  "createdTime": 1795480219,
+  "dependsOn": [],
+  "feature": null,
+  "home": "solace-cli",
+  "id": "cb99efffa917d3c5",
+  "links": [],
+  "milestone": null,
+  "rank": 466.0,
+  "scope": [
+    "solace-cli"
+  ],
+  "title": "test tools: automatic Node check beside a scoped entry"
+}

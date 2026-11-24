@@ -228,7 +228,7 @@ impl Store {
         {
             return Err(Failure(format!("E6013 {why}"), 1));
         }
-        let program = self.tool_program();
+        let program = self.tool_program()?;
         let mut argv = vec![program.to_string_lossy().into_owned()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
@@ -632,9 +632,8 @@ impl Store {
     }
 
     /// The language tool's program.
-    pub(crate) fn tool_program(&self) -> PathBuf {
-        let tool = self.lang().tool();
-        crate::language::tool_path(tool).unwrap_or_else(|| PathBuf::from(tool))
+    pub(crate) fn tool_program(&self) -> Result<PathBuf, Failure> {
+        crate::language::program(self.lang().tool())
     }
 
     /// Runs `cargo` in the project (D-158): whether it exited with 0, or
